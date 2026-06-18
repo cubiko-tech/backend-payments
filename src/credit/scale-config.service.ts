@@ -83,6 +83,59 @@ export class ScaleConfigService {
     return saved
   }
 
+  /** Todas las versiones de escala (la más nueva primero). */
+  async listVersions(): Promise<ScoreScaleConfig[]> {
+    return this.repo.find({ order: { version: 'DESC' } })
+  }
+
+  /**
+   * Crea una versión NUEVA de escala a partir de una config editada. No edita en
+   * sitio (las versiones son inmutables): asigna el siguiente número de versión.
+   * Valida antes de guardar; si `activate`, retira la activa anterior. §7.
+   */
+  async createVersion(
+    config: ScaleConfig,
+    createdBy: string,
+    activate: boolean,
+  ): Promise<ScoreScaleConfig> {
+    const errors = validateScaleConfig(config)
+    if (errors.length) {
+      throw new RequestException(
+        { error: `Config inválida: ${errors.join('; ')}`, code: 'invalidScaleConfig' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    const max = await this.repo
+      .createQueryBuilder('c')
+      .select('MAX(c.version)', 'm')
+      .getRawOne<{ m: string | null }>()
+    const nextVersion = (Number(max?.m) || 0) + 1
+
+    const entity = this.repo.create({
+      version: nextVersion,
+      baseCurrency: config.baseCurrency,
+      status: activate ? ScaleConfigStatus.ACTIVE : ScaleConfigStatus.DRAFT,
+      config: { ...config, version: nextVersion },
+      createdBy: createdBy || 'admin',
+    })
+
+    if (activate) {
+      const current = await this.repo.find({ where: { status: ScaleConfigStatus.ACTIVE } })
+      for (const c of current) {
+        c.status = ScaleConfigStatus.RETIRED
+        await this.repo.save(c)
+      }
+    }
+
+    const saved = await this.repo.save(entity)
+    this.cached = null
+    this.logger.log(
+      `Escala v${nextVersion} creada (${activate ? 'activa' : 'draft'}) por ${createdBy}`,
+    )
+    return saved
+  }
+
   /**
    * Activa una versión `draft`: valida la config, retira la activa anterior y
    * deja una sola `active`. Una config inválida activada corrompería todos los

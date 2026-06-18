@@ -49,3 +49,21 @@ export interface BureauContext {
   checkId: string | null
   band: BureauBand | null
 }
+
+/** Estado del pre-aprobado en forma amigable para el cliente (Fase 6). */
+export type PreapprovalStatus = 'eligible' | 'in_review' | 'not_eligible' | 'no_data'
+
+/**
+ * Pre-aprobado curado para el cliente: estado + términos, sin score crudo ni
+ * detalle de buró. Ver DISEÑO_SCORING_CREDITO §9.
+ */
+export interface Preapproval {
+  brandId: string
+  status: PreapprovalStatus
+  tier: string | null
+  amount: number | null
+  weeklyQuota: number | null
+  commission: number | null
+  currency: string
+  updatedAt: string | null
+}

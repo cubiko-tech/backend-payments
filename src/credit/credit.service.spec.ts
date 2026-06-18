@@ -5,6 +5,7 @@ import { CreditService } from './credit.service'
 import { CreditScore } from './entities/creditScore.entity'
 import { CreditInputsClient, CreditInputs } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
+import { BureauService } from './bureau/bureau.service'
 import { SCALE_CONFIG_V1 } from './domain/scale-config.v1'
 
 /** Período de 3 meses cerrados, válido respecto de hoy (mar–may 2026). */
@@ -49,6 +50,7 @@ describe('CreditService.calculate', () => {
         { provide: getRepositoryToken(CreditScore, 'DBRead'), useValue: repoMock },
         { provide: CreditInputsClient, useValue: client },
         { provide: ScaleConfigService, useValue: scaleConfig },
+        { provide: BureauService, useValue: { getActiveBand: jest.fn().mockResolvedValue(null) } },
       ],
     }).compile()
 

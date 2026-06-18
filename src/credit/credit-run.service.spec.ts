@@ -6,6 +6,7 @@ import { CreditRunService, CREDIT_RUN_QUEUE } from './credit-run.service'
 import { CreditService } from './credit.service'
 import { CreditInputsClient } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
+import { BureauService } from './bureau/bureau.service'
 import { ScoreRun, ScoreRunStatus } from './entities/scoreRun.entity'
 import { CreditScore } from './entities/creditScore.entity'
 import { SCALE_CONFIG_V1 } from './domain/scale-config.v1'
@@ -66,6 +67,7 @@ describe('CreditRunService', () => {
         { provide: CreditInputsClient, useValue: client },
         { provide: ScaleConfigService, useValue: scaleConfig },
         { provide: CreditService, useValue: creditService },
+        { provide: BureauService, useValue: { getActiveBand: jest.fn().mockResolvedValue(null) } },
       ],
     }).compile()
 

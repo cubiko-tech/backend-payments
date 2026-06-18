@@ -6,11 +6,14 @@ import { RequestException } from '../shared/exception/request.exception'
 import { CreditScore } from './entities/creditScore.entity'
 import { CreditInputs, CreditInputsClient } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
+import { BureauService } from './bureau/bureau.service'
 import { computeScore } from './domain/score-engine'
 import { BureauBand, ScaleConfig } from './domain/scale-config.types'
 import {
   EligibilityStatus,
   MonetaryInput,
+  Preapproval,
+  PreapprovalStatus,
   SnapshotScoreStatus,
 } from './credit.types'
 import {
@@ -46,6 +49,7 @@ export class CreditService {
     private readonly scoreReadRepo: Repository<CreditScore>,
     private readonly client: CreditInputsClient,
     private readonly scaleConfig: ScaleConfigService,
+    private readonly bureau: BureauService,
   ) {}
 
   async calculate(params: CalculateParams): Promise<CreditScore> {
@@ -70,14 +74,17 @@ export class CreditService {
 
     const { config, version } = await this.scaleConfig.getActiveConfig()
 
+    // Banda de buró vigente (si la hay): null ⇒ bureau_pending.
+    const bureau = await this.bureau.getActiveBand(brandId)
+
     return this.scoreInputs(inputs, config, version, {
       periodStart,
       periodEnd,
       requestedMonths,
       triggeredBy,
       runId: params.runId ?? null,
-      bureauBand: params.bureauBand ?? null,
-      bureauCheckId: params.bureauCheckId ?? null,
+      bureauBand: params.bureauBand ?? bureau?.band ?? null,
+      bureauCheckId: params.bureauCheckId ?? bureau?.checkId ?? null,
     })
   }
 
@@ -111,6 +118,68 @@ export class CreditService {
       bureauCheckId: ctx.bureauCheckId ?? null,
     })
     return this.scoreRepo.save(this.scoreRepo.create(snapshot))
+  }
+
+  /**
+   * Lista de scores, opcionalmente filtrada por run, ordenada por total desc
+   * (ranking de marcas). Paginada. Para el detalle del run en admin.
+   */
+  async listScores(opts: {
+    runId?: string
+    page: number
+    pageSize: number
+  }): Promise<{ data: CreditScore[]; total: number }> {
+    const qb = this.scoreReadRepo.createQueryBuilder('s')
+    if (opts.runId) qb.where('s.runId = :runId', { runId: opts.runId })
+    qb.orderBy('s.total', 'DESC')
+      .addOrderBy('s.createdAt', 'DESC')
+      .skip((opts.page - 1) * opts.pageSize)
+      .take(opts.pageSize)
+    const [data, total] = await qb.getManyAndCount()
+    return { data, total }
+  }
+
+  /**
+   * Pre-aprobado de crédito de una marca, en forma CURADA para el cliente
+   * (Fase 6, informativo). No expone score crudo, banda de buró ni insumos: solo
+   * estado amigable + términos (monto, cupo, comisión) cuando aplica. La causa de
+   * un veto de buró NO se revela (habeas data). Ver DISEÑO_SCORING_CREDITO §9.
+   */
+  async getPreapproval(brandId: string): Promise<Preapproval> {
+    const score = await this.scoreReadRepo.findOne({
+      where: { brandId },
+      order: { createdAt: 'DESC' },
+    })
+    if (!score) {
+      return {
+        brandId, status: 'no_data', tier: null, amount: null,
+        weeklyQuota: null, commission: null, currency: 'COP', updatedAt: null,
+      }
+    }
+
+    let status: PreapprovalStatus
+    if (score.scoreStatus === 'insufficient_data' || score.scoreStatus === 'fx_unavailable') {
+      status = 'no_data'
+    } else if (score.eligibilityStatus === 'eligible') {
+      status = 'eligible'
+    } else if (score.eligibilityStatus === 'bureau_pending') {
+      status = 'in_review'
+    } else {
+      status = 'not_eligible'
+    }
+
+    const showTerms = status === 'eligible' || status === 'in_review'
+    const when = score.calculatedAt ?? score.createdAt
+    return {
+      brandId,
+      status,
+      tier: showTerms ? score.tier : null,
+      amount: showTerms ? score.conditions.disbursement : null,
+      weeklyQuota: showTerms ? score.conditions.weeklyQuota : null,
+      commission: showTerms ? score.conditions.commission : null,
+      currency: 'COP',
+      updatedAt: when ? new Date(when).toISOString() : null,
+    }
   }
 
   /** Último score (o historial) de una marca. */

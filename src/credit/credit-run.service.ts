@@ -10,6 +10,7 @@ import { CreditScore } from './entities/creditScore.entity'
 import { CreditInputsClient } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
 import { CreditService } from './credit.service'
+import { BureauService } from './bureau/bureau.service'
 import { validateWholeMonths } from './period.util'
 
 export const CREDIT_RUN_QUEUE = 'credit-run'
@@ -40,6 +41,7 @@ export class CreditRunService {
     private readonly client: CreditInputsClient,
     private readonly scaleConfig: ScaleConfigService,
     private readonly creditService: CreditService,
+    private readonly bureau: BureauService,
   ) {}
 
   /** Crea un run (pending) y lo encola. Rechaza si ya hay uno activo del período. */
@@ -171,12 +173,15 @@ export class CreditRunService {
             continue
           }
           try {
+            const band = await this.bureau.getActiveBand(brandId)
             await this.creditService.scoreInputs(brandInputs, config, version, {
               periodStart: run.periodStart,
               periodEnd: run.periodEnd,
               requestedMonths,
               triggeredBy: run.triggeredBy,
               runId,
+              bureauBand: band?.band ?? null,
+              bureauCheckId: band?.checkId ?? null,
             })
             done.add(brandId)
           } catch (e) {
