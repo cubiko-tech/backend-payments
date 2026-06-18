@@ -70,7 +70,7 @@ export class CreditService {
 
     const { config, version } = await this.scaleConfig.getActiveConfig()
 
-    const snapshot = this.buildSnapshot(inputs, config, version, {
+    return this.scoreInputs(inputs, config, version, {
       periodStart,
       periodEnd,
       requestedMonths,
@@ -79,7 +79,37 @@ export class CreditService {
       bureauBand: params.bureauBand ?? null,
       bureauCheckId: params.bureauCheckId ?? null,
     })
+  }
 
+  /**
+   * Corre el motor sobre insumos YA traídos y persiste el snapshot. Compartido
+   * por el cálculo individual y el worker del run masivo (Fase 3): el run trae
+   * los insumos por página (un `getBatch` por lote) y la escala una sola vez, y
+   * llama acá por marca. No revalida el período (el caller ya lo hizo).
+   */
+  async scoreInputs(
+    inputs: CreditInputs,
+    config: ScaleConfig,
+    scaleVersion: number,
+    ctx: {
+      periodStart: string
+      periodEnd: string
+      requestedMonths: number
+      triggeredBy: string
+      runId?: string | null
+      bureauBand?: BureauBand | null
+      bureauCheckId?: string | null
+    },
+  ): Promise<CreditScore> {
+    const snapshot = this.buildSnapshot(inputs, config, scaleVersion, {
+      periodStart: ctx.periodStart,
+      periodEnd: ctx.periodEnd,
+      requestedMonths: ctx.requestedMonths,
+      triggeredBy: ctx.triggeredBy,
+      runId: ctx.runId ?? null,
+      bureauBand: ctx.bureauBand ?? null,
+      bureauCheckId: ctx.bureauCheckId ?? null,
+    })
     return this.scoreRepo.save(this.scoreRepo.create(snapshot))
   }
 

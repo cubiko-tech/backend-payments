@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   HttpStatus,
   Param,
   Post,
@@ -13,7 +14,9 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger'
 import { RequestException } from '../shared/exception/request.exception'
 import { CreditService } from './credit.service'
 import { ScaleConfigService } from './scale-config.service'
+import { CreditRunService } from './credit-run.service'
 import { CalculateScoreDto } from './dto/calculate-score.dto'
+import { CreateRunDto } from './dto/create-run.dto'
 
 /**
  * Endpoints de scoring de crédito (Fase 2): cálculo individual, consulta por
@@ -26,6 +29,7 @@ export class CreditController {
   constructor(
     private readonly creditService: CreditService,
     private readonly scaleConfigService: ScaleConfigService,
+    private readonly creditRunService: CreditRunService,
   ) {}
 
   @Post('scores/calculate')
@@ -48,6 +52,30 @@ export class CreditController {
   ) {
     const data = await this.creditService.getByBrand(brandId, latest !== 'false')
     return { data }
+  }
+
+  @Post('runs')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Disparar un run masivo de scoring para un período' })
+  async createRun(@Body() body: CreateRunDto, @Req() req: any) {
+    const run = await this.creditRunService.createRun({
+      periodStart: body.periodStart,
+      periodEnd: body.periodEnd,
+      triggeredBy: req?.user?.id ? `manual:${req.user.id}` : 'manual',
+    })
+    return { data: run }
+  }
+
+  @Get('runs')
+  @ApiOperation({ summary: 'Listar runs recientes' })
+  async listRuns() {
+    return { data: await this.creditRunService.listRuns() }
+  }
+
+  @Get('runs/:id')
+  @ApiOperation({ summary: 'Progreso/estado de un run' })
+  async getRun(@Param('id') id: string) {
+    return { data: await this.creditRunService.getRun(id) }
   }
 
   @Get('config/scales')
