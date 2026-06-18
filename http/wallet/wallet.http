@@ -1,0 +1,33 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@USER_ID = 00000000-0000-0000-0000-000000000001
+@WALLET_ID = 00000000-0000-0000-0000-000000000001
+
+### Listar wallets de una marca
+GET {{HOST}}/wallet?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Crear wallet
+POST {{HOST}}/wallet HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "provider": "internal",
+  "currency": "COP"
+}
+
+### Detalle de wallet
+GET {{HOST}}/wallet/{{WALLET_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Balance del wallet
+GET {{HOST}}/wallet/{{WALLET_ID}}/balance HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Transacciones del wallet
+GET {{HOST}}/wallet/{{WALLET_ID}}/transactions HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}

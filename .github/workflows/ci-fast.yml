@@ -1,0 +1,80 @@
+# CI Fast — Lint + tests en PRs y feature branches.
+name: CI - Fast Checks
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches:
+      - 'feature/**'
+      - 'task/**'
+  pull_request:
+    branches:
+      - 'feature/**'
+      - 'task/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint
+        continue-on-error: true
+        run: ESLINT_USE_FLAT_CONFIG=false npm run lint
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Test
+        run: npx jest --passWithNoTests
+
+  verify-files:
+    name: Verify Required Files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check required files
+        run: |
+          set -euo pipefail
+          for file in .env-template .env.schema \
+                      docker-compose.yml entrypoint.sh; do
+            if [ ! -f "$file" ]; then
+              echo "::error::Required file missing: $file"
+              exit 1
+            fi
+          done

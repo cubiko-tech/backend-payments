@@ -1,0 +1,38 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@USER_ID = 00000000-0000-0000-0000-000000000001
+@PAYMENT_ID = 00000000-0000-0000-0000-000000000001
+@REFUND_ID = 00000000-0000-0000-0000-000000000001
+
+### Solicitar reembolso
+POST {{HOST}}/refund HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "paymentId": "{{PAYMENT_ID}}",
+  "brandId": "{{BRAND_ID}}",
+  "amount": 50000,
+  "currency": "COP",
+  "reason": "customer_request",
+  "requestedBy": "{{USER_ID}}",
+  "description": "Customer requested refund"
+}
+
+### Listar reembolsos de una marca
+GET {{HOST}}/refund?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Detalle de reembolso
+GET {{HOST}}/refund/{{REFUND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Aprobar reembolso
+POST {{HOST}}/refund/{{REFUND_ID}}/approve HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "approvedBy": "{{USER_ID}}"
+}

@@ -1,0 +1,163 @@
+# Refresh .env — Pull from Infisical and redeploy (no code changes).
+name: Refresh Environment Variables
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'develop'
+        type: choice
+        options:
+          - develop
+          - staging
+          - production
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SERVICE_PATH: /backend-payments
+  IMAGE_VAR: BACKEND_PAYMENTS_IMAGE
+
+jobs:
+  refresh:
+    name: Pull .env & Redeploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - name: Validate secrets
+        run: |
+          set -euo pipefail
+          MISSING=false
+          for var in INFISICAL_URL INFISICAL_TOKEN \
+                     INFISICAL_PROJECT_ID \
+                     GCP_SERVICE_ACCOUNT_KEY GCP_PROJECT \
+                     GCP_INSTANCE_NAME GCP_ZONE DEPLOY_PATH; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing secret: $var"
+              MISSING=true
+            fi
+          done
+          [ "$MISSING" = "true" ] && exit 1
+        env:
+          INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_INSTANCE_NAME: ${{ secrets.GCP_INSTANCE_NAME }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Resolve Infisical environment
+        id: resolve
+        run: |
+          case "${{ inputs.environment }}" in
+            develop)    echo "env=development" >> "$GITHUB_OUTPUT" ;;
+            staging)    echo "env=staging" >> "$GITHUB_OUTPUT" ;;
+            production) echo "env=production" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Pull .env from Infisical (/shared + service)
+        env:
+          INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INF_ENV: ${{ steps.resolve.outputs.env }}
+        run: |
+          set -euo pipefail
+
+          fetch() {
+            local path="$1"
+            curl -sf -X GET \
+              "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INF_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=${path}&expandSecretReferences=true" \
+              -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+              || echo '{"secrets":[]}'
+          }
+
+          SHARED=$(fetch "/shared")
+          SERVICE=$(fetch "${SERVICE_PATH}")
+
+          SHARED_COUNT=$(echo "$SHARED" | jq '.secrets | length')
+          SERVICE_COUNT=$(echo "$SERVICE" | jq '.secrets | length')
+          TOTAL=$((SHARED_COUNT + SERVICE_COUNT))
+
+          if [ "$TOTAL" = "0" ]; then
+            echo "::error::No secrets in /shared nor ${SERVICE_PATH} (${INF_ENV})"
+            exit 1
+          fi
+
+          {
+            echo "# From Infisical (${INF_ENV})"
+            echo "# /shared (${SHARED_COUNT}) + ${SERVICE_PATH} (${SERVICE_COUNT})"
+            echo "# $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "$SHARED"  | jq -r '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+            echo "$SERVICE" | jq -r '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+          } > /tmp/service.env
+
+          echo "Pulled $TOTAL variables ($SHARED_COUNT shared + $SERVICE_COUNT service)"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Upload .env and redeploy
+        env:
+          GCP_INSTANCE: ${{ secrets.GCP_INSTANCE_NAME }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          gcloud compute scp /tmp/service.env \
+            "${GCP_INSTANCE}:/tmp/service.env" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h
+
+          gcloud compute ssh "$GCP_INSTANCE" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="sudo bash -c '
+              cp /tmp/service.env ${DEPLOY_PATH}/.env
+              rm -f /tmp/service.env
+              cd ${DEPLOY_PATH}
+              REGISTRY=\$(grep ${IMAGE_VAR} .env \
+                | cut -d= -f2 | cut -d/ -f1)
+              gcloud auth configure-docker \$REGISTRY \
+                --quiet 2>/dev/null || true
+              docker compose --env-file .env \
+                -f docker/docker-compose.image.yml \
+                up -d --force-recreate
+              echo \"Redeployed with new .env\"
+              docker ps --filter name=payments'"
+
+      - name: Health check
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          APP_URL="${{ secrets.APP_URL }}"
+          [ -z "${APP_URL:-}" ] && exit 0
+          sleep 30
+          for i in 1 2 3; do
+            curl -f -s --max-time 10 \
+              "$APP_URL/health/ready" && exit 0
+            sleep 10
+          done
+          echo "::warning::Health check failed"

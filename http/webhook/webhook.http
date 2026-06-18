@@ -1,0 +1,51 @@
+@HOST = http://localhost
+
+### Webhook de Stripe (evento de pago completado)
+POST {{HOST}}/webhook/stripe HTTP/1.1
+Content-Type: application/json
+Stripe-Signature: t=1234567890,v1=signature_placeholder
+
+{
+  "id": "evt_test_123",
+  "type": "checkout.session.completed",
+  "data": {
+    "object": {
+      "id": "cs_test_123",
+      "payment_status": "paid",
+      "amount_total": 2999,
+      "currency": "usd",
+      "metadata": {
+        "brandId": "00000000-0000-0000-0000-000000000001",
+        "purpose": "plan_purchase"
+      }
+    }
+  }
+}
+
+### Webhook de MercadoPago (notificación de pago)
+POST {{HOST}}/webhook/mercadopago HTTP/1.1
+Content-Type: application/json
+
+{
+  "id": "12345678",
+  "type": "payment",
+  "action": "payment.created",
+  "data": {
+    "id": "12345678"
+  }
+}
+
+### Webhook de Dropi (notificación de transacción)
+POST {{HOST}}/webhook/dropi HTTP/1.1
+Content-Type: application/json
+
+{
+  "event": "transaction.completed",
+  "data": {
+    "transactionId": "dropi_tx_123",
+    "brandId": "00000000-0000-0000-0000-000000000001",
+    "amount": 50000,
+    "currency": "COP",
+    "status": "completed"
+  }
+}

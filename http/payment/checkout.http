@@ -1,0 +1,65 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@USER_ID = 00000000-0000-0000-0000-000000000001
+@WALLET_ID = 00000000-0000-0000-0000-000000000001
+@PAYMENT_ID = 00000000-0000-0000-0000-000000000001
+
+### Pagar plan con wallet interno
+POST {{HOST}}/payment/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "purposeId": "pro",
+  "provider": "wallet",
+  "walletId": "{{WALLET_ID}}",
+  "amount": 99000,
+  "currency": "COP"
+}
+
+### Pagar plan con Stripe
+POST {{HOST}}/payment/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "purposeId": "pro",
+  "provider": "stripe",
+  "amount": 29.99,
+  "currency": "USD",
+  "successUrl": "http://localhost/success",
+  "cancelUrl": "http://localhost/cancel"
+}
+
+### Recarga de wallet con Stripe
+POST {{HOST}}/payment/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "wallet_recharge",
+  "provider": "stripe",
+  "amount": 100000,
+  "currency": "COP"
+}
+
+### Detalle de pago
+GET {{HOST}}/payment/{{PAYMENT_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Listar pagos de una marca
+GET {{HOST}}/payment?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Cancelar pago pendiente
+POST {{HOST}}/payment/{{PAYMENT_ID}}/cancel HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}

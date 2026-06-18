@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.github
+.env
+.env.*
+!.env-template
+*.log
+logs
+coverage
+.vscode
+.idea
+*.md
+!README.md
+# docker/ se necesita para COPY del entrypoint en el Dockerfile de produccion
+deploy
+test

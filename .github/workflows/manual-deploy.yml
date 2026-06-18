@@ -1,0 +1,313 @@
+# Manual Deploy — Despliegue manual a dev / stg-mono / prod-mono.
+# - dev      -> VM dev          (Infisical development, GH env "develop")
+# - stg-mono -> VM stg-mono     (Infisical staging,     GH env "staging")
+# - prod-mono-> VM prod-mono    (Infisical production,  GH env "production")
+# prod-mono solo puede dispararse desde la rama main.
+# Push 2 tags por build: <env> (mutable) + <env>-<sha7> (inmutable, para rollback).
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente destino
+        type: choice
+        options:
+          - dev
+          - stg-mono
+          - prod-mono
+        required: true
+      ref:
+        description: Branch/tag/sha a desplegar (opcional, default = rama actual)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: manual-deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: backend-payments
+  SERVICE_PATH: /backend-payments
+  DEPLOY_PATH: /opt/backend-payments
+  IMAGE_VAR: BACKEND_PAYMENTS_IMAGE
+  ENV_FILENAME: .env
+
+jobs:
+  validate:
+    name: Validate input
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      ref: ${{ steps.r.outputs.ref }}
+      gh_env: ${{ steps.r.outputs.gh_env }}
+      infisical_env: ${{ steps.r.outputs.infisical_env }}
+      mutable_tag: ${{ steps.r.outputs.mutable_tag }}
+    steps:
+      - name: Resolve env config
+        id: r
+        env:
+          INPUT_ENV: ${{ inputs.environment }}
+          INPUT_REF: ${{ inputs.ref }}
+          DEFAULT_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          REF="${INPUT_REF:-$DEFAULT_REF}"
+          case "$INPUT_ENV" in
+            dev)
+              GH_ENV=develop;    INF_ENV=development; TAG=develop ;;
+            stg-mono)
+              GH_ENV=staging;    INF_ENV=staging;     TAG=staging ;;
+            prod-mono)
+              if [ "$REF" != "main" ]; then
+                echo "::error::prod-mono solo se despliega desde main (recibido: $REF)"
+                exit 1
+              fi
+              GH_ENV=production; INF_ENV=production;  TAG=production ;;
+            *)
+              echo "::error::Ambiente desconocido: $INPUT_ENV"
+              exit 1 ;;
+          esac
+          {
+            echo "ref=$REF"
+            echo "gh_env=$GH_ENV"
+            echo "infisical_env=$INF_ENV"
+            echo "mutable_tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+  ci-validation:
+    name: CI Validation
+    needs: [validate]
+    uses: ./.github/workflows/ci-full.yml
+    secrets: inherit
+
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [validate, ci-validation]
+    environment:
+      name: ${{ needs.validate.outputs.gh_env }}
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image_tag_sha: ${{ steps.meta.outputs.image_tag_sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+
+      - name: Image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          MUTABLE_TAG="${{ needs.validate.outputs.mutable_tag }}"
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          SHA_TAG="${MUTABLE_TAG}-${SHORT_SHA}"
+          REGISTRY="${{ secrets.ARTIFACT_REGISTRY_URL }}"
+          if [ -z "$REGISTRY" ]; then
+            echo "::error::ARTIFACT_REGISTRY_URL no configurado"
+            exit 1
+          fi
+          {
+            echo "image_full_mutable=${REGISTRY}/${IMAGE_NAME}:${MUTABLE_TAG}"
+            echo "image_full_sha=${REGISTRY}/${IMAGE_NAME}:${SHA_TAG}"
+            echo "image_tag=${MUTABLE_TAG}"
+            echo "image_tag_sha=${SHA_TAG}"
+            echo "artifact_host=${REGISTRY%%/*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker
+        run: |
+          gcloud auth configure-docker \
+            "${{ steps.meta.outputs.artifact_host }}" --quiet
+
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          docker build -f docker/Dockerfile \
+            -t "${{ steps.meta.outputs.image_full_mutable }}" \
+            -t "${{ steps.meta.outputs.image_full_sha }}" \
+            .
+          docker push "${{ steps.meta.outputs.image_full_mutable }}"
+          docker push "${{ steps.meta.outputs.image_full_sha }}"
+
+  deploy-vm:
+    name: Deploy to VM (${{ needs.validate.outputs.gh_env }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [validate, build-push]
+    environment:
+      name: ${{ needs.validate.outputs.gh_env }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.ref }}
+          sparse-checkout: |
+            docker/docker-compose.image.yml
+            update-containers.sh
+
+      - name: Validate VM secrets
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.GCP_INSTANCE_NAME }}" ]; then
+            echo "::error::GCP_INSTANCE_NAME no configurado en GH environment '${{ needs.validate.outputs.gh_env }}'"
+            exit 1
+          fi
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Pull .env from Infisical
+        env:
+          INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          INFISICAL_ENV: ${{ needs.validate.outputs.infisical_env }}
+          ARTIFACT_REGISTRY_URL: ${{ secrets.ARTIFACT_REGISTRY_URL }}
+          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${INFISICAL_URL:-}" ]; then
+            echo "::error::INFISICAL_URL no configurado"
+            exit 1
+          fi
+          echo "Pulling from Infisical env=${INFISICAL_ENV}"
+          SHARED=$(curl -sf -X GET \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=/shared&expandSecretReferences=true" \
+            -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+            || echo '{"secrets":[]}')
+          SERVICE=$(curl -sf -X GET \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=${SERVICE_PATH}&expandSecretReferences=true" \
+            -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+            || echo '{"secrets":[]}')
+          {
+            echo "# From Infisical (${INFISICAL_ENV})"
+            echo "$SHARED" | jq -r '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+            echo "$SERVICE" | jq -r '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+            echo "${IMAGE_VAR}=${ARTIFACT_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "NETWORK_NAME=cubiko"
+          } > /tmp/service.env
+
+      - name: Deploy via IAP
+        env:
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_INSTANCE: ${{ secrets.GCP_INSTANCE_NAME }}
+        run: |
+          set -euo pipefail
+
+          retry_gcloud() {
+            local max=4 delay=10 i
+            for i in $(seq 1 $max); do
+              if "$@"; then return 0; fi
+              if [ "$i" -lt "$max" ]; then
+                echo "::warning::gcloud attempt $i/$max failed, retrying in ${delay}s..."
+                sleep "$delay"
+                delay=$((delay * 2))
+              fi
+            done
+            echo "::error::gcloud command failed after $max attempts"
+            return 1
+          }
+
+          retry_gcloud gcloud compute scp \
+            docker/docker-compose.image.yml \
+            update-containers.sh \
+            /tmp/service.env \
+            "${GCP_INSTANCE}:/tmp/" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h
+          retry_gcloud gcloud compute ssh "$GCP_INSTANCE" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="sudo bash -c '
+              set -euo pipefail
+              mkdir -p ${DEPLOY_PATH}/docker
+              cp /tmp/docker-compose.image.yml \
+                ${DEPLOY_PATH}/docker/docker-compose.image.yml
+              cp /tmp/update-containers.sh \
+                ${DEPLOY_PATH}/update-containers.sh
+              chmod +x ${DEPLOY_PATH}/update-containers.sh
+              cp /tmp/service.env ${DEPLOY_PATH}/${ENV_FILENAME}
+              rm -f /tmp/docker-compose.image.yml \
+                /tmp/update-containers.sh /tmp/service.env
+              cd ${DEPLOY_PATH}
+              set -a && source ${ENV_FILENAME} && set +a
+
+              REGISTRY=\$(echo \$${IMAGE_VAR} | cut -d/ -f1)
+              gcloud auth configure-docker \$REGISTRY \
+                --quiet 2>/dev/null || true
+              docker compose --env-file ${ENV_FILENAME} \
+                -f docker/docker-compose.image.yml pull
+
+              IP_BASE=\$(echo \$CONTAINER_IP | cut -d. -f1-3).
+              for i in \$(seq 2 254); do
+                IP=\"\${IP_BASE}\${i}\"
+                TAKEN=false
+                for cid in \$(docker ps -q); do
+                  if docker inspect -f \
+                    \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" \
+                    \"\$cid\" | grep -q \"\$IP\"; then
+                    TAKEN=true; break
+                  fi
+                done
+                if [ \"\$TAKEN\" = \"false\" ]; then
+                  sed -i \"s/^CONTAINER_IP=.*/CONTAINER_IP=\$IP/\" ${ENV_FILENAME}
+                  sed -i \"s/^CONTAINER_NUMBER=.*/CONTAINER_NUMBER=\$i/\" ${ENV_FILENAME}
+                  sed -i \"s/^CONTAINER_SLUG=.*/CONTAINER_SLUG=\${CONTAINER_NAME}-\$i/\" ${ENV_FILENAME}
+                  break
+                fi
+              done
+
+              set -a && source ${ENV_FILENAME} && set +a
+              docker compose --env-file ${ENV_FILENAME} \
+                -f docker/docker-compose.image.yml \
+                -p \"\${CONTAINER_SLUG}\" up -d
+              bash update-containers.sh \"\${CONTAINER_SLUG}\"
+              echo \"deployed (blue-green)\"
+              docker ps --filter name=\$CONTAINER_NAME'"
+
+      - name: Health check
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          APP_URL="${{ secrets.APP_URL }}"
+          [ -z "${APP_URL:-}" ] && exit 0
+          for i in 1 2 3 4 5; do
+            curl -f -s --max-time 10 "$APP_URL/health/ready" && exit 0
+            sleep 10
+          done
+          echo "::warning::Health check failed"

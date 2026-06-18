@@ -1,0 +1,101 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@USER_ID = 00000000-0000-0000-0000-000000000001
+@WALLET_ID = 00000000-0000-0000-0000-000000000001
+
+# =============================================
+# Checkout completo (orquestado)
+# Flujo: pago → suscripción → factura → DIAN → roles
+# =============================================
+
+### Comprar plan Pro con wallet interna
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "provider": "wallet",
+  "planSlug": "pro",
+  "currency": "COP",
+  "walletId": "{{WALLET_ID}}"
+}
+
+### Comprar plan Starter con Stripe (redirige a checkout)
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "provider": "stripe",
+  "planSlug": "starter",
+  "currency": "COP",
+  "successUrl": "https://app.cubiko.dev/payment/success",
+  "cancelUrl": "https://app.cubiko.dev/payment/cancel"
+}
+
+### Comprar plan con MercadoPago
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "provider": "mercadopago",
+  "planSlug": "pro",
+  "currency": "COP"
+}
+
+### Comprar plan con Dropi
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "plan_purchase",
+  "provider": "dropi",
+  "planSlug": "starter",
+  "currency": "COP"
+}
+
+### Recargar wallet interna con Stripe
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "wallet_recharge",
+  "provider": "stripe",
+  "amount": 100000,
+  "currency": "COP",
+  "walletId": "{{WALLET_ID}}",
+  "successUrl": "https://app.cubiko.dev/wallet/success",
+  "cancelUrl": "https://app.cubiko.dev/wallet/cancel"
+}
+
+### Pago de servicio con wallet interna
+POST {{HOST}}/checkout HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "purpose": "service_payment",
+  "provider": "wallet",
+  "amount": 50000,
+  "currency": "COP",
+  "walletId": "{{WALLET_ID}}"
+}

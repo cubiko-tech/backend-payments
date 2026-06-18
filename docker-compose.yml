@@ -1,0 +1,41 @@
+services:
+  payments:
+    container_name: $CONTAINER_SLUG
+    working_dir: /code
+    restart: always
+    build: .
+    image: $CONTAINER_NAME
+    expose:
+      - 80
+    extra_hosts:
+      - '${HOST_AUTH}'
+      - '${HOST_PLATFORM}'
+      - '${HOST_ROLES}'
+    volumes:
+      - .:/code
+    command:
+      - /bin/sh
+      - '-c'
+      - './entrypoint.sh'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'wget',
+          '--no-verbose',
+          '--tries=1',
+          '--spider',
+          'http://localhost/health/ready',
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      custom_network:
+        ipv4_address: $CONTAINER_IP
+
+networks:
+  custom_network:
+    name: cubiko
+    external: true

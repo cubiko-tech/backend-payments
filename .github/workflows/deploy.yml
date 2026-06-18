@@ -1,0 +1,332 @@
+# Deploy — Build image, push to Artifact Registry, deploy to VM.
+# - develop → VM dev (Docker Compose, Infisical development)
+# - staging → VM stg-mono (Docker Compose, Infisical staging)
+name: Deploy (Dev & Stg)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - develop
+      - staging
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+      - '.vscode/**'
+      - '.idea/**'
+      - '.gitattributes'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: backend-payments
+  SERVICE_PATH: /backend-payments
+  DEPLOY_PATH: /opt/backend-payments
+
+jobs:
+  ci-validation:
+    name: CI Validation
+    uses: ./.github/workflows/ci-full.yml
+    secrets: inherit
+
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [ci-validation]
+    environment:
+      name: ${{ github.ref_name }}
+    outputs:
+      image_full: ${{ steps.meta.outputs.image_full }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Image metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          REGISTRY="${{ secrets.ARTIFACT_REGISTRY_URL }}"
+          if [ -z "$REGISTRY" ]; then
+            echo "::warning::ARTIFACT_REGISTRY_URL not set"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IMAGE_FULL="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+          echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          echo "image_full=${IMAGE_FULL}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "artifact_host=${REGISTRY%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud CLI
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        if: steps.meta.outputs.skip_build != 'true'
+        run: |
+          gcloud auth configure-docker \
+            "${{ steps.meta.outputs.artifact_host }}" --quiet
+
+      - name: Login to Docker Hub
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image
+        if: steps.meta.outputs.skip_build != 'true'
+        run: |
+          set -euo pipefail
+          docker build -f docker/Dockerfile \
+            -t "${{ steps.meta.outputs.image_full }}" \
+            .
+          docker push "${{ steps.meta.outputs.image_full }}"
+
+  deploy-vm:
+    name: Deploy to VM (${{ github.ref_name }})
+    if: |
+      github.ref_name == 'develop' ||
+      github.ref_name == 'staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-push]
+    environment:
+      name: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            docker/docker-compose.image.yml
+            update-containers.sh
+
+      - name: Validate configuration
+        id: validate
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.GCP_INSTANCE_NAME }}" ]; then
+            echo "::warning::GCP_INSTANCE_NAME not set"
+            echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip_deploy=false" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP
+        if: steps.validate.outputs.skip_deploy != 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up gcloud CLI
+        if: steps.validate.outputs.skip_deploy != 'true'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Pull .env from Infisical
+        if: steps.validate.outputs.skip_deploy != 'true'
+        id: pull_env
+        env:
+          INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
+          INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          ARTIFACT_REGISTRY_URL: ${{ secrets.ARTIFACT_REGISTRY_URL }}
+          IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
+          INFISICAL_ENV: >-
+            ${{ github.ref_name == \'staging\'
+                && \'staging\' || \'development\' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${INFISICAL_URL:-}" ] || \
+             [ -z "${INFISICAL_TOKEN:-}" ]; then
+            echo "::warning::Infisical not configured"
+            echo "skip_env=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Pulling from Infisical env=${INFISICAL_ENV}"
+          SHARED=$(curl -sf -X GET \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=/shared" \
+            -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+            || echo '{"secrets":[]}')
+          SERVICE=$(curl -sf -X GET \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=${SERVICE_PATH}" \
+            -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
+            || echo '{"secrets":[]}')
+          SHARED_COUNT=$(echo "$SHARED" \
+            | jq '.secrets | length')
+          SERVICE_COUNT=$(echo "$SERVICE" \
+            | jq '.secrets | length')
+          TOTAL=$((SHARED_COUNT + SERVICE_COUNT))
+          if [ "$TOTAL" = "0" ]; then
+            echo "::warning::No secrets in Infisical"
+            echo "skip_env=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "# From Infisical (${INFISICAL_ENV})"
+            echo "# $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "$SHARED" | jq -r \
+              '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+            echo "$SERVICE" | jq -r \
+              '.secrets[] | "\(.secretKey)=\(.secretValue)"'
+            echo ""
+            echo "BACKEND_PAYMENTS_IMAGE=${ARTIFACT_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+          } > /tmp/service.env
+          echo "skip_env=false" >> "$GITHUB_OUTPUT"
+          echo "Pulled $TOTAL variables ($SHARED_COUNT shared + $SERVICE_COUNT service)"
+
+      - name: Deploy via IAP
+        if: steps.validate.outputs.skip_deploy != 'true'
+        env:
+          GCP_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GCP_ZONE: ${{ secrets.GCP_ZONE }}
+          GCP_INSTANCE: ${{ secrets.GCP_INSTANCE_NAME }}
+        run: |
+          set -euo pipefail
+
+          # Retry wrapper: absorbs OS Login key propagation races (ver feedback_ci_patterns)
+          retry_gcloud() {
+            local max=4 delay=10 i
+            for i in $(seq 1 $max); do
+              if "$@"; then return 0; fi
+              if [ "$i" -lt "$max" ]; then
+                echo "::warning::gcloud attempt $i/$max failed, retrying in ${delay}s..."
+                sleep "$delay"
+                delay=$((delay * 2))
+              fi
+            done
+            echo "::error::gcloud command failed after $max attempts"
+            return 1
+          }
+
+
+          retry_gcloud gcloud compute scp \
+            docker/docker-compose.image.yml \
+            update-containers.sh \
+            "${GCP_INSTANCE}:/tmp/" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h
+
+          if [ -f /tmp/service.env ]; then
+            retry_gcloud gcloud compute scp /tmp/service.env \
+              "${GCP_INSTANCE}:/tmp/service.env" \
+              --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+              --tunnel-through-iap \
+              --ssh-key-expire-after=1h
+          fi
+
+          retry_gcloud gcloud compute ssh "$GCP_INSTANCE" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h \
+            --ssh-flag="-o StrictHostKeyChecking=no" \
+            --command="sudo bash -c '
+              set -euo pipefail
+              mkdir -p ${DEPLOY_PATH}/docker
+              cp /tmp/docker-compose.image.yml \
+                ${DEPLOY_PATH}/docker/docker-compose.image.yml
+              cp /tmp/update-containers.sh \
+                ${DEPLOY_PATH}/update-containers.sh
+              chmod +x ${DEPLOY_PATH}/update-containers.sh
+              [ -f /tmp/service.env ] && \
+                cp /tmp/service.env ${DEPLOY_PATH}/.env
+              rm -f /tmp/docker-compose.image.yml \
+                /tmp/update-containers.sh /tmp/service.env
+              cd ${DEPLOY_PATH}
+              set -a && source .env && set +a
+
+              # Pull new image
+              REGISTRY=\$(echo \$BACKEND_PAYMENTS_IMAGE \
+                | cut -d/ -f1)
+              gcloud auth configure-docker \$REGISTRY \
+                --quiet 2>/dev/null || true
+              docker compose --env-file .env \
+                -f docker/docker-compose.image.yml pull
+
+              # Find available IP for blue-green
+              IP_BASE=\$(echo \$CONTAINER_IP \
+                | cut -d. -f1-3).
+              for i in \$(seq 2 254); do
+                IP=\"\${IP_BASE}\${i}\"
+                TAKEN=false
+                for cid in \$(docker ps -q); do
+                  if docker inspect -f \
+                    \"{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}\" \
+                    \"\$cid\" | grep -q \"\$IP\"; then
+                    TAKEN=true; break
+                  fi
+                done
+                if [ \"\$TAKEN\" = \"false\" ]; then
+                  sed -i \"s/^CONTAINER_IP=.*/CONTAINER_IP=\$IP/\" .env
+                  sed -i \"s/^CONTAINER_NUMBER=.*/CONTAINER_NUMBER=\$i/\" .env
+                  sed -i \"s/^CONTAINER_SLUG=.*/CONTAINER_SLUG=\${CONTAINER_NAME}-\$i/\" .env
+                  break
+                fi
+              done
+
+              # Reload env with new IP
+              set -a && source .env && set +a
+
+              # Start new container (old one still running)
+              docker compose --env-file .env \
+                -f docker/docker-compose.image.yml \
+                -p \"\${CONTAINER_SLUG}\" up -d
+
+              # Blue-green swap: health check, register
+              # upstream, remove old container
+              bash update-containers.sh \"\${CONTAINER_SLUG}\"
+
+              echo \"backend-payments deployed (blue-green)\"
+              docker ps --filter name=\$CONTAINER_NAME'"
+
+      - name: Health check
+        if: steps.validate.outputs.skip_deploy != 'true'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          APP_URL="${{ secrets.APP_URL }}"
+          if [ -z "${APP_URL:-}" ]; then
+            echo "APP_URL not set, skipping"
+            exit 0
+          fi
+          for i in 1 2 3 4 5; do
+            if curl -f -s --max-time 10 \
+              "$APP_URL/health/ready"; then
+              echo ""
+              echo "Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying..."
+            [ "$i" -lt 5 ] && sleep 10
+          done
+          echo "::warning::Health check failed"

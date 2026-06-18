@@ -1,0 +1,78 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@USER_ID = 00000000-0000-0000-0000-000000000001
+@WALLET_ID = 00000000-0000-0000-0000-000000000001
+@BILLING_PROFILE_ID = 00000000-0000-0000-0000-000000000001
+@PAYMENT_METHOD_ID = 00000000-0000-0000-0000-000000000001
+
+### Ajustar saldo de wallet (referencia — endpoint aún no implementado)
+POST {{HOST}}/wallet/{{WALLET_ID}}/adjust HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "amount": 50000,
+  "currency": "COP",
+  "reason": "Ajuste manual por soporte",
+  "adjustedBy": "{{USER_ID}}"
+}
+
+### Obtener perfil de facturación
+GET {{HOST}}/billing-profile?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Crear perfil de facturación
+POST {{HOST}}/billing-profile HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "legalName": "Mi Empresa S.A.S.",
+  "taxId": "900123456-7",
+  "address": "Calle 100 #15-20",
+  "city": "Bogotá",
+  "country": "CO",
+  "email": "facturacion@miempresa.com"
+}
+
+### Actualizar perfil de facturación
+PATCH {{HOST}}/billing-profile/{{BILLING_PROFILE_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "address": "Carrera 7 #71-21 Oficina 1201",
+  "city": "Bogotá"
+}
+
+### Listar métodos de pago
+GET {{HOST}}/payment-method?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Agregar método de pago
+POST {{HOST}}/payment-method HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "provider": "stripe",
+  "type": "card",
+  "token": "tok_visa",
+  "isDefault": true
+}
+
+### Eliminar método de pago
+DELETE {{HOST}}/payment-method/{{PAYMENT_METHOD_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Marcar método de pago como predeterminado
+PATCH {{HOST}}/payment-method/{{PAYMENT_METHOD_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "isDefault": true
+}

@@ -1,0 +1,10 @@
+@HOST = http://localhost
+
+### Health check general
+GET {{HOST}}/health HTTP/1.1
+
+### Readiness
+GET {{HOST}}/health/ready HTTP/1.1
+
+### Liveness
+GET {{HOST}}/health/live HTTP/1.1

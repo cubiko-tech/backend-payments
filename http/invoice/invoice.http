@@ -1,0 +1,36 @@
+@HOST = http://localhost
+@ACCESS_TOKEN = CHANGEME
+@BRAND_ID = 00000000-0000-0000-0000-000000000001
+@INVOICE_ID = 00000000-0000-0000-0000-000000000001
+
+### Listar facturas de una marca
+GET {{HOST}}/invoice?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Detalle de factura con items
+GET {{HOST}}/invoice/{{INVOICE_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Descargar factura en PDF
+GET {{HOST}}/invoice/{{INVOICE_ID}}/pdf HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Notas crédito de una factura
+GET {{HOST}}/invoice/{{INVOICE_ID}}/credit-notes HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+# =============================================
+# DIAN — Facturación electrónica
+# =============================================
+
+### Verificar si DIAN está configurado
+GET {{HOST}}/dian/configured HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Enviar factura a la DIAN
+POST {{HOST}}/dian/send/{{INVOICE_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Consultar estado de factura ante la DIAN
+GET {{HOST}}/dian/status/{{INVOICE_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
