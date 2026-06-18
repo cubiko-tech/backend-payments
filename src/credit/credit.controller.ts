@@ -12,6 +12,8 @@ import {
 } from '@nestjs/common'
 import { ApiOperation, ApiTags } from '@nestjs/swagger'
 
+import { RequestException } from '../shared/exception/request.exception'
+import { ClientPlatformService } from '../client/client-platform.service'
 import { CreditService } from './credit.service'
 import { ScaleConfigService } from './scale-config.service'
 import { CreditRunService } from './credit-run.service'
@@ -38,6 +40,7 @@ export class CreditController {
     private readonly scaleConfigService: ScaleConfigService,
     private readonly creditRunService: CreditRunService,
     private readonly bureauService: BureauService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Post('scores/calculate')
@@ -72,7 +75,16 @@ export class CreditController {
   @Get('preapproval/:brandId')
   @UseGuards(CreditPermissionGuard)
   @ApiOperation({ summary: 'Pre-aprobado de crédito (informativo, curado para el cliente)' })
-  async preapproval(@Param('brandId') brandId: string) {
+  async preapproval(@Param('brandId') brandId: string, @Req() req: any) {
+    // Brand- y role-scope (defense-in-depth además del BFF): salvo el server/
+    // superadmin, el usuario debe ser miembro de la marca con rol owner/admin/
+    // financiero. La causa del 403 no distingue para no filtrar existencia.
+    if (!req?.user?.isSuperAdmin) {
+      const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, brandId)
+      if (!allowed) {
+        throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+      }
+    }
     return { data: await this.creditService.getPreapproval(brandId) }
   }
 
