@@ -21,7 +21,6 @@ services:
     extra_hosts:
       - '${HOST_AUTH}'
       - '${HOST_PLATFORM}'
-      - '${HOST_ROLES}'
     volumes:
       - payments-logs:/code/logs
     networks:

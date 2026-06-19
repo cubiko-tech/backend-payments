@@ -12,7 +12,7 @@ RUN apk add --no-cache bash
 WORKDIR /code
 
 # Dependencias (cache layer)
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* .npmrc ./
 RUN npm install
 
 # Codigo fuente
@@ -29,7 +29,7 @@ RUN apk add --no-cache bash wget
 WORKDIR /code
 
 # Dependencias de produccion
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* .npmrc ./
 RUN npm install --omit=dev
 
 # Config files (TypeORM migrations need these)
