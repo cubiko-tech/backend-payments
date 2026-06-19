@@ -25,7 +25,7 @@ services:
       - payments-logs:/code/logs
     networks:
       custom_network:
-        ipv4_address: ${CONTAINER_IP:-192.160.6.2}
+        ipv4_address: ${CONTAINER_IP:-192.160.4.2}
     healthcheck:
       test: ['CMD', 'wget', '--no-verbose', '--tries=1',
              '--spider', 'http://localhost/health/ready']
