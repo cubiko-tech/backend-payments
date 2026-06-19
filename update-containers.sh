@@ -14,7 +14,8 @@ readonly ENV_FILE=".env"
 readonly HEALTH_MAX_ATTEMPTS=20
 readonly HEALTH_INTERVAL=30
 readonly GATEWAY_API_PORT="10341"
-readonly UPSTREAM_CONF="payments"
+readonly UPSTREAM_CONF="platform"
+readonly UPSTREAM_STREAM="payments"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,7 +63,7 @@ manage_upstream() {
   # Prefer local script if gateway repo is available
   if gateway_dir=$(resolve_gateway_dir) && [[ -f "${gateway_dir}/task/upstream.sh" ]]; then
     log "Using local upstream script: ${gateway_dir}/task/upstream.sh ${action} ${ip}"
-    bash "${gateway_dir}/task/upstream.sh" "$action" "$ip" "$UPSTREAM_CONF"
+    bash "${gateway_dir}/task/upstream.sh" "$action" "$ip" "$UPSTREAM_STREAM"
     return
   fi
 
@@ -77,7 +78,8 @@ manage_upstream() {
     -d "{
       \"action\": \"${action}\",
       \"ip\": \"${ip}\",
-      \"upstream\": \"${UPSTREAM_CONF}\"
+      \"conf\": \"${UPSTREAM_CONF}\",
+      \"stream\": \"${UPSTREAM_STREAM}\"
     }" || warn "Upstream ${action} failed for ${ip}"
 }
 
