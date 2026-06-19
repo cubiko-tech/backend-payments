@@ -129,6 +129,40 @@ export class ClientRolesService {
     this.cache = null
   }
 
+  /**
+   * ¿El sujeto (user|brand) tiene el permiso efectivo? Consulta backend-roles
+   * `GET /v1/effective/check/:subjectId/:slug` (O(1) sobre effective_permissions).
+   * Fail-closed: ante error de red/servicio devuelve false (no concede acceso).
+   */
+  async checkPermission(
+    subjectId: string,
+    permissionSlug: string,
+    type: 'user' | 'brand' = 'user',
+  ): Promise<boolean> {
+    if (!this.rolesUrl) {
+      this.logger.warn('SERVICE_ROLES no configurado — permiso denegado (fail-closed)')
+      return false
+    }
+    try {
+      const url =
+        `${this.rolesUrl}/v1/effective/check/${subjectId}/` +
+        `${encodeURIComponent(permissionSlug)}?type=${type}`
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.accessServer}` },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!response.ok) {
+        this.logger.warn(`backend-roles effective/check respondió ${response.status}`)
+        return false
+      }
+      const body = await response.json()
+      return !!body?.data?.hasPermission
+    } catch (error) {
+      this.logger.error(`Error consultando permiso en backend-roles: ${error.message}`)
+      return false
+    }
+  }
+
   // =============================================================
   // Gestión de planes por marca (service-to-service)
   // =============================================================

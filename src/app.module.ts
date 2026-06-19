@@ -27,6 +27,7 @@ import { AdminModule } from './admin/admin.module'
 import { MetricsModule } from './metrics/metrics.module'
 import { EventBusModule } from './event-bus/event-bus.module'
 import { ClientModule } from './client/client.module'
+import { CreditModule } from './credit/credit.module'
 
 @Module({
   imports: [
@@ -89,6 +90,7 @@ import { ClientModule } from './client/client.module'
     EventBusModule,
     AdminModule,
     MetricsModule,
+    CreditModule,
   ],
   providers: [
     {

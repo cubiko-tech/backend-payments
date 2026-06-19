@@ -1,7 +1,6 @@
 # compiled output
 /dist
 /node_modules
-package-lock.json
 
 # Logs
 logs
@@ -35,9 +34,11 @@ lerna-debug.log*
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# Env (solo se trackea el template, sin secretos)
+# Env (solo se trackea el template y el schema, sin secretos)
 .env
 .env.*
+!.env-template
+!.env.schema
 
 # Claude Code (personal state — only project-shared files are tracked)
 .claude/settings.local.json

@@ -31,6 +31,7 @@ env:
   IMAGE_NAME: backend-payments
   SERVICE_PATH: /backend-payments
   DEPLOY_PATH: /opt/backend-payments
+  IMAGE_ENV_VAR: BACKEND_PAYMENTS_IMAGE
 
 jobs:
   ci-validation:
@@ -160,8 +161,8 @@ jobs:
           ARTIFACT_REGISTRY_URL: ${{ secrets.ARTIFACT_REGISTRY_URL }}
           IMAGE_TAG: ${{ needs.build-push.outputs.image_tag }}
           INFISICAL_ENV: >-
-            ${{ github.ref_name == \'staging\'
-                && \'staging\' || \'development\' }}
+            ${{ github.ref_name == 'staging'
+                && 'staging' || 'development' }}
         run: |
           set -euo pipefail
           if [ -z "${INFISICAL_URL:-}" ] || \
@@ -172,11 +173,11 @@ jobs:
           fi
           echo "Pulling from Infisical env=${INFISICAL_ENV}"
           SHARED=$(curl -sf -X GET \
-            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=/shared" \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=/shared&expandSecretReferences=true" \
             -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
             || echo '{"secrets":[]}')
           SERVICE=$(curl -sf -X GET \
-            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=${SERVICE_PATH}" \
+            "${INFISICAL_URL}/api/v3/secrets/raw?environment=${INFISICAL_ENV}&workspaceId=${INFISICAL_PROJECT_ID}&secretPath=${SERVICE_PATH}&expandSecretReferences=true" \
             -H "Authorization: Bearer ${INFISICAL_TOKEN}" \
             || echo '{"secrets":[]}')
           SHARED_COUNT=$(echo "$SHARED" \
@@ -198,7 +199,7 @@ jobs:
             echo "$SERVICE" | jq -r \
               '.secrets[] | "\(.secretKey)=\(.secretValue)"'
             echo ""
-            echo "BACKEND_PAYMENTS_IMAGE=${ARTIFACT_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "${IMAGE_ENV_VAR}=${ARTIFACT_REGISTRY_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
           } > /tmp/service.env
           echo "skip_env=false" >> "$GITHUB_OUTPUT"
           echo "Pulled $TOTAL variables ($SHARED_COUNT shared + $SERVICE_COUNT service)"
@@ -265,7 +266,7 @@ jobs:
               set -a && source .env && set +a
 
               # Pull new image
-              REGISTRY=\$(echo \$BACKEND_PAYMENTS_IMAGE \
+              REGISTRY=\$(echo \$${IMAGE_ENV_VAR} \
                 | cut -d/ -f1)
               gcloud auth configure-docker \$REGISTRY \
                 --quiet 2>/dev/null || true
