@@ -3,6 +3,7 @@ import { PaymentProvider } from './provider.interface'
 import { StripeProvider } from './stripe/stripe.provider'
 import { MercadoPagoProvider } from './mercadopago/mercadopago.provider'
 import { DropiProvider } from './dropi/dropi.provider'
+import { ConfioProvider } from './confio/confio.provider'
 import { logger } from '../shared/logger/logger'
 
 /**
@@ -24,6 +25,7 @@ export class ProviderFactory implements OnModuleInit {
     private readonly stripeProvider: StripeProvider,
     private readonly mercadoPagoProvider: MercadoPagoProvider,
     private readonly dropiProvider: DropiProvider,
+    private readonly confioProvider: ConfioProvider,
   ) {}
 
   onModuleInit() {
@@ -32,6 +34,7 @@ export class ProviderFactory implements OnModuleInit {
       this.stripeProvider,
       this.mercadoPagoProvider,
       this.dropiProvider,
+      this.confioProvider,
     ]
 
     for (const provider of providers) {

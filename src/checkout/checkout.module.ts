@@ -14,6 +14,7 @@ import { AuditModule } from '../audit/audit.module'
 import { TaxModule } from '../tax/tax.module'
 import { DianModule } from '../dian/dian.module'
 import { PaymentModule } from '../payment/payment.module'
+import { WebhookModule } from '../webhook/webhook.module'
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { PaymentModule } from '../payment/payment.module'
     TaxModule,
     DianModule,
     PaymentModule,
+    WebhookModule,
   ],
   controllers: [CheckoutController],
   providers: [CheckoutService],

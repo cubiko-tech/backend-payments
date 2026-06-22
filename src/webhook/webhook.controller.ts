@@ -18,6 +18,7 @@ import { WebhookService } from './webhook.service'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
+import { ConfioProvider } from '../provider/confio/confio.provider'
 
 /**
  * Webhook Controller
@@ -36,6 +37,7 @@ export class WebhookController {
     private readonly stripeProvider: StripeProvider,
     private readonly mercadoPagoProvider: MercadoPagoProvider,
     private readonly dropiProvider: DropiProvider,
+    private readonly confioProvider: ConfioProvider,
   ) {}
 
   @Post('stripe')
@@ -118,6 +120,36 @@ export class WebhookController {
     const providerEventId = payload?.eventId || `dropi_${Date.now()}`
 
     return this.webhookService.receive('dropi', eventType, providerEventId, payload)
+  }
+
+  @Post('confio')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Recibir webhook de ConfioPagos' })
+  @ApiResponse({ status: 200, description: 'Webhook recibido correctamente' })
+  @ApiResponse({ status: 401, description: 'Token inválido' })
+  async confio(
+    @Headers('authorization') authorization: string,
+    @Req() req: RawBodyRequest<Request>,
+  ) {
+    const rawBody = req.rawBody
+    if (!rawBody) {
+      throw new HttpException('Cuerpo del webhook requerido', HttpStatus.BAD_REQUEST)
+    }
+
+    // ConfioPagos valida con el mismo access token en Authorization: Bearer.
+    const token = (authorization || '').replace(/^Bearer\s+/i, '')
+    if (!this.confioProvider.validateWebhookSignature(rawBody, token)) {
+      this.logger.warn('Webhook ConfioPagos rechazado: token inválido')
+      throw new HttpException('Token de ConfioPagos inválido', HttpStatus.UNAUTHORIZED)
+    }
+
+    const payload = JSON.parse(rawBody.toString())
+    const eventType = payload?.event || 'unknown'
+    // Único por transición de estado del pago (evita procesar dos veces el mismo estado).
+    const resourceName = payload?.data?.name || payload?.data?.correlationId || 'unknown'
+    const providerEventId = `${resourceName}:${payload?.data?.status || eventType}`
+
+    return this.webhookService.receive('confio', eventType, providerEventId, payload)
   }
 
   // ============================================

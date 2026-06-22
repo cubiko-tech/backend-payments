@@ -12,6 +12,7 @@ import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { WalletModule } from '../wallet/wallet.module'
 import { AuditModule } from '../audit/audit.module'
 import { PaymentModule } from '../payment/payment.module'
+import { CheckoutModule } from '../checkout/checkout.module'
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { PaymentModule } from '../payment/payment.module'
     WalletModule,
     AuditModule,
     PaymentModule,
+    CheckoutModule,
   ],
   providers: [TasksService],
 })
