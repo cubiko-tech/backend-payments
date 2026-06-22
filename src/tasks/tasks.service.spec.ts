@@ -18,10 +18,15 @@ describe('TasksService — processTrialConversions', () => {
   let clientRoles: any
   let walletService: any
   let eventBus: any
+  let checkoutService: any
+  let paymentRepo: ReturnType<typeof mockRepo>
+  let providerFactory: any
 
   beforeEach(() => {
     subscriptionRepo = mockRepo()
     subscriptionEventRepo = mockRepo()
+    paymentRepo = mockRepo()
+    providerFactory = { getProvider: jest.fn() }
     clientRoles = {
       removePlanFromBrand: jest.fn().mockResolvedValue(true),
       assignPlanToBrand: jest.fn().mockResolvedValue(true),
@@ -34,22 +39,28 @@ describe('TasksService — processTrialConversions', () => {
       notifySubscriptionExpired: jest.fn().mockResolvedValue(null),
       publishSubscriptionRenewed: jest.fn(),
       notifyPaymentFailed: jest.fn().mockResolvedValue(null),
+      publishNotification: jest.fn().mockResolvedValue(null),
+    }
+    checkoutService = {
+      processCheckout: jest.fn().mockResolvedValue({ paymentId: 'pay-1', status: 'pending', checkoutUrl: 'https://pay.confio/abc' }),
+      completeExternalPayment: jest.fn().mockResolvedValue(undefined),
     }
 
     service = new TasksService(
       mockRepo() as any, // walletReadRepo
       mockRepo() as any, // snapshotRepo
       mockRepo() as any, // transactionReadRepo
-      mockRepo() as any, // paymentRepo
+      paymentRepo as any,
       subscriptionRepo as any,
       subscriptionEventRepo as any,
       mockRepo() as any, // webhookEventRepo
       {} as any, // dataSource
       walletService as any,
       {} as any, // auditService
-      {} as any, // providerFactory
+      providerFactory as any,
       eventBus as any,
       clientRoles as any,
+      checkoutService as any,
     )
   })
 
@@ -100,5 +111,53 @@ describe('TasksService — processTrialConversions', () => {
       expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),
     )
     expect(eventBus.notifyPaymentFailed).toHaveBeenCalled()
+  })
+
+  it('emite link de cobro Confío para un trial externo vencido (no degrada)', async () => {
+    subscriptionRepo.find.mockResolvedValue([
+      { id: 's1', brandId: 'b1', userId: 'u1', planSlug: 'pro', provider: 'confio', walletId: null, status: SubscriptionStatus.TRIAL, retryCount: 0 },
+    ])
+
+    await service.processTrialConversions()
+
+    expect(checkoutService.processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'confio', purpose: 'plan_purchase', planSlug: 'pro', brandId: 'b1' }),
+    )
+    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),
+    )
+    // Notifica el link de pago, NO degrada a free.
+    expect(eventBus.publishNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'payment_link' }),
+    )
+    expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'free')
+  })
+
+  describe('reconcileExternalPayments', () => {
+    it('completa un pago confio pendiente cuyo estado real es completed', async () => {
+      paymentRepo.find.mockResolvedValue([
+        { id: 'pay-9', provider: 'confio', status: 'pending', providerPaymentId: 'stores/x/payments/y' },
+      ])
+      providerFactory.getProvider.mockReturnValue({
+        getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
+      })
+
+      await service.reconcileExternalPayments()
+
+      expect(checkoutService.completeExternalPayment).toHaveBeenCalledWith('pay-9', { source: 'cron-reconcile' })
+    })
+
+    it('NO completa si el estado real sigue pending', async () => {
+      paymentRepo.find.mockResolvedValue([
+        { id: 'pay-9', provider: 'confio', status: 'pending', providerPaymentId: 'stores/x/payments/y' },
+      ])
+      providerFactory.getProvider.mockReturnValue({
+        getPaymentStatus: jest.fn().mockResolvedValue({ status: 'pending' }),
+      })
+
+      await service.reconcileExternalPayments()
+
+      expect(checkoutService.completeExternalPayment).not.toHaveBeenCalled()
+    })
   })
 })

@@ -16,6 +16,7 @@ import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
+import { CheckoutService } from '../checkout/checkout.service'
 import { logger } from '../shared/logger/logger'
 
 @Injectable()
@@ -47,7 +48,71 @@ export class TasksService {
     private providerFactory: ProviderFactory,
     private eventBus: EventBusService,
     private clientRoles: ClientRolesService,
+    private checkoutService: CheckoutService,
   ) {}
+
+  /** Proveedores externos que cobran con link de pago (no wallet interna). */
+  private isExternalProvider(provider: string): boolean {
+    return provider === 'confio' || provider === 'stripe' || provider === 'mercadopago' || provider === 'dropi'
+  }
+
+  /**
+   * Emitir un cobro a un proveedor externo (ConfioPagos): genera un link de
+   * pago vía checkout y notifica al usuario. Deja la suscripción en past_due
+   * a la espera de que el usuario pague (el webhook la reactiva). `isRetry`
+   * incrementa el contador para que expireSubscriptions degrade tras MAX intentos.
+   */
+  private async issueExternalCharge(sub: Subscription, isRetry: boolean) {
+    try {
+      const result = await this.checkoutService.processCheckout({
+        brandId: sub.brandId,
+        userId: sub.userId,
+        purpose: 'plan_purchase',
+        provider: sub.provider as any,
+        planSlug: sub.planSlug,
+      })
+
+      const previousStatus = sub.status
+      sub.status = SubscriptionStatus.PAST_DUE
+      if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
+      await this.subscriptionRepo.save(sub)
+
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: sub.id,
+          eventType: SubscriptionEventType.PAYMENT_FAILED,
+          fromStatus: previousStatus,
+          toStatus: SubscriptionStatus.PAST_DUE,
+          triggeredBy: 'system',
+          paymentId: result.paymentId,
+          reason: isRetry
+            ? `Reintento de cobro ${sub.provider} (${sub.retryCount}/${this.MAX_RETRY})`
+            : `Link de cobro ${sub.provider} emitido`,
+        }),
+      )
+
+      // Notificar al usuario el link de pago (backend-processes envía email/push).
+      await this.eventBus.publishNotification({
+        brandId: sub.brandId,
+        userId: sub.userId,
+        type: 'payment_link',
+        subject: `Completa el pago de tu plan ${sub.planSlug}`,
+        metadata: {
+          checkoutUrl: result.checkoutUrl || '',
+          planSlug: sub.planSlug,
+          paymentId: result.paymentId,
+        },
+      })
+
+      logger.log('info', `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`)
+    } catch (error) {
+      logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
+      // Marcar past_due igual para que el ciclo de expiración avance.
+      sub.status = SubscriptionStatus.PAST_DUE
+      if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
+      await this.subscriptionRepo.save(sub)
+    }
+  }
 
   // =============================================================
   // 0. Convertir trials vencidos (cada hora)
@@ -68,37 +133,35 @@ export class TasksService {
 
     let converted = 0
     let downgraded = 0
+    let linked = 0
     for (const sub of trials) {
-      const hasPaymentMethod =
-        (sub.provider === 'wallet' && !!sub.walletId) ||
-        (sub.provider !== 'wallet' && !!sub.providerSubscriptionId)
-
-      // Sin método de pago: no hay nada que cobrar → degradar a free.
-      if (!hasPaymentMethod) {
-        await this.endTrialWithoutPayment(sub)
-        downgraded++
+      // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
+      if (sub.provider === 'wallet') {
+        if (!sub.walletId) {
+          await this.endTrialWithoutPayment(sub)
+          downgraded++
+          continue
+        }
+        try {
+          await this.renewFromWallet(sub)
+          converted++
+        } catch (error) {
+          logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
+          await this.handleRenewalFailure(sub)
+        }
         continue
       }
 
-      // Con método de pago: intentar el primer cobro.
-      try {
-        if (sub.provider === 'wallet' && sub.walletId) {
-          await this.renewFromWallet(sub)
-          converted++
-        } else {
-          // Proveedores externos: el cobro recurrente lo confirma el webhook.
-          // Marcamos past_due para que dunning/reintentos lo persigan si no llega.
-          await this.handleRenewalFailure(sub)
-        }
-      } catch (error) {
-        logger.log('error', `[CRON] Error convirtiendo trial ${sub.id}: ${error.message}`)
-        await this.handleRenewalFailure(sub)
-      }
+      // Proveedor externo (ConfioPagos): emitir link de pago y notificar.
+      // El webhook reactiva la suscripción cuando el usuario paga.
+      await this.issueExternalCharge(sub, false)
+      linked++
     }
 
     logger.log(
       'info',
-      `[CRON] processTrialConversions: ${converted} cobrados, ${downgraded} degradados a ${this.FREE_PLAN_SLUG}`,
+      `[CRON] processTrialConversions: ${converted} cobrados, ${linked} con link emitido, ` +
+        `${downgraded} degradados a ${this.FREE_PLAN_SLUG}`,
     )
   }
 
@@ -123,6 +186,10 @@ export class TasksService {
       try {
         if (sub.provider === 'wallet' && sub.walletId) {
           await this.renewFromWallet(sub)
+          processed++
+        } else if (sub.provider === 'confio' && sub.status === SubscriptionStatus.ACTIVE) {
+          // ConfioPagos one-shot: re-emitir link de cobro cada período.
+          await this.issueExternalCharge(sub, false)
           processed++
         }
         // Stripe/MP manejan renovación automática via webhooks
@@ -167,6 +234,10 @@ export class TasksService {
         if (sub.provider === 'wallet' && sub.walletId) {
           await this.renewFromWallet(sub)
           retried++
+        } else if (sub.provider === 'confio') {
+          // ConfioPagos: re-emitir el link de cobro (cuenta como reintento).
+          await this.issueExternalCharge(sub, true)
+          retried++
         }
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
@@ -177,6 +248,41 @@ export class TasksService {
     if (retried > 0) {
       logger.log('info', `[CRON] retryFailedPayments: ${retried} reintentados`)
     }
+  }
+
+  // =============================================================
+  // 2b. Reconciliar pagos Confío pendientes (cada 5 min)
+  //     Red de seguridad: si el webhook se perdió y el usuario no volvió,
+  //     consulta el estado real y completa los pagos ya pagados.
+  // =============================================================
+  @Cron('*/5 * * * *')
+  async reconcileExternalPayments() {
+    const cutoff = new Date(Date.now() - 2 * 60 * 1000) // pagos de más de 2 min
+    const pending = await this.paymentRepo.find({
+      where: {
+        provider: 'confio' as any,
+        status: PaymentStatus.PENDING,
+        createdAt: LessThan(cutoff),
+      },
+    })
+
+    if (pending.length === 0) return
+
+    let completed = 0
+    for (const p of pending) {
+      if (!p.providerPaymentId) continue
+      try {
+        const real = await this.providerFactory.getProvider('confio').getPaymentStatus(p.providerPaymentId)
+        if (real.status === 'completed') {
+          await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+          completed++
+        }
+      } catch (error) {
+        logger.log('warn', `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`)
+      }
+    }
+
+    logger.log('info', `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`)
   }
 
   // =============================================================

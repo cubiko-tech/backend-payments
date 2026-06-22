@@ -11,6 +11,7 @@ import { ProviderConfigService } from '../provider/provider-config.service'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
+import { ConfioProvider } from '../provider/confio/confio.provider'
 
 @Module({
   imports: [
@@ -26,7 +27,8 @@ import { DropiProvider } from '../provider/dropi/dropi.provider'
     StripeProvider,
     MercadoPagoProvider,
     DropiProvider,
+    ConfioProvider,
   ],
-  exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider],
+  exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider, ConfioProvider],
 })
 export class PaymentModule {}
