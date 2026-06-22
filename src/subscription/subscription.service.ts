@@ -1,9 +1,10 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
-import { Subscription, SubscriptionStatus } from './entities/subscription.entity'
+import { Subscription, SubscriptionStatus, SubscriptionProvider } from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
+import { EventBusService } from '../event-bus/event-bus.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 @Injectable()
@@ -22,7 +23,102 @@ export class SubscriptionService {
     @InjectDataSource('DBWrite')
     private readonly dataSource: DataSource,
     private readonly clientRoles: ClientRolesService,
+    private readonly eventBus: EventBusService,
   ) {}
+
+  /**
+   * Iniciar un trial gratuito (sin método de pago).
+   *
+   * Crea la suscripción en estado TRIAL por TRIAL_DAYS días, asigna el plan
+   * en backend-roles con expiración = fin del trial, y deja `nextBillingDate`
+   * en la fecha de vencimiento para que el cron de conversión la tome.
+   * Al vencer: si hay método de pago se cobra; si no, se degrada a `free`
+   * (ver TasksService.processTrialConversions).
+   */
+  async startTrial(input: {
+    brandId: string
+    userId: string
+    planSlug: string
+    provider?: SubscriptionProvider
+    walletId?: string
+  }) {
+    const { brandId, userId, planSlug } = input
+
+    const freePlan = process.env.FREE_PLAN_SLUG || 'free'
+    if (!planSlug || planSlug === freePlan) {
+      throw new RequestException(
+        { code: 'INVALID_TRIAL_PLAN', message: 'El trial requiere un plan de pago válido' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    // Una marca solo puede tener una suscripción (índice único) y el trial es único.
+    const existing = await this.subscriptionReadRepository.findOne({ where: { brandId } })
+    if (existing) {
+      throw new RequestException(
+        {
+          code: 'SUBSCRIPTION_ALREADY_EXISTS',
+          message: 'La marca ya tiene una suscripción; el trial solo está disponible una vez',
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
+
+    const trialDays = parseInt(process.env.TRIAL_DAYS || '15')
+    const now = new Date()
+    const trialEnd = new Date(now)
+    trialEnd.setDate(trialEnd.getDate() + trialDays)
+
+    try {
+      const subscription = this.subscriptionRepository.create({
+        brandId,
+        userId,
+        planSlug,
+        status: SubscriptionStatus.TRIAL,
+        provider: input.provider || SubscriptionProvider.WALLET,
+        walletId: input.walletId || null,
+        currentPeriodStart: now,
+        currentPeriodEnd: trialEnd,
+        trialStart: now,
+        trialEnd,
+        nextBillingDate: trialEnd,
+        autoRenew: true,
+      })
+      const saved = await this.subscriptionRepository.save(subscription)
+
+      await this.subscriptionEventRepository.save(
+        this.subscriptionEventRepository.create({
+          subscriptionId: saved.id,
+          eventType: SubscriptionEventType.TRIAL_STARTED,
+          toPlanSlug: planSlug,
+          toStatus: SubscriptionStatus.TRIAL,
+          triggeredBy: userId,
+          reason: `Trial de ${trialDays} días iniciado`,
+        }),
+      )
+
+      // Activar el plan en backend-roles durante el trial (expira al terminar el trial).
+      await this.clientRoles.assignPlanToBrand(brandId, planSlug, trialEnd)
+
+      // Notificar inicio del trial (backend-processes envía email/push).
+      await this.eventBus.publishNotification({
+        brandId,
+        userId,
+        type: 'trial_started',
+        subject: `Tu prueba gratuita de ${trialDays} días ha comenzado`,
+        metadata: { planSlug, trialEnd: trialEnd.toISOString() },
+      })
+
+      this.logger.log(
+        `Trial iniciado: ${saved.id} marca ${brandId} plan ${planSlug} hasta ${trialEnd.toISOString()}`,
+      )
+      return { data: saved }
+    } catch (error) {
+      if (error instanceof RequestException) throw error
+      this.logger.error(`Error al iniciar trial de marca ${brandId}: ${error.message}`)
+      return { error: error.message }
+    }
+  }
 
   /**
    * Obtener la suscripción actual de una marca

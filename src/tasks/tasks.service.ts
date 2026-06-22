@@ -22,6 +22,8 @@ import { logger } from '../shared/logger/logger'
 export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
   private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
+  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly FREE_PLAN_SLUG = process.env.FREE_PLAN_SLUG || 'free'
 
   constructor(
     @InjectRepository(Wallet, 'DBRead')
@@ -46,6 +48,59 @@ export class TasksService {
     private eventBus: EventBusService,
     private clientRoles: ClientRolesService,
   ) {}
+
+  // =============================================================
+  // 0. Convertir trials vencidos (cada hora)
+  //    Trial → primer cobro si hay método de pago; si no, degradar a free.
+  // =============================================================
+  @Cron(CronExpression.EVERY_HOUR)
+  async processTrialConversions() {
+    const now = new Date()
+    const trials = await this.subscriptionRepo.find({
+      where: {
+        status: SubscriptionStatus.TRIAL,
+        nextBillingDate: LessThan(now),
+      },
+    })
+
+    if (trials.length === 0) return
+    logger.log('info', `[CRON] processTrialConversions: ${trials.length} trials vencidos`)
+
+    let converted = 0
+    let downgraded = 0
+    for (const sub of trials) {
+      const hasPaymentMethod =
+        (sub.provider === 'wallet' && !!sub.walletId) ||
+        (sub.provider !== 'wallet' && !!sub.providerSubscriptionId)
+
+      // Sin método de pago: no hay nada que cobrar → degradar a free.
+      if (!hasPaymentMethod) {
+        await this.endTrialWithoutPayment(sub)
+        downgraded++
+        continue
+      }
+
+      // Con método de pago: intentar el primer cobro.
+      try {
+        if (sub.provider === 'wallet' && sub.walletId) {
+          await this.renewFromWallet(sub)
+          converted++
+        } else {
+          // Proveedores externos: el cobro recurrente lo confirma el webhook.
+          // Marcamos past_due para que dunning/reintentos lo persigan si no llega.
+          await this.handleRenewalFailure(sub)
+        }
+      } catch (error) {
+        logger.log('error', `[CRON] Error convirtiendo trial ${sub.id}: ${error.message}`)
+        await this.handleRenewalFailure(sub)
+      }
+    }
+
+    logger.log(
+      'info',
+      `[CRON] processTrialConversions: ${converted} cobrados, ${downgraded} degradados a ${this.FREE_PLAN_SLUG}`,
+    )
+  }
 
   // =============================================================
   // 1. Renovar suscripciones (cada hora)
@@ -178,8 +233,8 @@ export class TasksService {
         }),
       )
 
-      // Remover plan de la marca en backend-roles (HTTP directo)
-      await this.clientRoles.removePlanFromBrand(sub.brandId, sub.planSlug)
+      // Degradar la marca al plan free en backend-roles (remover pago + asignar free)
+      await this.downgradeBrandToFree(sub)
 
       // Publicar evento para redundancia (backend-roles consumer) y notificaciones
       this.eventBus.publishSubscriptionExpired({
@@ -415,12 +470,55 @@ export class TasksService {
   }
 
   /**
-   * Extender periodo de la suscripción 30 días.
+   * Terminar un trial vencido que no tiene método de pago: degradar a free.
+   */
+  private async endTrialWithoutPayment(sub: Subscription) {
+    const previousStatus = sub.status
+    sub.status = SubscriptionStatus.EXPIRED
+    sub.autoRenew = false
+    await this.subscriptionRepo.save(sub)
+
+    await this.subscriptionEventRepo.save(
+      this.subscriptionEventRepo.create({
+        subscriptionId: sub.id,
+        eventType: SubscriptionEventType.TRIAL_ENDED,
+        fromStatus: previousStatus,
+        toStatus: SubscriptionStatus.EXPIRED,
+        triggeredBy: 'system',
+        reason: `Trial vencido sin método de pago — degradado a ${this.FREE_PLAN_SLUG}`,
+      }),
+    )
+
+    await this.downgradeBrandToFree(sub)
+
+    this.eventBus.publishSubscriptionExpired({
+      brandId: sub.brandId,
+      subscriptionId: sub.id,
+      planSlug: sub.planSlug,
+    })
+    await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
+
+    logger.log('info', `[CRON] Trial degradado a ${this.FREE_PLAN_SLUG}: brandId=${sub.brandId}`)
+  }
+
+  /**
+   * Degradar la marca al plan free en backend-roles: remover el plan pago
+   * y asignar el plan free (sin expiración) para que conserve un baseline.
+   */
+  private async downgradeBrandToFree(sub: Subscription) {
+    await this.clientRoles.removePlanFromBrand(sub.brandId, sub.planSlug)
+    if (sub.planSlug !== this.FREE_PLAN_SLUG) {
+      await this.clientRoles.assignPlanToBrand(sub.brandId, this.FREE_PLAN_SLUG)
+    }
+  }
+
+  /**
+   * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
   private async extendSubscriptionPeriod(sub: Subscription) {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
-    newPeriodEnd.setDate(newPeriodEnd.getDate() + 30)
+    newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
     sub.currentPeriodStart = newPeriodStart
     sub.currentPeriodEnd = newPeriodEnd

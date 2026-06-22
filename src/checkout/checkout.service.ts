@@ -66,6 +66,7 @@ export interface CheckoutResult {
 @Injectable()
 export class CheckoutService {
   private readonly log = new Logger(CheckoutService.name)
+  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -454,7 +455,7 @@ export class CheckoutService {
   ): Promise<Subscription> {
     const now = new Date()
     const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + 30)
+    periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
     // Buscar suscripción existente
     let subscription = await this.subscriptionRepo.findOne({
@@ -621,11 +622,11 @@ export class CheckoutService {
 
   /**
    * Asignar plan a la marca en backend-roles con expiresAt.
-   * Calcula expiresAt = currentPeriodEnd de la suscripción (30 días).
+   * Calcula expiresAt = currentPeriodEnd de la suscripción (BILLING_PERIOD_DAYS).
    */
   private async assignPlanInRoles(brandId: string, planSlug: string) {
     const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + 30)
+    expiresAt.setDate(expiresAt.getDate() + this.BILLING_PERIOD_DAYS)
     await this.clientRoles.assignPlanToBrand(brandId, planSlug, expiresAt)
   }
 
