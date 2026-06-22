@@ -5,6 +5,7 @@ import { Repository, In } from 'typeorm'
 import { Queue } from 'bullmq'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment } from '../payment/entities/payment.entity'
+import { ConfioProvider } from '../provider/confio/confio.provider'
 
 const MAX_WEBHOOK_RETRIES = 3
 
@@ -201,6 +202,33 @@ export class WebhookService {
         this.logger.warn(`Dropi charge failed: ${payload.chargeId}`)
         return
       }
+    }
+
+    // =============================================
+    // CONFIOPAGOS
+    // =============================================
+    if (provider === 'confio') {
+      const data = payload?.data || {}
+      const status: string = data.status || ''
+
+      if (ConfioProvider.isCompleted(status)) {
+        // correlationId = nuestro paymentId; fallback por providerPaymentId (name).
+        const paymentId = data.correlationId || (await this.findPaymentByProviderIds(data.name))
+        if (paymentId) {
+          await this.completePayment(paymentId, payload)
+        } else {
+          this.logger.warn(`Confio: pago no encontrado para name=${data.name} correlationId=${data.correlationId}`)
+        }
+        return
+      }
+
+      if (status === 'FAILED' || status === 'EXPIRED' || status === 'CANCELED') {
+        this.logger.warn(`Confio pago no exitoso: ${data.name} status=${status}`)
+        return
+      }
+
+      this.logger.log(`Confio estado intermedio ignorado: ${data.name} status=${status}`)
+      return
     }
 
     this.logger.warn(`Evento no manejado: ${provider}/${eventType}`)
