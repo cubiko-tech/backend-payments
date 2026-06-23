@@ -13,6 +13,7 @@ import {
   EligibilityStatus,
   MonetaryInput,
   Preapproval,
+  PreapprovalScore,
   PreapprovalStatus,
   SnapshotScoreStatus,
 } from './credit.types'
@@ -154,6 +155,7 @@ export class CreditService {
       return {
         brandId, status: 'no_data', tier: null, amount: null,
         weeklyQuota: null, commission: null, currency: 'COP', updatedAt: null,
+        score: null,
       }
     }
 
@@ -170,6 +172,25 @@ export class CreditService {
 
     const showTerms = status === 'eligible' || status === 'in_review'
     const when = score.calculatedAt ?? score.createdAt
+
+    // Bloque de score con DATOS PROPIOS de la marca (no buró). Se incluye salvo
+    // cuando el score no se pudo calcular (cuenta nueva / sin tasa de cambio).
+    const hasScore =
+      score.scoreStatus !== 'insufficient_data' && score.scoreStatus !== 'fx_unavailable'
+    let scoreBlock: PreapprovalScore | null = null
+    if (hasScore) {
+      const { config } = await this.scaleConfig.getActiveConfig()
+      scoreBlock = {
+        total: score.total,
+        subscores: {
+          investment: score.subscores.investment,
+          roas: score.subscores.roas,
+          sales: score.subscores.sales,
+        },
+        nextStepHint: this.buildNextStepHint(score.total, score.subscores, config),
+      }
+    }
+
     return {
       brandId,
       status,
@@ -179,7 +200,38 @@ export class CreditService {
       commission: showTerms ? score.conditions.commission : null,
       currency: 'COP',
       updatedAt: when ? new Date(when).toISOString() : null,
+      score: scoreBlock,
     }
+  }
+
+  /**
+   * Recomendación accionable para subir de nivel, usando la escala activa.
+   * Sugiere reforzar la variable con menor subscore (más margen de mejora).
+   * Devuelve null si ya está en el nivel tope.
+   */
+  private buildNextStepHint(
+    total: number,
+    subscores: { investment: number; roas: number; sales: number },
+    config: ScaleConfig,
+  ): string | null {
+    const tiers = config.tiers
+    const i = tiers.findIndex((t) => total >= t.scoreMin && total <= t.scoreMax)
+    if (i < 0 || i >= tiers.length - 1) return null
+    const next = tiers[i + 1]
+    const pts = next.scoreMin - total
+    const weakest = [
+      { k: 'inversión en pauta', v: subscores.investment },
+      { k: 'ROAS', v: subscores.roas },
+      { k: 'volumen de ventas', v: subscores.sales },
+    ].sort((a, b) => a.v - b.v)[0]
+    const commission =
+      next.commission != null ? `${(next.commission * 100).toFixed(2).replace('.', ',')}%` : '—'
+    const cupo = next.disbursement * 3
+    return (
+      `Te ${pts === 1 ? 'falta' : 'faltan'} ${pts} ${pts === 1 ? 'punto' : 'puntos'} ` +
+      `para ${next.name} (comisión ${commission}, cupo $${cupo.toLocaleString('es-CO')}). ` +
+      `Mejora tu ${weakest.k}.`
+    )
   }
 
   /** Último score (o historial) de una marca. */

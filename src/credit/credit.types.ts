@@ -54,8 +54,20 @@ export interface BureauContext {
 export type PreapprovalStatus = 'eligible' | 'in_review' | 'not_eligible' | 'no_data'
 
 /**
- * Pre-aprobado curado para el cliente: estado + términos, sin score crudo ni
- * detalle de buró. Ver DISEÑO_SCORING_CREDITO §9.
+ * Bloque de score con DATOS PROPIOS de la marca (su gasto Meta, ROAS y ventas).
+ * No es dato de buró: son los insumos del propio usuario y el puntaje derivado,
+ * apto para mostrarse al cliente. La banda de buró NO se incluye aquí.
+ */
+export interface PreapprovalScore {
+  total: number
+  subscores: { investment: number; roas: number; sales: number }
+  nextStepHint: string | null // recomendación accionable para subir de nivel
+}
+
+/**
+ * Pre-aprobado curado para el cliente: estado + términos + (opcional) el score
+ * con datos propios. Sin banda de buró ni insumos crudos sensibles.
+ * Ver DISEÑO_SCORING_CREDITO §9.
  */
 export interface Preapproval {
   brandId: string
@@ -66,4 +78,5 @@ export interface Preapproval {
   commission: number | null
   currency: string
   updatedAt: string | null
+  score: PreapprovalScore | null
 }
