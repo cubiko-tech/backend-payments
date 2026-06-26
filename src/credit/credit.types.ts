@@ -53,15 +53,37 @@ export interface BureauContext {
 /** Estado del pre-aprobado en forma amigable para el cliente (Fase 6). */
 export type PreapprovalStatus = 'eligible' | 'in_review' | 'not_eligible' | 'no_data'
 
+export type CreditActivationRequestStatus =
+  | 'pending'
+  | 'contacted'
+  | 'qualified'
+  | 'rejected'
+  | 'activated'
+
+export type CreditActivationRequestSource = 'dropi'
+
 /**
  * Bloque de score con DATOS PROPIOS de la marca (su gasto Meta, ROAS y ventas).
  * No es dato de buró: son los insumos del propio usuario y el puntaje derivado,
  * apto para mostrarse al cliente. La banda de buró NO se incluye aquí.
  */
+/**
+ * Datos estructurados para "cómo subir de nivel" (sin texto formateado, para
+ * que el front arme el copy con su i18n). null si ya está en el tier tope.
+ */
+export interface PreapprovalNextStep {
+  tier: string // key del próximo tier, ej. 'pro_marketer'
+  tierName: string
+  pointsToNext: number
+  commission: number | null
+  weeklyQuota: number
+  weakest: 'investment' | 'roas' | 'sales' // subscore con más margen de mejora
+}
+
 export interface PreapprovalScore {
   total: number
   subscores: { investment: number; roas: number; sales: number }
-  nextStepHint: string | null // recomendación accionable para subir de nivel
+  nextStep: PreapprovalNextStep | null
 }
 
 /**

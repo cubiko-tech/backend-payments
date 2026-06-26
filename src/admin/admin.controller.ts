@@ -19,6 +19,8 @@ import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
 import { AuditService } from '../audit/audit.service'
+import { CreditService } from '../credit/credit.service'
+import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 
 /**
  * Controller admin centralizado para backend-payments.
@@ -55,6 +57,7 @@ export class AdminController {
     @InjectRepository(Transaction, 'DBWrite')
     private readonly transactionWriteRepo: Repository<Transaction>,
     private readonly auditService: AuditService,
+    private readonly creditService: CreditService,
   ) {}
 
   // ============================================
@@ -340,6 +343,41 @@ export class AdminController {
     )
 
     return { data: { message: 'Pago marcado para reintento', paymentId: id } }
+  }
+
+  @Get('credit/activation-requests')
+  @ApiOperation({ summary: 'Listado paginado de solicitudes de activación de crédito' })
+  @ApiResponse({ status: 200, description: 'Solicitudes de activación paginadas' })
+  async activationRequests(
+    @Query('page') page?: number,
+    @Query('perPage') perPage?: number,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    const p = Math.max(1, Number(page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+    const { data, total } = await this.creditService.listActivationRequests({
+      page: p,
+      perPage: limit,
+      status: (status || undefined) as any,
+      search,
+    })
+
+    return {
+      data,
+      count: total,
+      meta: { page: p, perPage: limit, total, totalPages: Math.ceil(total / limit) },
+    }
+  }
+
+  @Patch('credit/activation-requests/:id')
+  @ApiOperation({ summary: 'Actualizar estado/notas de una solicitud de activación de crédito' })
+  @ApiResponse({ status: 200, description: 'Solicitud actualizada' })
+  async updateActivationRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateActivationRequestDto,
+  ) {
+    return { data: await this.creditService.updateActivationRequest(id, body) }
   }
 
   @Get('dropi/batch-status')

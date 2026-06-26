@@ -8,12 +8,14 @@ import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { AuditModule } from '../audit/audit.module'
+import { CreditModule } from '../credit/credit.module'
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Subscription, Payment, Wallet, ProviderConfig, Transaction], 'DBWrite'),
     TypeOrmModule.forFeature([Subscription, Payment, Wallet, WalletBalanceSnapshot, ProviderConfig, Transaction], 'DBRead'),
     AuditModule,
+    CreditModule,
   ],
   controllers: [AdminController],
 })
