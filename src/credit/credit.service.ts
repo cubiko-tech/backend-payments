@@ -8,7 +8,7 @@ import { CreditActivationRequest } from './entities/creditActivationRequest.enti
 import { CreditInputs, CreditInputsClient } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
 import { BureauService } from './bureau/bureau.service'
-import { computeScore } from './domain/score-engine'
+import { computeScore, deriveWeeklyQuota } from './domain/score-engine'
 import { BureauBand, ScaleConfig } from './domain/scale-config.types'
 import {
   EligibilityStatus,
@@ -19,6 +19,8 @@ import {
   PreapprovalStatus,
   SnapshotScoreStatus,
   CreditActivationRequestStatus,
+  OpenActivationStatus,
+  PreapprovalActivationRequest,
 } from './credit.types'
 import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
 import { UpdateActivationRequestDto } from './dto/update-activation-request.dto'
@@ -27,6 +29,13 @@ import {
   monthIndexOfYmd,
   validateWholeMonths,
 } from './period.util'
+
+/**
+ * Una marca no puede tener dos solicitudes "abiertas" a la vez: mientras esté en
+ * alguno de estos estados, el cliente no puede crear otra (409) y el front oculta
+ * el CTA de activar. Fuente única para getPreapproval y createActivationRequest.
+ */
+const OPEN_ACTIVATION_STATUSES: OpenActivationStatus[] = ['pending', 'contacted', 'qualified']
 
 interface CalculateParams {
   brandId: string
@@ -164,9 +173,11 @@ export class CreditService {
       return {
         brandId, status: 'no_data', tier: null, amount: null,
         weeklyQuota: null, commission: null, currency: 'COP', updatedAt: null,
-        score: null,
+        score: null, activationRequest: null,
       }
     }
+
+    const activationRequest = await this.findOpenActivationRequest(brandId)
 
     const status = this.resolvePreapprovalStatus(score)
 
@@ -200,6 +211,25 @@ export class CreditService {
       currency: 'COP',
       updatedAt: when ? new Date(when).toISOString() : null,
       score: scoreBlock,
+      activationRequest,
+    }
+  }
+
+  /**
+   * Solicitud de activación abierta de la marca (la más reciente), o null. El
+   * front la usa para no ofrecer el botón si ya solicitó.
+   */
+  private async findOpenActivationRequest(
+    brandId: string,
+  ): Promise<PreapprovalActivationRequest | null> {
+    const open = await this.activationRequestReadRepo.findOne({
+      where: { brandId, status: In(OPEN_ACTIVATION_STATUSES) },
+      order: { createdAt: 'DESC' },
+    })
+    if (!open) return null
+    return {
+      status: open.status as OpenActivationStatus,
+      createdAt: new Date(open.createdAt).toISOString(),
     }
   }
 
@@ -227,13 +257,7 @@ export class CreditService {
       )
     }
 
-    const openRequest = await this.activationRequestReadRepo.findOne({
-      where: {
-        brandId,
-        status: In<CreditActivationRequestStatus>(['pending', 'contacted', 'qualified']),
-      },
-      order: { createdAt: 'DESC' },
-    })
+    const openRequest = await this.findOpenActivationRequest(brandId)
     if (openRequest) {
       throw new RequestException(
         { error: 'activationRequestAlreadyOpen', code: 'activationRequestAlreadyOpen' },
@@ -332,7 +356,7 @@ export class CreditService {
       tierName: next.name,
       pointsToNext: next.scoreMin - total,
       commission: next.commission,
-      weeklyQuota: next.disbursement * 3,
+      weeklyQuota: deriveWeeklyQuota(next.disbursement),
       weakest,
     }
   }

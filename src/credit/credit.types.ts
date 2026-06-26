@@ -63,6 +63,24 @@ export type CreditActivationRequestStatus =
 export type CreditActivationRequestSource = 'dropi'
 
 /**
+ * Estados "abiertos" de una solicitud: mientras esté en alguno, no se permite
+ * crear otra (y el front no debe ofrecer el botón de activar).
+ */
+export type OpenActivationStatus = Extract<
+  CreditActivationRequestStatus,
+  'pending' | 'contacted' | 'qualified'
+>
+
+/**
+ * Resumen de la solicitud de activación abierta de la marca, para que el front
+ * sepa que ya solicitó y oculte el CTA en vez de chocar contra un 409.
+ */
+export interface PreapprovalActivationRequest {
+  status: OpenActivationStatus
+  createdAt: string
+}
+
+/**
  * Bloque de score con DATOS PROPIOS de la marca (su gasto Meta, ROAS y ventas).
  * No es dato de buró: son los insumos del propio usuario y el puntaje derivado,
  * apto para mostrarse al cliente. La banda de buró NO se incluye aquí.
@@ -101,4 +119,6 @@ export interface Preapproval {
   currency: string
   updatedAt: string | null
   score: PreapprovalScore | null
+  // Solicitud de activación abierta (si existe); null si la marca puede solicitar.
+  activationRequest: PreapprovalActivationRequest | null
 }

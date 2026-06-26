@@ -191,6 +191,23 @@ describe('CreditService.getPreapproval', () => {
       weeklyQuota: 6_000_000,
       weakest: 'investment',
     })
+    expect(p.score!.nextStep!.weeklyQuota).toBe(2_000_000 * 3)
+    // sin solicitud abierta → el front puede ofrecer el CTA
+    expect(p.activationRequest).toBeNull()
+  })
+
+  it('eligible con solicitud abierta: expone activationRequest (el front oculta el CTA)', async () => {
+    repoMock.findOne.mockResolvedValue(snapshot())
+    activationRepoMock.findOne.mockResolvedValue({
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('eligible')
+    expect(p.activationRequest).toEqual({
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
   })
 
   it('in_review (buró pendiente): muestra score y términos', async () => {
@@ -274,7 +291,11 @@ describe('CreditService.getPreapproval', () => {
 
   it('createActivationRequest: rechaza si ya hay solicitud abierta', async () => {
     repoMock.findOne.mockResolvedValueOnce(snapshot())
-    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-open' })
+    activationRepoMock.findOne.mockResolvedValueOnce({
+      id: 'req-open',
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
 
     await expect(service.createActivationRequest('brand-1', {
       fullName: 'Juan Perez',
