@@ -1,26 +1,41 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { In, Repository } from 'typeorm'
 
 import { RequestException } from '../shared/exception/request.exception'
 import { CreditScore } from './entities/creditScore.entity'
+import { CreditActivationRequest } from './entities/creditActivationRequest.entity'
 import { CreditInputs, CreditInputsClient } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
 import { BureauService } from './bureau/bureau.service'
-import { computeScore } from './domain/score-engine'
+import { computeScore, deriveWeeklyQuota } from './domain/score-engine'
 import { BureauBand, ScaleConfig } from './domain/scale-config.types'
 import {
   EligibilityStatus,
   MonetaryInput,
   Preapproval,
+  PreapprovalNextStep,
+  PreapprovalScore,
   PreapprovalStatus,
   SnapshotScoreStatus,
+  CreditActivationRequestStatus,
+  OpenActivationStatus,
+  PreapprovalActivationRequest,
 } from './credit.types'
+import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
+import { UpdateActivationRequestDto } from './dto/update-activation-request.dto'
 import {
   firstCompleteMonthStart,
   monthIndexOfYmd,
   validateWholeMonths,
 } from './period.util'
+
+/**
+ * Una marca no puede tener dos solicitudes "abiertas" a la vez: mientras esté en
+ * alguno de estos estados, el cliente no puede crear otra (409) y el front oculta
+ * el CTA de activar. Fuente única para getPreapproval y createActivationRequest.
+ */
+const OPEN_ACTIVATION_STATUSES: OpenActivationStatus[] = ['pending', 'contacted', 'qualified']
 
 interface CalculateParams {
   brandId: string
@@ -47,6 +62,10 @@ export class CreditService {
     private readonly scoreRepo: Repository<CreditScore>,
     @InjectRepository(CreditScore, 'DBRead')
     private readonly scoreReadRepo: Repository<CreditScore>,
+    @InjectRepository(CreditActivationRequest, 'DBWrite')
+    private readonly activationRequestRepo: Repository<CreditActivationRequest>,
+    @InjectRepository(CreditActivationRequest, 'DBRead')
+    private readonly activationRequestReadRepo: Repository<CreditActivationRequest>,
     private readonly client: CreditInputsClient,
     private readonly scaleConfig: ScaleConfigService,
     private readonly bureau: BureauService,
@@ -154,22 +173,34 @@ export class CreditService {
       return {
         brandId, status: 'no_data', tier: null, amount: null,
         weeklyQuota: null, commission: null, currency: 'COP', updatedAt: null,
+        score: null, activationRequest: null,
       }
     }
 
-    let status: PreapprovalStatus
-    if (score.scoreStatus === 'insufficient_data' || score.scoreStatus === 'fx_unavailable') {
-      status = 'no_data'
-    } else if (score.eligibilityStatus === 'eligible') {
-      status = 'eligible'
-    } else if (score.eligibilityStatus === 'bureau_pending') {
-      status = 'in_review'
-    } else {
-      status = 'not_eligible'
-    }
+    const activationRequest = await this.findOpenActivationRequest(brandId)
+
+    const status = this.resolvePreapprovalStatus(score)
 
     const showTerms = status === 'eligible' || status === 'in_review'
     const when = score.calculatedAt ?? score.createdAt
+
+    // Bloque de score con DATOS PROPIOS de la marca (no buró). Solo cuando la
+    // marca es elegible o está en revisión: en vetadas/no_data no aplica, y
+    // sugerir "te faltan N puntos para X" sería engañoso (el veto manda).
+    let scoreBlock: PreapprovalScore | null = null
+    if (status === 'eligible' || status === 'in_review') {
+      const { config } = await this.scaleConfig.getActiveConfig()
+      scoreBlock = {
+        total: score.total,
+        subscores: {
+          investment: score.subscores.investment,
+          roas: score.subscores.roas,
+          sales: score.subscores.sales,
+        },
+        nextStep: this.buildNextStep(score.total, score.subscores, config),
+      }
+    }
+
     return {
       brandId,
       status,
@@ -179,7 +210,164 @@ export class CreditService {
       commission: showTerms ? score.conditions.commission : null,
       currency: 'COP',
       updatedAt: when ? new Date(when).toISOString() : null,
+      score: scoreBlock,
+      activationRequest,
     }
+  }
+
+  /**
+   * Solicitud de activación abierta de la marca (la más reciente), o null. El
+   * front la usa para no ofrecer el botón si ya solicitó.
+   */
+  private async findOpenActivationRequest(
+    brandId: string,
+  ): Promise<PreapprovalActivationRequest | null> {
+    const open = await this.activationRequestReadRepo.findOne({
+      where: { brandId, status: In(OPEN_ACTIVATION_STATUSES) },
+      order: { createdAt: 'DESC' },
+    })
+    if (!open) return null
+    return {
+      status: open.status as OpenActivationStatus,
+      createdAt: new Date(open.createdAt).toISOString(),
+    }
+  }
+
+  async createActivationRequest(
+    brandId: string,
+    body: CreateActivationRequestDto,
+    _requestedBy?: string | null,
+  ): Promise<CreditActivationRequest> {
+    const score = await this.scoreReadRepo.findOne({
+      where: { brandId },
+      order: { createdAt: 'DESC' },
+    })
+    if (!score) {
+      throw new RequestException(
+        { error: 'brandHasNoScore', code: 'brandHasNoScore' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    const status = this.resolvePreapprovalStatus(score)
+    if (status !== 'eligible') {
+      throw new RequestException(
+        { error: 'brandNotEligible', code: 'brandNotEligible' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    const openRequest = await this.findOpenActivationRequest(brandId)
+    if (openRequest) {
+      throw new RequestException(
+        { error: 'activationRequestAlreadyOpen', code: 'activationRequestAlreadyOpen' },
+        HttpStatus.CONFLICT,
+      )
+    }
+
+    const fullName = body.fullName.trim()
+    const email = body.email.trim().toLowerCase()
+    const phone = body.phone.replace(/[^\d+]/g, '')
+
+    return this.activationRequestRepo.save(
+      this.activationRequestRepo.create({
+        brandId,
+        creditScoreId: score.id,
+        scoreTotal: score.total,
+        tier: score.tier,
+        fullName,
+        email,
+        phone,
+        source: 'dropi',
+        status: 'pending',
+      }),
+    )
+  }
+
+  async listActivationRequests(opts: {
+    page: number
+    perPage: number
+    status?: CreditActivationRequestStatus
+    search?: string
+  }): Promise<{ data: CreditActivationRequest[]; total: number }> {
+    const qb = this.activationRequestReadRepo.createQueryBuilder('r')
+    if (opts.status) {
+      qb.andWhere('r.status = :status', { status: opts.status })
+    }
+    if (opts.search) {
+      qb.andWhere(
+        '(r.brandId ILIKE :q OR r.email ILIKE :q OR r.fullName ILIKE :q OR r.phone ILIKE :q)',
+        { q: `%${opts.search}%` },
+      )
+    }
+    qb.orderBy('r.createdAt', 'DESC')
+      .skip((opts.page - 1) * opts.perPage)
+      .take(opts.perPage)
+
+    const [data, total] = await qb.getManyAndCount()
+    return { data, total }
+  }
+
+  async updateActivationRequest(
+    id: string,
+    body: UpdateActivationRequestDto,
+  ): Promise<CreditActivationRequest> {
+    const current = await this.activationRequestRepo.findOne({ where: { id } })
+    if (!current) {
+      throw new RequestException(
+        { error: 'activationRequestNotFound', code: 'activationRequestNotFound' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+
+    if (body.status) current.status = body.status
+    if (body.notes !== undefined) current.notes = body.notes?.trim() || null
+    if (body.contactedBy !== undefined) current.contactedBy = body.contactedBy?.trim() || null
+    if (body.status === 'contacted' && !current.contactedAt) {
+      current.contactedAt = new Date()
+    }
+
+    return this.activationRequestRepo.save(current)
+  }
+
+  /**
+   * Datos para subir de nivel (estructurados, sin formato — el front arma el
+   * copy con su i18n). Señala la variable con menor subscore (más margen de
+   * mejora). Devuelve null si ya está en el nivel tope.
+   */
+  private buildNextStep(
+    total: number,
+    subscores: { investment: number; roas: number; sales: number },
+    config: ScaleConfig,
+  ): PreapprovalNextStep | null {
+    const tiers = config.tiers
+    const i = tiers.findIndex((t) => total >= t.scoreMin && total <= t.scoreMax)
+    if (i < 0 || i >= tiers.length - 1) return null
+    const next = tiers[i + 1]
+    const weakest = (
+      [
+        { k: 'investment', v: subscores.investment },
+        { k: 'roas', v: subscores.roas },
+        { k: 'sales', v: subscores.sales },
+      ] as const
+    ).slice().sort((a, b) => a.v - b.v)[0].k
+    return {
+      tier: next.key,
+      tierName: next.name,
+      pointsToNext: next.scoreMin - total,
+      commission: next.commission,
+      weeklyQuota: deriveWeeklyQuota(next.disbursement),
+      weakest,
+    }
+  }
+
+  private resolvePreapprovalStatus(score: CreditScore): PreapprovalStatus {
+    if (score.scoreStatus === 'insufficient_data' || score.scoreStatus === 'fx_unavailable') {
+      return 'no_data'
+    }
+    if (score.eligibilityStatus === 'eligible') return 'eligible'
+    if (score.eligibilityStatus === 'bureau_pending') return 'in_review'
+    return 'not_eligible'
   }
 
   /** Último score (o historial) de una marca. */

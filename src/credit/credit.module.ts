@@ -8,6 +8,7 @@ import { ScoreScaleConfig } from './entities/scoreScaleConfig.entity'
 import { ScoreRun } from './entities/scoreRun.entity'
 import { CreditProfile } from './entities/creditProfile.entity'
 import { BureauCheck } from './entities/bureauCheck.entity'
+import { CreditActivationRequest } from './entities/creditActivationRequest.entity'
 import { CreditController } from './credit.controller'
 import { CreditService } from './credit.service'
 import { ScaleConfigService } from './scale-config.service'
@@ -27,11 +28,11 @@ import { ClientModule } from '../client/client.module'
 @Module({
   imports: [
     TypeOrmModule.forFeature(
-      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck],
+      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck, CreditActivationRequest],
       'DBWrite',
     ),
     TypeOrmModule.forFeature(
-      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck],
+      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck, CreditActivationRequest],
       'DBRead',
     ),
     BullModule.registerQueue({ name: CREDIT_RUN_QUEUE }),
