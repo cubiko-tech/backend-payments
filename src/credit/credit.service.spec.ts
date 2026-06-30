@@ -3,6 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm'
 
 import { CreditService } from './credit.service'
 import { CreditScore } from './entities/creditScore.entity'
+import { CreditActivationRequest } from './entities/creditActivationRequest.entity'
 import { CreditInputsClient, CreditInputs } from './client/credit-inputs.client'
 import { ScaleConfigService } from './scale-config.service'
 import { BureauService } from './bureau/bureau.service'
@@ -29,6 +30,7 @@ describe('CreditService.calculate', () => {
   let service: CreditService
   let client: { getBatch: jest.Mock }
   let scaleConfig: { getActiveConfig: jest.Mock }
+  let activationRepoMock: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock }
 
   beforeEach(async () => {
     client = { getBatch: jest.fn() }
@@ -42,12 +44,19 @@ describe('CreditService.calculate', () => {
       findOne: jest.fn(),
       find: jest.fn(),
     }
+    activationRepoMock = {
+      create: jest.fn((data) => data),
+      save: jest.fn((data) => Promise.resolve({ id: 'req-1', ...data })),
+      findOne: jest.fn(),
+    }
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreditService,
         { provide: getRepositoryToken(CreditScore, 'DBWrite'), useValue: repoMock },
         { provide: getRepositoryToken(CreditScore, 'DBRead'), useValue: repoMock },
+        { provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'), useValue: activationRepoMock },
+        { provide: getRepositoryToken(CreditActivationRequest, 'DBRead'), useValue: activationRepoMock },
         { provide: CreditInputsClient, useValue: client },
         { provide: ScaleConfigService, useValue: scaleConfig },
         { provide: BureauService, useValue: { getActiveBand: jest.fn().mockResolvedValue(null) } },
@@ -113,5 +122,231 @@ describe('CreditService.calculate', () => {
     expect(s.subscores.roasValue).toBeCloseTo(2.8, 5)
     expect(s.scoreStatus).toBe('vetoed_roas')
     expect(s.tier).toBe('no_eligible')
+  })
+})
+
+describe('CreditService.getPreapproval', () => {
+  let service: CreditService
+  let repoMock: { findOne: jest.Mock }
+  let activationRepoMock: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock }
+
+  function snapshot(overrides: Record<string, unknown> = {}) {
+    return {
+      brandId: 'brand-1',
+      scaleVersion: 1,
+      total: 74,
+      tier: 'growth_seller',
+      tierByScore: 'growth_seller',
+      conditions: { disbursement: 2_000_000, weeklyQuota: 6_000_000, commission: 0.025 },
+      subscores: { investment: 70, roas: 80, sales: 70, roasValue: 3.5 },
+      scoreStatus: 'scored',
+      eligibilityStatus: 'eligible',
+      calculatedAt: '2026-05-31T12:00:00.000Z',
+      createdAt: '2026-05-31T12:00:00.000Z',
+      ...overrides,
+    }
+  }
+
+  beforeEach(async () => {
+    repoMock = { findOne: jest.fn() } as any
+    activationRepoMock = {
+      findOne: jest.fn(),
+      create: jest.fn((data) => data),
+      save: jest.fn((data) => Promise.resolve(data)),
+    }
+    const scaleConfig = {
+      getActiveConfig: jest.fn().mockResolvedValue({ config: SCALE_CONFIG_V1, version: 1 }),
+    }
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CreditService,
+        { provide: getRepositoryToken(CreditScore, 'DBWrite'), useValue: repoMock },
+        { provide: getRepositoryToken(CreditScore, 'DBRead'), useValue: repoMock },
+        { provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'), useValue: activationRepoMock },
+        { provide: getRepositoryToken(CreditActivationRequest, 'DBRead'), useValue: activationRepoMock },
+        { provide: CreditInputsClient, useValue: { getBatch: jest.fn() } },
+        { provide: ScaleConfigService, useValue: scaleConfig },
+        { provide: BureauService, useValue: { getActiveBand: jest.fn() } },
+      ],
+    }).compile()
+    service = module.get(CreditService)
+  })
+
+  it('eligible: términos + score + nextStep estructurado', async () => {
+    repoMock.findOne.mockResolvedValue(snapshot())
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('eligible')
+    expect(p.tier).toBe('growth_seller')
+    expect(p.amount).toBe(2_000_000)
+    expect(p.weeklyQuota).toBe(6_000_000)
+    expect(p.score).not.toBeNull()
+    expect(p.score!.total).toBe(74)
+    expect(p.score!.subscores).toEqual({ investment: 70, roas: 80, sales: 70 })
+    // total 74 (Growth) → siguiente tier Pro; faltan 75-74=1; más débil = investment (70).
+    expect(p.score!.nextStep).toEqual({
+      tier: 'pro_marketer',
+      tierName: 'Pro Marketer',
+      pointsToNext: 1,
+      commission: 0.0225,
+      weeklyQuota: 6_000_000,
+      weakest: 'investment',
+    })
+    expect(p.score!.nextStep!.weeklyQuota).toBe(2_000_000 * 3)
+    // sin solicitud abierta → el front puede ofrecer el CTA
+    expect(p.activationRequest).toBeNull()
+  })
+
+  it('eligible con solicitud abierta: expone activationRequest (el front oculta el CTA)', async () => {
+    repoMock.findOne.mockResolvedValue(snapshot())
+    activationRepoMock.findOne.mockResolvedValue({
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('eligible')
+    expect(p.activationRequest).toEqual({
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
+  })
+
+  it('in_review (buró pendiente): muestra score y términos', async () => {
+    repoMock.findOne.mockResolvedValue(snapshot({ eligibilityStatus: 'bureau_pending' }))
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('in_review')
+    expect(p.score).not.toBeNull()
+    expect(p.tier).toBe('growth_seller')
+  })
+
+  it('not_eligible (vetada por ROAS): SIN score ni nextStep', async () => {
+    repoMock.findOne.mockResolvedValue(
+      snapshot({ scoreStatus: 'vetoed_roas', eligibilityStatus: 'not_applicable' }),
+    )
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('not_eligible')
+    expect(p.score).toBeNull()
+    expect(p.tier).toBeNull()
+  })
+
+  it('insufficient_data → no_data y score null', async () => {
+    repoMock.findOne.mockResolvedValue(snapshot({ scoreStatus: 'insufficient_data' }))
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('no_data')
+    expect(p.score).toBeNull()
+  })
+
+  it('sin snapshot → no_data', async () => {
+    repoMock.findOne.mockResolvedValue(null)
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('no_data')
+    expect(p.score).toBeNull()
+    expect(p.tier).toBeNull()
+  })
+
+  it('tier tope (elite) → nextStep null', async () => {
+    repoMock.findOne.mockResolvedValue(
+      snapshot({
+        total: 90,
+        tier: 'elite',
+        conditions: { disbursement: 2_000_000, weeklyQuota: 6_000_000, commission: 0.02 },
+        subscores: { investment: 100, roas: 92, sales: 88, roasValue: 6 },
+      }),
+    )
+    const p = await service.getPreapproval('brand-1')
+    expect(p.status).toBe('eligible')
+    expect(p.score!.nextStep).toBeNull()
+  })
+
+  it('createActivationRequest: crea solicitud cuando la marca es elegible y no tiene una abierta', async () => {
+    repoMock.findOne.mockResolvedValueOnce(snapshot())
+    activationRepoMock.findOne.mockResolvedValueOnce(null)
+
+    const result = await service.createActivationRequest('brand-1', {
+      fullName: '  Juan Perez  ',
+      email: 'JUAN@MAIL.COM ',
+      phone: '+57 300 123 4567',
+    })
+
+    expect(activationRepoMock.save).toHaveBeenCalled()
+    expect(result).toMatchObject({
+      brandId: 'brand-1',
+      scoreTotal: 74,
+      tier: 'growth_seller',
+      fullName: 'Juan Perez',
+      email: 'juan@mail.com',
+      phone: '+573001234567',
+      status: 'pending',
+    })
+  })
+
+  it('createActivationRequest: rechaza si la marca no está elegible', async () => {
+    repoMock.findOne.mockResolvedValueOnce(snapshot({ eligibilityStatus: 'bureau_pending' }))
+
+    await expect(service.createActivationRequest('brand-1', {
+      fullName: 'Juan Perez',
+      email: 'juan@mail.com',
+      phone: '3001234567',
+    })).rejects.toMatchObject({ status: 400 })
+  })
+
+  it('createActivationRequest: rechaza si ya hay solicitud abierta', async () => {
+    repoMock.findOne.mockResolvedValueOnce(snapshot())
+    activationRepoMock.findOne.mockResolvedValueOnce({
+      id: 'req-open',
+      status: 'contacted',
+      createdAt: '2026-05-30T10:00:00.000Z',
+    })
+
+    await expect(service.createActivationRequest('brand-1', {
+      fullName: 'Juan Perez',
+      email: 'juan@mail.com',
+      phone: '3001234567',
+    })).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('createActivationRequest: traduce la carrera (índice único) a 409', async () => {
+    // El chequeo previo (réplica) no ve la abierta, pero el insert choca contra
+    // el índice único parcial: debe responder el mismo 409, no un 500.
+    repoMock.findOne.mockResolvedValueOnce(snapshot())
+    activationRepoMock.findOne.mockResolvedValueOnce(null)
+    activationRepoMock.save.mockRejectedValueOnce({ code: '23505' })
+
+    await expect(service.createActivationRequest('brand-1', {
+      fullName: 'Juan Perez',
+      email: 'juan@mail.com',
+      phone: '3001234567',
+    })).rejects.toMatchObject({ status: 409 })
+  })
+
+  it('updateActivationRequest: aplica una transición válida, sella contactedAt y el actor', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+
+    const result = await service.updateActivationRequest('req-1', { status: 'contacted' }, 'admin-7')
+
+    expect(result.status).toBe('contacted')
+    expect(result.contactedAt).toBeInstanceOf(Date)
+    expect(result.contactedBy).toBe('admin-7')
+  })
+
+  it('updateActivationRequest: usa el contactedBy del operador si viene en el body', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+
+    const result = await service.updateActivationRequest(
+      'req-1',
+      { status: 'contacted', contactedBy: 'Comercial Ana' },
+      'admin-7',
+    )
+
+    // El operador especificó quién contactó: gana sobre el admin autenticado.
+    expect(result.contactedBy).toBe('Comercial Ana')
+  })
+
+  it('updateActivationRequest: rechaza reabrir una solicitud cerrada', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'activated', contactedAt: null })
+
+    await expect(
+      service.updateActivationRequest('req-1', { status: 'pending' }),
+    ).rejects.toMatchObject({ status: 422 })
+    expect(activationRepoMock.save).not.toHaveBeenCalled()
   })
 })

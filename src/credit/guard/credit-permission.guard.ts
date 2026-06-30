@@ -11,6 +11,7 @@ import { CREDIT_PERMISSION_KEY } from './require-credit-permission.decorator'
 interface GuardUser {
   id: string
   isSuperAdmin: boolean
+  brand?: string | null
 }
 
 /**
@@ -24,6 +25,7 @@ export class CreditPermissionGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
   private readonly ACCESS_SERVER = process.env.ACCESS_SERVER
   private readonly JWT_SECRET = process.env.JWT_SECRET
+  private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
 
   constructor(
     private readonly reflector: Reflector,
@@ -33,7 +35,7 @@ export class CreditPermissionGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<Request & { user?: GuardUser }>()
-    const user = this.resolveUser(req)
+    const user = await this.resolveUser(req)
     if (!user) {
       throw new RequestException({ error: 'unauthorized', code: 'unauthorized' }, HttpStatus.UNAUTHORIZED)
     }
@@ -53,18 +55,68 @@ export class CreditPermissionGuard implements CanActivate {
     return true
   }
 
-  private resolveUser(req: Request): GuardUser | null {
+  private async resolveUser(req: Request): Promise<GuardUser | null> {
     const cookie = (req as any).cookies?.[this.COOKIE_SESSION as string]
     const token = cookie || this.extractBearer(req)
     if (!token) return null
 
-    if (this.isServerToken(token)) return { id: 'server', isSuperAdmin: true }
+    if (this.isServerToken(token)) return { id: 'server', isSuperAdmin: true, brand: null }
 
+    // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
     try {
       const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
       const id = payload.id || payload.user
+      if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
+    } catch {
+      /* sigue a la validación contra el auth-service */
+    }
+
+    // 2) Tokens de auto-login: firmados con el `clientSecret` del cliente (que
+    // ROTA), así que payments NO puede guardarlo. Los valida el auth-service,
+    // que conoce el secreto vigente de cada cliente. Ver backend-auth
+    // POST /client/validate-token.
+    return this.validateViaAuth(token)
+  }
+
+  /**
+   * Valida el token de cliente contra el auth-service. El `client` se lee del
+   * propio token (decode sin verificar firma) y el auth verifica con el
+   * `clientSecret` vigente. Devuelve el usuario o null.
+   */
+  private async validateViaAuth(token: string): Promise<GuardUser | null> {
+    if (!this.SERVICE_AUTH) return null
+    const client = this.decodeClaims(token)?.client
+    if (!client) return null
+
+    try {
+      const res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ client }),
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!res.ok) return null
+      const body: any = await res.json()
+      if (body?.code !== 'tokenValidate' || !body?.data) return null
+      const id = body.data.user || body.data.id
       if (!id) return null
-      return { id, isSuperAdmin: !!payload.isSuperAdmin }
+      return {
+        id,
+        isSuperAdmin: body.data.role === 'superadmin' || !!body.data.isSuperAdmin,
+        brand: body.data.brand ?? this.decodeClaims(token)?.brand ?? null,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** Decodifica los claims del JWT sin verificar la firma (solo lectura). */
+  private decodeClaims(token: string): any {
+    try {
+      return JSON.parse(Buffer.from(token.split('.')[1] || '', 'base64url').toString('utf8'))
     } catch {
       return null
     }
