@@ -386,7 +386,18 @@ export class AdminController {
     @Req() req: any,
   ) {
     const actor = req?.user?.id || null
-    return { data: await this.creditService.updateActivationRequest(id, body, actor) }
+    const updated = await this.creditService.updateActivationRequest(id, body, actor)
+
+    await this.auditService.log(
+      actor || 'admin',
+      'credit_activation_request_updated',
+      'credit_activation_request',
+      id,
+      { status: updated.status, notesUpdated: body.notes !== undefined },
+      body.status ? `Solicitud de activación → ${body.status}` : 'Actualización de solicitud',
+    )
+
+    return { data: updated }
   }
 
   @Get('dropi/batch-status')
