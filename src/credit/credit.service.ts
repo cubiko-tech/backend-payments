@@ -193,18 +193,18 @@ export class CreditService {
       }
     }
 
-    const activationRequest = await this.findOpenActivationRequest(brandId)
-
     const status = this.resolvePreapprovalStatus(score)
 
     const showTerms = status === 'eligible' || status === 'in_review'
     const when = score.calculatedAt ?? score.createdAt
 
-    // Bloque de score con DATOS PROPIOS de la marca (no buró). Solo cuando la
-    // marca es elegible o está en revisión: en vetadas/no_data no aplica, y
-    // sugerir "te faltan N puntos para X" sería engañoso (el veto manda).
+    // Solo elegible/en revisión ofrecen términos y CTA. Para vetadas/no_data no
+    // hay score que mostrar (sugerir "te faltan N puntos" sería engañoso, el
+    // veto manda) ni solicitud que consultar, así evitamos dos queries por poll.
     let scoreBlock: PreapprovalScore | null = null
-    if (status === 'eligible' || status === 'in_review') {
+    let activationRequest: PreapprovalActivationRequest | null = null
+    if (showTerms) {
+      activationRequest = await this.findOpenActivationRequest(brandId)
       const { config } = await this.scaleConfig.getActiveConfig()
       scoreBlock = {
         total: score.total,
