@@ -34,6 +34,10 @@ export class CreditActivationRequest extends Content {
   @Column({ type: 'varchar', default: 'pending' })
   status: CreditActivationRequestStatus
 
+  /** Usuario que originó la solicitud (id del token); null si la creó el sistema. */
+  @Column({ nullable: true })
+  requestedBy: string | null
+
   @Column({ type: 'timestamptz', nullable: true })
   contactedAt: Date | null
 

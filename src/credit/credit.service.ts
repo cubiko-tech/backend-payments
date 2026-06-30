@@ -252,7 +252,7 @@ export class CreditService {
   async createActivationRequest(
     brandId: string,
     body: CreateActivationRequestDto,
-    _requestedBy?: string | null,
+    requestedBy?: string | null,
   ): Promise<CreditActivationRequest> {
     const score = await this.scoreReadRepo.findOne({
       where: { brandId },
@@ -297,6 +297,7 @@ export class CreditService {
           phone,
           source: 'dropi',
           status: 'pending',
+          requestedBy: requestedBy ?? null,
         }),
       )
     } catch (e) {
