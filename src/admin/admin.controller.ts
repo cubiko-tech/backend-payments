@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
   ParseUUIDPipe,
+  BadRequestException,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
@@ -21,6 +22,10 @@ import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
 import { AuditService } from '../audit/audit.service'
 import { CreditService } from '../credit/credit.service'
+import {
+  CREDIT_ACTIVATION_REQUEST_STATUSES,
+  CreditActivationRequestStatus,
+} from '../credit/credit.types'
 import { CreditPermissionGuard } from '../credit/guard/credit-permission.guard'
 import { RequireCreditPermission } from '../credit/guard/require-credit-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
@@ -361,10 +366,13 @@ export class AdminController {
   ) {
     const p = Math.max(1, Number(page) || 1)
     const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+    if (status && !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)) {
+      throw new BadRequestException('status inválido')
+    }
     const { data, total } = await this.creditService.listActivationRequests({
       page: p,
       perPage: limit,
-      status: (status || undefined) as any,
+      status: (status as CreditActivationRequestStatus) || undefined,
       search,
     })
 

@@ -1,19 +1,14 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator'
 
-import { CreditActivationRequestStatus } from '../credit.types'
-
-const STATUSES: CreditActivationRequestStatus[] = [
-  'pending',
-  'contacted',
-  'qualified',
-  'rejected',
-  'activated',
-]
+import {
+  CREDIT_ACTIVATION_REQUEST_STATUSES,
+  CreditActivationRequestStatus,
+} from '../credit.types'
 
 export class UpdateActivationRequestDto {
   @IsOptional()
   @IsString()
-  @IsIn(STATUSES)
+  @IsIn(CREDIT_ACTIVATION_REQUEST_STATUSES)
   status?: CreditActivationRequestStatus
 
   @IsOptional()

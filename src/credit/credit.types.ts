@@ -60,6 +60,15 @@ export type CreditActivationRequestStatus =
   | 'rejected'
   | 'activated'
 
+/** Lista runtime de los estados válidos (para validar filtros y DTOs). */
+export const CREDIT_ACTIVATION_REQUEST_STATUSES: CreditActivationRequestStatus[] = [
+  'pending',
+  'contacted',
+  'qualified',
+  'rejected',
+  'activated',
+]
+
 export type CreditActivationRequestSource = 'dropi'
 
 /**
@@ -81,11 +90,6 @@ export interface PreapprovalActivationRequest {
 }
 
 /**
- * Bloque de score con DATOS PROPIOS de la marca (su gasto Meta, ROAS y ventas).
- * No es dato de buró: son los insumos del propio usuario y el puntaje derivado,
- * apto para mostrarse al cliente. La banda de buró NO se incluye aquí.
- */
-/**
  * Datos estructurados para "cómo subir de nivel" (sin texto formateado, para
  * que el front arme el copy con su i18n). null si ya está en el tier tope.
  */
@@ -98,6 +102,11 @@ export interface PreapprovalNextStep {
   weakest: 'investment' | 'roas' | 'sales' // subscore con más margen de mejora
 }
 
+/**
+ * Bloque de score con DATOS PROPIOS de la marca (su gasto Meta, ROAS y ventas).
+ * No es dato de buró: son los insumos del propio usuario y el puntaje derivado,
+ * apto para mostrarse al cliente. La banda de buró NO se incluye aquí.
+ */
 export interface PreapprovalScore {
   total: number
   subscores: { investment: number; roas: number; sales: number }
