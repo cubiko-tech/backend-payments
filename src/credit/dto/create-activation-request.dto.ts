@@ -10,7 +10,12 @@ export class CreateActivationRequestDto {
   @MaxLength(160)
   email: string
 
+  // Acepta el formato como lo escribe el usuario (espacios, guiones, paréntesis
+  // y un '+' inicial); el service lo normaliza a solo dígitos. El lookahead
+  // exige entre 7 y 15 dígitos reales (E.164 admite hasta 15).
   @IsString()
-  @Matches(/^\+?[0-9]{7,20}$/, { message: 'phone debe contener entre 7 y 20 dígitos' })
+  @Matches(/^(?=(?:\D*\d){7,15}\D*$)\+?[\d\s().-]{6,24}$/, {
+    message: 'phone debe tener entre 7 y 15 dígitos',
+  })
   phone: string
 }
