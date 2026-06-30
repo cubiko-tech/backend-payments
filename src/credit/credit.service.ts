@@ -324,9 +324,12 @@ export class CreditService {
       qb.andWhere('r.status = :status', { status: opts.status })
     }
     if (opts.search) {
+      // Escapamos los metacaracteres de LIKE (\ % _) para que el usuario no
+      // inyecte comodines; Postgres usa '\' como escape por defecto.
+      const q = `%${opts.search.replace(/[\\%_]/g, '\\$&')}%`
       qb.andWhere(
         '(r.brandId ILIKE :q OR r.email ILIKE :q OR r.fullName ILIKE :q OR r.phone ILIKE :q)',
-        { q: `%${opts.search}%` },
+        { q },
       )
     }
     qb.orderBy('r.createdAt', 'DESC')
