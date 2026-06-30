@@ -303,4 +303,18 @@ describe('CreditService.getPreapproval', () => {
       phone: '3001234567',
     })).rejects.toMatchObject({ status: 409 })
   })
+
+  it('createActivationRequest: traduce la carrera (índice único) a 409', async () => {
+    // El chequeo previo (réplica) no ve la abierta, pero el insert choca contra
+    // el índice único parcial: debe responder el mismo 409, no un 500.
+    repoMock.findOne.mockResolvedValueOnce(snapshot())
+    activationRepoMock.findOne.mockResolvedValueOnce(null)
+    activationRepoMock.save.mockRejectedValueOnce({ code: '23505' })
+
+    await expect(service.createActivationRequest('brand-1', {
+      fullName: 'Juan Perez',
+      email: 'juan@mail.com',
+      phone: '3001234567',
+    })).rejects.toMatchObject({ status: 409 })
+  })
 })

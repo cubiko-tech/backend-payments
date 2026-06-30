@@ -269,19 +269,32 @@ export class CreditService {
     const email = body.email.trim().toLowerCase()
     const phone = body.phone.replace(/[^\d+]/g, '')
 
-    return this.activationRequestRepo.save(
-      this.activationRequestRepo.create({
-        brandId,
-        creditScoreId: score.id,
-        scoreTotal: score.total,
-        tier: score.tier,
-        fullName,
-        email,
-        phone,
-        source: 'dropi',
-        status: 'pending',
-      }),
-    )
+    try {
+      return await this.activationRequestRepo.save(
+        this.activationRequestRepo.create({
+          brandId,
+          creditScoreId: score.id,
+          scoreTotal: score.total,
+          tier: score.tier,
+          fullName,
+          email,
+          phone,
+          source: 'dropi',
+          status: 'pending',
+        }),
+      )
+    } catch (e) {
+      // Barrera real contra la carrera: el chequeo previo lee de la réplica, así
+      // que dos requests concurrentes pueden pasarlo; el índice único parcial
+      // rechaza la segunda inserción y la traducimos al mismo 409.
+      if (isUniqueViolation(e)) {
+        throw new RequestException(
+          { error: 'activationRequestAlreadyOpen', code: 'activationRequestAlreadyOpen' },
+          HttpStatus.CONFLICT,
+        )
+      }
+      throw e
+    }
   }
 
   async listActivationRequests(opts: {
@@ -546,4 +559,9 @@ function resolveEligibility(
   if (bureauBand === 'veto') return 'vetoed_bureau'
   if (bureauBand === null) return 'bureau_pending'
   return 'eligible'
+}
+
+/** Violación de índice único en Postgres (p. ej. dos solicitudes abiertas). */
+function isUniqueViolation(e: unknown): boolean {
+  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
 }
