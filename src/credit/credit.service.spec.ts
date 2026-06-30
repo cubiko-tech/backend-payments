@@ -317,4 +317,22 @@ describe('CreditService.getPreapproval', () => {
       phone: '3001234567',
     })).rejects.toMatchObject({ status: 409 })
   })
+
+  it('updateActivationRequest: aplica una transición válida y sella contactedAt', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+
+    const result = await service.updateActivationRequest('req-1', { status: 'contacted' })
+
+    expect(result.status).toBe('contacted')
+    expect(result.contactedAt).toBeInstanceOf(Date)
+  })
+
+  it('updateActivationRequest: rechaza reabrir una solicitud cerrada', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'activated', contactedAt: null })
+
+    await expect(
+      service.updateActivationRequest('req-1', { status: 'pending' }),
+    ).rejects.toMatchObject({ status: 422 })
+    expect(activationRepoMock.save).not.toHaveBeenCalled()
+  })
 })

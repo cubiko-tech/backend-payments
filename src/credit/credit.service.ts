@@ -37,6 +37,22 @@ import {
  */
 const OPEN_ACTIVATION_STATUSES: OpenActivationStatus[] = ['pending', 'contacted', 'qualified']
 
+/**
+ * Transiciones válidas del estado de una solicitud. `rejected` y `activated` son
+ * terminales. Impide reabrir una solicitud cerrada (que la devolvería a un estado
+ * "abierto" y rompería el invariante de una sola solicitud abierta por marca).
+ */
+const ALLOWED_ACTIVATION_TRANSITIONS: Record<
+  CreditActivationRequestStatus,
+  CreditActivationRequestStatus[]
+> = {
+  pending: ['contacted', 'qualified', 'rejected'],
+  contacted: ['qualified', 'rejected'],
+  qualified: ['activated', 'rejected'],
+  rejected: [],
+  activated: [],
+}
+
 interface CalculateParams {
   brandId: string
   periodStart: string
@@ -333,7 +349,21 @@ export class CreditService {
       )
     }
 
-    if (body.status) current.status = body.status
+    if (body.status && body.status !== current.status) {
+      const allowed = ALLOWED_ACTIVATION_TRANSITIONS[current.status] ?? []
+      if (!allowed.includes(body.status)) {
+        throw new RequestException(
+          {
+            error: 'invalidActivationTransition',
+            code: 'invalidActivationTransition',
+            from: current.status,
+            to: body.status,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+      current.status = body.status
+    }
     if (body.notes !== undefined) current.notes = body.notes?.trim() || null
     if (body.contactedBy !== undefined) current.contactedBy = body.contactedBy?.trim() || null
     if (body.status === 'contacted' && !current.contactedAt) {
