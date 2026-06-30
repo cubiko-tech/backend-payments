@@ -6,6 +6,7 @@ import {
   Param,
   Query,
   Body,
+  Req,
   UseGuards,
   ParseUUIDPipe,
 } from '@nestjs/common'
@@ -382,8 +383,10 @@ export class AdminController {
   async updateActivationRequest(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateActivationRequestDto,
+    @Req() req: any,
   ) {
-    return { data: await this.creditService.updateActivationRequest(id, body) }
+    const actor = req?.user?.id || null
+    return { data: await this.creditService.updateActivationRequest(id, body, actor) }
   }
 
   @Get('dropi/batch-status')

@@ -318,13 +318,27 @@ describe('CreditService.getPreapproval', () => {
     })).rejects.toMatchObject({ status: 409 })
   })
 
-  it('updateActivationRequest: aplica una transición válida y sella contactedAt', async () => {
+  it('updateActivationRequest: aplica una transición válida, sella contactedAt y el actor', async () => {
     activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
 
-    const result = await service.updateActivationRequest('req-1', { status: 'contacted' })
+    const result = await service.updateActivationRequest('req-1', { status: 'contacted' }, 'admin-7')
 
     expect(result.status).toBe('contacted')
     expect(result.contactedAt).toBeInstanceOf(Date)
+    expect(result.contactedBy).toBe('admin-7')
+  })
+
+  it('updateActivationRequest: usa el contactedBy del operador si viene en el body', async () => {
+    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+
+    const result = await service.updateActivationRequest(
+      'req-1',
+      { status: 'contacted', contactedBy: 'Comercial Ana' },
+      'admin-7',
+    )
+
+    // El operador especificó quién contactó: gana sobre el admin autenticado.
+    expect(result.contactedBy).toBe('Comercial Ana')
   })
 
   it('updateActivationRequest: rechaza reabrir una solicitud cerrada', async () => {

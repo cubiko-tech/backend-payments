@@ -340,6 +340,7 @@ export class CreditService {
   async updateActivationRequest(
     id: string,
     body: UpdateActivationRequestDto,
+    actor?: string | null,
   ): Promise<CreditActivationRequest> {
     const current = await this.activationRequestRepo.findOne({ where: { id } })
     if (!current) {
@@ -365,9 +366,14 @@ export class CreditService {
       current.status = body.status
     }
     if (body.notes !== undefined) current.notes = body.notes?.trim() || null
+    // Quién contactó: lo carga el operador (puede no ser el admin logueado). La
+    // trazabilidad de quién ejecutó la acción queda en el audit log, así que
+    // aceptarlo del body es seguro.
     if (body.contactedBy !== undefined) current.contactedBy = body.contactedBy?.trim() || null
     if (body.status === 'contacted' && !current.contactedAt) {
       current.contactedAt = new Date()
+      // Si el operador no especificó quién contactó, default al admin autenticado.
+      if (!current.contactedBy) current.contactedBy = actor ?? null
     }
 
     return this.activationRequestRepo.save(current)
