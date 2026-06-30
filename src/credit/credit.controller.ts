@@ -26,6 +26,7 @@ import { RegisterProfileDto } from './dto/register-profile.dto'
 import { GrantConsentDto } from './dto/grant-consent.dto'
 import { CreateBureauCheckDto } from './dto/create-bureau-check.dto'
 import { CreateScaleVersionDto } from './dto/create-scale-version.dto'
+import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
 
 /**
  * Endpoints de scoring de crédito (Fase 2): cálculo individual, consulta por
@@ -86,6 +87,19 @@ export class CreditController {
       }
     }
     return { data: await this.creditService.getPreapproval(brandId) }
+  }
+
+  @Post('activation-requests')
+  @UseGuards(CreditPermissionGuard)
+  @ApiOperation({ summary: 'Crear una solicitud de activación de crédito para una marca elegible' })
+  async createActivationRequest(@Body() body: CreateActivationRequestDto, @Req() req: any) {
+    const brandId = req?.user?.brand
+    if (!brandId) {
+      throw new RequestException({ error: 'brandRequired', code: 'brandRequired' }, HttpStatus.BAD_REQUEST)
+    }
+    return {
+      data: await this.creditService.createActivationRequest(brandId, body, req?.user?.id || null),
+    }
   }
 
   @Get('scores/brand/:brandId')

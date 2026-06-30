@@ -7,6 +7,10 @@ import {
   ScoreStatus,
 } from './scale-config.types'
 
+export function deriveWeeklyQuota(disbursement: number): number {
+  return disbursement * 3
+}
+
 /**
  * Motor de scoring de crédito — FUNCIÓN PURA, table-driven, sin I/O ni fechas.
  *
@@ -75,7 +79,7 @@ export function computeScore(
     tierCappedBy,
     conditions: {
       disbursement: tier.disbursement,
-      weeklyQuota: tier.disbursement * 3,
+      weeklyQuota: deriveWeeklyQuota(tier.disbursement),
       commission,
     },
     scoreStatus,
