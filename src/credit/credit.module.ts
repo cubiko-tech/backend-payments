@@ -50,6 +50,16 @@ import { ClientModule } from '../client/client.module'
     BureauService,
     CreditPermissionGuard,
   ],
-  exports: [CreditService, ScaleConfigService, CreditRunService, BureauService],
+  // JwtModule se re-exporta para que AdminModule (que usa el guard exportado)
+  // pueda resolver JwtService: los guards de `@UseGuards(Clase)` se instancian
+  // en el contexto del módulo del controller, no en el de CreditModule.
+  exports: [
+    CreditService,
+    ScaleConfigService,
+    CreditRunService,
+    BureauService,
+    CreditPermissionGuard,
+    JwtModule,
+  ],
 })
 export class CreditModule {}
