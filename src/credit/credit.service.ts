@@ -389,7 +389,9 @@ export class CreditService {
     subscores: { investment: number; roas: number; sales: number },
     config: ScaleConfig,
   ): PreapprovalNextStep | null {
-    const tiers = config.tiers
+    // El "siguiente" tier es tiers[i+1], así que el orden importa: ordenamos por
+    // scoreMin para no depender de cómo venga la config.
+    const tiers = [...config.tiers].sort((a, b) => a.scoreMin - b.scoreMin)
     const i = tiers.findIndex((t) => total >= t.scoreMin && total <= t.scoreMax)
     if (i < 0 || i >= tiers.length - 1) return null
     const next = tiers[i + 1]
