@@ -36,6 +36,15 @@ export class SubscriptionController {
     return this.subscriptionService.create(data)
   }
 
+  @Post('trial')
+  @ApiOperation({ summary: 'Iniciar trial gratuito de 15 días (sin método de pago)' })
+  @ApiResponse({ status: 201, description: 'Trial iniciado correctamente' })
+  async startTrial(
+    @Body() data: { brandId: string; userId: string; planSlug: string; provider?: any; walletId?: string },
+  ) {
+    return this.subscriptionService.startTrial(data)
+  }
+
   @Patch('plan')
   @ApiOperation({ summary: 'Cambiar de plan' })
   @ApiResponse({ status: 200, description: 'Plan cambiado correctamente' })

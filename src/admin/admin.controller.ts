@@ -6,12 +6,14 @@ import {
   Param,
   Query,
   Body,
+  Req,
   UseGuards,
   ParseUUIDPipe,
+  BadRequestException,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository, LessThan, MoreThan, In, Between } from 'typeorm'
+import { Repository, MoreThan, In, Between } from 'typeorm'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
@@ -19,6 +21,14 @@ import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
 import { AuditService } from '../audit/audit.service'
+import { CreditService } from '../credit/credit.service'
+import {
+  CREDIT_ACTIVATION_REQUEST_STATUSES,
+  CreditActivationRequestStatus,
+} from '../credit/credit.types'
+import { CreditPermissionGuard } from '../credit/guard/credit-permission.guard'
+import { RequireCreditPermission } from '../credit/guard/require-credit-permission.decorator'
+import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 
 /**
  * Controller admin centralizado para backend-payments.
@@ -55,6 +65,7 @@ export class AdminController {
     @InjectRepository(Transaction, 'DBWrite')
     private readonly transactionWriteRepo: Repository<Transaction>,
     private readonly auditService: AuditService,
+    private readonly creditService: CreditService,
   ) {}
 
   // ============================================
@@ -340,6 +351,61 @@ export class AdminController {
     )
 
     return { data: { message: 'Pago marcado para reintento', paymentId: id } }
+  }
+
+  @Get('credit/activation-requests')
+  @UseGuards(CreditPermissionGuard)
+  @RequireCreditPermission('credit:runs')
+  @ApiOperation({ summary: 'Listado paginado de solicitudes de activación de crédito' })
+  @ApiResponse({ status: 200, description: 'Solicitudes de activación paginadas' })
+  async activationRequests(
+    @Query('page') page?: number,
+    @Query('perPage') perPage?: number,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    const p = Math.max(1, Number(page) || 1)
+    const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+    if (status && !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)) {
+      throw new BadRequestException('status inválido')
+    }
+    const { data, total } = await this.creditService.listActivationRequests({
+      page: p,
+      perPage: limit,
+      status: (status as CreditActivationRequestStatus) || undefined,
+      search,
+    })
+
+    return {
+      data,
+      count: total,
+      meta: { page: p, perPage: limit, total, totalPages: Math.ceil(total / limit) },
+    }
+  }
+
+  @Patch('credit/activation-requests/:id')
+  @UseGuards(CreditPermissionGuard)
+  @RequireCreditPermission('credit:runs')
+  @ApiOperation({ summary: 'Actualizar estado/notas de una solicitud de activación de crédito' })
+  @ApiResponse({ status: 200, description: 'Solicitud actualizada' })
+  async updateActivationRequest(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateActivationRequestDto,
+    @Req() req: any,
+  ) {
+    const actor = req?.user?.id || null
+    const updated = await this.creditService.updateActivationRequest(id, body, actor)
+
+    await this.auditService.log(
+      actor || 'admin',
+      'credit_activation_request_updated',
+      'credit_activation_request',
+      id,
+      { status: updated.status, notesUpdated: body.notes !== undefined },
+      body.status ? `Solicitud de activación → ${body.status}` : 'Actualización de solicitud',
+    )
+
+    return { data: updated }
   }
 
   @Get('dropi/batch-status')

@@ -16,12 +16,15 @@ import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
+import { CheckoutService } from '../checkout/checkout.service'
 import { logger } from '../shared/logger/logger'
 
 @Injectable()
 export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
   private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
+  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly FREE_PLAN_SLUG = process.env.FREE_PLAN_SLUG || 'free'
 
   constructor(
     @InjectRepository(Wallet, 'DBRead')
@@ -45,7 +48,122 @@ export class TasksService {
     private providerFactory: ProviderFactory,
     private eventBus: EventBusService,
     private clientRoles: ClientRolesService,
+    private checkoutService: CheckoutService,
   ) {}
+
+  /** Proveedores externos que cobran con link de pago (no wallet interna). */
+  private isExternalProvider(provider: string): boolean {
+    return provider === 'confio' || provider === 'stripe' || provider === 'mercadopago' || provider === 'dropi'
+  }
+
+  /**
+   * Emitir un cobro a un proveedor externo (ConfioPagos): genera un link de
+   * pago vía checkout y notifica al usuario. Deja la suscripción en past_due
+   * a la espera de que el usuario pague (el webhook la reactiva). `isRetry`
+   * incrementa el contador para que expireSubscriptions degrade tras MAX intentos.
+   */
+  private async issueExternalCharge(sub: Subscription, isRetry: boolean) {
+    try {
+      const result = await this.checkoutService.processCheckout({
+        brandId: sub.brandId,
+        userId: sub.userId,
+        purpose: 'plan_purchase',
+        provider: sub.provider as any,
+        planSlug: sub.planSlug,
+      })
+
+      const previousStatus = sub.status
+      sub.status = SubscriptionStatus.PAST_DUE
+      if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
+      await this.subscriptionRepo.save(sub)
+
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: sub.id,
+          eventType: SubscriptionEventType.PAYMENT_FAILED,
+          fromStatus: previousStatus,
+          toStatus: SubscriptionStatus.PAST_DUE,
+          triggeredBy: 'system',
+          paymentId: result.paymentId,
+          reason: isRetry
+            ? `Reintento de cobro ${sub.provider} (${sub.retryCount}/${this.MAX_RETRY})`
+            : `Link de cobro ${sub.provider} emitido`,
+        }),
+      )
+
+      // Notificar al usuario el link de pago (backend-processes envía email/push).
+      await this.eventBus.publishNotification({
+        brandId: sub.brandId,
+        userId: sub.userId,
+        type: 'payment_link',
+        subject: `Completa el pago de tu plan ${sub.planSlug}`,
+        metadata: {
+          checkoutUrl: result.checkoutUrl || '',
+          planSlug: sub.planSlug,
+          paymentId: result.paymentId,
+        },
+      })
+
+      logger.log('info', `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`)
+    } catch (error) {
+      logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
+      // Marcar past_due igual para que el ciclo de expiración avance.
+      sub.status = SubscriptionStatus.PAST_DUE
+      if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
+      await this.subscriptionRepo.save(sub)
+    }
+  }
+
+  // =============================================================
+  // 0. Convertir trials vencidos (cada hora)
+  //    Trial → primer cobro si hay método de pago; si no, degradar a free.
+  // =============================================================
+  @Cron(CronExpression.EVERY_HOUR)
+  async processTrialConversions() {
+    const now = new Date()
+    const trials = await this.subscriptionRepo.find({
+      where: {
+        status: SubscriptionStatus.TRIAL,
+        nextBillingDate: LessThan(now),
+      },
+    })
+
+    if (trials.length === 0) return
+    logger.log('info', `[CRON] processTrialConversions: ${trials.length} trials vencidos`)
+
+    let converted = 0
+    let downgraded = 0
+    let linked = 0
+    for (const sub of trials) {
+      // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
+      if (sub.provider === 'wallet') {
+        if (!sub.walletId) {
+          await this.endTrialWithoutPayment(sub)
+          downgraded++
+          continue
+        }
+        try {
+          await this.renewFromWallet(sub)
+          converted++
+        } catch (error) {
+          logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
+          await this.handleRenewalFailure(sub)
+        }
+        continue
+      }
+
+      // Proveedor externo (ConfioPagos): emitir link de pago y notificar.
+      // El webhook reactiva la suscripción cuando el usuario paga.
+      await this.issueExternalCharge(sub, false)
+      linked++
+    }
+
+    logger.log(
+      'info',
+      `[CRON] processTrialConversions: ${converted} cobrados, ${linked} con link emitido, ` +
+        `${downgraded} degradados a ${this.FREE_PLAN_SLUG}`,
+    )
+  }
 
   // =============================================================
   // 1. Renovar suscripciones (cada hora)
@@ -68,6 +186,10 @@ export class TasksService {
       try {
         if (sub.provider === 'wallet' && sub.walletId) {
           await this.renewFromWallet(sub)
+          processed++
+        } else if (sub.provider === 'confio' && sub.status === SubscriptionStatus.ACTIVE) {
+          // ConfioPagos one-shot: re-emitir link de cobro cada período.
+          await this.issueExternalCharge(sub, false)
           processed++
         }
         // Stripe/MP manejan renovación automática via webhooks
@@ -112,6 +234,10 @@ export class TasksService {
         if (sub.provider === 'wallet' && sub.walletId) {
           await this.renewFromWallet(sub)
           retried++
+        } else if (sub.provider === 'confio') {
+          // ConfioPagos: re-emitir el link de cobro (cuenta como reintento).
+          await this.issueExternalCharge(sub, true)
+          retried++
         }
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
@@ -122,6 +248,41 @@ export class TasksService {
     if (retried > 0) {
       logger.log('info', `[CRON] retryFailedPayments: ${retried} reintentados`)
     }
+  }
+
+  // =============================================================
+  // 2b. Reconciliar pagos Confío pendientes (cada 5 min)
+  //     Red de seguridad: si el webhook se perdió y el usuario no volvió,
+  //     consulta el estado real y completa los pagos ya pagados.
+  // =============================================================
+  @Cron('*/5 * * * *')
+  async reconcileExternalPayments() {
+    const cutoff = new Date(Date.now() - 2 * 60 * 1000) // pagos de más de 2 min
+    const pending = await this.paymentRepo.find({
+      where: {
+        provider: 'confio' as any,
+        status: PaymentStatus.PENDING,
+        createdAt: LessThan(cutoff),
+      },
+    })
+
+    if (pending.length === 0) return
+
+    let completed = 0
+    for (const p of pending) {
+      if (!p.providerPaymentId) continue
+      try {
+        const real = await this.providerFactory.getProvider('confio').getPaymentStatus(p.providerPaymentId)
+        if (real.status === 'completed') {
+          await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+          completed++
+        }
+      } catch (error) {
+        logger.log('warn', `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`)
+      }
+    }
+
+    logger.log('info', `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`)
   }
 
   // =============================================================
@@ -178,8 +339,8 @@ export class TasksService {
         }),
       )
 
-      // Remover plan de la marca en backend-roles (HTTP directo)
-      await this.clientRoles.removePlanFromBrand(sub.brandId, sub.planSlug)
+      // Degradar la marca al plan free en backend-roles (remover pago + asignar free)
+      await this.downgradeBrandToFree(sub)
 
       // Publicar evento para redundancia (backend-roles consumer) y notificaciones
       this.eventBus.publishSubscriptionExpired({
@@ -415,12 +576,55 @@ export class TasksService {
   }
 
   /**
-   * Extender periodo de la suscripción 30 días.
+   * Terminar un trial vencido que no tiene método de pago: degradar a free.
+   */
+  private async endTrialWithoutPayment(sub: Subscription) {
+    const previousStatus = sub.status
+    sub.status = SubscriptionStatus.EXPIRED
+    sub.autoRenew = false
+    await this.subscriptionRepo.save(sub)
+
+    await this.subscriptionEventRepo.save(
+      this.subscriptionEventRepo.create({
+        subscriptionId: sub.id,
+        eventType: SubscriptionEventType.TRIAL_ENDED,
+        fromStatus: previousStatus,
+        toStatus: SubscriptionStatus.EXPIRED,
+        triggeredBy: 'system',
+        reason: `Trial vencido sin método de pago — degradado a ${this.FREE_PLAN_SLUG}`,
+      }),
+    )
+
+    await this.downgradeBrandToFree(sub)
+
+    this.eventBus.publishSubscriptionExpired({
+      brandId: sub.brandId,
+      subscriptionId: sub.id,
+      planSlug: sub.planSlug,
+    })
+    await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
+
+    logger.log('info', `[CRON] Trial degradado a ${this.FREE_PLAN_SLUG}: brandId=${sub.brandId}`)
+  }
+
+  /**
+   * Degradar la marca al plan free en backend-roles: remover el plan pago
+   * y asignar el plan free (sin expiración) para que conserve un baseline.
+   */
+  private async downgradeBrandToFree(sub: Subscription) {
+    await this.clientRoles.removePlanFromBrand(sub.brandId, sub.planSlug)
+    if (sub.planSlug !== this.FREE_PLAN_SLUG) {
+      await this.clientRoles.assignPlanToBrand(sub.brandId, this.FREE_PLAN_SLUG)
+    }
+  }
+
+  /**
+   * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
   private async extendSubscriptionPeriod(sub: Subscription) {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
-    newPeriodEnd.setDate(newPeriodEnd.getDate() + 30)
+    newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
     sub.currentPeriodStart = newPeriodStart
     sub.currentPeriodEnd = newPeriodEnd

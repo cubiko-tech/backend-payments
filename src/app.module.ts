@@ -27,6 +27,7 @@ import { AdminModule } from './admin/admin.module'
 import { MetricsModule } from './metrics/metrics.module'
 import { EventBusModule } from './event-bus/event-bus.module'
 import { ClientModule } from './client/client.module'
+import { CreditModule } from './credit/credit.module'
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { ClientModule } from './client/client.module'
       connection: {
         host: process.env.REDIS_HOST || '192.160.1.5',
         port: parseInt(process.env.REDIS_PORT || '6379'),
+        password: process.env.REDIS_PASSWORD || undefined,
       },
     }),
 
@@ -89,6 +91,7 @@ import { ClientModule } from './client/client.module'
     EventBusModule,
     AdminModule,
     MetricsModule,
+    CreditModule,
   ],
   providers: [
     {

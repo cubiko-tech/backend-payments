@@ -9,7 +9,10 @@ import { logger } from './shared/logger/logger'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
-    cors: true,
+    // NO `cors: true` acá: registraría un CORS por defecto con `origin:'*'` que
+    // contesta el preflight OPTIONS antes del `app.enableCors` de abajo. Con
+    // `credentials:'include'` + header `Authorization`, el browser rechaza ese
+    // wildcard. El CORS real (reflejo de origin + credentials) se configura abajo.
     // Raw body necesario para validar firmas de webhooks (Stripe, MP, Dropi)
     rawBody: true,
   })

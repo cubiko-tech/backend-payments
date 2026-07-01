@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
 
@@ -22,6 +22,7 @@ import { BillingProfile } from '../billing-profile/entities/billingProfile.entit
 import { ClientRolesService } from '../client/client-roles.service'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
+import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { logger as winstonLogger } from '../shared/logger/logger'
 
@@ -43,16 +44,18 @@ export interface CheckoutRequest {
   brandId: string
   userId: string
   purpose: 'plan_purchase' | 'wallet_recharge' | 'service_payment'
-  provider: 'wallet' | 'stripe' | 'mercadopago' | 'dropi'
+  provider: 'wallet' | 'stripe' | 'mercadopago' | 'dropi' | 'confio'
   // Para plan_purchase
   planSlug?: string
   // Para wallet_recharge / service_payment
   amount?: number
   currency?: string
   walletId?: string
-  // URLs de redirect (Stripe/MP)
+  // URLs de redirect (Stripe/MP/Confio)
   successUrl?: string
   cancelUrl?: string
+  // Datos del comprador (requeridos por ConfioPagos: email + teléfono E.164)
+  buyer?: { firstName?: string; lastName?: string; email?: string; phoneNumber?: string }
 }
 
 export interface CheckoutResult {
@@ -64,8 +67,9 @@ export interface CheckoutResult {
 }
 
 @Injectable()
-export class CheckoutService {
+export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
+  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -91,7 +95,18 @@ export class CheckoutService {
     private clientRoles: ClientRolesService,
     private enterprisePricing: EnterprisePricingService,
     private providerConfig: ProviderConfigService,
+    private webhookService: WebhookService,
   ) {}
+
+  /**
+   * Registrarse en WebhookService (inyección tardía para evitar dependencia
+   * circular Checkout↔Webhook): así los webhooks de pago externo pueden
+   * completar el checkout (asignar plan, generar factura, etc.).
+   */
+  onModuleInit() {
+    this.webhookService.setCheckoutService(this)
+    this.log.log('CheckoutService registrado en WebhookService')
+  }
 
   /**
    * Flujo principal de checkout.
@@ -273,7 +288,7 @@ export class CheckoutService {
         purposeId: req.planSlug,
         successUrl: req.successUrl,
         cancelUrl: req.cancelUrl,
-        metadata: { paymentId: payment.id },
+        metadata: { paymentId: payment.id, buyer: req.buyer },
       })
 
       // Actualizar pago con datos del provider
@@ -410,6 +425,48 @@ export class CheckoutService {
     this.log.log(`Pago externo completado: payment=${payment.id} brand=${payment.brandId}`)
   }
 
+  /**
+   * Reconciliar un pago consultando el estado REAL en el proveedor.
+   *
+   * Lo usa la página de retorno (al volver del checkout) y el cron de barrido:
+   * si el proveedor confirma el pago, lo completa (idempotente con el webhook).
+   * No depende de que el webhook llegue — robusto en cualquier ambiente.
+   */
+  async reconcilePayment(paymentId: string): Promise<{ status: string; planSlug?: string }> {
+    const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
+    if (!payment) {
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' },
+        404,
+      )
+    }
+
+    if (payment.status === PaymentStatus.COMPLETED) {
+      return { status: 'completed', planSlug: payment.purposeId || undefined }
+    }
+    if (payment.status === PaymentStatus.FAILED) {
+      return { status: 'failed' }
+    }
+    if (!payment.providerPaymentId) {
+      return { status: payment.status }
+    }
+
+    try {
+      const provider = this.providerFactory.getProvider(payment.provider)
+      const real = await provider.getPaymentStatus(payment.providerPaymentId)
+
+      if (real.status === 'completed') {
+        await this.completeExternalPayment(paymentId, { source: 'reconcile', providerStatus: real.metadata })
+        return { status: 'completed', planSlug: payment.purposeId || undefined }
+      }
+
+      return { status: real.status }
+    } catch (error) {
+      this.log.warn(`reconcilePayment: error consultando ${payment.provider} para ${paymentId}: ${error.message}`)
+      return { status: payment.status }
+    }
+  }
+
   // =============================================================
   // Helpers
   // =============================================================
@@ -454,7 +511,7 @@ export class CheckoutService {
   ): Promise<Subscription> {
     const now = new Date()
     const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + 30)
+    periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
     // Buscar suscripción existente
     let subscription = await this.subscriptionRepo.findOne({
@@ -621,11 +678,11 @@ export class CheckoutService {
 
   /**
    * Asignar plan a la marca en backend-roles con expiresAt.
-   * Calcula expiresAt = currentPeriodEnd de la suscripción (30 días).
+   * Calcula expiresAt = currentPeriodEnd de la suscripción (BILLING_PERIOD_DAYS).
    */
   private async assignPlanInRoles(brandId: string, planSlug: string) {
     const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + 30)
+    expiresAt.setDate(expiresAt.getDate() + this.BILLING_PERIOD_DAYS)
     await this.clientRoles.assignPlanToBrand(brandId, planSlug, expiresAt)
   }
 

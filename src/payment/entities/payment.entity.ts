@@ -1,7 +1,7 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-export enum PaymentProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago', DROPI = 'dropi', WALLET = 'wallet' }
+export enum PaymentProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago', DROPI = 'dropi', WALLET = 'wallet', CONFIO = 'confio' }
 export enum PaymentStatus { PENDING = 'pending', PROCESSING = 'processing', COMPLETED = 'completed', FAILED = 'failed', REFUNDED = 'refunded', DISPUTED = 'disputed' }
 export enum PaymentPurpose { PLAN_PURCHASE = 'plan_purchase', WALLET_RECHARGE = 'wallet_recharge', SERVICE_PAYMENT = 'service_payment' }
 

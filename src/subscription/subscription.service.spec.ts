@@ -4,6 +4,7 @@ import { SubscriptionService } from './subscription.service'
 import { Subscription, SubscriptionStatus } from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
+import { EventBusService } from '../event-bus/event-bus.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 const createMockRepo = () => ({
@@ -34,6 +35,7 @@ describe('SubscriptionService', () => {
   let subscriptionReadRepo: ReturnType<typeof createMockRepo>
   let eventRepo: ReturnType<typeof createMockRepo>
   let eventReadRepo: ReturnType<typeof createMockRepo>
+  let clientRoles: { assignPlanToBrand: jest.Mock; removePlanFromBrand: jest.Mock; renewPlanForBrand: jest.Mock }
 
   beforeEach(async () => {
     subscriptionRepo = createMockRepo()
@@ -69,10 +71,15 @@ describe('SubscriptionService', () => {
             renewPlanForBrand: jest.fn().mockResolvedValue(true),
           },
         },
+        {
+          provide: EventBusService,
+          useValue: { publishNotification: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile()
 
     service = module.get<SubscriptionService>(SubscriptionService)
+    clientRoles = module.get(ClientRolesService)
   })
 
   describe('getCurrent', () => {
@@ -131,6 +138,55 @@ describe('SubscriptionService', () => {
         triggeredBy: 'user-1',
       }))
       expect(eventRepo.save).toHaveBeenCalled()
+    })
+  })
+
+  describe('startTrial', () => {
+    it('crea un trial de 15 días, asigna el plan en roles y registra el evento', async () => {
+      subscriptionReadRepo.findOne.mockResolvedValue(null)
+      subscriptionRepo.create.mockImplementation((data) => data)
+      subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ id: 'sub-1', ...data }))
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      const result = await service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' })
+
+      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.trialStart).toBeInstanceOf(Date)
+      expect(result.data.trialEnd).toBeInstanceOf(Date)
+      // nextBillingDate = trialEnd para que el cron de conversión lo tome
+      expect(result.data.nextBillingDate).toEqual(result.data.trialEnd)
+      // ~15 días de trial
+      const days = Math.round(
+        (result.data.trialEnd.getTime() - result.data.trialStart.getTime()) / (24 * 3600 * 1000),
+      )
+      expect(days).toBe(15)
+
+      // plan asignado en roles con expiración = fin del trial
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('brand-1', 'pro', result.data.trialEnd)
+
+      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
+        subscriptionId: 'sub-1',
+        eventType: SubscriptionEventType.TRIAL_STARTED,
+        toPlanSlug: 'pro',
+        toStatus: SubscriptionStatus.TRIAL,
+        triggeredBy: 'user-1',
+      }))
+    })
+
+    it('lanza conflicto si la marca ya tiene una suscripción', async () => {
+      subscriptionReadRepo.findOne.mockResolvedValue({ id: 'sub-1', brandId: 'brand-1' })
+
+      await expect(
+        service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
+      ).rejects.toThrow(RequestException)
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rechaza iniciar un trial con el plan free', async () => {
+      await expect(
+        service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'free' }),
+      ).rejects.toThrow(RequestException)
     })
   })
 

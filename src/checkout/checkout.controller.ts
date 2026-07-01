@@ -26,4 +26,15 @@ export class CheckoutController {
     const providers = await this.providerConfigService.getAvailableProviders(country || 'CO')
     return { data: providers }
   }
+
+  @Get('return')
+  @ApiOperation({ summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)' })
+  @ApiResponse({ status: 200, description: 'Estado reconciliado del pago' })
+  async paymentReturn(
+    @Query('paymentId') paymentId?: string,
+    @Query('correlation_id') correlationId?: string,
+  ) {
+    // ConfioPagos redirige con correlation_id = nuestro paymentId.
+    return { data: await this.checkoutService.reconcilePayment(paymentId || correlationId) }
+  }
 }
