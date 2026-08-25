@@ -44,7 +44,6 @@ export class InvoicePdfService {
    * Construye el documento PDF con PDFKit.
    */
   private buildPdf(invoice: Invoice, profile: BillingProfile | null): Promise<Buffer> {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const PDFDocument = require('pdfkit')
 
     return new Promise((resolve, reject) => {
