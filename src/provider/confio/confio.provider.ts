@@ -11,6 +11,11 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import {
+  ConfioSubscriptionPlan,
+  CreateConfioPlanParams,
+  ListConfioPlansResponse,
+} from './confio.types'
 
 /**
  * ConfioPagos — pasarela de pagos colombiana (links de pago one-shot).
@@ -20,8 +25,16 @@ import { logger } from '../../shared/logger/logger'
  * (validado por el mismo `CONFIO_ACCESS_TOKEN` en el header Authorization).
  *
  * No tiene checkout session como Stripe; es un link + confirmación asíncrona,
- * similar a Dropi pero con URL de pago. El cobro recurrente se resuelve
- * re-emitiendo un link cada período (ver TasksService.issueExternalCharge).
+ * similar a Dropi pero con URL de pago.
+ *
+ * Para el cobro recurrente sí tiene API propia de planes y suscripciones
+ * (`/stores/{store}/subscription-plans…`): ConfioPagos cobra cada período y
+ * avisa por webhook. Acá viven, por ahora, sólo los dos métodos de **planes**;
+ * el alta de suscripción sigue sin implementar (ver `createSubscription`).
+ *
+ * ⚠️ `CONFIO_API_BASE_URL` **ya termina en `/v1`** y `confioFetch` concatena, así
+ * que los paths van SIN ese prefijo. Con `/v1` repetido ConfioPagos responde un
+ * 404 en texto plano que parece «ese endpoint no existe».
  *
  * Referencia de contrato: roax-ads-back/internal/payment/.../confiopagos_client.go
  */
@@ -143,6 +156,78 @@ export class ConfioProvider implements PaymentProvider {
    */
   async refundPayment(_providerPaymentId: string, _amount?: number): Promise<RefundResult> {
     throw new Error('ConfioPagos no soporta reembolsos automáticos en esta integración')
+  }
+
+  /**
+   * Crear un plan recurrente en ConfioPagos.
+   *
+   * ⚠️ **Un plan creado NO se puede borrar** y ConfioPagos no expone update:
+   * `amountCents` y `trialPeriodDays` quedan congelados. Además el store está
+   * COMPARTIDO con backend-ads, así que un plan de más ensucia el store de otro
+   * servicio. Todo llamador debe **listar antes de crear** (`listSubscriptionPlans`).
+   *
+   * Por eso hoy este método NO tiene llamador: el alta real de los planes de
+   * `dropi-roax` es una decisión operativa pendiente (ver HUMAN_ACTIONS.md sobre
+   * quién es dueño de las suscripciones en ese store), no algo que dispare el
+   * arranque del servicio.
+   */
+  async createSubscriptionPlan(params: CreateConfioPlanParams): Promise<ConfioSubscriptionPlan> {
+    this.ensureConfigured()
+
+    const body = {
+      displayName: params.displayName,
+      ...(params.description ? { description: params.description } : {}),
+      amountCents: params.amountCents,
+      currencyCode: params.currencyCode,
+      billingCycleFrequency: params.billingCycleFrequency || 'MONTHLY',
+      billingCycleInterval: params.billingCycleInterval ?? 1,
+      trialPeriodDays: params.trialPeriodDays,
+    }
+
+    const resp: ConfioSubscriptionPlan = await this.confioFetch(
+      `/stores/${this.storeId}/subscription-plans`,
+      { method: 'POST', body: JSON.stringify(body) },
+    )
+
+    logger.log(
+      'info',
+      `ConfioProvider: plan de suscripción creado ${resp.name} ` +
+        `(${resp.amountCents} ${resp.currencyCode}, trial ${resp.trialPeriodDays}d)`,
+    )
+
+    return resp
+  }
+
+  /**
+   * Listar todos los planes del store, siguiendo la paginación.
+   *
+   * El listado pagina: quedarse en la primera página puede "no encontrar" un
+   * plan que sí existe y llevar a crear un duplicado imborrable. `nextPageToken`
+   * llega como string VACÍO en la última página, no ausente.
+   */
+  async listSubscriptionPlans(): Promise<ConfioSubscriptionPlan[]> {
+    this.ensureConfigured()
+
+    const out: ConfioSubscriptionPlan[] = []
+    let pageToken: string | undefined
+    // Tope duro: 20 páginas × 100 = 2.000 planes. Corta un token que se repita
+    // en vez de girar para siempre.
+    for (let page = 0; page < 20; page++) {
+      const query = new URLSearchParams({ pageSize: '100' })
+      if (pageToken) query.set('pageToken', pageToken)
+
+      const resp: ListConfioPlansResponse = await this.confioFetch(
+        `/stores/${this.storeId}/subscription-plans?${query.toString()}`,
+        { method: 'GET' },
+      )
+
+      out.push(...(resp.plans ?? []))
+      if (!resp.nextPageToken) return out
+      pageToken = resp.nextPageToken
+    }
+
+    logger.log('warn', 'ConfioProvider: listSubscriptionPlans cortó en el tope de 20 páginas')
+    return out
   }
 
   /**
