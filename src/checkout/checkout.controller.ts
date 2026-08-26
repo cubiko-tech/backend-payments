@@ -15,8 +15,24 @@ export class CheckoutController {
   @Post()
   @ApiOperation({ summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)' })
   @ApiResponse({ status: 201, description: 'Checkout procesado' })
+  @ApiResponse({ status: 400, description: 'INVALID_BRAND_ID: brandId ausente o que no es un UUID' })
+  @ApiResponse({ status: 404, description: 'BRAND_NOT_FOUND: platform no conoce la marca' })
+  @ApiResponse({
+    status: 422,
+    description: 'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o '
+      + 'WALLET_CURRENCY_MISMATCH: no se puede determinar o cobrar el precio',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
+  })
   async processCheckout(@Body() body: CheckoutRequest) {
-    return { data: await this.checkoutService.processCheckout(body) }
+    // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
+    // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
+    // global no tiene metatype contra el cual recortar y NO descarta claves
+    // desconocidas: sin este borrado un llamador HTTP podría pedir el camino de
+    // precios legacy y cobrarse en la moneda que él mande.
+    return { data: await this.checkoutService.processCheckout({ ...body, renewal: undefined }) }
   }
 
   @Get('providers')

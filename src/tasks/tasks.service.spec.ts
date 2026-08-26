@@ -121,7 +121,13 @@ describe('TasksService — processTrialConversions', () => {
     await service.processTrialConversions()
 
     expect(checkoutService.processCheckout).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: 'confio', purpose: 'plan_purchase', planSlug: 'pro', brandId: 'b1' }),
+      expect.objectContaining({
+        provider: 'confio',
+        purpose: 'plan_purchase',
+        planSlug: 'pro',
+        brandId: 'b1',
+        renewal: true,
+      }),
     )
     expect(subscriptionRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),

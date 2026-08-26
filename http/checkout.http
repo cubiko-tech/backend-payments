@@ -9,6 +9,12 @@
 # Flujo: pago → suscripción → factura → DIAN → roles
 # =============================================
 
+# NOTA (alta de plan): en `plan_purchase` el precio se resuelve por `brand.country`
+# contra el catálogo de backend-roles y la moneda es un dato DERIVADO de la fila de
+# precio (o de la fila negociada, en enterprise): `currency` se IGNORA y por eso no
+# aparece en estos ejemplos. `brandId` debe ser un UUID o la request se rechaza con
+# 400 INVALID_BRAND_ID, y si se paga con wallet, la wallet tiene que estar en la
+# moneda resuelta o responde 422 WALLET_CURRENCY_MISMATCH.
 ### Comprar plan Pro con wallet interna
 POST {{HOST}}/checkout HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
@@ -20,7 +26,6 @@ Content-Type: application/json
   "purpose": "plan_purchase",
   "provider": "wallet",
   "planSlug": "pro",
-  "currency": "COP",
   "walletId": "{{WALLET_ID}}"
 }
 
@@ -35,7 +40,6 @@ Content-Type: application/json
   "purpose": "plan_purchase",
   "provider": "stripe",
   "planSlug": "starter",
-  "currency": "COP",
   "successUrl": "https://app.cubiko.dev/payment/success",
   "cancelUrl": "https://app.cubiko.dev/payment/cancel"
 }
@@ -50,8 +54,7 @@ Content-Type: application/json
   "userId": "{{USER_ID}}",
   "purpose": "plan_purchase",
   "provider": "mercadopago",
-  "planSlug": "pro",
-  "currency": "COP"
+  "planSlug": "pro"
 }
 
 ### Comprar plan con Dropi
@@ -64,8 +67,7 @@ Content-Type: application/json
   "userId": "{{USER_ID}}",
   "purpose": "plan_purchase",
   "provider": "dropi",
-  "planSlug": "starter",
-  "currency": "COP"
+  "planSlug": "starter"
 }
 
 ### Recargar wallet interna con Stripe

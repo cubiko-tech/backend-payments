@@ -70,6 +70,8 @@ export class TasksService {
         purpose: 'plan_purchase',
         provider: sub.provider as any,
         planSlug: sub.planSlug,
+        // Renovación: mantiene el precio legacy (COP), no resuelve país.
+        renewal: true,
       })
 
       const previousStatus = sub.status
