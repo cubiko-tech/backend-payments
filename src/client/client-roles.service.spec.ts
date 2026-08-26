@@ -149,7 +149,13 @@ describe('ClientRolesService', () => {
       expect(result.code).not.toBe(PLAN_NOT_FOUND)
     })
 
-    it('cae a la fila isDefault del plan cuando no hay fila del país pedido', async () => {
+    /**
+     * `isDefault` desempata entre filas del MISMO país; NO suple a un país
+     * ausente. Caer a la fila de otro país le cobraría 19.900 COP a una marca
+     * mexicana sin que nadie se entere, y el criterio 1 de la épica 002 pide lo
+     * contrario: rechazar cuando el precio falta del catálogo.
+     */
+    it('rechaza cuando el país pedido no tiene fila, sin caer a la de otro país', async () => {
       global.fetch = mockPlans([
         {
           slug: 'dropi-roax',
@@ -161,8 +167,8 @@ describe('ClientRolesService', () => {
       ]) as unknown as typeof fetch
 
       const result = await service.resolvePriceForCountry('dropi-roax', 'MX')
-      expect(result.ok).toBe(true)
-      expect(result.price.id).toBe('p-co')
+      expect(result.ok).toBe(false)
+      expect(result.code).toBe(PRICE_NOT_FOUND_FOR_COUNTRY)
     })
 
     /**

@@ -137,9 +137,12 @@ export class ClientRolesService {
       if (winner) return { ok: true, price: winner }
     }
 
-    const fallback = rows.find((row) => row.isDefault)
-    if (fallback) return { ok: true, price: fallback }
-
+    // Sin fila para ese país NO se cae a la de otro. `isDefault` desempata entre
+    // filas del MISMO país (arriba), no suple a un país ausente: son dos cosas
+    // distintas y confundirlas le cobraría 19.900 COP a una marca argentina o
+    // mexicana sin que nadie se entere. Rechazar es la decisión del criterio 1
+    // de la épica 002 —«rechazar el alta cuando el plan o la moneda faltan del
+    // catálogo»—, y agregar un país es una decisión comercial, no un default.
     return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY }
   }
 
