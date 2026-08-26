@@ -211,6 +211,71 @@ describe('ClientPlatformService — país de la marca', () => {
     })
   })
 
+  describe('caché de país (el alta no puede depender de que platform conteste siempre)', () => {
+    it('dos resoluciones seguidas de la misma marca consultan platform UNA vez', async () => {
+      const fetchMock = mockOk(brandBody())
+      global.fetch = fetchMock as unknown as typeof fetch
+
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('marcas distintas no comparten entrada', async () => {
+      const fetchMock = mockOk(brandBody())
+      global.fetch = fetchMock as unknown as typeof fetch
+
+      await service.resolveBrandCountry(BRAND_ID)
+      await service.resolveBrandCountry('11111111-2222-4333-8444-555555555555')
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+
+    /**
+     * Sin esto, la disponibilidad del alta es el PRODUCTO de la de payments por la
+     * de platform: un parpadeo de platform convierte cada alta en un 503. Un país no
+     * cambia entre dos cobros, así que servir el valor cacheado es estrictamente
+     * mejor que degradar al usuario.
+     */
+    it('si platform deja de responder, se sirve el país cacheado en vez de un fallo transitorio', async () => {
+      global.fetch = mockOk(brandBody()) as unknown as typeof fetch
+      await service.resolveBrandCountry(BRAND_ID)
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000)
+      global.fetch = mockStatus(500, { statusCode: 500 }) as unknown as typeof fetch
+
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+    })
+
+    /**
+     * Un fallo DEFINITIVO sí desmiente lo cacheado: platform contestó y dijo que esa
+     * marca no está. Servir el país viejo ahí sería inventar un hecho.
+     */
+    it('un 200 con `{}` (marca inexistente) invalida la entrada y se propaga', async () => {
+      global.fetch = mockOk(brandBody()) as unknown as typeof fetch
+      await service.resolveBrandCountry(BRAND_ID)
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000)
+      global.fetch = mockOk({}) as unknown as typeof fetch
+
+      const result = await service.resolveBrandCountry(BRAND_ID)
+      expect(result.ok).toBe(false)
+      expect(result.code).toBe(BRAND_NOT_FOUND)
+    })
+
+    it('invalidateCountryCache fuerza una consulta nueva', async () => {
+      const fetchMock = mockOk(brandBody())
+      global.fetch = fetchMock as unknown as typeof fetch
+
+      await service.resolveBrandCountry(BRAND_ID)
+      service.invalidateCountryCache()
+      await service.resolveBrandCountry(BRAND_ID)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+  })
+
   it('el caso feliz de resolveBrandCountry devuelve ok con el país normalizado', async () => {
     global.fetch = mockOk(brandBody({ country: ' co ' })) as unknown as typeof fetch
 

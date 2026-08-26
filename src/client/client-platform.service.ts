@@ -47,11 +47,32 @@ export type BrandCountryResolution =
 export class ClientPlatformService {
   private readonly logger = new Logger(ClientPlatformService.name)
 
+  /**
+   * Caché en memoria de brandId → país, mismo molde que `ClientRolesService`.
+   *
+   * Existe porque `resolveBrandCountry` pasó a estar en el camino crítico del
+   * checkout: sin caché, la disponibilidad del alta es el PRODUCTO de la de
+   * payments por la de platform, y un parpadeo de platform convierte cada alta en
+   * un 503. Sólo se cachean las resoluciones EXITOSAS (nunca los fallos), y ante
+   * un fallo TRANSITORIO se sirve la entrada vencida antes que degradar al
+   * usuario; un fallo definitivo (la marca no está, o perdió el país) borra la
+   * entrada. Costo: un cambio de país en platform tarda hasta el TTL en verse.
+   */
+  private countryCache = new Map<string, { country: string; fetchedAt: number }>()
+  private readonly COUNTRY_CACHE_TTL_MS = 5 * 60 * 1000
+  /** Tope defensivo: el caché es por marca y el proceso es de larga vida. */
+  private readonly COUNTRY_CACHE_MAX = 1000
+
   private get platformUrl(): string {
     return process.env.SERVICE_PLATFORM || ''
   }
   private get accessServer(): string {
     return process.env.ACCESS_SERVER || ''
+  }
+
+  /** Vaciar el caché de países (útil tras un cambio administrativo de marca). */
+  invalidateCountryCache() {
+    this.countryCache.clear()
   }
 
   /**
@@ -99,6 +120,11 @@ export class ClientPlatformService {
    * modos de fallo en `null` para quien sólo quiera el dato. Quien necesite
    * distinguir "no pude preguntar" de "esa marca no está" usa el otro método.
    *
+   * DECISIÓN EXPLÍCITA: hoy no tiene consumidores de producción —el checkout usa
+   * `resolveBrandCountry`, que es el que puede mapear cada fallo a su HTTP— y se
+   * CONSERVA como API simple para consultas donde el país es informativo y un
+   * `null` alcanza. Si dentro de un par de pases sigue sin llamador, se borra.
+   *
    * SONDA REAL (2026-08-25) contra dev por HTTPS vía gateway,
    * `GET https://app.roaxai.dev/platform/v1/brand/:id` con `Bearer ACCESS_SERVER`,
    * brandId `72a8463b-…-66a0985a10e6`. Cuatro formas observadas:
@@ -138,10 +164,45 @@ export class ClientPlatformService {
    * definitivo del llamador. En payments el brandId viene de un DTO ya
    * validado; si aparece un camino con id libre, hay que darle su propio código.
    *
-   * DEUDA CONOCIDA: sin caché. Es una llamada por alta, pero si un camino
-   * caliente lo consume habrá que cachear como hace `ClientRolesService`.
+   * Cacheado 5 minutos (ver `countryCache`): es una llamada por alta, pero el alta
+   * es el camino del dinero y no puede depender de que platform conteste siempre.
    */
   async resolveBrandCountry(brandId: string): Promise<BrandCountryResolution> {
+    const cached = this.countryCache.get(brandId)
+    if (cached && Date.now() - cached.fetchedAt < this.COUNTRY_CACHE_TTL_MS) {
+      return { ok: true, country: cached.country }
+    }
+
+    const fresh = await this.fetchBrandCountry(brandId)
+
+    if (fresh.ok) {
+      this.rememberCountry(brandId, fresh.country)
+      return fresh
+    }
+
+    // Fallo TRANSITORIO con entrada vencida: se sirve el país viejo. Un país no
+    // cambia entre dos cobros, y la alternativa es un 503 en el alta por un
+    // parpadeo de platform. Mismo criterio que el caché vencido de precios.
+    if (fresh.code === BRAND_LOOKUP_UNAVAILABLE && cached) {
+      this.logger.warn(`Usando el país cacheado de la marca ${brandId} (platform no responde)`)
+      return { ok: true, country: cached.country }
+    }
+
+    // Fallo DEFINITIVO: platform contestó y dijo que esa marca no está, o que
+    // perdió el país. Lo cacheado quedó desmentido.
+    if (fresh.code !== BRAND_LOOKUP_UNAVAILABLE) this.countryCache.delete(brandId)
+
+    return fresh
+  }
+
+  /** Guardar el país con tope de tamaño (el proceso es de larga vida). */
+  private rememberCountry(brandId: string, country: string) {
+    if (this.countryCache.size >= this.COUNTRY_CACHE_MAX) this.countryCache.clear()
+    this.countryCache.set(brandId, { country, fetchedAt: Date.now() })
+  }
+
+  /** La consulta cruda a platform, sin caché: los modos de fallo viven acá. */
+  private async fetchBrandCountry(brandId: string): Promise<BrandCountryResolution> {
     if (!this.platformUrl) {
       this.logger.warn('SERVICE_PLATFORM no configurado — país de la marca no disponible')
       return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }

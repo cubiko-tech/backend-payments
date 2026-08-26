@@ -71,10 +71,17 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
   let enterprisePricing: { getForBrand: jest.Mock }
   let walletService: { debit: jest.Mock; findById: jest.Mock }
   let providerFactory: { getProvider: jest.Mock }
+  let providerConfig: { isProviderAvailable: jest.Mock }
+  let taxService: { getTaxForCountry: jest.Mock }
+  let dianService: { isConfigured: jest.Mock; sendInvoice: jest.Mock }
   let createCheckout: jest.Mock
 
-  /** La wallet que `checkout` lee para comparar monedas antes de debitar. */
-  const walletEn = (currency: string) => ({ data: { id: 'w-1', currency } })
+  /**
+   * La wallet que `checkout` lee antes de debitar. Trae `brandId`: desde que la
+   * guarda también verifica pertenencia, una wallet sin dueño es una wallet ajena.
+   */
+  const walletEn = (currency: string, brandId: string = BRAND_ID) =>
+    ({ data: { id: 'w-1', brandId, currency } })
 
   beforeEach(async () => {
     paymentRepo = createMockRepo()
@@ -119,7 +126,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         },
         {
           provide: DianService,
-          useValue: { isConfigured: jest.fn().mockReturnValue(false), sendInvoice: jest.fn() },
+          useValue: {
+            isConfigured: jest.fn().mockReturnValue(false),
+            sendInvoice: jest.fn().mockResolvedValue({ success: true }),
+          },
         },
         { provide: ProviderFactory, useValue: { getProvider: jest.fn(() => ({ createCheckout })) } },
         {
@@ -157,6 +167,9 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     enterprisePricing = module.get(EnterprisePricingService)
     walletService = module.get(WalletService)
     providerFactory = module.get(ProviderFactory)
+    providerConfig = module.get(ProviderConfigService)
+    taxService = module.get(TaxService)
+    dianService = module.get(DianService)
   })
 
   /** Alta con wallet: saltea el gate de proveedor y llega a `paymentRepo.create`. */
@@ -218,7 +231,14 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
     })
 
-    it('plan free → cobra 0 en la moneda de la fila real del país (no un cero fabricado)', async () => {
+    /**
+     * Fila REAL del catálogo de dev, medida el 2026-08-25 con `GET /v1/plan`:
+     * `free -> US:USD:0.00 | CO:COP:0.00:DEFAULT`. O sea que `free` **sí** resuelve
+     * por país y cobra 0; el cero no es fabricado, sale de la fila. Se fija acá para
+     * que quitarle las filas al plan se note como un cambio de contrato y no como un
+     * 422 sorpresa en `POST /checkout`.
+     */
+    it('plan free → cobra 0 con la fila real del país (medida en el catálogo de dev)', async () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'CO' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
@@ -231,6 +251,54 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(paymentRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ amount: 0, currency: 'COP' }),
       )
+    })
+
+    /**
+     * El otro desenlace, para un plan que sí está sin filas en dev
+     * (`ally_dropi_pro`/`ally_dropi_free`): el alta se rechaza con 422 y no persiste
+     * nada. Es el caso demostrable de "país sin precio → rechazo".
+     */
+    it('plan sin filas en el catálogo → 422 y nada persistido', async () => {
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: false,
+        code: PRICE_NOT_FOUND_FOR_COUNTRY,
+      })
+
+      await expect(
+        service.processCheckout(altaConWallet({ planSlug: 'ally_dropi_pro' })),
+      ).rejects.toMatchObject({ code: PRICE_NOT_FOUND_FOR_COUNTRY })
+
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['no numérico', 'no-es-un-precio'],
+      ['ausente', null],
+      ['negativo', -1],
+    ])('fila de precio malformada (%s) → 422, no cobra NaN ni regala el plan', async (_caso, price) => {
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: true,
+        price: priceRow({ price: price as unknown as number }),
+      })
+
+      await expect(
+        service.processCheckout(altaConWallet()),
+      ).rejects.toMatchObject({ code: PRICE_NOT_FOUND_FOR_COUNTRY })
+
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['con salto de línea', 'dropi-roax\nfake-log-line'],
+      ['con path traversal', '../../admin'],
+    ])('planSlug %s → 400 INVALID_PLAN_SLUG sin consultar nada', async (_caso, planSlug) => {
+      await expect(
+        service.processCheckout(altaConWallet({ planSlug })),
+      ).rejects.toMatchObject({ code: 'INVALID_PLAN_SLUG' })
+
+      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+      expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
     })
   })
   describe('fallos de resolución (nada se persiste)', () => {
@@ -262,19 +330,22 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       await esperarFallo(altaConWallet(), BRAND_WITHOUT_COUNTRY, HttpStatus.UNPROCESSABLE_ENTITY)
     })
 
-    it('plan sin precio para el país → 422 PRICE_NOT_FOUND_FOR_COUNTRY nombrando plan y país', async () => {
+    it('plan sin precio para el país → 422 nombrando el plan pero NO el país de la marca', async () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY })
 
-      expect.assertions(4)
+      expect.assertions(5)
       try {
         await service.processCheckout(altaConWallet({ planSlug: 'ally_dropi_pro' }))
       } catch (error) {
         expect((error as RequestException).code).toBe(PRICE_NOT_FOUND_FOR_COUNTRY)
         expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
         expect((error as RequestException).getResponse()).toMatchObject({
-          message: expect.stringMatching(/ally_dropi_pro.*MX/),
+          message: expect.stringContaining('ally_dropi_pro'),
         })
+        // El endpoint contesta sin autenticar: devolver el país lo convertiría en un
+        // lector del país de cualquier marca. El país va al log, no al cliente.
+        expect(JSON.stringify((error as RequestException).getResponse())).not.toContain('MX')
       }
       expect(paymentRepo.save).not.toHaveBeenCalled()
     })
@@ -322,8 +393,16 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
   })
 
-  describe('renovación del cron (no cambia de comportamiento)', () => {
-    it('renewal:true en marca US cobra el precio legacy en COP y no resuelve país', async () => {
+  describe('renovación del cron (indulgente: intenta el país, cae al legacy)', () => {
+    /**
+     * El criterio (e) pide "estricto en el alta, indulgente en la renovación": la
+     * renovación intenta el mismo catálogo por país y sólo cae al precio legacy si
+     * NO puede resolverlo. Que el alta cobre en USD y la renovación de la MISMA
+     * suscripción en COP —para siempre, porque `subscriptions` no guarda moneda— es
+     * lo que estos tests prohíben.
+     */
+    it('renewal:true en marca US cobra 6,99 USD: alta y renovación no divergen', async () => {
+      walletService.findById.mockResolvedValue(walletEn('USD'))
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
@@ -332,15 +411,68 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
       await service.processCheckout(altaConWallet({ renewal: true }))
 
-      expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('dropi-roax', 'COP')
-      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
-      expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
+      expect(clientRoles.resolvePriceForCountry).toHaveBeenCalledWith('dropi-roax', 'US')
+      expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
       expect(paymentRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: LEGACY_SENTINEL, currency: 'COP' }),
+        expect.objectContaining({ amount: 6.99, currency: 'USD' }),
       )
     })
 
+    it.each([
+      ['platform no responde', { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }],
+      ['la marca no existe', { ok: false, code: BRAND_NOT_FOUND }],
+      ['la marca no tiene país', { ok: false, code: BRAND_WITHOUT_COUNTRY }],
+    ])('si %s, la renovación NO falla: cae al precio legacy', async (_caso, resolution) => {
+      const logError = jest.spyOn((service as any).log, 'error').mockImplementation(() => undefined)
+      clientPlatform.resolveBrandCountry.mockResolvedValue(resolution)
+
+      await service.processCheckout(altaConWallet({ renewal: true }))
+
+      // Ser estricto acá no da un 4xx a nadie: `issueExternalCharge` atrapa, marca
+      // `past_due` sin link de pago y tras MAX_RETRY degrada la marca a free.
+      expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('dropi-roax', 'COP')
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: LEGACY_SENTINEL, currency: 'COP' }),
+      )
+      expect(logError).toHaveBeenCalledWith(expect.stringContaining(BRAND_ID))
+    })
+
+    it('si el plan no tiene precio para el país, la renovación cae al legacy con el país en el log', async () => {
+      const logError = jest.spyOn((service as any).log, 'error').mockImplementation(() => undefined)
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY })
+
+      await service.processCheckout(altaConWallet({ renewal: true }))
+
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: LEGACY_SENTINEL, currency: 'COP' }),
+      )
+      expect(logError).toHaveBeenCalledWith(expect.stringContaining('MX'))
+      expect(logError).toHaveBeenCalledWith(expect.stringContaining(PRICE_NOT_FOUND_FOR_COUNTRY))
+    })
+
+    /**
+     * `subscriptions.brandId` es un `varchar` sin FK ni tipo `uuid`, y la convención
+     * del monorepo es que los ids cross-service son strings. Aplicarle al cron la
+     * guarda de UUID del alta convertía toda suscripción con un id no canónico en un
+     * `past_due` sin link de pago y, tras MAX_RETRY, en una marca degradada a free.
+     */
+    it('renewal:true con un brandId que no es UUID cobra el precio legacy y NO lanza', async () => {
+      const logError = jest.spyOn((service as any).log, 'error').mockImplementation(() => undefined)
+      walletService.findById.mockResolvedValue(walletEn('COP', 'b1'))
+
+      await service.processCheckout(altaConWallet({ renewal: true, brandId: 'b1' }))
+
+      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+      expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('dropi-roax', 'COP')
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ brandId: 'b1', amount: LEGACY_SENTINEL, currency: 'COP' }),
+      )
+      expect(logError).toHaveBeenCalledWith(expect.stringContaining('b1'))
+    })
+
     it('renewal:true sin precio legacy sigue lanzando INVALID_PLAN', async () => {
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code: BRAND_LOOKUP_UNAVAILABLE })
       clientRoles.getPlanPrice.mockResolvedValue(null)
 
       await expect(
@@ -349,20 +481,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(paymentRepo.save).not.toHaveBeenCalled()
     })
 
-    it('los mismos datos SIN renewal resuelven por país (el atajo es del llamador, no de los datos)', async () => {
-      walletService.findById.mockResolvedValue(walletEn('USD'))
-      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
-      clientRoles.resolvePriceForCountry.mockResolvedValue({
-        ok: true,
-        price: priceRow({ countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
-      })
-
-      await service.processCheckout(altaConWallet())
-
-      expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
-      expect(paymentRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: 6.99, currency: 'USD' }),
-      )
+    it('el alta con los mismos datos exige UUID; la renovación no (el atajo es del llamador)', async () => {
+      await expect(
+        service.processCheckout(altaConWallet({ brandId: 'b1' })),
+      ).rejects.toMatchObject({ code: 'INVALID_BRAND_ID' })
     })
   })
 
@@ -425,14 +547,30 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
     })
 
-    it('renovación: con la fila negociada en otra moneda sigue cayendo al precio legacy', async () => {
-      enterprisePricing.getForBrand.mockResolvedValue({ monthlyPrice: 900, currency: 'USD' })
+    it('renovación: la fila negociada en la moneda legacy manda, sin consultar el país', async () => {
+      enterprisePricing.getForBrand.mockResolvedValue({ monthlyPrice: 900, currency: 'COP' })
 
       await service.processCheckout(altaConWallet({ planSlug: 'enterprise', renewal: true }))
 
-      expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('enterprise', 'COP')
       expect(paymentRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: LEGACY_SENTINEL, currency: 'COP' }),
+        expect.objectContaining({ amount: 900, currency: 'COP' }),
+      )
+      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+    })
+
+    it('renovación: con la fila negociada en otra moneda pasa al catálogo por país', async () => {
+      enterprisePricing.getForBrand.mockResolvedValue({ monthlyPrice: 900, currency: 'USD' })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: true,
+        price: priceRow({ currency: 'COP', price: 599000 }),
+      })
+
+      await service.processCheckout(altaConWallet({ planSlug: 'enterprise', renewal: true }))
+
+      // La comparación legacy `customPricing.currency === req.currency` queda intacta
+      // en la renovación; lo que cambia es a dónde cae cuando no matchea.
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 599000, currency: 'COP' }),
       )
     })
   })
@@ -473,6 +611,124 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
       expect(walletService.debit).toHaveBeenCalledWith('w-1', 6.99, expect.any(Object))
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
+    })
+
+    /**
+     * `WalletService.findById(undefined)` NO falla: TypeORM descarta las condiciones
+     * `undefined` y la consulta degenera en "la primera wallet de la tabla", así que
+     * sin este rechazo la guarda compararía —y filtraría— la moneda de una wallet
+     * ajena mientras el débito posterior toca otra.
+     */
+    it('sin walletId → 400 MISSING_WALLET_ID antes de leer wallet alguna', async () => {
+      await expect(
+        service.processCheckout(altaConWallet({ walletId: undefined })),
+      ).rejects.toMatchObject({ code: 'MISSING_WALLET_ID' })
+
+      expect(walletService.findById).not.toHaveBeenCalled()
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('wallet de OTRA marca → 404 genérico, sin decir en qué moneda está', async () => {
+      walletService.findById.mockResolvedValue(walletEn('COP', 'otra-marca'))
+
+      expect.assertions(4)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect((error as RequestException).code).toBe('WALLET_NOT_FOUND')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.NOT_FOUND)
+        expect(JSON.stringify((error as RequestException).getResponse())).not.toContain('COP')
+      }
+      expect(walletService.debit).not.toHaveBeenCalled()
+    })
+
+    /**
+     * La guarda es del alta de plan: es el único camino cuya moneda dejó de ser la
+     * del llamador. Un `service_payment` sigue cobrando lo que pide el llamador y no
+     * gana un 422 que antes no existía.
+     */
+    it('service_payment con wallet en otra moneda sigue pasando (guarda acotada al alta)', async () => {
+      walletService.findById.mockResolvedValue(walletEn('COP'))
+
+      await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-1',
+        amount: 50,
+        currency: 'USD',
+      })
+
+      expect(walletService.debit).toHaveBeenCalledWith('w-1', 50, expect.any(Object))
+    })
+  })
+
+  describe('coherencia de país: proveedor, impuesto y DIAN', () => {
+    const marcaUS = () => {
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: true,
+        price: priceRow({ countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
+      })
+    }
+
+    /**
+     * El monto viaja en la moneda del país de la marca; gatear al proveedor por el
+     * perfil de facturación (`|| 'CO'`) le mandaba USD a un proveedor habilitado
+     * sólo para CO y nunca validado para esa moneda.
+     */
+    it('el gate de proveedor usa el país que decidió el precio, no el de facturación', async () => {
+      marcaUS()
+
+      await service.processCheckout(
+        altaConWallet({ provider: 'stripe', walletId: undefined }),
+      )
+
+      expect(providerConfig.isProviderAvailable).toHaveBeenCalledWith('US', 'stripe')
+    })
+
+    it('proveedor no habilitado en el país del precio → PROVIDER_NOT_AVAILABLE', async () => {
+      marcaUS()
+      providerConfig.isProviderAvailable.mockResolvedValue(false)
+
+      await expect(
+        service.processCheckout(altaConWallet({ provider: 'confio', walletId: undefined })),
+      ).rejects.toMatchObject({ code: 'PROVIDER_NOT_AVAILABLE' })
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('precio en USD → el impuesto se calcula para US, no el 19% colombiano', async () => {
+      marcaUS()
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      await service.processCheckout(altaConWallet())
+
+      expect(taxService.getTaxForCountry).toHaveBeenCalledWith('US')
+    })
+
+    it('precio en COP → el impuesto sigue saliendo del perfil de facturación', async () => {
+      await service.processCheckout(altaConWallet())
+
+      expect(taxService.getTaxForCountry).toHaveBeenCalledWith('CO')
+    })
+
+    it('factura en USD → no se manda a la DIAN aunque esté configurada', async () => {
+      marcaUS()
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+      dianService.isConfigured.mockReturnValue(true)
+
+      await service.processCheckout(altaConWallet())
+
+      expect(dianService.sendInvoice).not.toHaveBeenCalled()
+    })
+
+    it('factura en COP → se manda a la DIAN como hasta hoy', async () => {
+      dianService.isConfigured.mockReturnValue(true)
+
+      await service.processCheckout(altaConWallet())
+
+      expect(dianService.sendInvoice).toHaveBeenCalledWith('inv-1')
     })
   })
 

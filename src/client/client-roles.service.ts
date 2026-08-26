@@ -117,12 +117,16 @@ export class ClientRolesService {
    *
    * Dos decisiones de borde deliberadas:
    * - un `countryCode` vacío o en blanco va directo a la fila `isDefault`;
-   * - `free` (sin filas de precio reales) responde `PRICE_NOT_FOUND_FOR_COUNTRY`
-   *   en vez de un cero fabricado, para que el alta no persista un id de precio
-   *   inventado.
+   * - un plan SIN filas de precio responde `PRICE_NOT_FOUND_FOR_COUNTRY` en vez del
+   *   cero fabricado que sí produce `getAllPlanPrices`, para que el alta no persista
+   *   un precio inventado. Medido en dev el 2026-08-25 con `GET /v1/plan`: los
+   *   planes sin filas son `ally_dropi_pro` y `ally_dropi_free`; **`free` SÍ tiene
+   *   filas reales de 0.00** (CO/COP `isDefault` y US/USD), así que resuelve normal
+   *   y cobra 0 — no lo alcanza esta rama.
    *
-   * La fila se devuelve por referencia desde el caché: quien la reciba no debe
-   * mutarla o corrompe el precio para todos los consumidores hasta que expire.
+   * La fila se devuelve por referencia desde el caché, pero viene CONGELADA
+   * (`Object.freeze` al construir el caché): la invariante "no la mutes" está
+   * impuesta, no sólo documentada.
    */
   async resolvePriceForCountry(planSlug: string, countryCode: string): Promise<PriceResolution> {
     const rowsByPlan = await this.getPlanRows()
@@ -210,18 +214,21 @@ export class ClientRolesService {
 
       if (Array.isArray(plan.prices)) {
         for (const price of plan.prices) {
-          rows.push({
+          // Congelada: la fila se entrega por referencia desde el caché y una
+          // mutación de un consumidor corrompería el precio para todos hasta que
+          // expire el TTL.
+          rows.push(Object.freeze({
             id: String(price.id),
             countryCode: String(price.countryCode ?? ''),
             // `price` viaja como string: `plan_prices.price` es decimal en backend-roles.
             currency: String(price.currency),
             price: Number(price.price),
             isDefault: !!price.isDefault,
-          })
+          }))
         }
       }
 
-      pricesMap.set(plan.slug, rows)
+      pricesMap.set(plan.slug, Object.freeze(rows) as PlanPriceRow[])
     }
 
     this.logger.log(`Precios actualizados desde backend-roles: ${pricesMap.size} planes`)
@@ -251,7 +258,7 @@ export class ClientRolesService {
     }
     try {
       const url =
-        `${this.rolesUrl}/v1/effective/check/${subjectId}/` +
+        `${this.rolesUrl}/v1/effective/check/${encodeURIComponent(subjectId)}/` +
         `${encodeURIComponent(permissionSlug)}?type=${type}`
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.accessServer}` },
@@ -278,7 +285,7 @@ export class ClientRolesService {
    */
   async assignPlanToBrand(brandId: string, planSlug: string, expiresAt?: Date): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}`,
       'POST',
       expiresAt ? { expiresAt: expiresAt.toISOString() } : undefined,
       `Plan ${planSlug} asignado a marca ${brandId}`,
@@ -290,7 +297,7 @@ export class ClientRolesService {
    */
   async removePlanFromBrand(brandId: string, planSlug: string): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}`,
       'DELETE',
       undefined,
       `Plan ${planSlug} removido de marca ${brandId}`,
@@ -302,7 +309,7 @@ export class ClientRolesService {
    */
   async renewPlanForBrand(brandId: string, planSlug: string, expiresAt: Date): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}/renew`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}/renew`,
       'POST',
       { expiresAt: expiresAt.toISOString() },
       `Plan ${planSlug} renovado para marca ${brandId} hasta ${expiresAt.toISOString()}`,

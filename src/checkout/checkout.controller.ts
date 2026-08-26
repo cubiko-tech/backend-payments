@@ -15,8 +15,16 @@ export class CheckoutController {
   @Post()
   @ApiOperation({ summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)' })
   @ApiResponse({ status: 201, description: 'Checkout procesado' })
-  @ApiResponse({ status: 400, description: 'INVALID_BRAND_ID: brandId ausente o que no es un UUID' })
-  @ApiResponse({ status: 404, description: 'BRAND_NOT_FOUND: platform no conoce la marca' })
+  @ApiResponse({
+    status: 400,
+    description: 'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG '
+      + 'o MISSING_WALLET_ID (pago con wallet sin walletId)',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'BRAND_NOT_FOUND (platform no conoce la marca) o WALLET_NOT_FOUND '
+      + '(la wallet no existe o no es de esa marca)',
+  })
   @ApiResponse({
     status: 422,
     description: 'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o '

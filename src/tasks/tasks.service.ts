@@ -70,7 +70,10 @@ export class TasksService {
         purpose: 'plan_purchase',
         provider: sub.provider as any,
         planSlug: sub.planSlug,
-        // Renovación: mantiene el precio legacy (COP), no resuelve país.
+        // Renovación: resuelve por país como el alta pero es INDULGENTE — si no
+        // puede (marca no consultable, sin país, plan sin fila) cae al precio
+        // legacy en vez de fallar, porque un fallo acá deja la suscripción
+        // `past_due` sin link de pago. Ver `CheckoutService.renewalPlanPrice`.
         renewal: true,
       })
 

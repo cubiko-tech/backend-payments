@@ -13,8 +13,14 @@
 # contra el catálogo de backend-roles y la moneda es un dato DERIVADO de la fila de
 # precio (o de la fila negociada, en enterprise): `currency` se IGNORA y por eso no
 # aparece en estos ejemplos. `brandId` debe ser un UUID o la request se rechaza con
-# 400 INVALID_BRAND_ID, y si se paga con wallet, la wallet tiene que estar en la
-# moneda resuelta o responde 422 WALLET_CURRENCY_MISMATCH.
+# 400 INVALID_BRAND_ID, y si se paga con wallet hay que mandar `walletId` (400
+# MISSING_WALLET_ID), la wallet tiene que ser de esa marca (404 WALLET_NOT_FOUND) y
+# estar en la moneda resuelta (422 WALLET_CURRENCY_MISMATCH).
+#
+# El país de la marca decide además a qué proveedores se puede pagar: el gate usa
+# ESE país y no el del perfil de facturación, así que un plan en USD sólo sale por
+# un proveedor habilitado para ese país en `provider_config` (si no, 400
+# PROVIDER_NOT_AVAILABLE). Y una factura que no está en COP no se envía a la DIAN.
 ### Comprar plan Pro con wallet interna
 POST {{HOST}}/checkout HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
