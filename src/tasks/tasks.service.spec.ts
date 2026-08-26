@@ -90,7 +90,9 @@ describe('TasksService — processTrialConversions', () => {
 
     await service.processTrialConversions()
 
-    expect(walletService.debit).toHaveBeenCalled()
+    // 3 argumentos exactos: el cron NO pasa `expectedCurrency`. La aserción se rompe el
+    // día que alguien cablee la guarda de moneda dentro de `renewFromWallet`.
+    expect(walletService.debit).toHaveBeenCalledWith('w1', 50000, expect.any(Object))
     expect(subscriptionRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
     )

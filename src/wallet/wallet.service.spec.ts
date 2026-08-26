@@ -4,6 +4,7 @@ import { WalletService } from './wallet.service'
 import { Wallet } from './entities/wallet.entity'
 import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
+import { HttpStatus } from '@nestjs/common'
 
 const createMockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -208,6 +209,60 @@ describe('WalletService', () => {
         where: { id: 'w1' },
         lock: { mode: 'pessimistic_write' },
       })
+    })
+  })
+
+  /**
+   * La guarda de moneda es del camino del alta: `checkout.processWalletPayment` pasa la
+   * moneda ya resuelta por país y `debit` la vuelve a comparar contra la fila BLOQUEADA.
+   * El parámetro es opcional a propósito — el cron (`renewFromWallet`) sigue llamando con
+   * tres argumentos y no gana un rechazo que hoy no tiene.
+   */
+  describe('debit — guarda de moneda', () => {
+    it('moneda distinta → 422 WALLET_CURRENCY_MISMATCH y no deja movimiento', async () => {
+      const wallet = { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 200 }
+      mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
+
+      expect.assertions(6)
+      try {
+        await service.debit('w1', 80, {}, 'USD')
+      } catch (error) {
+        expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+      // "No deja movimiento" = ni balance tocado ni fila en `transactions`: la guarda
+      // corre antes de cualquier `save` y el `catch` revierte la transacción abierta.
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.release).toHaveBeenCalled()
+    })
+
+    it('moneda igual → debita normalmente', async () => {
+      const wallet = { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 200 }
+      mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
+
+      const result = await service.debit('w1', 80, {}, 'COP')
+
+      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(Transaction, expect.objectContaining({
+        type: TransactionType.DEBIT,
+        amount: 80,
+        balanceBefore: 200,
+        balanceAfter: 120,
+      }))
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(result.data).toBeDefined()
+    })
+
+    it('sin el argumento la wallet se debita igual que hoy (el camino del cron)', async () => {
+      const wallet = { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 200 }
+      mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
+
+      const result = await service.debit('w1', 80, {})
+
+      expect(result.data).toBeDefined()
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).not.toHaveBeenCalled()
     })
   })
 

@@ -596,8 +596,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
         expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
       }
-      // `WalletService.debit` no compara monedas: sin esta guarda se debitaban 6,99 COP
-      // (≈USD 0,002) por un plan de 6,99 USD, con factura emitida en USD.
+      // Sin esta guarda se debitaban 6,99 COP (≈USD 0,002) por un plan de 6,99 USD, con
+      // factura emitida en USD. El pre-chequeo sigue existiendo aunque `WalletService.debit`
+      // ya compare monedas: acá el 422 llega ANTES de persistir la fila de `payments`, y
+      // `debit` vuelve a comparar sobre la fila bloqueada como último respaldo.
       expect(walletService.debit).not.toHaveBeenCalled()
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
       expect(paymentRepo.save).not.toHaveBeenCalled()
@@ -609,7 +611,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
       await service.processCheckout(altaConWallet())
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 6.99, expect.any(Object))
+      expect(walletService.debit).toHaveBeenCalledWith('w-1', 6.99, expect.any(Object), 'USD')
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
 
@@ -660,7 +662,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         currency: 'USD',
       })
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 50, expect.any(Object))
+      expect(walletService.debit).toHaveBeenCalledWith('w-1', 50, expect.any(Object), undefined)
     })
   })
 

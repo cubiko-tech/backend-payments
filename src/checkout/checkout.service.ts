@@ -242,7 +242,20 @@ export class CheckoutService implements OnModuleInit {
     }))
 
     try {
-      // Debitar wallet (atómico con pessimistic lock)
+      // Debitar wallet (atómico con pessimistic lock).
+      //
+      // La moneda viaja como 4º argumento SÓLO en el alta de plan, el mismo alcance que
+      // `assertWalletCurrency`: es el único camino cuya moneda dejó de ser la del llamador
+      // (sale del país de la marca). Un `service_payment` sigue cobrando lo que pide el
+      // llamador y no gana un 422 que antes no existía. Es defensa en profundidad: el
+      // pre-chequeo devuelve el 422 barato antes de persistir la fila de `payments`, y
+      // `debit` vuelve a comparar sobre la fila ya bloqueada.
+      //
+      // DEUDA CONOCIDA (de otra tarea, no se toca acá): el `catch` de abajo reetiqueta
+      // TODO fallo de wallet como `INSUFFICIENT_BALANCE` 400, así que si este respaldo
+      // llegara a dispararse desde checkout saldría bajo el código equivocado. Destaparlo
+      // también cambiaría el status de `WALLET_FROZEN`/`WALLET_CLOSED`/`INSUFFICIENT_BALANCE`,
+      // que son previos a esta tarea y visibles para los clientes.
       await this.walletService.debit(req.walletId, totalAmount, {
         brandId: req.brandId,
         category: req.purpose === 'plan_purchase' ? 'plan_payment' : 'service_payment',
@@ -251,7 +264,7 @@ export class CheckoutService implements OnModuleInit {
           : 'Pago de servicio',
         referenceType: 'payment',
         referenceId: payment.id,
-      })
+      }, req.purpose === 'plan_purchase' ? currency : undefined)
     } catch (error) {
       // Saldo insuficiente u otro error
       payment.status = PaymentStatus.FAILED
