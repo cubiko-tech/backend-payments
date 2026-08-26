@@ -7,13 +7,16 @@ import {
   PaymentStatusResult,
   RefundResult,
   CreateSubscriptionParams,
-  SubscriptionResult,
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
 import {
+  ConfioSubscription,
   ConfioSubscriptionPlan,
+  ConfioSubscriptionResult,
+  ConfioBuyer,
   CreateConfioPlanParams,
+  CreateConfioSubscriptionParams,
   ListConfioPlansResponse,
 } from './confio.types'
 
@@ -29,8 +32,28 @@ import {
  *
  * Para el cobro recurrente sí tiene API propia de planes y suscripciones
  * (`/stores/{store}/subscription-plans…`): ConfioPagos cobra cada período y
- * avisa por webhook. Acá viven, por ahora, sólo los dos métodos de **planes**;
- * el alta de suscripción sigue sin implementar (ver `createSubscription`).
+ * avisa por webhook. Acá viven los dos métodos de **planes**
+ * (`createSubscriptionPlan`, `listSubscriptionPlans`) y los dos de
+ * **suscripciones** (`createSubscription`, `getSubscription`).
+ *
+ * Flujo real del alta: **no cobra**. Devuelve la suscripción en
+ * `PENDING_ACCEPTANCE` más un `acceptanceUrl` hospedado por ConfioPagos — el
+ * «único link de pago inicial» del criterio 1 de la épica 002. El comprador
+ * acepta ahí y registra su tarjeta; recién entonces pasa a `TRIALING` (con los
+ * 15 días de trial del plan) o a `ACTIVE`, y a partir de ahí ConfioPagos cobra
+ * cada período por su cuenta.
+ *
+ * ⚠️ El `acceptanceUrl` es un **link portador**: quien lo tenga registra una
+ * tarjeta contra esta suscripción. No se loguea, no se persiste y por eso el
+ * mapeador lo saca del `raw` que devuelve.
+ *
+ * ⚠️ `getSubscription` **no forma parte de `PaymentProvider`**: se consume con
+ * el tipo concreto `ConfioProvider`, no por `ProviderFactory.getProvider()`.
+ *
+ * 🔧 Deuda conocida: `cancelSubscription` sigue siendo un no-op y ahora miente
+ * más que antes, porque el endpoint existe (`POST …/{sub}/cancel`, con `reason`
+ * obligatorio). Fuera del alcance de esta tarea: lo cubre
+ * `cancelacion-de-la-renovacion`.
  *
  * ⚠️ `CONFIO_API_BASE_URL` **ya termina en `/v1`** y `confioFetch` concatena, así
  * que los paths van SIN ese prefijo. Con `/v1` repetido ConfioPagos responde un
@@ -38,6 +61,35 @@ import {
  *
  * Referencia de contrato: roax-ads-back/internal/payment/.../confiopagos_client.go
  */
+/** Prefijo de todo mensaje de `ConfioSubscriptionInputError`. */
+export const CONFIO_SUBSCRIPTION_INPUT_ERROR = 'ConfioSubscription rechazada'
+
+/** Códigos de rechazo local, ANTES de tocar la red. */
+export type ConfioSubscriptionInputErrorCode =
+  | 'missing_buyer_or_plan'
+  | 'invalid_buyer'
+  | 'plan_store_mismatch'
+  | 'invalid_subscription_name'
+
+/**
+ * Rechazo de entrada del cliente de suscripciones: la petición nunca salió.
+ *
+ * **Este error es contrato con el alta** (`alta-crea-suscripcion-en-confiopagos`),
+ * que necesita rechazar «con un código propio, no con un 422 opaco de Confío».
+ * Se mapea por `instanceof` + `code` + `field`, NUNCA por el texto del mensaje.
+ * Si cambiás `code` o `field`, actualizá ese mapeo.
+ */
+export class ConfioSubscriptionInputError extends Error {
+  constructor(
+    readonly code: ConfioSubscriptionInputErrorCode,
+    readonly field: string,
+    detail: string,
+  ) {
+    super(`${CONFIO_SUBSCRIPTION_INPUT_ERROR} [${code}] ${field}: ${detail}`)
+    this.name = 'ConfioSubscriptionInputError'
+  }
+}
+
 @Injectable()
 export class ConfioProvider implements PaymentProvider {
   readonly name = 'confio'
@@ -231,11 +283,208 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * El recurrente se maneja re-emitiendo un link de pago cada período
-   * (TasksService.issueExternalCharge); no hay suscripción nativa en este flujo.
+   * Alta de suscripción — `POST …/subscription-plans/{plan}/subscriptions`.
+   *
+   * **No cobra nada.** Devuelve la suscripción en `PENDING_ACCEPTANCE` más un
+   * `acceptanceUrl` hospedado por ConfioPagos: ése es el «único link inicial»
+   * del criterio 1 de la épica. El comprador acepta ahí, registra su tarjeta y
+   * la suscripción pasa a `TRIALING` (con `trialPeriodDays > 0`) o a `ACTIVE`.
+   *
+   * El parámetro acepta la unión con `CreateSubscriptionParams` sólo para
+   * satisfacer el contrato de `PaymentProvider`: esa forma no trae ni el plan de
+   * ConfioPagos ni el comprador, así que se rechaza con `missing_buyer_or_plan`.
+   * No es un camino soportado.
+   *
+   * Rechaza ANTES de tocar la red con `ConfioSubscriptionInputError` —
+   * **contrato con el alta** (`alta-crea-suscripcion-en-confiopagos`), que mapea
+   * por `instanceof` + `code` + `field`, nunca por el texto del mensaje.
    */
-  async createSubscription(_params: CreateSubscriptionParams): Promise<SubscriptionResult> {
-    throw new Error('ConfioPagos one-shot: usar createCheckout por período, no createSubscription')
+  async createSubscription(
+    params: CreateConfioSubscriptionParams | CreateSubscriptionParams,
+  ): Promise<ConfioSubscriptionResult> {
+    this.ensureConfigured()
+
+    if (!('planName' in params) || !params.planName || !params.buyer) {
+      throw new ConfioSubscriptionInputError(
+        'missing_buyer_or_plan',
+        'planName/buyer',
+        'el alta de ConfioPagos necesita el resource name del plan y el comprador completo',
+      )
+    }
+
+    const planPath = this.assertPlanPath(params.planName)
+    const buyer = ConfioProvider.assertSubscriptionBuyer(params.buyer)
+
+    // Body armado campo por campo con `!== undefined`, NO por truthiness como
+    // el `...(params.description ? … : {})` de createSubscriptionPlan: acá el 0
+    // de `firstChargeAmountCents` es válido (`minimum: 0` en el spec) y
+    // significa PRIMER CICLO GRATIS. Tragárselo haría que Confío cobre el ciclo
+    // entero, en silencio. Lo mismo con un `correlationId` vacío.
+    const body: Record<string, unknown> = { buyer }
+    if (params.correlationId !== undefined) body.correlationId = params.correlationId
+    if (params.firstChargeAmountCents !== undefined) {
+      body.firstChargeAmountCents = params.firstChargeAmountCents
+    }
+    if (params.redirectUri !== undefined) body.redirectUri = params.redirectUri
+    if (params.acceptanceExpireTime !== undefined) {
+      body.acceptanceExpireTime = params.acceptanceExpireTime
+    }
+
+    const resp: ConfioSubscription = await this.confioFetch(`/${planPath}/subscriptions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+
+    // El `acceptanceUrl` es un link PORTADOR (quien lo tenga registra una
+    // tarjeta): se loguea si vino, jamás su valor.
+    logger.log(
+      'info',
+      `ConfioProvider: suscripción creada ${resp.name} (${resp.status}, ` +
+        `link de aceptación: ${resp.acceptanceUrl ? 'sí' : 'no'})`,
+    )
+
+    return ConfioProvider.toSubscriptionResult(resp)
+  }
+
+  /**
+   * Consultar una suscripción por su resource name completo.
+   *
+   * ⚠️ **No está en `PaymentProvider`**: se consume con el tipo concreto
+   * `ConfioProvider`, no por `ProviderFactory.getProvider()`, que devuelve la
+   * interfaz y no ve este método.
+   *
+   * A diferencia de `getPaymentStatus`, no compone la ruta desde `this.storeId`
+   * cuando el nombre viene suelto: haría falta también el id del plan, y
+   * adivinarlo produce un 404 que se lee como «esa suscripción no existe».
+   */
+  async getSubscription(name: string): Promise<ConfioSubscriptionResult> {
+    this.ensureConfigured()
+
+    const resp: ConfioSubscription = await this.confioFetch(
+      `/${ConfioProvider.toSubscriptionPath(name)}`,
+      { method: 'GET' },
+    )
+
+    return ConfioProvider.toSubscriptionResult(resp)
+  }
+
+  /**
+   * Valida que el `planName` sea un resource name de NUESTRO store y devuelve
+   * la ruta relativa a la base.
+   *
+   * Los planes son POR AMBIENTE: un identificador de dev usado en producción (o
+   * de otra tienda) responde un 404 mudo que se lee como «el endpoint no
+   * existe». Mejor cortar acá y decir cuál era el store esperado.
+   */
+  private assertPlanPath(planName: string): string {
+    const path = ConfioProvider.toSubscriptionPath(planName)
+    if (!path.startsWith(`stores/${this.storeId}/`)) {
+      throw new ConfioSubscriptionInputError(
+        'plan_store_mismatch',
+        'planName',
+        `el plan ${planName} no pertenece al store configurado (${this.storeId})`,
+      )
+    }
+    return path
+  }
+
+  /**
+   * Normaliza un resource name a ruta relativa a la base (que ya trae `/v1`).
+   *
+   * ConfioPagos devuelve algunos names prefijados con `organizations/…` (se ve
+   * en el ejemplo de payload de webhook), así que se recorta todo lo anterior a
+   * `stores/`. Un id suelto se rechaza: de ahí no se puede componer la ruta.
+   */
+  private static toSubscriptionPath(name: string): string {
+    const at = (name || '').indexOf('stores/')
+    if (at < 0) {
+      throw new ConfioSubscriptionInputError(
+        'invalid_subscription_name',
+        'name',
+        `se esperaba un resource name que contenga "stores/", llegó "${name}"`,
+      )
+    }
+    return name.slice(at)
+  }
+
+  /**
+   * Valida el comprador contra las reglas del spec (`CreateSubscriptionRequest`)
+   * y devuelve la copia normalizada que se manda.
+   *
+   * ⚠️ **No usa `normalizeColombianPhone` como está**: ese helper sustituye en
+   * silencio un teléfono inválido por el `+573215786325` de la documentación.
+   * En un link one-shot es cosmético; pegado a un cobro RECURRENTE es un
+   * contacto falso que se repite todos los meses, y además rompe al comprador
+   * del plan en USD. Acá un E.164 válido pasa, un número local colombiano se
+   * normaliza, y cualquier otra cosa se RECHAZA.
+   */
+  private static assertSubscriptionBuyer(raw: ConfioBuyer): ConfioBuyer {
+    const buyer: ConfioBuyer = {
+      email: (raw?.email || '').trim(),
+      phoneNumber: (raw?.phoneNumber || '').trim(),
+      firstName: (raw?.firstName || '').trim(),
+      lastName: (raw?.lastName || '').trim(),
+    }
+
+    if (!buyer.email || !buyer.email.includes('@')) {
+      throw new ConfioSubscriptionInputError('invalid_buyer', 'buyer.email', 'email vacío o sin "@"')
+    }
+    for (const field of ['firstName', 'lastName'] as const) {
+      const value = buyer[field]
+      if (value.length < 3 || value.length > 64) {
+        throw new ConfioSubscriptionInputError(
+          'invalid_buyer',
+          `buyer.${field}`,
+          `ConfioPagos exige de 3 a 64 caracteres, llegó ${value.length}`,
+        )
+      }
+    }
+
+    buyer.phoneNumber = ConfioProvider.toE164(buyer.phoneNumber)
+    return buyer
+  }
+
+  /** E.164 estricto, o el número local colombiano ya normalizado. Si no, rechaza. */
+  private static toE164(phone: string): string {
+    if (/^\+[1-9]\d{7,14}$/.test(phone)) return phone
+
+    // Sólo para números locales: si `normalizeColombianPhone` tuvo que caer a su
+    // fallback, el teléfono era inválido y NO se inventa uno.
+    const normalized = ConfioProvider.normalizeColombianPhone(phone)
+    if (/^\+[1-9]\d{7,14}$/.test(normalized) && normalized !== '+573215786325') return normalized
+
+    throw new ConfioSubscriptionInputError(
+      'invalid_buyer',
+      'buyer.phoneNumber',
+      `se esperaba E.164 (+<país><número>), llegó "${phone}"`,
+    )
+  }
+
+  /**
+   * Mapeador único del envelope de suscripción, para el alta y para la consulta.
+   *
+   * El `acceptanceUrl` se **saca** del objeto que queda en `raw` y se expone en
+   * un solo campo de primer nivel: así un `metadata: result.raw` aguas abajo no
+   * puede persistir un link portador.
+   */
+  private static toSubscriptionResult(raw: ConfioSubscription): ConfioSubscriptionResult {
+    const { acceptanceUrl, ...rest } = raw || ({} as ConfioSubscription)
+
+    return {
+      providerSubscriptionId: rest.name,
+      status: rest.status,
+      acceptanceUrl,
+      acceptanceExpireTime: rest.acceptanceExpireTime
+        ? new Date(rest.acceptanceExpireTime)
+        : undefined,
+      // En PENDING_ACCEPTANCE todavía no hay período abierto: quedan undefined
+      // pese a estar tipados obligatorios en `SubscriptionResult` (ver el tipo).
+      currentPeriodStart: rest.currentPeriodStart ? new Date(rest.currentPeriodStart) : undefined,
+      currentPeriodEnd: rest.currentPeriodEnd ? new Date(rest.currentPeriodEnd) : undefined,
+      nextBillingTime: rest.nextBillingTime ? new Date(rest.nextBillingTime) : undefined,
+      correlationId: rest.correlationId,
+      raw: rest,
+    }
   }
 
   async cancelSubscription(_providerSubscriptionId: string): Promise<void> {

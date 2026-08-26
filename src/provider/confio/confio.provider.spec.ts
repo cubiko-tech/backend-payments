@@ -1,6 +1,6 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { AddressInfo } from 'net'
-import { ConfioProvider } from './confio.provider'
+import { ConfioProvider, ConfioSubscriptionInputError } from './confio.provider'
 
 /**
  * `describe('createCheckout')` pisa `global.fetch` con un jest.fn() y NO lo
@@ -256,6 +256,363 @@ describe('ConfioProvider', () => {
 
         const provider = new ConfioProvider()
         await expect(provider.listSubscriptionPlans()).resolves.toEqual([])
+      })
+    })
+  })
+
+  /**
+   * Suscripciones contra un servidor HTTP REAL, por el mismo motivo que el
+   * bloque de planes: es la única forma de asertar la URL efectiva —incluido
+   * que el `/v1` no se duplique— y el JSON tal como sale por el socket.
+   *
+   * Formas MEDIDAS contra el store de dev con una sonda real el **2026-08-26**
+   * (`POST …/{plan}/subscriptions` sobre el plan COP `01M0Z020DYMXKKDHHR4HAX916R`
+   * y su `GET` de vuelta), no inferidas de la doc. Lo que devolvió:
+   *
+   * - claves exactas en `PENDING_ACCEPTANCE`: `name`, `status`, `buyer`,
+   *   `correlationId`, `acceptanceUrl`, `acceptanceExpireTime`, `createTime`.
+   *   **Ningún** `currentPeriodStart` / `currentPeriodEnd` / `nextBillingTime`:
+   *   el alta no abre período, confirmado y no supuesto.
+   * - `name` SIN prefijo `organizations/…`, empieza directo en `stores/`. El
+   *   recorte se prueba igual porque el ejemplo de webhook sí lo trae prefijado.
+   * - `acceptanceExpireTime` a 90 minutos fue aceptado (el spec pide entre 1
+   *   hora y 30 días); vuelve como el mismo ISO que se mandó.
+   * - las opcionales que no se mandan tampoco vuelven en la respuesta.
+   */
+  describe('suscripciones (servidor HTTP de prueba)', () => {
+    let server: Server
+    let received: Array<{ method: string; url: string; headers: any; body: any }>
+    let respond: (req: IncomingMessage, res: ServerResponse) => void
+
+    const PLAN = 'stores/01TESTSTORE/subscription-plans/01PLAN'
+    const SUB = `${PLAN}/subscriptions/01SUB`
+
+    const buyer = () => ({
+      email: 'comprador@roaxai.com',
+      phoneNumber: '+573001234567',
+      firstName: 'Santiago',
+      lastName: 'García',
+    })
+
+    beforeEach(async () => {
+      // Restaurar el fetch real ANTES de construir el provider: el describe de
+      // createCheckout dejó un jest.fn() pegado a global.fetch y
+      // jest.restoreAllMocks() no deshace una asignación a un global.
+      ;(global as any).fetch = REAL_FETCH
+
+      received = []
+      respond = (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end('{}')
+      }
+
+      server = createServer((req, res) => {
+        const chunks: Buffer[] = []
+        req.on('data', (c) => chunks.push(c))
+        req.on('end', () => {
+          const raw = Buffer.concat(chunks).toString()
+          received.push({
+            method: req.method!,
+            url: req.url!,
+            headers: req.headers,
+            body: raw ? JSON.parse(raw) : null,
+          })
+          respond(req, res)
+        })
+      })
+
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const { port } = server.address() as AddressInfo
+      // El provider lee el env en el CONSTRUCTOR: primero el env, después el new.
+      process.env.CONFIO_API_BASE_URL = `http://127.0.0.1:${port}/v1`
+    })
+
+    afterEach(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    })
+
+    const subResponse = (over: Record<string, any> = {}) => ({
+      name: SUB,
+      status: 'PENDING_ACCEPTANCE',
+      buyer: buyer(),
+      createTime: '2026-08-26T10:30:00Z',
+      correlationId: 'sub-alta-1',
+      acceptanceUrl: 'https://checkout.confiopagos.com/s/abc123token',
+      acceptanceExpireTime: '2026-08-26T12:00:00Z',
+      ...over,
+    })
+
+    /**
+     * Captura el rechazo con su tipo. Un `.catch((e) => e)` deja una unión con
+     * el valor resuelto y esconde `code`/`field`; además esto falla explícito
+     * si la promesa RESUELVE, que es justo lo que no queremos que pase inadvertido.
+     */
+    const rechazo = async (p: Promise<unknown>): Promise<ConfioSubscriptionInputError> => {
+      try {
+        await p
+      } catch (e) {
+        return e as ConfioSubscriptionInputError
+      }
+      throw new Error('se esperaba un rechazo y la promesa resolvió')
+    }
+
+    const replyWith = (payload: any, status = 200) => {
+      respond = (_req, res) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(payload))
+      }
+    }
+
+    describe('createSubscription', () => {
+      it('POSTea a …/{plan}/subscriptions (sin duplicar /v1) con el buyer completo', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        expect(received).toHaveLength(1)
+        expect(received[0].method).toBe('POST')
+        expect(received[0].url).toBe('/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions')
+        expect(received[0].headers.authorization).toBe('Bearer test-token-123')
+        expect(received[0].body.buyer).toEqual({
+          email: 'comprador@roaxai.com',
+          phoneNumber: '+573001234567',
+          firstName: 'Santiago',
+          lastName: 'García',
+        })
+      })
+
+      it('NO manda las claves opcionales que no vinieron (verificado con Object.keys)', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        // `toBeUndefined()` pasaría igual si la clave viajara con valor undefined;
+        // lo que importa es qué claves salieron por el socket.
+        expect(Object.keys(received[0].body).sort()).toEqual(['buyer'])
+      })
+
+      it('manda las 4 opcionales con su tipo cuando vienen', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.createSubscription({
+          planName: PLAN,
+          buyer: buyer(),
+          correlationId: 'sub-alta-1',
+          firstChargeAmountCents: 995000,
+          redirectUri: 'https://app.roaxai.com/roax/suscripcion',
+          acceptanceExpireTime: '2026-08-26T12:00:00Z',
+        })
+
+        const sent = received[0].body
+        expect(sent.correlationId).toBe('sub-alta-1')
+        expect(sent.firstChargeAmountCents).toBe(995000)
+        expect(typeof sent.firstChargeAmountCents).toBe('number')
+        expect(sent.redirectUri).toBe('https://app.roaxai.com/roax/suscripcion')
+        expect(sent.acceptanceExpireTime).toBe('2026-08-26T12:00:00Z')
+      })
+
+      it('manda firstChargeAmountCents: 0 y correlationId vacío TAL CUAL (no por truthiness)', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.createSubscription({
+          planName: PLAN,
+          buyer: buyer(),
+          firstChargeAmountCents: 0,
+          correlationId: '',
+        })
+
+        // `minimum: 0` es válido en el spec y significa PRIMER CICLO GRATIS.
+        // Un spread por truthiness se lo tragaría y Confío cobraría el ciclo entero.
+        expect(received[0].body.firstChargeAmountCents).toBe(0)
+        expect(Object.keys(received[0].body)).toContain('firstChargeAmountCents')
+        expect(received[0].body.correlationId).toBe('')
+      })
+
+      it('mapea el envelope PENDING_ACCEPTANCE: sin períodos y con el link de aceptación', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        const result = await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        expect(result.providerSubscriptionId).toBe(SUB)
+        expect(result.status).toBe('PENDING_ACCEPTANCE')
+        expect(result.acceptanceUrl).toBe('https://checkout.confiopagos.com/s/abc123token')
+        expect(result.acceptanceExpireTime).toEqual(new Date('2026-08-26T12:00:00Z'))
+        expect(result.correlationId).toBe('sub-alta-1')
+        // El alta NO cobra ni abre período: Confío no manda estos campos todavía.
+        expect(result.currentPeriodStart).toBeUndefined()
+        expect(result.currentPeriodEnd).toBeUndefined()
+        expect(result.nextBillingTime).toBeUndefined()
+      })
+
+      it('deja el acceptanceUrl FUERA de `raw` y conserva el resto verbatim', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        const result = await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        // El link es portador: quien lo tenga registra una tarjeta. Vive en UN
+        // solo campo para que un `metadata: result.raw` aguas abajo no lo persista.
+        expect(result.raw).not.toHaveProperty('acceptanceUrl')
+        expect(JSON.stringify(result.raw)).not.toContain('abc123token')
+        const { acceptanceUrl: _omitido, ...resto } = subResponse()
+        expect(result.raw).toEqual(resto)
+      })
+
+      it('mapea una respuesta TRIALING: períodos y próximo cobro como Date, sin link', async () => {
+        replyWith(
+          subResponse({
+            status: 'TRIALING',
+            acceptanceUrl: undefined,
+            acceptanceExpireTime: undefined,
+            currentPeriodStart: '2026-08-26T10:30:00Z',
+            currentPeriodEnd: '2026-09-10T10:30:00Z',
+            nextBillingTime: '2026-09-10T10:30:00Z',
+          }),
+        )
+
+        const provider = new ConfioProvider()
+        const result = await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        expect(result.status).toBe('TRIALING')
+        expect(result.acceptanceUrl).toBeUndefined()
+        expect(result.currentPeriodStart).toEqual(new Date('2026-08-26T10:30:00Z'))
+        expect(result.currentPeriodEnd).toEqual(new Date('2026-09-10T10:30:00Z'))
+        expect(result.nextBillingTime).toEqual(new Date('2026-09-10T10:30:00Z'))
+      })
+
+      it('deja pasar un estado que no conocemos en vez de romper el parseo', async () => {
+        replyWith(subResponse({ status: 'FROZEN' }))
+
+        const provider = new ConfioProvider()
+        const result = await provider.createSubscription({ planName: PLAN, buyer: buyer() })
+
+        expect(result.status).toBe('FROZEN')
+      })
+
+      it.each([
+        [{ ...buyer(), email: '' }, 'buyer.email'],
+        [{ ...buyer(), email: 'sin-arroba' }, 'buyer.email'],
+        [{ ...buyer(), firstName: 'Jo' }, 'buyer.firstName'],
+        [{ ...buyer(), lastName: '  ' }, 'buyer.lastName'],
+        [{ ...buyer(), phoneNumber: '123' }, 'buyer.phoneNumber'],
+      ])('rechaza un buyer inválido ANTES de tocar la red (%#) nombrando el campo', async (bad, field) => {
+        const provider = new ConfioProvider()
+
+        await expect(
+          provider.createSubscription({ planName: PLAN, buyer: bad as any }),
+        ).rejects.toBeInstanceOf(ConfioSubscriptionInputError)
+        // Nada salió por la red: la guarda corta antes del fetch.
+        expect(received).toHaveLength(0)
+
+        const err = await rechazo(provider.createSubscription({ planName: PLAN, buyer: bad as any }))
+        expect(err.code).toBe('invalid_buyer')
+        expect(err.field).toBe(field)
+      })
+
+      it('normaliza un teléfono colombiano local a E.164 en vez de rechazarlo', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.createSubscription({
+          planName: PLAN,
+          buyer: { ...buyer(), phoneNumber: '3001234567' },
+        })
+
+        expect(received[0].body.buyer.phoneNumber).toBe('+573001234567')
+      })
+
+      it('rechaza un plan de OTRO store sin pegarle a la red', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(
+          provider.createSubscription({
+            planName: 'stores/01OTROSTORE/subscription-plans/01PLAN',
+            buyer: buyer(),
+          }),
+        )
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('plan_store_mismatch')
+        expect(received).toHaveLength(0)
+      })
+
+      it('rechaza la firma compartida de PaymentProvider (sin planName ni buyer)', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(
+          provider.createSubscription({
+            brandId: 'b1',
+            userId: 'u1',
+            planSlug: 'dropi-roax',
+            priceAmount: 19900,
+            currency: 'COP',
+          }),
+        )
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('missing_buyer_or_plan')
+        expect(received).toHaveLength(0)
+      })
+
+      it('propaga el 4xx de ConfioPagos con su cuerpo', async () => {
+        replyWith({ message: 'buyer.firstName: must be at least 3 characters' }, 422)
+
+        const provider = new ConfioProvider()
+        await expect(
+          provider.createSubscription({ planName: PLAN, buyer: buyer() }),
+        ).rejects.toThrow(/ConfioPagos error 422/)
+      })
+    })
+
+    describe('getSubscription', () => {
+      it('GETea el resource name completo tal cual', async () => {
+        replyWith(subResponse({ status: 'TRIALING', acceptanceUrl: undefined }))
+
+        const provider = new ConfioProvider()
+        const result = await provider.getSubscription(SUB)
+
+        expect(received).toHaveLength(1)
+        expect(received[0].method).toBe('GET')
+        expect(received[0].url).toBe(
+          '/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions/01SUB',
+        )
+        expect(result.providerSubscriptionId).toBe(SUB)
+        expect(result.status).toBe('TRIALING')
+      })
+
+      it('recorta el prefijo `organizations/…` con el que Confío devuelve algunos names', async () => {
+        replyWith(subResponse())
+
+        const provider = new ConfioProvider()
+        await provider.getSubscription(`organizations/01ORG/${SUB}`)
+
+        expect(received[0].url).toBe(
+          '/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions/01SUB',
+        )
+      })
+
+      it('rechaza un id suelto: de ahí no se puede componer la ruta', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.getSubscription('01SUB'))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('invalid_subscription_name')
+        expect(received).toHaveLength(0)
+      })
+
+      it('lanza si el provider no está configurado', async () => {
+        process.env.CONFIO_STORE_ID = ''
+        process.env.CONFIO_ACCESS_TOKEN = ''
+
+        const provider = new ConfioProvider()
+        await expect(provider.getSubscription(SUB)).rejects.toThrow(/no configurado/)
+        expect(received).toHaveLength(0)
       })
     })
   })

@@ -9,6 +9,8 @@
  * de request/response sobre estos.
  */
 
+import { SubscriptionResult } from '../provider.interface'
+
 /** Centinela incluido: ConfioPagos puede devolver `STATUS_UNSPECIFIED`. */
 export type ConfioPlanStatus = 'STATUS_UNSPECIFIED' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED'
 
@@ -63,6 +65,144 @@ export interface CreateConfioPlanParams {
 export interface ListConfioPlansResponse {
   plans?: ConfioSubscriptionPlan[]
   nextPageToken?: string
+}
+
+// ============================================================
+// Suscripciones
+// ============================================================
+
+/**
+ * Los 8 estados del enum `Subscription.status` del spec vendorizado.
+ *
+ * Unión ESTRICTA a propósito: agregarle `| string` la colapsaría a `string` y
+ * el tipo dejaría de verificar nada. Para el campo que llega por la red se usa
+ * `ConfioSubscriptionStatusWire`, que sí tolera un valor nuevo.
+ */
+export type ConfioSubscriptionStatus =
+  | 'PENDING_ACCEPTANCE'
+  | 'ACTIVE'
+  | 'PROCESSING'
+  | 'TRIALING'
+  | 'PAST_DUE'
+  | 'CANCELED'
+  | 'EXPIRED'
+  | 'SUSPENDED'
+
+/**
+ * El estado tal como VIENE de ConfioPagos. `(string & {})` conserva el
+ * autocompletado de los 8 literales y a la vez deja pasar un estado que Confío
+ * agregue mañana: el mapeo es passthrough, así que prometer la unión estricta
+ * sería mentir sobre lo que el objeto realmente contiene.
+ */
+export type ConfioSubscriptionStatusWire = ConfioSubscriptionStatus | (string & {})
+
+/**
+ * Comprador de la suscripción. Los CUATRO campos son obligatorios
+ * (`CreateSubscriptionRequest.buyer.required` del spec vendorizado), y
+ * `firstName`/`lastName` van de 3 a 64 caracteres.
+ */
+export interface ConfioBuyer {
+  email: string
+  /** E.164, con `+` y código de país: `+573215786325`. */
+  phoneNumber: string
+  /** 3–64 caracteres. */
+  firstName: string
+  /** 3–64 caracteres. */
+  lastName: string
+}
+
+/** Alta de suscripción — `POST …/subscription-plans/{plan}/subscriptions`. */
+export interface CreateConfioSubscriptionParams {
+  /**
+   * Resource name COMPLETO del plan: `stores/{store}/subscription-plans/{plan}`.
+   * Nunca el id suelto: de un id no se puede componer la ruta, y un plan de otro
+   * store da un 404 mudo (los planes son POR AMBIENTE).
+   */
+  planName: string
+  buyer: ConfioBuyer
+  /** Nuestro identificador para correlacionar. Máx. 128 caracteres. */
+  correlationId?: string
+  /**
+   * Monto SÓLO del primer ciclo, en centavos. `minimum: 0` en el spec, y el 0
+   * es válido: significa primer ciclo gratis. Por eso el body se arma con
+   * `!== undefined` y no por truthiness.
+   */
+  firstChargeAmountCents?: number
+  /** A dónde vuelve el comprador después de aceptar. */
+  redirectUri?: string
+  /**
+   * Vencimiento del link de aceptación (ISO-8601). El spec exige entre 1 hora y
+   * 30 días desde la creación; default 7 días.
+   */
+  acceptanceExpireTime?: string
+}
+
+/**
+ * Suscripción tal como la devuelve ConfioPagos (verbatim).
+ *
+ * Obligatorios según el spec: `name`, `status`, `buyer`, `createTime`. El resto
+ * depende del estado:
+ * - `acceptanceUrl` **sólo viaja mientras el estado es `PENDING_ACCEPTANCE`**.
+ * - `currentPeriodStart` / `currentPeriodEnd` / `nextBillingTime` no existen
+ *   hasta que el comprador acepta: el alta NO cobra ni abre período.
+ */
+export interface ConfioSubscription {
+  /** `stores/{store}/subscription-plans/{plan}/subscriptions/{sub}`. */
+  name: string
+  status: ConfioSubscriptionStatusWire
+  buyer: ConfioBuyer
+  createTime: string
+  correlationId?: string
+  firstChargeAmountCents?: number
+  redirectUri?: string
+  /** Link portador: quien lo tenga registra una tarjeta. Sólo en `PENDING_ACCEPTANCE`. */
+  acceptanceUrl?: string
+  acceptanceExpireTime?: string
+  currentPeriodStart?: string
+  currentPeriodEnd?: string
+  nextBillingTime?: string
+}
+
+/**
+ * Resultado normalizado del alta y de la consulta de una suscripción.
+ *
+ * Extiende `SubscriptionResult` (el contrato común de `PaymentProvider`) con lo
+ * que ConfioPagos agrega. Ojo: **`getSubscription` NO está en `PaymentProvider`**,
+ * así que se consume con el tipo concreto `ConfioProvider` (inyectado o
+ * instanciado directo), no por `ProviderFactory.getProvider()`, que devuelve la
+ * interfaz y no ve este método.
+ */
+export interface ConfioSubscriptionResult extends SubscriptionResult {
+  /** El `name` de ConfioPagos: el resource name completo, no un uuid. */
+  providerSubscriptionId: string
+  status: ConfioSubscriptionStatusWire
+  /**
+   * Heredado de `SubscriptionResult` como `Date` OBLIGATORIO, pero en
+   * `PENDING_ACCEPTANCE` ConfioPagos no lo manda y llega `undefined` en runtime.
+   * Declararlo opcional rompe el `implements` ("Property is optional ... but
+   * required"), y con `strictNullChecks: false` en este tsconfig TS tampoco
+   * protegería al llamador si lo fuera. El arreglo real es ensanchar
+   * `provider.interface.ts`: deuda de otra tarea. Chequealo antes de usarlo.
+   */
+  currentPeriodStart: Date
+  /** Mismo caso que `currentPeriodStart`: `undefined` hasta que el comprador acepta. */
+  currentPeriodEnd: Date
+  /**
+   * Link portador de aceptación: el "único link inicial" del criterio 1. Sólo
+   * viene en `PENDING_ACCEPTANCE`. No se loguea ni se persiste.
+   */
+  acceptanceUrl?: string
+  acceptanceExpireTime?: Date
+  nextBillingTime?: Date
+  correlationId?: string
+  /**
+   * Respuesta cruda MENOS el link de aceptación. El `acceptanceUrl` se expone en
+   * UN solo campo a propósito, para que un `metadata: result.raw` aguas abajo no
+   * pueda persistir un link portador (restricción 3 de
+   * `alta-crea-suscripcion-en-confiopagos`). Ojo igual: **`raw.buyer` es PII**
+   * (email y teléfono del comprador), no lo serialices entero sin pensarlo.
+   */
+  raw: Omit<ConfioSubscription, 'acceptanceUrl'>
 }
 
 // ============================================================
