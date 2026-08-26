@@ -7,6 +7,14 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { RequestException } from '../shared/exception/request.exception'
 
+// Estados en los que la marca tiene servicio vigente; `expired` y `cancelled` son ciclos
+// terminados y no deben bloquear un alta nueva.
+const LIVE_SUBSCRIPTION_STATUSES = [
+  SubscriptionStatus.TRIAL,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAST_DUE,
+]
+
 @Injectable()
 export class SubscriptionService {
   private readonly logger = new Logger(SubscriptionService.name)
@@ -34,6 +42,10 @@ export class SubscriptionService {
    * en la fecha de vencimiento para que el cron de conversión la tome.
    * Al vencer: si hay método de pago se cobra; si no, se degrada a `free`
    * (ver TasksService.processTrialConversions).
+   *
+   * La prueba es una sola por marca: si ya se consumió, el alta se rechaza y la
+   * marca solo puede volver por el checkout pago. En cambio, una suscripción
+   * vencida o cancelada que nunca la usó sí puede iniciarla, reusando su fila.
    */
   async startTrial(input: {
     brandId: string
@@ -52,13 +64,36 @@ export class SubscriptionService {
       )
     }
 
-    // Una marca solo puede tener una suscripción (índice único) y el trial es único.
-    const existing = await this.subscriptionReadRepository.findOne({ where: { brandId } })
-    if (existing) {
+    // Se lee del repo de ESCRITURA porque a partir de acá el alta hace read-modify-write
+    // sobre la fila (la reusa si el ciclo anterior está muerto) y la réplica podría estar
+    // atrasada; `cancel()` y `reactivate()` ya usan el repo de escritura por lo mismo.
+    // Deudas que NO se resuelven acá: (1) no hay transacción ni lock, así que dos POST
+    // simultáneos pasan ambos el guard —con marca nueva el índice único ataja la segunda
+    // inserción, pero al reusar la fila los dos hacen UPDATE y quedan dos TRIAL_STARTED
+    // (Importante #5 de docs/REVISION_TRIAL_CONFIO_2026-06-30.md); (2) `create()` y el
+    // checkout siguen creando suscripciones sin pasar por acá, así que esto es la barrera
+    // del alta, no una invariante de dominio.
+    const existing = await this.subscriptionRepository.findOne({ where: { brandId } })
+
+    // Con servicio vigente no hay nada que iniciar: se conserva el código de siempre.
+    if (existing && LIVE_SUBSCRIPTION_STATUSES.includes(existing.status)) {
       throw new RequestException(
         {
           code: 'SUBSCRIPTION_ALREADY_EXISTS',
-          message: 'La marca ya tiene una suscripción; el trial solo está disponible una vez',
+          message: 'La marca ya tiene una suscripción vigente',
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
+
+    // `trialStart` es la marca durable de prueba consumida: ningún camino la limpia
+    // (el checkout revive la fila sin tocar `trialStart`/`trialEnd` y el cron de
+    // expiración solo mueve el estado a EXPIRED).
+    if (existing && existing.trialStart) {
+      throw new RequestException(
+        {
+          code: 'TRIAL_ALREADY_USED',
+          message: 'La marca ya usó su prueba gratuita; para volver a suscribirse hay que pagar el plan',
         },
         HttpStatus.CONFLICT,
       )
@@ -70,7 +105,10 @@ export class SubscriptionService {
     trialEnd.setDate(trialEnd.getDate() + trialDays)
 
     try {
+      // Si la marca ya tenía una fila muerta se reusa (el índice único por brandId impide
+      // una segunda) y se resetean los residuos del ciclo anterior para no arrastrarlos.
       const subscription = this.subscriptionRepository.create({
+        ...(existing ? { id: existing.id } : {}),
         brandId,
         userId,
         planSlug,
@@ -83,6 +121,11 @@ export class SubscriptionService {
         trialEnd,
         nextBillingDate: trialEnd,
         autoRenew: true,
+        cancelledAt: null,
+        cancelReason: null,
+        retryCount: 0,
+        lastPaymentId: null,
+        providerSubscriptionId: null,
       })
       const saved = await this.subscriptionRepository.save(subscription)
 
@@ -91,6 +134,8 @@ export class SubscriptionService {
           subscriptionId: saved.id,
           eventType: SubscriptionEventType.TRIAL_STARTED,
           toPlanSlug: planSlug,
+          // Deja reconstruible el reinicio: la fila puede acumular más de un ciclo.
+          fromStatus: existing?.status ?? null,
           toStatus: SubscriptionStatus.TRIAL,
           triggeredBy: userId,
           reason: `Trial de ${trialDays} días iniciado`,

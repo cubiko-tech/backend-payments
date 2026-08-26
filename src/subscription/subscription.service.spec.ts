@@ -143,7 +143,7 @@ describe('SubscriptionService', () => {
 
   describe('startTrial', () => {
     it('crea un trial de 15 días, asigna el plan en roles y registra el evento', async () => {
-      subscriptionReadRepo.findOne.mockResolvedValue(null)
+      subscriptionRepo.findOne.mockResolvedValue(null)
       subscriptionRepo.create.mockImplementation((data) => data)
       subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ id: 'sub-1', ...data }))
       eventRepo.create.mockImplementation((data) => data)
@@ -174,13 +174,111 @@ describe('SubscriptionService', () => {
       }))
     })
 
-    it('lanza conflicto si la marca ya tiene una suscripción', async () => {
-      subscriptionReadRepo.findOne.mockResolvedValue({ id: 'sub-1', brandId: 'brand-1' })
+    it('rechaza si la marca ya tiene una suscripción vigente', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.ACTIVE,
+        trialStart: null,
+      })
 
       await expect(
         service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
-      ).rejects.toThrow(RequestException)
+      ).rejects.toMatchObject({ code: 'SUBSCRIPTION_ALREADY_EXISTS' })
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('rechaza una suscripción en mora como vigente, no como prueba consumida', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.PAST_DUE,
+        trialStart: new Date('2026-01-01'),
+      })
+
+      await expect(
+        service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
+      ).rejects.toMatchObject({ code: 'SUBSCRIPTION_ALREADY_EXISTS' })
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rechaza si la marca ya consumió su prueba', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: new Date('2026-01-01'),
+        trialEnd: new Date('2026-01-16'),
+      })
+
+      await expect(
+        service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
+      ).rejects.toMatchObject({ code: 'TRIAL_ALREADY_USED' })
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('reinicia la prueba sobre una suscripción cancelada que nunca la usó', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.CANCELLED,
+        trialStart: null,
+        cancelledAt: new Date('2026-02-01'),
+        cancelReason: 'motivo',
+        retryCount: 3,
+        lastPaymentId: 'pay-1',
+      })
+      subscriptionRepo.create.mockImplementation((data) => data)
+      subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ ...data }))
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      const result = await service.startTrial({
+        brandId: 'brand-1',
+        userId: 'user-1',
+        planSlug: 'pro',
+      })
+
+      // Reusa la fila existente: el índice único por brandId impide una segunda.
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({
+        id: 'sub-1',
+        status: SubscriptionStatus.TRIAL,
+        cancelledAt: null,
+        cancelReason: null,
+        retryCount: 0,
+        lastPaymentId: null,
+      }))
+      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('brand-1', 'pro', result.data.trialEnd)
+      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
+        eventType: SubscriptionEventType.TRIAL_STARTED,
+        fromStatus: SubscriptionStatus.CANCELLED,
+        toStatus: SubscriptionStatus.TRIAL,
+      }))
+    })
+
+    it('permite la prueba sobre una suscripción vencida que nunca la usó', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: null,
+      })
+      subscriptionRepo.create.mockImplementation((data) => data)
+      subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ ...data }))
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      const result = await service.startTrial({
+        brandId: 'brand-1',
+        userId: 'user-1',
+        planSlug: 'pro',
+      })
+
+      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'sub-1' }))
     })
 
     it('rechaza iniciar un trial con el plan free', async () => {

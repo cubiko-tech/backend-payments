@@ -21,6 +21,19 @@ Content-Type: application/json
   "walletId": "{{WALLET_ID}}"
 }
 
+### Iniciar prueba gratuita de 15 días (una sola por marca)
+# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca ya tiene una suscripción vigente.
+# 409 TRIAL_ALREADY_USED: la marca ya consumió su prueba; solo puede volver pagando.
+POST {{HOST}}/subscription/trial HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "planSlug": "dropi-roax"
+}
+
 ### Cambiar plan de suscripción
 PATCH {{HOST}}/subscription/plan HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
