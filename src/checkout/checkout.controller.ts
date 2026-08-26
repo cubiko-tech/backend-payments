@@ -1,11 +1,30 @@
 import { Controller, Get, Post, Body, Query, UseGuards } from '@nestjs/common'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { CheckoutService, CheckoutRequest } from './checkout.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
 
+/**
+ * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
+ * decorador vacío, o sea ningún guard—, así que todo endpoint de acá era
+ * alcanzable sin credencial por el gateway público: cualquiera podía originar
+ * cobros y links de pago. Verificado en vivo el 2026-08-25 con 20+ POST sin
+ * credencial, que dejaron filas en `payments` y `payment_attempts`.
+ *
+ * `ApiAuthGuard` resuelve quién llama con el MISMO JWT del resto del sistema
+ * (cookie de sesión o Bearer, verificado local con `JWT_SECRET`, más el
+ * `ACCESS_SERVER` para server-to-server y el fallback a
+ * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
+ * firmados con un `clientSecret` que rota y que payments no puede guardar).
+ *
+ * Es autenticación SOLA: ningún handler de acá declara `@RequirePermission`, así
+ * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
+ * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
+ * si hacen falta, son una decisión aparte.
+ */
 @ApiTags('Checkout')
 @Controller('checkout')
-@UseGuards()
+@UseGuards(ApiAuthGuard)
 export class CheckoutController {
   constructor(
     private readonly checkoutService: CheckoutService,
