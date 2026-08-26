@@ -18,8 +18,8 @@ import { CreditService } from './credit.service'
 import { ScaleConfigService } from './scale-config.service'
 import { CreditRunService } from './credit-run.service'
 import { BureauService } from './bureau/bureau.service'
-import { CreditPermissionGuard } from './guard/credit-permission.guard'
-import { RequireCreditPermission } from './guard/require-credit-permission.decorator'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequirePermission } from '../shared/auth/require-permission.decorator'
 import { CalculateScoreDto } from './dto/calculate-score.dto'
 import { CreateRunDto } from './dto/create-run.dto'
 import { RegisterProfileDto } from './dto/register-profile.dto'
@@ -45,8 +45,8 @@ export class CreditController {
   ) {}
 
   @Post('scores/calculate')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Calcular el score de crédito de una marca para un período' })
   async calculate(@Body() body: CalculateScoreDto, @Req() req: any) {
     const score = await this.creditService.calculate({
@@ -59,8 +59,8 @@ export class CreditController {
   }
 
   @Get('scores')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Listar scores (ranking), filtrable por run' })
   async listScores(
     @Query('runId') runId?: string,
@@ -74,7 +74,7 @@ export class CreditController {
   }
 
   @Get('preapproval/:brandId')
-  @UseGuards(CreditPermissionGuard)
+  @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Pre-aprobado de crédito (informativo, curado para el cliente)' })
   async preapproval(@Param('brandId') brandId: string, @Req() req: any) {
     // Brand- y role-scope (defense-in-depth además del BFF): salvo el server/
@@ -90,7 +90,7 @@ export class CreditController {
   }
 
   @Post('activation-requests')
-  @UseGuards(CreditPermissionGuard)
+  @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Crear una solicitud de activación de crédito para una marca elegible' })
   async createActivationRequest(@Body() body: CreateActivationRequestDto, @Req() req: any) {
     const brandId = req?.user?.brand
@@ -103,8 +103,8 @@ export class CreditController {
   }
 
   @Get('scores/brand/:brandId')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Último score (o historial) de una marca' })
   async getByBrand(
     @Param('brandId') brandId: string,
@@ -116,8 +116,8 @@ export class CreditController {
 
   @Post('runs')
   @HttpCode(HttpStatus.ACCEPTED)
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Disparar un run masivo de scoring para un período' })
   async createRun(@Body() body: CreateRunDto, @Req() req: any) {
     const run = await this.creditRunService.createRun({
@@ -129,16 +129,16 @@ export class CreditController {
   }
 
   @Get('runs')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Listar runs recientes' })
   async listRuns() {
     return { data: await this.creditRunService.listRuns() }
   }
 
   @Get('runs/:id')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Progreso/estado de un run' })
   async getRun(@Param('id') id: string) {
     return { data: await this.creditRunService.getRun(id) }
@@ -147,24 +147,24 @@ export class CreditController {
   // --- Buró / perfil (Fase 5) ---
 
   @Get('profile/:brandId')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:bureau')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Perfil de crédito de una marca (documento + consentimiento)' })
   async getProfile(@Param('brandId') brandId: string) {
     return { data: await this.bureauService.getProfile(brandId) }
   }
 
   @Post('profile/:brandId')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:bureau')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Registrar/actualizar el documento legal del perfil' })
   async registerProfile(@Param('brandId') brandId: string, @Body() body: RegisterProfileDto) {
     return { data: await this.bureauService.upsertProfile(brandId, body) }
   }
 
   @Post('profile/:brandId/consent')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:bureau')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Registrar consentimiento habeas data del titular' })
   async grantConsent(
     @Param('brandId') brandId: string,
@@ -176,16 +176,16 @@ export class CreditController {
   }
 
   @Get('bureau/checks/brand/:brandId')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:bureau')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Historial de checks de buró de una marca' })
   async bureauChecks(@Param('brandId') brandId: string) {
     return { data: await this.bureauService.getChecksByBrand(brandId) }
   }
 
   @Post('bureau/checks')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:bureau')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Cargar un check de buró (manual). Requiere permiso credit:bureau' })
   async createBureauCheck(@Body() body: CreateBureauCheckDto, @Req() req: any) {
     const by = req?.user?.id || 'admin'
@@ -194,24 +194,24 @@ export class CreditController {
   }
 
   @Get('config/scales')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:scale')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:scale')
   @ApiOperation({ summary: 'Versión de escala activa' })
   async activeScale() {
     return { data: await this.scaleConfigService.getActiveConfig() }
   }
 
   @Get('config/scales/versions')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:scale')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:scale')
   @ApiOperation({ summary: 'Listar versiones de escala' })
   async listScaleVersions() {
     return { data: await this.scaleConfigService.listVersions() }
   }
 
   @Post('config/scales')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:scale')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:scale')
   @ApiOperation({ summary: 'Crear una versión nueva de escala (pesos/valores editados)' })
   async createScaleVersion(@Body() body: CreateScaleVersionDto, @Req() req: any) {
     const created = await this.scaleConfigService.createVersion(
@@ -223,8 +223,8 @@ export class CreditController {
   }
 
   @Post('config/scales/:version/activate')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:scale')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:scale')
   @ApiOperation({ summary: 'Activar una versión de escala (valida draft→active)' })
   async activateScale(@Param('version') version: string, @Req() req: any) {
     const activated = await this.scaleConfigService.activateVersion(

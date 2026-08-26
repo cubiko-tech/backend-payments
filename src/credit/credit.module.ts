@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common'
 import { TypeOrmModule } from '@nestjs/typeorm'
 import { BullModule } from '@nestjs/bullmq'
-import { JwtModule } from '@nestjs/jwt'
 
 import { CreditScore } from './entities/creditScore.entity'
 import { ScoreScaleConfig } from './entities/scoreScaleConfig.entity'
@@ -16,7 +15,6 @@ import { CreditInputsClient } from './client/credit-inputs.client'
 import { CreditRunService, CREDIT_RUN_QUEUE } from './credit-run.service'
 import { CreditRunProcessor } from './credit-run.processor'
 import { BureauService } from './bureau/bureau.service'
-import { CreditPermissionGuard } from './guard/credit-permission.guard'
 import { AuditModule } from '../audit/audit.module'
 import { ClientModule } from '../client/client.module'
 
@@ -36,7 +34,6 @@ import { ClientModule } from '../client/client.module'
       'DBRead',
     ),
     BullModule.registerQueue({ name: CREDIT_RUN_QUEUE }),
-    JwtModule.register({ secret: process.env.JWT_SECRET }),
     AuditModule,
     ClientModule,
   ],
@@ -48,18 +45,12 @@ import { ClientModule } from '../client/client.module'
     CreditRunService,
     CreditRunProcessor,
     BureauService,
-    CreditPermissionGuard,
   ],
-  // JwtModule se re-exporta para que AdminModule (que usa el guard exportado)
-  // pueda resolver JwtService: los guards de `@UseGuards(Clase)` se instancian
-  // en el contexto del módulo del controller, no en el de CreditModule.
   exports: [
     CreditService,
     ScaleConfigService,
     CreditRunService,
     BureauService,
-    CreditPermissionGuard,
-    JwtModule,
   ],
 })
 export class CreditModule {}

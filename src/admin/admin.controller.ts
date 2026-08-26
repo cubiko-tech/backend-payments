@@ -26,8 +26,8 @@ import {
   CREDIT_ACTIVATION_REQUEST_STATUSES,
   CreditActivationRequestStatus,
 } from '../credit/credit.types'
-import { CreditPermissionGuard } from '../credit/guard/credit-permission.guard'
-import { RequireCreditPermission } from '../credit/guard/require-credit-permission.decorator'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequirePermission } from '../shared/auth/require-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 
 /**
@@ -354,8 +354,8 @@ export class AdminController {
   }
 
   @Get('credit/activation-requests')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Listado paginado de solicitudes de activación de crédito' })
   @ApiResponse({ status: 200, description: 'Solicitudes de activación paginadas' })
   async activationRequests(
@@ -384,8 +384,8 @@ export class AdminController {
   }
 
   @Patch('credit/activation-requests/:id')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Actualizar estado/notas de una solicitud de activación de crédito' })
   @ApiResponse({ status: 200, description: 'Solicitud actualizada' })
   async updateActivationRequest(
