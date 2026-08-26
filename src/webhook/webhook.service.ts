@@ -9,6 +9,11 @@ import { ConfioProvider } from '../provider/confio/confio.provider'
 
 const MAX_WEBHOOK_RETRIES = 3
 
+/** Violación de índice único en Postgres (verificado contra dev: `code=23505`). */
+function isUniqueViolation(e: unknown): boolean {
+  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
+}
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name)
@@ -44,8 +49,13 @@ export class WebhookService {
     payload: any,
   ) {
     try {
-      // Idempotencia
-      const existing = await this.webhookEventReadRepository.findOne({
+      // Idempotencia. El chequeo previo existe para evitar un INSERT condenado,
+      // no para garantizar unicidad: entre el SELECT y el INSERT entra otra
+      // entrega. Quien garantiza es el índice único `UQ_webhook_events_provider_id`
+      // (`migrations/1742600000000-InitialSchema.ts:233`), así que el contrato de
+      // idempotencia es la rama del 23505 de abajo, no este SELECT. Va contra la
+      // escritura —no contra la réplica— para que el lag no entre en el argumento.
+      const existing = await this.webhookEventRepository.findOne({
         where: { providerEventId },
       })
 
@@ -61,7 +71,23 @@ export class WebhookService {
         payload,
         status: WebhookStatus.RECEIVED,
       })
-      const saved = await this.webhookEventRepository.save(event)
+
+      let saved: WebhookEvent
+      try {
+        saved = await this.webhookEventRepository.save(event)
+      } catch (error) {
+        if (!isUniqueViolation(error)) throw error
+
+        // Perdimos la carrera contra otra entrega de la MISMA notificación: es un
+        // duplicado, no un fallo. Se devuelve la fila que ganó y no se despacha.
+        // La idempotencia en recepción alcanza porque el efecto aguas abajo también
+        // lo es (`checkout.service.ts:411` corta si el pago ya está COMPLETED).
+        const winner = await this.webhookEventRepository.findOne({
+          where: { providerEventId },
+        })
+        this.logger.warn(`Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`)
+        return { data: winner, duplicate: true }
+      }
 
       this.logger.log(`Webhook recibido: ${provider}/${eventType} (${providerEventId})`)
 

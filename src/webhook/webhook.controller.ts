@@ -19,6 +19,7 @@ import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { buildConfioWebhookEventId } from '../provider/confio/confio-webhook'
 
 /**
  * Webhook Controller
@@ -145,9 +146,9 @@ export class WebhookController {
 
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.event || 'unknown'
-    // Único por transición de estado del pago (evita procesar dos veces el mismo estado).
-    const resourceName = payload?.data?.name || payload?.data?.correlationId || 'unknown'
-    const providerEventId = `${resourceName}:${payload?.data?.status || eventType}`
+    // La clave identifica a la notificación, no al intento de entrega: la deriva
+    // `buildConfioWebhookEventId` a partir de los campos que Confío reenvía igual.
+    const providerEventId = buildConfioWebhookEventId(payload)
 
     return this.webhookService.receive('confio', eventType, providerEventId, payload)
   }
