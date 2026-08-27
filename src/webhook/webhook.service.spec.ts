@@ -412,18 +412,17 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       expect(guardada.currentPeriodStart).toEqual(remoto.currentPeriodStart)
       expect(guardada.currentPeriodEnd).toEqual(remoto.currentPeriodEnd)
       expect(guardada.nextBillingDate).toEqual(remoto.nextBillingTime)
-      expect(historial()[0].metadata).toEqual({
-        event: 'subscription.billingStatusChanged',
-        cycleNumber: 3,
-        amountCents: 1990000,
-        currencyCode: 'COP',
-        providerEventId: 'ev-1',
-        roles: {
-          accion: 'reponer',
-          brandId: 'brand-1',
-          planSlug: 'dropi-roax',
-          expiresAt: remoto.currentPeriodEnd.toISOString(),
-        },
+      // Acotado a `metadata.roles`, que es lo que este caso declara: que el
+      // `expiresAt` prometido a roles sea EXACTAMENTE el período que se persiste.
+      // El resto del `metadata` lo cubre —con `toEqual` exhaustivo— el primer
+      // test de `la traza del movimiento…` en
+      // `confio-subscription-webhook.service.spec.ts`, dueño único de esa forma
+      // desde `trazabilidad-de-movimientos`. No se afloja a `toMatchObject`.
+      expect(historial()[0].metadata.roles).toEqual({
+        accion: 'reponer',
+        brandId: 'brand-1',
+        planSlug: 'dropi-roax',
+        expiresAt: remoto.currentPeriodEnd.toISOString(),
       })
     })
 
@@ -438,18 +437,17 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       expect(guardada.currentPeriodStart).toEqual(FIN_ANTERIOR)
       expect(guardada.currentPeriodEnd).toEqual(unMesDespues(FIN_ANTERIOR))
       expect(guardada.nextBillingDate).toEqual(unMesDespues(FIN_ANTERIOR))
-      expect(historial()[0].metadata).toEqual({
-        event: 'subscription.billingStatusChanged',
-        cycleNumber: 3,
-        amountCents: 1990000,
-        currencyCode: 'COP',
-        providerEventId: 'ev-1',
-        roles: {
-          accion: 'reponer',
-          brandId: 'brand-1',
-          planSlug: 'dropi-roax',
-          expiresAt: unMesDespues(FIN_ANTERIOR).toISOString(),
-        },
+      // Acotado a `metadata.roles`, que es lo que este caso declara: que el
+      // `expiresAt` prometido a roles sea EXACTAMENTE el período que se persiste.
+      // El resto del `metadata` lo cubre —con `toEqual` exhaustivo— el primer
+      // test de `la traza del movimiento…` en
+      // `confio-subscription-webhook.service.spec.ts`, dueño único de esa forma
+      // desde `trazabilidad-de-movimientos`. No se afloja a `toMatchObject`.
+      expect(historial()[0].metadata.roles).toEqual({
+        accion: 'reponer',
+        brandId: 'brand-1',
+        planSlug: 'dropi-roax',
+        expiresAt: unMesDespues(FIN_ANTERIOR).toISOString(),
       })
     })
 

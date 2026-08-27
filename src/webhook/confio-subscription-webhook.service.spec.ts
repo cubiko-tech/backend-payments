@@ -223,13 +223,17 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
 
       await despachar(cobro('FAILED'))
 
-      expect(historial()[0].metadata).toEqual({
-        event: 'subscription.billingStatusChanged',
-        cycleNumber: 3,
-        amountCents: 1990000,
-        currencyCode: 'COP',
-        providerEventId: 'ev-1',
-        roles: { accion: 'retirar', brandId: BRAND_ID, planSlug: PLAN_SLUG, expiresAt: undefined },
+      // Acotado a `metadata.roles`, que es su propósito declarado: el resto del
+      // `metadata` lo cubre —y con `toEqual` EXHAUSTIVO— el primer test de
+      // `la traza del movimiento…`, que asumió ese rol al agregarse los campos de
+      // `trazabilidad-de-movimientos`. No se afloja a `toMatchObject`: el candado
+      // contra volcar campos no decididos en un objeto que se sirve por API sigue
+      // existiendo, sólo que en un solo lugar.
+      expect(historial()[0].metadata.roles).toEqual({
+        accion: 'retirar',
+        brandId: BRAND_ID,
+        planSlug: PLAN_SLUG,
+        expiresAt: undefined,
       })
     })
 
@@ -450,6 +454,190 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         expect(manager.save).not.toHaveBeenCalled()
       },
     )
+  })
+
+  // ------------------------------------------------- (5) traza del movimiento
+  /**
+   * `trazabilidad-de-movimientos` (épica 002, criterio 2): de cada movimiento
+   * que reporta ConfioPagos se reconstruye el hecho completo —marca, usuario,
+   * plan, monto, moneda, referencia del proveedor y resultado— leyendo SÓLO la
+   * fila de `subscription_events`, sin volver a preguntarle al proveedor.
+   *
+   * Los cinco casos tienen roles DISTINTOS y declarados: 1 pinnea la FORMA
+   * completa del `metadata`, 2 y 3 verifican campo por campo los dos resultados
+   * restantes, 4 defiende la totalidad del armado y 5 es guarda de regresión
+   * sobre el acoplamiento traza↔idempotencia.
+   */
+  describe('la traza del movimiento reconstruye el hecho sin el proveedor', () => {
+    it('el cobro exitoso deja la fila completa (forma CERRADA del metadata)', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      // Se rechaza a propósito: la traza no depende del período remoto.
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(historial()).toHaveLength(1)
+      const fila = historial()[0]
+      expect(fila.subscriptionId).toBe(SUB_ID)
+      expect(fila.eventType).toBe('payment_succeeded')
+      expect(fila.fromStatus).toBe(SubscriptionStatus.PAST_DUE)
+      expect(fila.toStatus).toBe(SubscriptionStatus.ACTIVE)
+      expect(fila.triggeredBy).toBe('confio-webhook')
+
+      // `toEqual` ESTRICTO y no `toMatchObject`, a propósito: esta fila entera
+      // sale por `GET /subscription/history`
+      // (`subscription.service.ts:606-620` hace `find()` sin `select`), y ese
+      // endpoint tiene autenticación SOLA —ningún `@RequirePermission` y ninguna
+      // validación de que el `brandId` pedido sea del que llama—. O sea que todo
+      // lo que caiga en `metadata` queda legible por cualquier usuario
+      // autenticado. El `toEqual` es el candado: agregar un campo sin decidirlo
+      // —PII del comprador (`ConfioBuyer` trae email y teléfono), tokens,
+      // resource names de más— pone el build en rojo acá.
+      // rojo si: se borra `brandId` del metadata armado (o se agrega CUALQUIER
+      // clave nueva).
+      expect(fila.metadata).toEqual({
+        event: 'subscription.billingStatusChanged',
+        providerEventId: 'ev-1',
+        brandId: BRAND_ID,
+        userId: 'user-1',
+        planSlug: PLAN_SLUG,
+        amountCents: 1990000,
+        currencyCode: 'COP',
+        cycleNumber: 3,
+        providerRef: { name: SUB_NAME, payment: 'organizations/o/stores/s/payments/p3' },
+        roles: {
+          accion: 'reponer',
+          brandId: BRAND_ID,
+          planSlug: PLAN_SLUG,
+          expiresAt: '2026-03-01T00:00:00.000Z',
+        },
+      })
+    })
+
+    // rojo si: se deja de copiar `data.reason` a la COLUMNA `reason` (la
+    // aceptación pide la columna, no el metadata), o falta cualquiera de los
+    // campos afirmados uno por uno acá abajo.
+    it('el cobro fallido deja el motivo en la columna `reason` y la referencia sin pago', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cobro('FAILED'))
+
+      expect(historial()).toHaveLength(1)
+      const fila = historial()[0]
+      expect(fila.eventType).toBe('payment_failed')
+      expect(fila.fromStatus).toBe(SubscriptionStatus.ACTIVE)
+      expect(fila.toStatus).toBe(SubscriptionStatus.PAST_DUE)
+      expect(fila.triggeredBy).toBe('confio-webhook')
+      // La COLUMNA, no el metadata.
+      expect(fila.reason).toBe('INSUFFICIENT_FUNDS')
+
+      expect(fila.metadata.event).toBe('subscription.billingStatusChanged')
+      expect(fila.metadata.providerEventId).toBe('ev-1')
+      expect(fila.metadata.brandId).toBe(BRAND_ID)
+      expect(fila.metadata.userId).toBe('user-1')
+      expect(fila.metadata.planSlug).toBe(PLAN_SLUG)
+      expect(fila.metadata.amountCents).toBe(1990000)
+      expect(fila.metadata.currencyCode).toBe('COP')
+      expect(fila.metadata.cycleNumber).toBe(3)
+      // El fallo no trae `payment`: la referencia lleva el motivo en su lugar.
+      expect(fila.metadata.providerRef).toEqual({ name: SUB_NAME, reason: 'INSUFFICIENT_FUNDS' })
+      expect(fila.metadata.providerRef).not.toHaveProperty('payment')
+    })
+
+    // rojo si: se remapea `CANCELED` a otro `SubscriptionEventType`, o se deja
+    // de leer `planSlug` de la fila bloqueada.
+    it('la cancelación deja la traza sin monto ni ciclo, que su payload no trae', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado('CANCELED'))
+
+      expect(historial()).toHaveLength(1)
+      const fila = historial()[0]
+      expect(fila.eventType).toBe('cancelled')
+      expect(fila.toStatus).toBe(SubscriptionStatus.CANCELLED)
+      expect(fila.triggeredBy).toBe('confio-webhook')
+
+      expect(fila.metadata.event).toBe('subscription.subscriptionStatusChanged')
+      expect(fila.metadata.providerEventId).toBe('ev-1')
+      expect(fila.metadata.brandId).toBe(BRAND_ID)
+      expect(fila.metadata.userId).toBe('user-1')
+      expect(fila.metadata.planSlug).toBe(PLAN_SLUG)
+      expect(fila.metadata.providerRef).toEqual({ name: SUB_NAME })
+      expect(fila.metadata.providerRef).not.toHaveProperty('payment')
+      // Ausencia y NUNCA `toBeNull()`: en el jsonb real una clave `undefined` se
+      // serializa como AUSENTE, así que un `toBeNull()` pasaría en unit y
+      // mentiría sobre la fila. La aceptación admite «null/omitidos».
+      expect(fila.metadata.amountCents).toBeUndefined()
+      expect(fila.metadata.currencyCode).toBeUndefined()
+      expect(fila.metadata.cycleNumber).toBeUndefined()
+    })
+
+    // rojo si: el armado lee un opcional sin guarda (p. ej. `data.reason.trim()`).
+    // Eso tira `TypeError` DENTRO de la transacción y se la lleva puesta entera:
+    // no queda fila y el estado no cambia, con lo cual caen las dos aserciones de
+    // efecto de abajo. Es lo único que sostiene la totalidad del armado: el
+    // tsconfig tiene `strictNullChecks: false` y el compilador no la ve.
+    it('un payload mutilado escribe la fila igual y NO impide el efecto', async () => {
+      // Arranca en `past_due` a propósito: la fábrica nace `ACTIVE`, así que
+      // afirmar `active` sobre ella sería vacuo —pasaría sin que nada cambiara—.
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+      const payload = cobro('SUCCEEDED')
+      // Borrado REAL de las claves, no `undefined` por `over`: un `undefined`
+      // explícito oculta el caso de la clave que nunca vino.
+      delete payload.data.amountCents
+      delete payload.data.cycleNumber
+
+      await despachar(payload)
+
+      expect(historial()).toHaveLength(1)
+      const fila = historial()[0]
+      expect(fila.metadata.brandId).toBe(BRAND_ID)
+      expect(fila.metadata.userId).toBe('user-1')
+      expect(fila.metadata.planSlug).toBe(PLAN_SLUG)
+      expect(fila.metadata.event).toBe('subscription.billingStatusChanged')
+      expect(fila.metadata.providerEventId).toBe('ev-1')
+      expect(fila.metadata.amountCents).toBeUndefined()
+      expect(fila.metadata.cycleNumber).toBeUndefined()
+      // El efecto de negocio SE APLICÓ pese al payload mutilado. Las dos
+      // aserciones sólo pasan si hubo transición real.
+      expect(fila.fromStatus).toBe(SubscriptionStatus.PAST_DUE)
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+    })
+
+    /**
+     * TEST DE GUARDA, no un rojo prometido: el handler YA escribe
+     * `providerEventId` en el `metadata`, así que con un doble realista de
+     * `getOne` este caso NACE VERDE. Su valor es fijar el acoplamiento
+     * traza↔idempotencia para que la refactorización no lo rompa.
+     *
+     * Cómo comprobar que muerde (procedimiento, ejercido y revertido al
+     * construir esta tarea): quitar `providerEventId` del metadata armado en
+     * `confio-traza.util.ts` ⇒ el marcador deja de encontrarse y quedan DOS
+     * filas. La deduplicación es `metadata ->> 'providerEventId'`, extracción de
+     * TEXTO en la RAÍZ del jsonb: anidar o renombrar esa clave regala un período.
+     */
+    it('la reentrega del mismo providerEventId sigue dejando UNA sola fila', async () => {
+      conSuscripcion(suscripcion())
+      // El helper `qb()` compartido conserva su `getOne: null` para el resto del
+      // spec; acá y sólo acá se sobreescriben los DOS builders, porque el
+      // pre-chequeo usa el repo y la relectura bajo lock usa el manager.
+      const buscador = () => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn(async () =>
+          historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
+        ),
+      })
+      eventRepo.createQueryBuilder.mockImplementation(buscador)
+      manager.createQueryBuilder.mockImplementation(buscador)
+
+      await despachar(cobro('FAILED'))
+      await despachar(cobro('FAILED'))
+
+      expect(historial()).toHaveLength(1)
+      expect(historial()[0].metadata.providerEventId).toBe('ev-1')
+    })
   })
 })
 

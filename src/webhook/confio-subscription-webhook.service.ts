@@ -13,6 +13,7 @@ import {
 import { WebhookEvent } from './entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { aFecha, estaVencido, PeriodoConfio, periodoLocal } from './confio-period.util'
+import { armarTrazaDelMovimiento } from './confio-traza.util'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -482,34 +483,20 @@ export class ConfioSubscriptionWebhookService {
 
       await manager.save(sub)
 
-      const data = payload.data || {}
-      await manager.save(SubscriptionEvent, {
-        subscriptionId,
-        eventType: efecto.eventType,
-        fromStatus,
-        toStatus: efecto.toStatus,
-        triggeredBy: 'confio-webhook',
-        metadata: {
-          event: payload.event,
-          cycleNumber: data.cycleNumber,
-          amountCents: data.amountCents,
-          currencyCode: data.currencyCode,
+      // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
+      // usuario y plan salen de esa fila y no de una relectura posterior.
+      await manager.save(
+        SubscriptionEvent,
+        armarTrazaDelMovimiento({
+          sub,
+          fromStatus,
+          eventType: efecto.eventType,
+          toStatus: efecto.toStatus,
+          payload,
           providerEventId,
-          // Traza mínima del movimiento de acceso, en la fila de historial que
-          // este efecto ya emitía (sin tipos de evento nuevos ni migración). El
-          // spread condicional deja limpias las filas que no tocan roles.
-          ...(efecto.roles
-            ? {
-                roles: {
-                  accion: efecto.roles.accion,
-                  brandId: efecto.roles.brandId,
-                  planSlug: efecto.roles.planSlug,
-                  expiresAt: efecto.roles.expiresAt?.toISOString(),
-                },
-              }
-            : {}),
-        },
-      })
+          roles: efecto.roles,
+        }),
+      )
     })
   }
 
