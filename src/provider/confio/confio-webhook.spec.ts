@@ -1,4 +1,4 @@
-import { buildConfioWebhookEventId } from './confio-webhook'
+import { buildConfioWebhookEventId, classifyConfioWebhookEvent } from './confio-webhook'
 import { ConfioWebhookPayload } from './confio.types'
 
 /**
@@ -139,5 +139,31 @@ describe('buildConfioWebhookEventId', () => {
         'stores/01KZBY100Z3HD2X997XE0DN8PW/payments/01M0Z0BBBB:FUNDED',
       )
     })
+  })
+})
+
+describe('classifyConfioWebhookEvent', () => {
+  // Mutación que pone rojo el ramo firmado: devolver 'one_shot' para estos dos.
+  it('manda al ramo firmado los dos eventos de suscripción', () => {
+    expect(classifyConfioWebhookEvent('subscription.billingStatusChanged')).toBe('firmado')
+    expect(classifyConfioWebhookEvent('subscription.subscriptionStatusChanged')).toBe('firmado')
+  })
+
+  // Mutación que lo pone rojo: mandar el par one-shot a 'fuera_de_contrato'.
+  // Sería apagar tráfico VIVO: llegan sin objeto `signature` (fixture de abajo)
+  // y `webhook.service.ts:236-256` los despacha por `data.status`.
+  it('manda al ramo one-shot los dos eventos del link de pago', () => {
+    expect(classifyConfioWebhookEvent('payment.statusChanged')).toBe('one_shot')
+    expect(classifyConfioWebhookEvent('paymentAttempt.statusChanged')).toBe('one_shot')
+  })
+
+  // Mutación que lo pone rojo: devolver 'one_shot' por defecto.
+  it('deja fuera del contrato lo que no está en la tabla publicada', () => {
+    expect(classifyConfioWebhookEvent('invoice.created')).toBe('fuera_de_contrato')
+    expect(classifyConfioWebhookEvent(undefined)).toBe('fuera_de_contrato')
+    expect(classifyConfioWebhookEvent('')).toBe('fuera_de_contrato')
+    expect(classifyConfioWebhookEvent({ event: 'subscription.billingStatusChanged' })).toBe(
+      'fuera_de_contrato',
+    )
   })
 })

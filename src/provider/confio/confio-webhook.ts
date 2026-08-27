@@ -16,6 +16,43 @@ import { ConfioWebhookPayload } from './confio.types'
  *
  * Contrato en `roax-ops/planning/CONFIOPAGOS_SUSCRIPCIONES.md` §Webhooks.
  */
+/**
+ * Ramo al que pertenece un evento de webhook de ConfioPagos.
+ *
+ * Los cuatro nombres son la tabla de eventos publicada del contrato
+ * (`roax-ops/planning/CONFIOPAGOS_SUSCRIPCIONES.md` §Webhooks). El reparto NO es
+ * cosmético, decide cómo se autentica cada evento:
+ *
+ *  - `firmado` — los dos eventos de suscripción, que traen objeto `signature` y
+ *    se verifican con `verifyConfioWebhookSignature`.
+ *  - `one_shot` — los dos eventos del link de pago, que hoy llegan SIN objeto
+ *    `signature` (fixture vivo `confio-webhook.spec.ts`) y son tráfico EN VUELO:
+ *    `webhook.service.ts:236-256` los despacha mirando `data.status` sin leer
+ *    nunca el `eventType`. Silenciarlos apagaría cobros que están corriendo.
+ *  - `fuera_de_contrato` — todo lo demás: no se sabe cómo autenticarlo, así que
+ *    no se despacha.
+ */
+export type ConfioWebhookRamo = 'firmado' | 'one_shot' | 'fuera_de_contrato'
+
+const EVENTOS_FIRMADOS = [
+  'subscription.billingStatusChanged',
+  'subscription.subscriptionStatusChanged',
+]
+
+const EVENTOS_ONE_SHOT = ['payment.statusChanged', 'paymentAttempt.statusChanged']
+
+/**
+ * Clasifica el `event` del envelope. Acepta `unknown` a propósito: el valor
+ * viene del emisor y puede no ser ni siquiera un string.
+ */
+export function classifyConfioWebhookEvent(event: unknown): ConfioWebhookRamo {
+  if (typeof event !== 'string') return 'fuera_de_contrato'
+  if (EVENTOS_FIRMADOS.includes(event)) return 'firmado'
+  if (EVENTOS_ONE_SHOT.includes(event)) return 'one_shot'
+
+  return 'fuera_de_contrato'
+}
+
 export function buildConfioWebhookEventId(payload: ConfioWebhookPayload): string {
   const data = payload?.data || {}
   const event = payload?.event

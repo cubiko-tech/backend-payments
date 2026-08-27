@@ -158,11 +158,14 @@ const EXPECTED_SORTED_KEYS = EXPECTED_PROPERTY_SETS.map((variant) => [...variant
  * sobre la compuerta `missing_checksum`: así una entrada crafteada nunca puede
  * tirar un TypeError dentro de `Buffer.from`.
  *
- * Queda SIN exportar a propósito: `cablear-firma-en-el-webhook-confio` va a
- * necesitar la misma primitiva para el bearer y ahí sí conviene extraerla; hasta
- * ese segundo llamador real, YAGNI.
+ * Se exporta porque ya tiene DOS llamadores reales: la comparación del checksum
+ * de acá abajo y la del bearer en `webhook.controller.ts`, que compara el
+ * `Authorization` recibido contra `CONFIO_WEBHOOK_KEY` antes de verificar la
+ * firma. El bearer se compara con la misma primitiva que el digest: dos
+ * comparaciones de secreto con distinta forma es una invitación a que una de las
+ * dos filtre por tiempo.
  */
-function timingSafeEqualStrings(a: unknown, b: unknown): boolean {
+export function timingSafeEqualStrings(a: unknown, b: unknown): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false
 
   const left = Buffer.from(a, 'utf8')
