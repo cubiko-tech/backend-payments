@@ -48,6 +48,23 @@ export class SubscriptionController {
     return this.subscriptionService.getCurrent(brandId)
   }
 
+  /**
+   * Re-pide el link de aceptación a ConfioPagos en vez de devolver uno guardado.
+   *
+   * El `acceptanceUrl` es un link PORTADOR —quien lo tenga registra una tarjeta—
+   * y por eso NO se persiste: lo que se guarda es el `name` del recurso, y el
+   * link se pide de nuevo por acá, detrás del guard. Confío sólo lo entrega
+   * mientras la suscripción está en `PENDING_ACCEPTANCE`; después no hay link
+   * que dar y el servicio lo dice con su propio código.
+   */
+  @Get('acceptance-link')
+  @ApiOperation({ summary: 'Obtener el link de aceptación vigente de una marca' })
+  @ApiResponse({ status: 200, description: 'Link de aceptación obtenido' })
+  @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
+  async getAcceptanceLink(@Query('brandId') brandId: string) {
+    return this.subscriptionService.getAcceptanceLink(brandId)
+  }
+
   @Post()
   @ApiOperation({ summary: 'Crear una suscripción' })
   @ApiResponse({ status: 201, description: 'Suscripción creada correctamente' })

@@ -22,8 +22,39 @@ Content-Type: application/json
 }
 
 ### Iniciar prueba gratuita de 15 días (una sola por marca)
-# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca ya tiene una suscripción vigente.
+# El alta CREA la suscripción en ConfioPagos y responde
+# `{ data, acceptanceUrl, acceptanceExpireTime }`: `acceptanceUrl` es el único link
+# inicial (link PORTADOR — no se persiste ni se loguea, se re-pide por el camino
+# autenticado). El alta NO cobra: la suscripción queda en PENDING_ACCEPTANCE hasta
+# que el comprador acepta y registra su tarjeta.
+#
+# Ya NO acepta `provider` ni `walletId`: ConfioPagos es el único medio de pago.
+# 422 TRIAL_PROVIDER_NOT_SUPPORTED: el body trajo `provider` distinto de `confio`
+#     o trajo `walletId`.
+# 422 INVALID_TRIAL_PLAN: sin plan, o con el plan free.
+# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca ya tiene una suscripción vigente
+#     (también por CARRERA: dos altas simultáneas, una gana y la otra recibe 409).
 # 409 TRIAL_ALREADY_USED: la marca ya consumió su prueba; solo puede volver pagando.
+# 503 BRAND_LOOKUP_UNAVAILABLE / 404 BRAND_NOT_FOUND / 422 BRAND_WITHOUT_COUNTRY:
+#     país de la marca (backend-platform).
+# 503 PLAN_NOT_FOUND / 422 PRICE_NOT_FOUND_FOR_COUNTRY: precio del plan (backend-roles).
+# 422 CONFIO_PLAN_NOT_MAPPED / CONFIO_PLAN_NOT_CREATED / CONFIO_PLAN_ARCHIVED:
+#     no hay plan de ConfioPagos para (plan, moneda).
+# 503 USER_LOOKUP_UNAVAILABLE / 422 USER_NOT_FOUND: contacto del comprador (backend-auth).
+# 422 INVALID_BUYER: los datos del comprador (email/nombre/teléfono) no cumplen lo
+#     que exige ConfioPagos; lo puede corregir el llamador. Devuelve sólo `field`:
+#     el detalle lleva PII y no se expone.
+# 503 CONFIO_PLAN_STORE_MISMATCH / CONFIO_SUBSCRIPTION_NAME_INVALID: rechazo local
+#     por configuración NUESTRA —el plan del catálogo no es del `CONFIO_STORE_ID`
+#     configurado, o el resource name guardado es inconsultable—. NO es algo que el
+#     comprador pueda arreglar: el detalle queda en el log del servicio.
+# 503 CONFIO_SUBSCRIPTION_UNAVAILABLE: ConfioPagos no respondió.
+# 503 PLAN_ASSIGNMENT_FAILED: no se pudo activar el plan en backend-roles. NO se
+#     escribe nada LOCAL —la marca no queda quemada—, pero la suscripción en
+#     ConfioPagos YA ESTÁ CREADA: el reintento deja un segundo huérfano en
+#     PENDING_ACCEPTANCE (vence solo y no cobra).
+# 503 TRIAL_START_FAILED: fallo inesperado (la escritura de la fila, el commit).
+#     Mismo residual que arriba: el alta en ConfioPagos puede haber quedado hecha.
 POST {{HOST}}/subscription/trial HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
