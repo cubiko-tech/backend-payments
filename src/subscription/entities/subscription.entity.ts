@@ -20,6 +20,10 @@ export class Subscription extends Content {
   @Column({ type: 'timestamptz', nullable: true }) trialStart: Date
   @Column({ type: 'timestamptz', nullable: true }) trialEnd: Date
   @Column({ default: true }) autoRenew: boolean
+  // El link inicial del alta (el `acceptanceUrl` de ConfioPagos) ya fue emitido para ESTA fila: el cron
+  // de conversión no debe emitir un segundo. Columna propia y no `metadata.confio` (jsonb no es un
+  // marcador explícito) ni `providerSubscriptionId` (ese es criterio de backfill de una sola vez).
+  @Column({ type: 'timestamptz', nullable: true }) initialPaymentLinkIssuedAt: Date
   @Column({ type: 'timestamptz', nullable: true }) cancelledAt: Date
   @Column({ type: 'text', nullable: true }) cancelReason: string
   @Column({ type: 'uuid', nullable: true }) lastPaymentId: string

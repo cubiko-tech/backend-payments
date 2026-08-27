@@ -139,6 +139,7 @@ export class TasksService {
     let converted = 0
     let downgraded = 0
     let linked = 0
+    let skipped = 0
     for (const sub of trials) {
       // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
       if (sub.provider === 'wallet') {
@@ -157,6 +158,15 @@ export class TasksService {
         continue
       }
 
+      // El alta ya emitió el único link inicial de esta fila: emitir otro abriría un riel de
+      // cobro paralelo al de la suscripción recurrente. Se discrimina por el marcador y NO por
+      // `providerSubscriptionId`. La fila queda en TRIAL a propósito: la degradación por
+      // `trialEnd` es de otra tarea.
+      if (sub.initialPaymentLinkIssuedAt) {
+        skipped++
+        continue
+      }
+
       // Proveedor externo (ConfioPagos): emitir link de pago y notificar.
       // El webhook reactiva la suscripción cuando el usuario paga.
       await this.issueExternalCharge(sub, false)
@@ -166,7 +176,8 @@ export class TasksService {
     logger.log(
       'info',
       `[CRON] processTrialConversions: ${converted} cobrados, ${linked} con link emitido, ` +
-        `${downgraded} degradados a ${this.FREE_PLAN_SLUG}`,
+        `${downgraded} degradados a ${this.FREE_PLAN_SLUG}, ` +
+        `${skipped} salteados: link inicial ya emitido`,
     )
   }
 

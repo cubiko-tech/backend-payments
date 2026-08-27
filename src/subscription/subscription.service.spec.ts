@@ -367,6 +367,38 @@ describe('SubscriptionService', () => {
       expect(escrito).not.toContain(ACCEPTANCE_URL)
     })
 
+    it('marca `initialPaymentLinkIssuedAt` en la MISMA transacción que crea la fila', async () => {
+      await alta()
+
+      // La PRIMERA escritura de `Subscription` de la transacción: el marcador nace con la
+      // fila, no en un `save` posterior al commit.
+      const [, data] = txManager.save.mock.calls.find(([entity]) => entity === Subscription)
+      expect(data).toEqual(
+        expect.objectContaining({
+          trialStart: expect.any(Date),
+          initialPaymentLinkIssuedAt: expect.any(Date),
+        }),
+      )
+    })
+
+    it('el reuso de una fila muerta también queda marcado (ciclo nuevo, link nuevo)', async () => {
+      const muerta = {
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: null,
+      }
+      subscriptionRepo.findOne.mockResolvedValue(muerta)
+      txManager.findOne.mockResolvedValue(muerta)
+
+      await alta()
+
+      const [, data] = txManager.save.mock.calls.find(([entity]) => entity === Subscription)
+      expect(data).toEqual(
+        expect.objectContaining({ id: 'sub-1', initialPaymentLinkIssuedAt: expect.any(Date) }),
+      )
+    })
+
     it('escribe DESPUÉS de tener el link: Confío → roles → fila', async () => {
       await alta()
 

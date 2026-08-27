@@ -117,7 +117,18 @@ describe('TasksService — processTrialConversions', () => {
 
   it('emite link de cobro Confío para un trial externo vencido (no degrada)', async () => {
     subscriptionRepo.find.mockResolvedValue([
-      { id: 's1', brandId: 'b1', userId: 'u1', planSlug: 'pro', provider: 'confio', walletId: null, status: SubscriptionStatus.TRIAL, retryCount: 0 },
+      // `initialPaymentLinkIssuedAt: null` explícito: es el discriminante del caso de al lado.
+      {
+        id: 's1',
+        brandId: 'b1',
+        userId: 'u1',
+        planSlug: 'pro',
+        provider: 'confio',
+        walletId: null,
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+        initialPaymentLinkIssuedAt: null,
+      },
     ])
 
     await service.processTrialConversions()
@@ -139,6 +150,65 @@ describe('TasksService — processTrialConversions', () => {
       expect.objectContaining({ type: 'payment_link' }),
     )
     expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'free')
+  })
+
+  it('NO emite un segundo link si el alta ya emitió el link inicial', async () => {
+    subscriptionRepo.find.mockResolvedValue([
+      {
+        id: 's1',
+        brandId: 'b1',
+        userId: 'u1',
+        planSlug: 'dropi-roax',
+        provider: 'confio',
+        walletId: null,
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+        initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
+      },
+    ])
+
+    await service.processTrialConversions()
+
+    // Ni segundo link ni notificación ni cambio de estado: la fila queda intacta.
+    expect(checkoutService.processCheckout).not.toHaveBeenCalled()
+    expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    expect(eventBus.publishNotification).not.toHaveBeenCalled()
+    // Tampoco degrada: la degradación por `trialEnd` es de otra tarea.
+    expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'free')
+  })
+
+  it('lote mixto: sólo la fila sin marcar recibe link', async () => {
+    subscriptionRepo.find.mockResolvedValue([
+      {
+        id: 's1',
+        brandId: 'b-marcada',
+        userId: 'u1',
+        planSlug: 'dropi-roax',
+        provider: 'confio',
+        walletId: null,
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+        initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
+      },
+      {
+        id: 's2',
+        brandId: 'b-sin-marcar',
+        userId: 'u2',
+        planSlug: 'dropi-roax',
+        provider: 'confio',
+        walletId: null,
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+        initialPaymentLinkIssuedAt: null,
+      },
+    ])
+
+    await service.processTrialConversions()
+
+    expect(checkoutService.processCheckout).toHaveBeenCalledTimes(1)
+    expect(checkoutService.processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({ brandId: 'b-sin-marcar' }),
+    )
   })
 
   describe('reconcileExternalPayments', () => {

@@ -253,6 +253,12 @@ export class SubscriptionService {
           currentPeriodEnd: trialEnd,
           trialStart: now,
           trialEnd,
+          // Se marca INCONDICIONALMENTE: lo que afirma no es «hubo URL» sino «esta fila ya
+          // tiene su suscripción recurrente en ConfioPagos», y re-emitir un checkout
+          // one-shot encima sería un segundo riel de cobro. Si el `acceptanceUrl` no llegó,
+          // la vía de recuperación es `getAcceptanceLink`, nunca el cron. El reuso de una
+          // fila muerta lo re-marca a propósito: ciclo nuevo, link nuevo.
+          initialPaymentLinkIssuedAt: now,
           nextBillingDate: trialEnd,
           autoRenew: true,
           cancelledAt: null,
