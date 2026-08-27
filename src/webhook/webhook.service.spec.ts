@@ -1,11 +1,20 @@
+import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
-import { getRepositoryToken } from '@nestjs/typeorm'
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { getQueueToken } from '@nestjs/bullmq'
 import { QueryFailedError } from 'typeorm'
 
 import { WebhookService } from './webhook.service'
-import { WebhookEvent } from './entities/webhookEvent.entity'
+import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment } from '../payment/entities/payment.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
+import { ConfioProvider } from '../provider/confio/confio.provider'
 
 /**
  * Error tal como lo entrega el driver: `code` y `constraint` copiados de una
@@ -56,6 +65,8 @@ describe('WebhookService.receive', () => {
         { provide: getRepositoryToken(WebhookEvent, 'DBRead'), useValue: readRepo },
         { provide: getRepositoryToken(Payment, 'DBRead'), useValue: paymentReadRepo },
         { provide: getQueueToken('webhook-retry'), useValue: queue },
+        // El ramo firmado tiene su propio bloque más abajo, con el handler real.
+        { provide: ConfioSubscriptionWebhookService, useValue: { handle: jest.fn() } },
       ],
     }).compile()
 
@@ -104,5 +115,432 @@ describe('WebhookService.receive', () => {
 
     expect(res).toHaveProperty('error')
     expect((res as { duplicate?: boolean }).duplicate).toBeUndefined()
+  })
+})
+
+// ============================================================================
+// Ramo firmado de ConfioPagos: los dos eventos `subscription.*`
+// ============================================================================
+
+/**
+ * Payloads copiados de `src/provider/confio/confio-webhook.spec.ts`, que a su
+ * vez los vendorizó de `CONFIOPAGOS_SUSCRIPCIONES.md` §Webhooks. No inventados:
+ * el cobro exitoso trae `payment`, el fallido lo cambia por `failedCount`.
+ */
+const SUB_NAME =
+  'stores/01KZBY100Z3HD2X997XE0DN8PW/subscription-plans/01M0Z020DYMXKKDHHR4HAX916R/subscriptions/01M0Z0AAAA'
+
+const SUB_ID = '11111111-1111-4111-8111-111111111111'
+
+function cobro(status: string, over: Record<string, any> = {}): any {
+  return {
+    event: 'subscription.billingStatusChanged',
+    data: {
+      name: SUB_NAME,
+      cycleNumber: 3,
+      amountCents: 1990000,
+      currencyCode: 'COP',
+      status,
+      createTime: '2026-01-14T10:00:00Z',
+      ...(status === 'SUCCEEDED'
+        ? { payment: 'organizations/o/stores/s/payments/p3' }
+        : { failedCount: 1, reason: 'INSUFFICIENT_FUNDS' }),
+      ...over,
+    },
+    timestamp: 1768384800,
+    signature: { properties: ['name', 'status'], checksum: '4F6A' },
+  }
+}
+
+function cambioDeEstado(status: string, over: Record<string, any> = {}): any {
+  return {
+    event: 'subscription.subscriptionStatusChanged',
+    data: {
+      name: SUB_NAME,
+      status,
+      createTime: '2026-01-01T10:00:00Z',
+      updateTime: '2026-02-14T10:00:00Z',
+      ...over,
+    },
+    timestamp: 1768384800,
+    signature: { properties: ['name', 'status'], checksum: '4F6A' },
+  }
+}
+
+function suscripcion(over: Record<string, any> = {}): any {
+  return {
+    id: SUB_ID,
+    brandId: 'brand-1',
+    userId: 'user-1',
+    planSlug: 'dropi-roax',
+    status: SubscriptionStatus.ACTIVE,
+    provider: SubscriptionProvider.CONFIO,
+    providerSubscriptionId: SUB_NAME,
+    currentPeriodStart: new Date('2026-01-01T00:00:00Z'),
+    currentPeriodEnd: new Date('2026-02-01T00:00:00Z'),
+    nextBillingDate: new Date('2026-02-01T00:00:00Z'),
+    retryCount: 2,
+    cancelledAt: null,
+    ...over,
+  }
+}
+
+describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
+  let service: WebhookService
+  let writeRepo: any
+  let subRepo: { findOne: jest.Mock }
+  let eventRepo: { createQueryBuilder: jest.Mock }
+  let manager: any
+  let confio: { getSubscription: jest.Mock }
+  let checkout: { completeExternalPayment: jest.Mock }
+  let warn: jest.SpyInstance
+
+  /** Query builder encadenable: lo único que se le pide es `getOne()`. */
+  function qb(resultado: any) {
+    return {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(resultado),
+    }
+  }
+
+  beforeEach(async () => {
+    writeRepo = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((d) => d),
+      save: jest.fn((d) => Promise.resolve({ id: 'we-1', ...d })),
+    }
+    subRepo = { findOne: jest.fn().mockResolvedValue(null) }
+    eventRepo = { createQueryBuilder: jest.fn(() => qb(null)) }
+    manager = {
+      findOne: jest.fn().mockResolvedValue(null),
+      save: jest.fn((...args: any[]) => Promise.resolve(args[args.length - 1])),
+      createQueryBuilder: jest.fn(() => qb(null)),
+    }
+    confio = { getSubscription: jest.fn() }
+    checkout = { completeExternalPayment: jest.fn().mockResolvedValue(undefined) }
+
+    const dataSource = { transaction: jest.fn((cb: any) => cb(manager)) }
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        WebhookService,
+        ConfioSubscriptionWebhookService,
+        { provide: getRepositoryToken(WebhookEvent, 'DBWrite'), useValue: writeRepo },
+        { provide: getRepositoryToken(WebhookEvent, 'DBRead'), useValue: { findOne: jest.fn() } },
+        { provide: getRepositoryToken(Payment, 'DBRead'), useValue: { findOne: jest.fn() } },
+        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subRepo },
+        { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: eventRepo },
+        { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
+        { provide: ConfioProvider, useValue: confio },
+        { provide: getQueueToken('webhook-retry'), useValue: { add: jest.fn() } },
+      ],
+    }).compile()
+
+    service = module.get<WebhookService>(WebhookService)
+    service.setCheckoutService(checkout)
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => jest.restoreAllMocks())
+
+  /** Fila de `subscriptions` que quedó guardada dentro de la transacción. */
+  function suscripcionGuardada(): any {
+    const call = manager.save.mock.calls.find((c: any[]) => c[0] !== SubscriptionEvent)
+    return call?.[0]
+  }
+
+  /** Filas de historial escritas (`subscription_events`). */
+  function historial(): any[] {
+    return manager.save.mock.calls
+      .filter((c: any[]) => c[0] === SubscriptionEvent)
+      .map((c: any[]) => c[1])
+  }
+
+  function evento(payload: any, providerEventId = 'ev-1'): any {
+    return {
+      id: 'we-1',
+      provider: 'confio',
+      eventType: payload.event,
+      providerEventId,
+      payload,
+      status: WebhookStatus.RECEIVED,
+      retryCount: 0,
+    }
+  }
+
+  function despachar(payload: any, providerEventId = 'ev-1') {
+    return service['processEvent'](evento(payload, providerEventId))
+  }
+
+  function conSuscripcion(sub: any) {
+    subRepo.findOne.mockResolvedValue(sub)
+    manager.findOne.mockResolvedValue(sub)
+    return sub
+  }
+
+  // ---------------------------------------------------------------- mapa (4)
+  describe('subscription.subscriptionStatusChanged', () => {
+    const casos: Array<[string, SubscriptionStatus]> = [
+      ['TRIALING', SubscriptionStatus.TRIAL],
+      ['ACTIVE', SubscriptionStatus.ACTIVE],
+      ['PAST_DUE', SubscriptionStatus.PAST_DUE],
+      ['SUSPENDED', SubscriptionStatus.PAST_DUE],
+      ['CANCELED', SubscriptionStatus.CANCELLED],
+      ['EXPIRED', SubscriptionStatus.EXPIRED],
+    ]
+
+    it.each(casos)('mapea %s → %s y deja una sola fila de historial', async (wire, local) => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.TRIAL }))
+
+      await despachar(cambioDeEstado(wire))
+
+      expect(suscripcionGuardada().status).toBe(local)
+      const filas = historial()
+      expect(filas).toHaveLength(1)
+      expect(filas[0]).toMatchObject({
+        subscriptionId: SUB_ID,
+        fromStatus: SubscriptionStatus.TRIAL,
+        toStatus: local,
+        triggeredBy: 'confio-webhook',
+      })
+      expect(filas[0].metadata).toMatchObject({
+        event: 'subscription.subscriptionStatusChanged',
+        providerEventId: 'ev-1',
+      })
+    })
+
+    it('CANCELED sella cancelledAt cuando venía nulo', async () => {
+      conSuscripcion(suscripcion({ cancelledAt: null }))
+
+      await despachar(cambioDeEstado('CANCELED'))
+
+      expect(suscripcionGuardada().cancelledAt).toBeInstanceOf(Date)
+    })
+
+    it('CANCELED no pisa un cancelledAt existente', async () => {
+      const previo = new Date('2026-01-05T00:00:00Z')
+      conSuscripcion(suscripcion({ cancelledAt: previo }))
+
+      await despachar(cambioDeEstado('CANCELED'))
+
+      expect(suscripcionGuardada().cancelledAt).toBe(previo)
+    })
+
+    it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])('%s no cambia el estado ni escribe', async (wire) => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado(wire))
+
+      expect(manager.save).not.toHaveBeenCalled()
+      expect(historial()).toHaveLength(0)
+    })
+
+    it('un estado desconocido se loguea, no escribe y no lanza', async () => {
+      conSuscripcion(suscripcion())
+
+      await expect(despachar(cambioDeEstado('SOMETHING_NEW'))).resolves.toBeUndefined()
+
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('avisa cuando revive una suscripción cancelada', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.CANCELLED }))
+
+      await despachar(cambioDeEstado('ACTIVE'))
+
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+      expect(warn.mock.calls.flat().join(' ')).toMatch(/cancelled.*active|active.*cancelled/)
+    })
+  })
+
+  // ------------------------------------------------------------- cobro (2/3)
+  describe('subscription.billingStatusChanged', () => {
+    it('SUCCEEDED con respuesta del proveedor toma sus tres fechas', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      // Fechas a propósito DISTINTAS del avance local (02-01 → 03-01): si el
+      // handler ignorara al proveedor, este test seguiría verde.
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
+        nextBillingTime: new Date('2026-03-06T00:00:00Z'),
+      })
+
+      await despachar(cobro('SUCCEEDED'))
+
+      const guardada = suscripcionGuardada()
+      expect(guardada.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(guardada.retryCount).toBe(0)
+      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-05T00:00:00Z'))
+      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-05T00:00:00Z'))
+      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-06T00:00:00Z'))
+      expect(historial()[0].metadata).toEqual({
+        event: 'subscription.billingStatusChanged',
+        cycleNumber: 3,
+        amountCents: 1990000,
+        currencyCode: 'COP',
+        providerEventId: 'ev-1',
+      })
+    })
+
+    it('SUCCEEDED con el proveedor caído avanza un ciclo local desde el fin anterior', async () => {
+      conSuscripcion(suscripcion())
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      const guardada = suscripcionGuardada()
+      expect(guardada.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-01T00:00:00Z'))
+      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-01T00:00:00Z'))
+      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-01T00:00:00Z'))
+      expect(historial()[0].metadata).toEqual({
+        event: 'subscription.billingStatusChanged',
+        cycleNumber: 3,
+        amountCents: 1990000,
+        currencyCode: 'COP',
+        providerEventId: 'ev-1',
+      })
+    })
+
+    it('SUCCEEDED sin las tres fechas del proveedor también avanza localmente', async () => {
+      conSuscripcion(suscripcion())
+      // Respuesta PARCIAL: se descarta entera, no se mezcla con el avance local.
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
+        nextBillingTime: undefined,
+      })
+
+      await despachar(cobro('SUCCEEDED'))
+
+      const guardada = suscripcionGuardada()
+      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-01T00:00:00Z'))
+      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-01T00:00:00Z'))
+      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-01T00:00:00Z'))
+    })
+
+    it.each(['FAILED', 'SOMETHING_NEW'])('%s deja past_due sin avanzar el período', async (status) => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cobro(status))
+
+      const guardada = suscripcionGuardada()
+      expect(guardada.status).toBe(SubscriptionStatus.PAST_DUE)
+      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-02-01T00:00:00Z'))
+      expect(guardada.nextBillingDate).toEqual(new Date('2026-02-01T00:00:00Z'))
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+      expect(historial()[0].metadata).toMatchObject({
+        event: 'subscription.billingStatusChanged',
+        providerEventId: 'ev-1',
+        cycleNumber: 3,
+      })
+    })
+  })
+
+  // ------------------------------------------------------------ resolución (1)
+  describe('resolución de la suscripción', () => {
+    it('resuelve por providerSubscriptionId === data.name', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado('EXPIRED'))
+
+      expect(subRepo.findOne).toHaveBeenCalledWith({ where: { providerSubscriptionId: SUB_NAME } })
+    })
+
+    it('cae al correlationId cuando es un UUID y el name no resuelve', async () => {
+      const sub = suscripcion()
+      subRepo.findOne.mockResolvedValueOnce(null).mockResolvedValue(sub)
+      manager.findOne.mockResolvedValue(sub)
+
+      await despachar(cambioDeEstado('EXPIRED', { correlationId: SUB_ID }))
+
+      expect(subRepo.findOne).toHaveBeenCalledWith({ where: { id: SUB_ID } })
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.EXPIRED)
+    })
+
+    it('un correlationId que no es UUID nunca llega al repositorio', async () => {
+      await despachar(cambioDeEstado('EXPIRED', { name: undefined, correlationId: 'brand-42' }))
+
+      expect(subRepo.findOne).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('sin suscripción: loguea name y correlationId, no lanza y el evento queda processed', async () => {
+      const e = evento(cambioDeEstado('EXPIRED', { correlationId: SUB_ID }))
+
+      await expect(service['processEvent'](e)).resolves.toBeUndefined()
+
+      expect(manager.save).not.toHaveBeenCalled()
+      expect(e.status).toBe(WebhookStatus.PROCESSED)
+      const texto = warn.mock.calls.flat().join(' ')
+      expect(texto).toContain(SUB_NAME)
+      expect(texto).toContain(SUB_ID)
+    })
+
+    it('resuelto por correlationId, el cobro consulta el resource name de la fila', async () => {
+      conSuscripcion(suscripcion())
+      confio.getSubscription.mockResolvedValue({})
+
+      await despachar(cobro('SUCCEEDED', { name: undefined, correlationId: SUB_ID }))
+
+      expect(confio.getSubscription).toHaveBeenCalledWith(SUB_NAME)
+    })
+
+    it('sin resource name en ninguna punta no se llama al proveedor', async () => {
+      conSuscripcion(suscripcion({ providerSubscriptionId: null }))
+
+      await despachar(cobro('SUCCEEDED', { name: undefined, correlationId: SUB_ID }))
+
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+    })
+  })
+
+  // ----------------------------------------------------------- idempotencia (6)
+  describe('idempotencia del re-despacho', () => {
+    it('el marcador previo corta antes de consultar al proveedor', async () => {
+      conSuscripcion(suscripcion())
+      eventRepo.createQueryBuilder.mockReturnValue(qb({ id: 'se-previo' }))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('el marcador dentro de la transacción corta aunque el previo no lo viera', async () => {
+      conSuscripcion(suscripcion())
+      confio.getSubscription.mockResolvedValue({})
+      manager.createQueryBuilder.mockReturnValue(qb({ id: 'se-previo' }))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(manager.save).not.toHaveBeenCalled()
+      expect(historial()).toHaveLength(0)
+    })
+
+    it('relee la fila bloqueada con pessimistic_write', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado('EXPIRED'))
+
+      expect(manager.findOne).toHaveBeenCalledWith(Subscription, {
+        where: { id: SUB_ID },
+        lock: { mode: 'pessimistic_write' },
+      })
+    })
+  })
+
+  // -------------------------------------------------------- regresión one-shot
+  it('el evento del link one-shot sigue tomando el camino viejo por data.status', async () => {
+    await despachar({
+      event: 'payment.statusChanged',
+      data: { name: 'stores/s/payments/p', status: 'FUNDED', correlationId: 'pay-1' },
+    })
+
+    expect(checkout.completeExternalPayment).toHaveBeenCalledWith('pay-1', expect.any(Object))
+    expect(subRepo.findOne).not.toHaveBeenCalled()
   })
 })

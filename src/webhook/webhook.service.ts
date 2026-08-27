@@ -6,6 +6,8 @@ import { Queue } from 'bullmq'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment } from '../payment/entities/payment.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
+import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
 
 const MAX_WEBHOOK_RETRIES = 3
 
@@ -30,6 +32,7 @@ export class WebhookService {
     private readonly paymentReadRepo: Repository<Payment>,
     @InjectQueue('webhook-retry')
     private readonly retryQueue: Queue,
+    private readonly confioSubscriptions: ConfioSubscriptionWebhookService,
   ) {}
 
   /**
@@ -234,6 +237,18 @@ export class WebhookService {
     // CONFIOPAGOS
     // =============================================
     if (provider === 'confio') {
+      // Ruteo POR NOMBRE DE EVENTO, y sólo para el ramo firmado (los dos
+      // `subscription.*`). El camino de abajo —el del link one-shot, que
+      // despacha mirando `data.status`— queda intacto a propósito: es tráfico
+      // vivo que llega sin objeto `signature` y sin `event` conocido.
+      //
+      // La lógica del ramo firmado vive en `confio-subscription-webhook.service.ts`
+      // y NO acá: este archivo ya está en el límite de tamaño del repo.
+      if (classifyConfioWebhookEvent(payload?.event) === 'firmado') {
+        await this.confioSubscriptions.handle(event)
+        return
+      }
+
       const data = payload?.data || {}
       const status: string = data.status || ''
 
