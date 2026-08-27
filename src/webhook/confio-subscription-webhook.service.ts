@@ -11,6 +11,8 @@ import {
   ConfioWebhookPayload,
 } from '../provider/confio/confio.types'
 import { WebhookEvent } from './entities/webhookEvent.entity'
+import { ClientRolesService } from '../client/client-roles.service'
+import { aFecha, estaVencido, PeriodoConfio, periodoLocal } from './confio-period.util'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -71,11 +73,28 @@ interface EfectoConfio {
   toStatus: SubscriptionStatus
   /** Sólo el cobro exitoso avanza el período. */
   avanzaPeriodo?: boolean
-  /** Período resuelto en ConfioPagos; sin él se avanza un ciclo local. */
-  periodo?: { start: Date; end: Date; nextBilling: Date }
+  /** Período del cobro: el del proveedor, o el avance local. */
+  periodo?: PeriodoConfio
   reiniciaReintentos?: boolean
   /** `CANCELED` sella `cancelledAt`, pero sólo si venía nulo. */
   sellaCancelacion?: boolean
+  /** Movimiento de acceso en `backend-roles`; ausente = no se toca roles. */
+  roles?: EfectoRoles
+}
+
+/**
+ * Movimiento de acceso en `backend-roles`, decidido ANTES de tocar la base.
+ *
+ * Lleva `brandId` y `planSlug` PROPIOS en vez de releerlos de la fila bloqueada:
+ * así lo que se empujó a roles y lo que queda escrito en `metadata` son el MISMO
+ * dato, incluso si otra escritura le cambiara el plan a la fila en el medio.
+ */
+interface EfectoRoles {
+  accion: 'retirar' | 'reponer'
+  brandId: string
+  planSlug: string
+  /** Sólo la reposición: fin del período que se acaba de cobrar. */
+  expiresAt?: Date
 }
 
 /**
@@ -91,6 +110,12 @@ interface EfectoConfio {
  * `processEvent` marque el evento `processed` y el endpoint responda 200 —un
  * fallo del canal no puede convertirse en un hecho sobre el objeto—. Los
  * errores REALES de base sí se dejan propagar, así la cola reintenta.
+ *
+ * Sí lanza, y sólo, cuando `backend-roles` rechaza el movimiento de acceso: eso
+ * es un fallo de CANAL, no un hecho del objeto, y lanzar antes de abrir la
+ * transacción deja cero escrituras locales —ni `past_due`, ni marcador, ni
+ * historial— para que el reintento del webhook vuelva a intentarlo entero. Lo
+ * recíproco también vale: no recibir el webhook no retira nada.
  *
  * ⚠️ Residual aceptado: dos eventos DISTINTOS de la misma suscripción son
  * last-write-wins, así que una entrega fuera de orden puede aplicar un estado
@@ -110,6 +135,7 @@ export class ConfioSubscriptionWebhookService {
     @InjectDataSource('DBWrite')
     private readonly dataSource: DataSource,
     private readonly confio: ConfioProvider,
+    private readonly clientRoles: ClientRolesService,
   ) {}
 
   async handle(event: WebhookEvent): Promise<void> {
@@ -138,8 +164,12 @@ export class ConfioSubscriptionWebhookService {
 
     const efecto = payload.event === 'subscription.billingStatusChanged'
       ? await this.planearCobro(data, sub)
-      : this.planearCambioDeEstado(data)
+      : this.planearCambioDeEstado(data, sub)
     if (!efecto) return
+
+    if (efecto.roles) {
+      await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
+    }
 
     await this.aplicar(sub.id, efecto, payload, event.providerEventId)
   }
@@ -177,8 +207,15 @@ export class ConfioSubscriptionWebhookService {
     sub: Subscription,
   ): Promise<EfectoConfio> {
     if (data?.status !== 'SUCCEEDED') {
-      // El corte de acceso en `backend-roles` NO es de esta tarea: lo hace
-      // `corte-de-acceso-al-primer-fallo`. Acá sólo queda el estado local.
+      // El acceso pro se corta al PRIMER cobro fallido que reporte el webhook,
+      // sin período de gracia (regla de negocio de la épica 002). Se retira el
+      // plan de la suscripción y NO se asigna `free`: un plan free no se cobra y
+      // la degradación es de `degradacion-a-free-y-baja-en-roles`.
+      //
+      // Corta cualquier estado que no sea `SUCCEEDED` y no una lista de fallos
+      // porque `billingStatusChanged` sólo reporta cobros YA procesados
+      // («exitoso o fallido», tabla de eventos del contrato): hoy no hay estado
+      // intermedio. Si Confío agrega uno, este predicado lo leería como impago.
       //
       // ⚠️ DINERO: escribir `past_due` arma un cron VIEJO. `retryFailedPayments`
       // (`tasks.service.ts:216-250`, cada 6h) toma `PAST_DUE + autoRenew` y para
@@ -191,7 +228,27 @@ export class ConfioSubscriptionWebhookService {
       return {
         eventType: SubscriptionEventType.PAYMENT_FAILED,
         toStatus: SubscriptionStatus.PAST_DUE,
+        roles: this.efectoRoles('retirar', sub),
       }
+    }
+
+    // El período se resuelve ACÁ, en la fase de decisión, y no al aplicar: el
+    // `expiresAt` que se le promete a roles tiene que ser EXACTAMENTE el
+    // `currentPeriodEnd` que después se persiste. Resolverlo dos veces (una para
+    // roles, otra para la fila) permitiría que difieran.
+    const periodo = (await this.leerPeriodoDelProveedor(data, sub)) || periodoLocal(sub)
+
+    // Resurrección: un `SUCCEEDED` tardío sobre una suscripción que del lado
+    // NUESTRO ya está cancelada o vencida no repone el acceso. El mapeo de estado
+    // lo dicta la aceptación y se aplica (con el aviso de `aplicar`, medido sobre
+    // la fila bloqueada), pero conceder pro por el cobro de una suscripción que
+    // consideramos muerta es la mitad IRREVERSIBLE: se decide ACÁ, no después de
+    // haber empujado el movimiento a roles.
+    const revive = ESTADOS_TERMINALES.includes(sub.status)
+    if (revive) {
+      this.logger.warn(
+        `Confio cobro exitoso sobre una suscripción ${sub.status} (${sub.id}): no se repone el plan en roles`,
+      )
     }
 
     return {
@@ -199,8 +256,79 @@ export class ConfioSubscriptionWebhookService {
       toStatus: SubscriptionStatus.ACTIVE,
       avanzaPeriodo: true,
       reiniciaReintentos: true,
-      periodo: await this.leerPeriodoDelProveedor(data, sub),
+      periodo,
+      roles: revive ? undefined : this.efectoRoles('reponer', sub, periodo.end),
     }
+  }
+
+  /**
+   * Descriptor de roles, o `undefined` cuando la fila no alcanza para armarlo.
+   *
+   * La guarda es barata y necesaria: `brandId`/`planSlug` van al path de roles
+   * (`/v1/brand/{id}/plan/slug/{slug}`), y uno vacío devolvería 404 → `false` →
+   * un fallo de canal que reintentaría en bucle sin poder resolverse nunca.
+   */
+  private efectoRoles(
+    accion: EfectoRoles['accion'],
+    sub: Subscription,
+    expiresAt?: Date,
+  ): EfectoRoles | undefined {
+    if (!sub.brandId || !sub.planSlug) {
+      this.logger.warn(
+        `Confio ${sub.id} sin brandId/planSlug: no se ${accion} el plan en roles (brand=${
+          sub.brandId
+        } plan=${sub.planSlug})`,
+      )
+      return undefined
+    }
+
+    return { accion, brandId: sub.brandId, planSlug: sub.planSlug, expiresAt }
+  }
+
+  /**
+   * Empuje del movimiento de acceso a `backend-roles`.
+   *
+   * (1) Se ramifica sobre el BOOLEANO y no sobre un throw: `callRolesApi`
+   *     (`client-roles.service.ts:323-357`) atrapa 4xx, 5xx, timeout y
+   *     `SERVICE_ROLES` ausente y devuelve `false`, así que un rollback escrito
+   *     sobre «si rechaza» dejaría pasar de largo una caída de roles. Mismo
+   *     precedente que el alta (`subscription.service.ts:179-190`).
+   * (2) Se llama ANTES de la transacción: es HTTP con timeout de 10 s y adentro
+   *     retendría el lock de la fila todo ese tiempo.
+   * (3) Lanzar deja CERO escrituras locales, o sea que un canal caído no puede
+   *     quedar registrado como impago ni degradar por sí solo; el mensaje queda
+   *     en `webhook_events.error` y el evento se marca para reintento. Ese
+   *     reintento HOY no reprocesa solo (`webhook.processor.ts` incrementa el
+   *     contador y relanza): la reparación entra por `POST /webhook/:id/retry`.
+   *     Deuda preexistente de todos los proveedores, no de este camino.
+   * (4) La reposición usa `assignPlanToBrand` y NUNCA `renewPlanForBrand`:
+   *     `assignPlanToBrandBySlug` es un upsert (actualiza `expiresAt` si el
+   *     vínculo existe, lo crea si no), mientras que el `renew` tira 404 cuando
+   *     la marca no tiene el plan — que es justo el estado que dejó el retiro.
+   *
+   * ⚠️ `callRolesApi` colapsa 404 y 503 en el mismo `false`, así que un plan que
+   * NO esté sembrado en el catálogo de roles se lee acá como canal caído y el
+   * evento termina en dead letter tras 3 intentos. Falla ruidosa —lo correcto
+   * para un error de configuración—, pero mientras `plan-dropi-roax-en-catalogo`
+   * siga abierto es el resultado esperado de todo cobro de `dropi-roax`.
+   */
+  private async sincronizarAccesoEnRoles(
+    roles: EfectoRoles,
+    subscriptionId: string,
+    providerEventId: string,
+  ): Promise<void> {
+    const traza = `brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId} event=${providerEventId}`
+
+    const ok = roles.accion === 'retirar'
+      ? await this.clientRoles.removePlanFromBrand(roles.brandId, roles.planSlug)
+      : await this.clientRoles.assignPlanToBrand(roles.brandId, roles.planSlug, roles.expiresAt)
+
+    if (!ok) {
+      throw new Error(`No se pudo ${roles.accion} el plan en backend-roles: ${traza}`)
+    }
+
+    const hasta = roles.expiresAt ? ` expiresAt=${roles.expiresAt.toISOString()}` : ''
+    this.logger.log(`Confio acceso en roles: ${roles.accion} aplicado ${traza}${hasta}`)
   }
 
   /**
@@ -219,7 +347,7 @@ export class ConfioSubscriptionWebhookService {
   private async leerPeriodoDelProveedor(
     data: ConfioWebhookPayload['data'],
     sub: Subscription,
-  ): Promise<EfectoConfio['periodo']> {
+  ): Promise<PeriodoConfio | undefined> {
     const resourceName = data?.name || sub.providerSubscriptionId
     if (!resourceName) {
       this.logger.warn(
@@ -230,11 +358,22 @@ export class ConfioSubscriptionWebhookService {
 
     try {
       const remota = await this.confio.getSubscription(resourceName)
-      const start = ConfioSubscriptionWebhookService.aFecha(remota?.currentPeriodStart)
-      const end = ConfioSubscriptionWebhookService.aFecha(remota?.currentPeriodEnd)
-      const nextBilling = ConfioSubscriptionWebhookService.aFecha(remota?.nextBillingTime)
+      const start = aFecha(remota?.currentPeriodStart)
+      const end = aFecha(remota?.currentPeriodEnd)
+      const nextBilling = aFecha(remota?.nextBillingTime)
 
-      if (start && end && nextBilling) return { start, end, nextBilling }
+      if (start && end && nextBilling) {
+        // Un período YA VENCIDO no sirve ni como `expiresAt` (roles lo barre)
+        // ni como `nextBillingDate` (⚠️ DINERO): se degrada al avance local, que
+        // tiene piso en el ahora. Razones completas en `confio-period.util.ts`.
+        if (!estaVencido(end)) return { start, end, nextBilling }
+
+        this.logger.warn(
+          `Confio devolvió un período ya vencido para ${sub.id} (fin=${end.toISOString()}): ` +
+            'se avanza un ciclo local',
+        )
+        return undefined
+      }
 
       this.logger.warn(
         `Confio devolvió un período incompleto para ${sub.id} (fuente=${
@@ -251,7 +390,10 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /** Cambio de estado de la suscripción. `null` = no hay nada que aplicar. */
-  private planearCambioDeEstado(data: ConfioWebhookPayload['data']): EfectoConfio | null {
+  private planearCambioDeEstado(
+    data: ConfioWebhookPayload['data'],
+    sub: Subscription,
+  ): EfectoConfio | null {
     const wire: ConfioSubscriptionStatusWire = data?.status || ''
 
     if (CONFIO_ESTADOS_SIN_EFECTO.includes(wire)) {
@@ -267,10 +409,25 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
+    // Un solo predicado, y cubre EXACTAMENTE los dos estados de la aceptación:
+    // `PAST_DUE` y `SUSPENDED` son los dos wire states que
+    // `CONFIO_SUBSCRIPTION_STATUS_MAP` manda a `past_due`. `CANCELED`/`EXPIRED`
+    // quedan sin efecto en roles A PROPÓSITO: la baja definitiva es de
+    // `degradacion-a-free-y-baja-en-roles`.
+    //
+    // Hueco conocido y deliberado: un cambio de estado a `ACTIVE` NO repone el
+    // plan, porque ese efecto no trae período y no habría `expiresAt` honesto
+    // que prometerle a roles sin inventarlo. La reposición la dispara el cobro
+    // `SUCCEEDED`, que es lo que pide la regla de negocio.
+    const roles = toStatus === SubscriptionStatus.PAST_DUE
+      ? this.efectoRoles('retirar', sub)
+      : undefined
+
     return {
       eventType: CONFIO_TIPO_DE_EVENTO[wire as ConfioSubscriptionStatus],
       toStatus,
       sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
+      ...(roles ? { roles } : {}),
     }
   }
 
@@ -338,43 +495,37 @@ export class ConfioSubscriptionWebhookService {
           amountCents: data.amountCents,
           currencyCode: data.currencyCode,
           providerEventId,
+          // Traza mínima del movimiento de acceso, en la fila de historial que
+          // este efecto ya emitía (sin tipos de evento nuevos ni migración). El
+          // spread condicional deja limpias las filas que no tocan roles.
+          ...(efecto.roles
+            ? {
+                roles: {
+                  accion: efecto.roles.accion,
+                  brandId: efecto.roles.brandId,
+                  planSlug: efecto.roles.planSlug,
+                  expiresAt: efecto.roles.expiresAt?.toISOString(),
+                },
+              }
+            : {}),
         },
       })
     })
   }
 
-  /** Período del proveedor, o un ciclo mensual desde el fin del anterior. */
-  private static avanzarPeriodo(sub: Subscription, periodo: EfectoConfio['periodo']): void {
-    if (periodo) {
-      sub.currentPeriodStart = periodo.start
-      sub.currentPeriodEnd = periodo.end
-      sub.nextBillingDate = periodo.nextBilling
-      return
-    }
-
-    const inicio = ConfioSubscriptionWebhookService.aFecha(sub.currentPeriodEnd) || new Date()
-    const fin = ConfioSubscriptionWebhookService.sumarUnCicloMensual(inicio)
-    sub.currentPeriodStart = inicio
-    sub.currentPeriodEnd = fin
-    sub.nextBillingDate = fin
-  }
-
-  /** Un mes calendario, recortado al último día cuando el destino es más corto. */
-  private static sumarUnCicloMensual(desde: Date): Date {
-    const fin = new Date(desde.getTime())
-    const dia = fin.getUTCDate()
-    fin.setUTCMonth(fin.getUTCMonth() + 1)
-    if (fin.getUTCDate() < dia) fin.setUTCDate(0)
-
-    return fin
-  }
-
-  /** `Date` utilizable, o `undefined`. Un `Invalid Date` NO es utilizable. */
-  private static aFecha(valor: Date | string | undefined): Date | undefined {
-    if (!valor) return undefined
-    const fecha = valor instanceof Date ? valor : new Date(valor)
-
-    return isNaN(fecha.getTime()) ? undefined : fecha
+  /**
+   * Asigna el trío de fechas ya resuelto en la fase de decisión.
+   *
+   * El respaldo local subió a `planearCobro` (que necesita el `end` para
+   * prometerlo a roles), así que ahora se calcula sobre la lectura SIN lock:
+   * aceptable porque el MISMO evento sigue deduplicado y dos eventos DISTINTOS
+   * ya eran last-write-wins. La alternativa era prometer un `expiresAt` distinto
+   * del que se persiste, o sostener HTTP dentro de la transacción.
+   */
+  private static avanzarPeriodo(sub: Subscription, periodo: PeriodoConfio): void {
+    sub.currentPeriodStart = periodo.start
+    sub.currentPeriodEnd = periodo.end
+    sub.nextBillingDate = periodo.nextBilling
   }
 
   /**

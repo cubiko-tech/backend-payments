@@ -6,6 +6,7 @@ import { QueryFailedError } from 'typeorm'
 
 import { WebhookService } from './webhook.service'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { sumarUnCicloMensual } from './confio-period.util'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment } from '../payment/entities/payment.entity'
 import {
@@ -15,6 +16,7 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ClientRolesService } from '../client/client-roles.service'
 
 /**
  * Error tal como lo entrega el driver: `code` y `constraint` copiados de una
@@ -167,6 +169,17 @@ function cambioDeEstado(status: string, over: Record<string, any> = {}): any {
   }
 }
 
+/**
+ * El mes siguiente se calcula con la MISMA función que usa el código
+ * (`sumarUnCicloMensual`), no con una réplica: duplicar la aritmética de fechas
+ * en el test haría que ambos coincidan en el error el día que alguien cambie la
+ * regla —fin de mes, años bisiestos— y el caso dejaría de cuidar nada.
+ */
+const unMesDespues = (d: Date) => sumarUnCicloMensual(d)
+
+/** Fin de período vigente (a futuro), base de los casos de avance local. */
+const FIN_ANTERIOR = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000)
+
 function suscripcion(over: Record<string, any> = {}): any {
   return {
     id: SUB_ID,
@@ -177,8 +190,13 @@ function suscripcion(over: Record<string, any> = {}): any {
     provider: SubscriptionProvider.CONFIO,
     providerSubscriptionId: SUB_NAME,
     currentPeriodStart: new Date('2026-01-01T00:00:00Z'),
-    currentPeriodEnd: new Date('2026-02-01T00:00:00Z'),
-    nextBillingDate: new Date('2026-02-01T00:00:00Z'),
+    // A futuro y relativo: `periodoLocal` tiene PISO en el ahora (un
+    // `nextBillingDate` en el pasado despertaría el cron de cobros), así que un
+    // literal vencido haría caer estos casos al piso en vez de ejercitar la rama
+    // «avanza desde el fin anterior» — y el día que la fecha quede atrás, el test
+    // se rompe solo sin que nada haya cambiado.
+    currentPeriodEnd: FIN_ANTERIOR,
+    nextBillingDate: FIN_ANTERIOR,
     retryCount: 2,
     cancelledAt: null,
     ...over,
@@ -192,6 +210,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
   let eventRepo: { createQueryBuilder: jest.Mock }
   let manager: any
   let confio: { getSubscription: jest.Mock }
+  let roles: Record<string, jest.Mock>
   let checkout: { completeExternalPayment: jest.Mock }
   let warn: jest.SpyInstance
 
@@ -218,6 +237,11 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       createQueryBuilder: jest.fn(() => qb(null)),
     }
     confio = { getSubscription: jest.fn() }
+    roles = {
+      assignPlanToBrand: jest.fn().mockResolvedValue(true),
+      removePlanFromBrand: jest.fn().mockResolvedValue(true),
+      renewPlanForBrand: jest.fn().mockResolvedValue(true),
+    }
     checkout = { completeExternalPayment: jest.fn().mockResolvedValue(undefined) }
 
     const dataSource = { transaction: jest.fn((cb: any) => cb(manager)) }
@@ -233,6 +257,10 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: eventRepo },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: ConfioProvider, useValue: confio },
+        // El corte de acceso en roles tiene su propio spec
+        // (`confio-subscription-webhook.service.spec.ts`); acá el canal responde
+        // OK para que estos casos midan sólo el estado local.
+        { provide: ClientRolesService, useValue: roles },
         { provide: getQueueToken('webhook-retry'), useValue: { add: jest.fn() } },
       ],
     }).compile()
@@ -355,32 +383,47 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     })
   })
 
+  // Fechas del proveedor RELATIVAS al ahora, no literales. El handler descarta a
+  // propósito un período ya vencido (`confio-period.util.ts`: no sirve ni como
+  // `expiresAt` —roles lo barre— ni como `nextBillingDate`), así que un literal
+  // como '2026-02-05' hace pasar el test el día que se escribe y lo rompe cuando
+  // esa fecha queda atrás. Estos tres se mantienen siempre a futuro.
+  const DIA = 24 * 60 * 60 * 1000
+  const periodoRemoto = () => ({
+    currentPeriodStart: new Date(Date.now() - 5 * DIA),
+    currentPeriodEnd: new Date(Date.now() + 25 * DIA),
+    nextBillingTime: new Date(Date.now() + 26 * DIA),
+  })
+
   // ------------------------------------------------------------- cobro (2/3)
   describe('subscription.billingStatusChanged', () => {
     it('SUCCEEDED con respuesta del proveedor toma sus tres fechas', async () => {
       conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
       // Fechas a propósito DISTINTAS del avance local (02-01 → 03-01): si el
       // handler ignorara al proveedor, este test seguiría verde.
-      confio.getSubscription.mockResolvedValue({
-        currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
-        currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
-        nextBillingTime: new Date('2026-03-06T00:00:00Z'),
-      })
+      const remoto = periodoRemoto()
+      confio.getSubscription.mockResolvedValue(remoto)
 
       await despachar(cobro('SUCCEEDED'))
 
       const guardada = suscripcionGuardada()
       expect(guardada.status).toBe(SubscriptionStatus.ACTIVE)
       expect(guardada.retryCount).toBe(0)
-      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-05T00:00:00Z'))
-      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-05T00:00:00Z'))
-      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-06T00:00:00Z'))
+      expect(guardada.currentPeriodStart).toEqual(remoto.currentPeriodStart)
+      expect(guardada.currentPeriodEnd).toEqual(remoto.currentPeriodEnd)
+      expect(guardada.nextBillingDate).toEqual(remoto.nextBillingTime)
       expect(historial()[0].metadata).toEqual({
         event: 'subscription.billingStatusChanged',
         cycleNumber: 3,
         amountCents: 1990000,
         currencyCode: 'COP',
         providerEventId: 'ev-1',
+        roles: {
+          accion: 'reponer',
+          brandId: 'brand-1',
+          planSlug: 'dropi-roax',
+          expiresAt: remoto.currentPeriodEnd.toISOString(),
+        },
       })
     })
 
@@ -392,15 +435,21 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
 
       const guardada = suscripcionGuardada()
       expect(guardada.status).toBe(SubscriptionStatus.ACTIVE)
-      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-01T00:00:00Z'))
-      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-01T00:00:00Z'))
-      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-01T00:00:00Z'))
+      expect(guardada.currentPeriodStart).toEqual(FIN_ANTERIOR)
+      expect(guardada.currentPeriodEnd).toEqual(unMesDespues(FIN_ANTERIOR))
+      expect(guardada.nextBillingDate).toEqual(unMesDespues(FIN_ANTERIOR))
       expect(historial()[0].metadata).toEqual({
         event: 'subscription.billingStatusChanged',
         cycleNumber: 3,
         amountCents: 1990000,
         currencyCode: 'COP',
         providerEventId: 'ev-1',
+        roles: {
+          accion: 'reponer',
+          brandId: 'brand-1',
+          planSlug: 'dropi-roax',
+          expiresAt: unMesDespues(FIN_ANTERIOR).toISOString(),
+        },
       })
     })
 
@@ -416,9 +465,9 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       await despachar(cobro('SUCCEEDED'))
 
       const guardada = suscripcionGuardada()
-      expect(guardada.currentPeriodStart).toEqual(new Date('2026-02-01T00:00:00Z'))
-      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-03-01T00:00:00Z'))
-      expect(guardada.nextBillingDate).toEqual(new Date('2026-03-01T00:00:00Z'))
+      expect(guardada.currentPeriodStart).toEqual(FIN_ANTERIOR)
+      expect(guardada.currentPeriodEnd).toEqual(unMesDespues(FIN_ANTERIOR))
+      expect(guardada.nextBillingDate).toEqual(unMesDespues(FIN_ANTERIOR))
     })
 
     it.each(['FAILED', 'SOMETHING_NEW'])('%s deja past_due sin avanzar el período', async (status) => {
@@ -428,8 +477,8 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
 
       const guardada = suscripcionGuardada()
       expect(guardada.status).toBe(SubscriptionStatus.PAST_DUE)
-      expect(guardada.currentPeriodEnd).toEqual(new Date('2026-02-01T00:00:00Z'))
-      expect(guardada.nextBillingDate).toEqual(new Date('2026-02-01T00:00:00Z'))
+      expect(guardada.currentPeriodEnd).toEqual(FIN_ANTERIOR)
+      expect(guardada.nextBillingDate).toEqual(FIN_ANTERIOR)
       expect(confio.getSubscription).not.toHaveBeenCalled()
       expect(historial()[0].metadata).toMatchObject({
         event: 'subscription.billingStatusChanged',

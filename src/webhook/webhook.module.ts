@@ -10,17 +10,22 @@ import { WebhookService } from './webhook.service'
 import { WebhookRetryProcessor } from './webhook.processor'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
 import { PaymentModule } from '../payment/payment.module'
+import { ClientModule } from '../client/client.module'
 
 @Module({
   imports: [
     // Las dos entidades de suscripción se inyectan DIRECTO (como ya hacen
     // `tasks.service.ts` y `checkout.service.ts`) en vez de importar
-    // `SubscriptionModule`: ese módulo arrastra `ClientRolesService`, y el corte
-    // de acceso en roles es de otra tarea (`corte-de-acceso-al-primer-fallo`).
+    // `SubscriptionModule`: de ese módulo acá sólo se necesita
+    // `ClientRolesService`, que entra por `ClientModule` y no arrastra el resto.
     TypeOrmModule.forFeature([WebhookEvent, Subscription, SubscriptionEvent], 'DBWrite'),
     TypeOrmModule.forFeature([WebhookEvent, Payment], 'DBRead'),
     BullModule.registerQueue({ name: 'webhook-retry' }),
     PaymentModule,
+    // `ClientModule` es `@Global()` y ya entra por `app.module.ts`; se importa
+    // igual, declarativo, como ya hace `credit.module.ts:38`: el corte de acceso
+    // en roles al primer cobro fallido es una dependencia real de este módulo.
+    ClientModule,
   ],
   controllers: [WebhookController],
   providers: [WebhookService, WebhookRetryProcessor, ConfioSubscriptionWebhookService],

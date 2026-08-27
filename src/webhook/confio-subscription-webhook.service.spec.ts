@@ -1,0 +1,532 @@
+import { Logger } from '@nestjs/common'
+import { Test, TestingModule } from '@nestjs/testing'
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
+import { getQueueToken } from '@nestjs/bullmq'
+
+import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { WebhookService } from './webhook.service'
+import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
+import { Payment } from '../payment/entities/payment.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
+import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ClientRolesService } from '../client/client-roles.service'
+
+/**
+ * Corte y reposición del acceso pro en `backend-roles` según el resultado del
+ * cobro que reporta ConfioPagos (épica 002, `corte-de-acceso-al-primer-fallo`).
+ *
+ * Payloads copiados de `src/provider/confio/confio-webhook.spec.ts`, que a su vez
+ * los vendorizó de `CONFIOPAGOS_SUSCRIPCIONES.md` §Webhooks: el cobro exitoso
+ * trae `payment`, el fallido lo cambia por `failedCount`. No inventados.
+ *
+ * Nota sobre la reposición: `assignPlanToBrand` repetido NO es un problema del
+ * lado de roles —`assignPlanToBrandBySlug`
+ * (`backend-roles/src/data/brand-permission/brand-permission.service.ts:529`) es
+ * un upsert: actualiza `expiresAt` si el vínculo ya existe—. `renewPlanForBrand`
+ * sí lo sería: su handler tira 404 cuando la marca no tiene el plan, que es
+ * exactamente el estado en el que queda tras el retiro.
+ */
+const SUB_NAME =
+  'stores/01KZBY100Z3HD2X997XE0DN8PW/subscription-plans/01M0Z020DYMXKKDHHR4HAX916R/subscriptions/01M0Z0AAAA'
+
+/**
+ * Reloj fijo, dentro del período que la suscripción de prueba tiene vigente
+ * (`currentPeriodEnd` = 2026-02-01). El avance local tiene PISO en el ahora, así
+ * que sin fijar el reloj los casos de renovación normal dependerían de la fecha
+ * en que corren los tests. Los casos de recuperación tardía lo mueven a mano con
+ * `relojEn`.
+ */
+const AHORA = '2026-01-14T10:00:00Z'
+
+const SUB_ID = '11111111-1111-4111-8111-111111111111'
+const BRAND_ID = 'brand-1'
+const PLAN_SLUG = 'dropi-roax'
+
+function cobro(status: string, over: Record<string, any> = {}): any {
+  return {
+    event: 'subscription.billingStatusChanged',
+    data: {
+      name: SUB_NAME,
+      cycleNumber: 3,
+      amountCents: 1990000,
+      currencyCode: 'COP',
+      status,
+      createTime: '2026-01-14T10:00:00Z',
+      ...(status === 'SUCCEEDED'
+        ? { payment: 'organizations/o/stores/s/payments/p3' }
+        : { failedCount: 1, reason: 'INSUFFICIENT_FUNDS' }),
+      ...over,
+    },
+    timestamp: 1768384800,
+    signature: { properties: ['name', 'status'], checksum: '4F6A' },
+  }
+}
+
+function cambioDeEstado(status: string, over: Record<string, any> = {}): any {
+  return {
+    event: 'subscription.subscriptionStatusChanged',
+    data: {
+      name: SUB_NAME,
+      status,
+      createTime: '2026-01-01T10:00:00Z',
+      updateTime: '2026-02-14T10:00:00Z',
+      ...over,
+    },
+    timestamp: 1768384800,
+    signature: { properties: ['name', 'status'], checksum: '4F6A' },
+  }
+}
+
+function suscripcion(over: Record<string, any> = {}): any {
+  return {
+    id: SUB_ID,
+    brandId: BRAND_ID,
+    userId: 'user-1',
+    planSlug: PLAN_SLUG,
+    status: SubscriptionStatus.ACTIVE,
+    provider: SubscriptionProvider.CONFIO,
+    providerSubscriptionId: SUB_NAME,
+    currentPeriodStart: new Date('2026-01-01T00:00:00Z'),
+    currentPeriodEnd: new Date('2026-02-01T00:00:00Z'),
+    nextBillingDate: new Date('2026-02-01T00:00:00Z'),
+    retryCount: 2,
+    cancelledAt: null,
+    ...over,
+  }
+}
+
+function evento(payload: any, providerEventId = 'ev-1'): any {
+  return {
+    id: 'we-1',
+    provider: 'confio',
+    eventType: payload.event,
+    providerEventId,
+    payload,
+    status: WebhookStatus.RECEIVED,
+    retryCount: 0,
+  }
+}
+
+/** Query builder encadenable: lo único que se le pide es `getOne()`. */
+function qb(resultado: any) {
+  return {
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    getOne: jest.fn().mockResolvedValue(resultado),
+  }
+}
+
+describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro', () => {
+  let service: ConfioSubscriptionWebhookService
+  let subRepo: { findOne: jest.Mock }
+  let eventRepo: { createQueryBuilder: jest.Mock }
+  let manager: any
+  let dataSource: { transaction: jest.Mock }
+  let confio: { getSubscription: jest.Mock }
+  let roles: {
+    assignPlanToBrand: jest.Mock
+    removePlanFromBrand: jest.Mock
+    renewPlanForBrand: jest.Mock
+  }
+
+  beforeEach(async () => {
+    subRepo = { findOne: jest.fn().mockResolvedValue(null) }
+    eventRepo = { createQueryBuilder: jest.fn(() => qb(null)) }
+    manager = {
+      findOne: jest.fn().mockResolvedValue(null),
+      save: jest.fn((...args: any[]) => Promise.resolve(args[args.length - 1])),
+      createQueryBuilder: jest.fn(() => qb(null)),
+    }
+    dataSource = { transaction: jest.fn((cb: any) => cb(manager)) }
+    confio = { getSubscription: jest.fn() }
+    roles = {
+      assignPlanToBrand: jest.fn().mockResolvedValue(true),
+      removePlanFromBrand: jest.fn().mockResolvedValue(true),
+      renewPlanForBrand: jest.fn().mockResolvedValue(true),
+    }
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        ConfioSubscriptionWebhookService,
+        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subRepo },
+        { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: eventRepo },
+        { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
+        { provide: ConfioProvider, useValue: confio },
+        { provide: ClientRolesService, useValue: roles },
+      ],
+    }).compile()
+
+    service = module.get<ConfioSubscriptionWebhookService>(ConfioSubscriptionWebhookService)
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
+    // Después de compilar el módulo, y sin tocar la maquinaria async de Node:
+    // lo único que hace falta es que `new Date()` sea determinístico.
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'], now: new Date(AHORA) })
+  })
+
+  afterEach(() => {
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
+
+  /** Mueve el reloj: los casos de recuperación tardía viven en otro mes. */
+  function relojEn(iso: string) {
+    jest.setSystemTime(new Date(iso))
+  }
+
+  /** Fila de `subscriptions` guardada dentro de la transacción. */
+  function suscripcionGuardada(): any {
+    const call = manager.save.mock.calls.find((c: any[]) => c[0] !== SubscriptionEvent)
+    return call?.[0]
+  }
+
+  /** Filas de historial escritas (`subscription_events`). */
+  function historial(): any[] {
+    return manager.save.mock.calls
+      .filter((c: any[]) => c[0] === SubscriptionEvent)
+      .map((c: any[]) => c[1])
+  }
+
+  function conSuscripcion(sub: any) {
+    subRepo.findOne.mockResolvedValue(sub)
+    manager.findOne.mockResolvedValue(sub)
+    return sub
+  }
+
+  function despachar(payload: any, providerEventId = 'ev-1') {
+    return service.handle(evento(payload, providerEventId))
+  }
+
+  // ------------------------------------------------------- (1) cobro fallido
+  describe('el cobro fallido retira el plan', () => {
+    it('un cobro no exitoso retira el plan de la suscripción, no `free`', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cobro('FAILED'))
+
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(roles.removePlanFromBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG)
+      // Degradar a `free` es de `degradacion-a-free-y-baja-en-roles`, no de acá.
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalledWith(expect.anything(), 'free')
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(roles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
+    })
+
+    it('deja la traza del retiro en la fila de historial ya emitida', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cobro('FAILED'))
+
+      expect(historial()[0].metadata).toEqual({
+        event: 'subscription.billingStatusChanged',
+        cycleNumber: 3,
+        amountCents: 1990000,
+        currencyCode: 'COP',
+        providerEventId: 'ev-1',
+        roles: { accion: 'retirar', brandId: BRAND_ID, planSlug: PLAN_SLUG, expiresAt: undefined },
+      })
+    })
+
+    it.each(['PAST_DUE', 'SUSPENDED'])('el cambio de estado a %s también retira', async (wire) => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado(wire))
+
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(roles.removePlanFromBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG)
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
+    })
+
+    it.each(['CANCELED', 'EXPIRED'])('%s no toca roles: la baja es de otra tarea', async (wire) => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado(wire))
+
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(historial()[0].metadata.roles).toBeUndefined()
+    })
+
+    it('una suscripción sin planSlug no pega en roles con un slug vacío', async () => {
+      conSuscripcion(suscripcion({ planSlug: '' }))
+
+      await despachar(cobro('FAILED'))
+
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
+    })
+  })
+
+  // --------------------------------------------------- (2) cobro exitoso
+  describe('el cobro exitoso posterior repone el plan', () => {
+    it('repone con el fin de período que da el proveedor', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      // Fechas a propósito DISTINTAS del avance local (02-01 → 03-01): si el
+      // handler prometiera el avance local, este test se pondría rojo.
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
+        nextBillingTime: new Date('2026-03-06T00:00:00Z'),
+      })
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-03-05T00:00:00Z'),
+      )
+      // `renewPlanForBrand` tira 404 en roles cuando la marca no tiene el plan,
+      // que es justo el estado que dejó el retiro: nunca se usa acá.
+      expect(roles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+    })
+
+    it('con el proveedor sin período repone con el avance local, el MISMO que persiste', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      // Respuesta PARCIAL: se descarta entera y se avanza un ciclo local.
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
+        nextBillingTime: undefined,
+      })
+
+      await despachar(cobro('SUCCEEDED'))
+
+      const finLocal = new Date('2026-03-01T00:00:00Z')
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG, finLocal)
+      // Lo prometido a roles y lo persistido son el mismo valor por construcción.
+      expect(suscripcionGuardada().currentPeriodEnd).toEqual(finLocal)
+      expect(roles.assignPlanToBrand.mock.calls[0][2]).toEqual(
+        suscripcionGuardada().currentPeriodEnd,
+      )
+    })
+
+    it('deja la traza de la reposición en la fila de historial', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(historial()[0].metadata.roles).toEqual({
+        accion: 'reponer',
+        brandId: BRAND_ID,
+        planSlug: PLAN_SLUG,
+        expiresAt: '2026-03-01T00:00:00.000Z',
+      })
+    })
+
+    // El cobro fallido NO avanza el período, así que el reintento exitoso puede
+    // caer más de un ciclo después del último período pagado. Si el avance local
+    // se contara igual desde `currentPeriodEnd`, el `expiresAt` prometido saldría
+    // VENCIDO: el vínculo nacería barrido por el cron de `backend-roles`
+    // (`tasks.service.ts:71`) y el cliente que pagó no recuperaría el acceso.
+    describe('la recuperación tardía nunca promete un vencimiento en el pasado', () => {
+      it('el avance local arranca en el ahora cuando el período ya venció', async () => {
+        relojEn('2026-05-20T00:00:00Z')
+        conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+        await despachar(cobro('SUCCEEDED'))
+
+        // Un mes desde el pago, no desde el 2026-02-01 que quedó sin cobrar.
+        const fin = new Date('2026-06-20T00:00:00Z')
+        expect(roles.assignPlanToBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG, fin)
+        expect(roles.assignPlanToBrand.mock.calls[0][2].getTime()).toBeGreaterThan(Date.now())
+        const guardada = suscripcionGuardada()
+        expect(guardada.currentPeriodStart).toEqual(new Date('2026-05-20T00:00:00Z'))
+        expect(guardada.currentPeriodEnd).toEqual(fin)
+        // ⚠️ DINERO: un `nextBillingDate` en el pasado despierta a
+        // `processSubscriptionRenewals`, que cobraría por un segundo riel.
+        expect(guardada.nextBillingDate.getTime()).toBeGreaterThan(Date.now())
+      })
+
+      it('un período ya vencido del proveedor se descarta como si no lo hubiera dado', async () => {
+        relojEn('2026-05-20T00:00:00Z')
+        conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+        // Trío COMPLETO, pero de un ciclo que ya terminó: el proveedor puede ir
+        // atrasado y prometerlo sería lo mismo que no reponer nada.
+        confio.getSubscription.mockResolvedValue({
+          currentPeriodStart: new Date('2026-02-05T00:00:00Z'),
+          currentPeriodEnd: new Date('2026-03-05T00:00:00Z'),
+          nextBillingTime: new Date('2026-03-06T00:00:00Z'),
+        })
+
+        await despachar(cobro('SUCCEEDED'))
+
+        expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+          BRAND_ID,
+          PLAN_SLUG,
+          new Date('2026-06-20T00:00:00Z'),
+        )
+        expect(suscripcionGuardada().currentPeriodEnd).toEqual(new Date('2026-06-20T00:00:00Z'))
+        expect(suscripcionGuardada().nextBillingDate.getTime()).toBeGreaterThan(Date.now())
+      })
+    })
+
+    it.each([SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED])(
+      'un cobro tardío sobre una suscripción %s no concede acceso',
+      async (status) => {
+        conSuscripcion(suscripcion({ status }))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+        await despachar(cobro('SUCCEEDED'))
+
+        // El mapeo de estado lo dicta la aceptación y se aplica; conceder pro por
+        // el cobro de una suscripción muerta, no.
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(roles.renewPlanForBrand).not.toHaveBeenCalled()
+        expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+        expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+        expect(historial()[0].metadata.roles).toBeUndefined()
+      },
+    )
+
+    it('empuja a roles ANTES de abrir la transacción, para no sostener el lock', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(roles.assignPlanToBrand.mock.invocationCallOrder[0]).toBeLessThan(
+        dataSource.transaction.mock.invocationCallOrder[0],
+      )
+    })
+  })
+
+  // ------------------------------------------------------ (3) idempotencia
+  describe('una notificación reentregada no repite la escritura en roles', () => {
+    it('el marcador previo corta antes de roles y antes del proveedor', async () => {
+      conSuscripcion(suscripcion())
+      eventRepo.createQueryBuilder.mockReturnValue(qb({ id: 'se-previo' }))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('el marcador que sólo aparece bajo el lock no deja escribir dos veces', async () => {
+      conSuscripcion(suscripcion())
+      manager.createQueryBuilder.mockReturnValue(qb({ id: 'se-previo' }))
+
+      await despachar(cobro('FAILED'))
+
+      expect(manager.save).not.toHaveBeenCalled()
+      // Residual ACEPTADO: dos entregas concurrentes del MISMO evento pueden
+      // empujar el retiro a roles dos veces. Es idempotente del otro lado
+      // (DELETE del vínculo, upsert en la reposición) y la alternativa sería
+      // sostener la llamada HTTP dentro del lock.
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ------------------------------------------------------- (4) roles caído
+  describe('un fallo del canal de roles no es un impago', () => {
+    it.each([
+      ['el retiro', cobro('FAILED'), 'removePlanFromBrand'],
+      ['la reposición', cobro('SUCCEEDED'), 'assignPlanToBrand'],
+    ] as Array<[string, any, 'removePlanFromBrand' | 'assignPlanToBrand']>)(
+      '%s que roles rechaza deja CERO escrituras locales y lanza',
+      async (_nombre, payload, metodo) => {
+        conSuscripcion(suscripcion())
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+        roles[metodo].mockResolvedValue(false)
+
+        await expect(service.handle(evento(payload))).rejects.toThrow(/roles/i)
+
+        // Ni el estado ni el historial: el acceso no cambió y no se degradó.
+        expect(dataSource.transaction).not.toHaveBeenCalled()
+        expect(manager.save).not.toHaveBeenCalled()
+      },
+    )
+  })
+})
+
+// ============================================================================
+// El webhook queda marcado para reintento: la única consecuencia del fallo de
+// canal que vive FUERA del handler (`WebhookService.processEvent`).
+// ============================================================================
+
+describe('WebhookService — roles caído marca el webhook para reintento', () => {
+  let service: WebhookService
+  let writeRepo: any
+  let queue: { add: jest.Mock }
+
+  beforeEach(async () => {
+    writeRepo = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((d) => d),
+      save: jest.fn((d) => Promise.resolve(d)),
+    }
+    queue = { add: jest.fn().mockResolvedValue(undefined) }
+
+    const manager = {
+      findOne: jest.fn().mockResolvedValue(suscripcion()),
+      save: jest.fn((...args: any[]) => Promise.resolve(args[args.length - 1])),
+      createQueryBuilder: jest.fn(() => qb(null)),
+    }
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        WebhookService,
+        ConfioSubscriptionWebhookService,
+        { provide: getRepositoryToken(WebhookEvent, 'DBWrite'), useValue: writeRepo },
+        { provide: getRepositoryToken(WebhookEvent, 'DBRead'), useValue: { findOne: jest.fn() } },
+        { provide: getRepositoryToken(Payment, 'DBRead'), useValue: { findOne: jest.fn() } },
+        {
+          provide: getRepositoryToken(Subscription, 'DBWrite'),
+          useValue: { findOne: jest.fn().mockResolvedValue(suscripcion()) },
+        },
+        {
+          provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
+          useValue: { createQueryBuilder: jest.fn(() => qb(null)) },
+        },
+        { provide: getDataSourceToken('DBWrite'), useValue: { transaction: jest.fn((cb: any) => cb(manager)) } },
+        { provide: ConfioProvider, useValue: { getSubscription: jest.fn() } },
+        {
+          provide: ClientRolesService,
+          useValue: {
+            // Canal caído: `callRolesApi` colapsa 4xx, 5xx y timeout en `false`.
+            removePlanFromBrand: jest.fn().mockResolvedValue(false),
+            assignPlanToBrand: jest.fn().mockResolvedValue(false),
+            renewPlanForBrand: jest.fn().mockResolvedValue(false),
+          },
+        },
+        { provide: getQueueToken('webhook-retry'), useValue: queue },
+      ],
+    }).compile()
+
+    service = module.get<WebhookService>(WebhookService)
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => jest.restoreAllMocks())
+
+  it('marca el evento fallido y lo encola con el primer backoff', async () => {
+    const e = evento(cobro('FAILED'))
+
+    await expect(service['processEvent'](e)).rejects.toThrow(/roles/i)
+
+    expect(e.status).toBe(WebhookStatus.FAILED)
+    expect(e.retryCount).toBe(1)
+    expect(e.error).toMatch(/roles/i)
+    expect(queue.add).toHaveBeenCalledWith(
+      'retry',
+      { eventId: 'we-1' },
+      expect.objectContaining({ delay: 60000 }),
+    )
+  })
+})
