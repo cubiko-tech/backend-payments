@@ -10,11 +10,12 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { ConfioSubscriptionInputError } from './confio-subscription-error'
+import { assertConfioBuyer } from './confio-buyer'
 import {
   ConfioSubscription,
   ConfioSubscriptionPlan,
   ConfioSubscriptionResult,
-  ConfioBuyer,
   CreateConfioPlanParams,
   CreateConfioSubscriptionParams,
   ListConfioPlansResponse,
@@ -61,34 +62,16 @@ import {
  *
  * Referencia de contrato: roax-ads-back/internal/payment/.../confiopagos_client.go
  */
-/** Prefijo de todo mensaje de `ConfioSubscriptionInputError`. */
-export const CONFIO_SUBSCRIPTION_INPUT_ERROR = 'ConfioSubscription rechazada'
-
-/** Códigos de rechazo local, ANTES de tocar la red. */
-export type ConfioSubscriptionInputErrorCode =
-  | 'missing_buyer_or_plan'
-  | 'invalid_buyer'
-  | 'plan_store_mismatch'
-  | 'invalid_subscription_name'
-
-/**
- * Rechazo de entrada del cliente de suscripciones: la petición nunca salió.
- *
- * **Este error es contrato con el alta** (`alta-crea-suscripcion-en-confiopagos`),
- * que necesita rechazar «con un código propio, no con un 422 opaco de Confío».
- * Se mapea por `instanceof` + `code` + `field`, NUNCA por el texto del mensaje.
- * Si cambiás `code` o `field`, actualizá ese mapeo.
- */
-export class ConfioSubscriptionInputError extends Error {
-  constructor(
-    readonly code: ConfioSubscriptionInputErrorCode,
-    readonly field: string,
-    detail: string,
-  ) {
-    super(`${CONFIO_SUBSCRIPTION_INPUT_ERROR} [${code}] ${field}: ${detail}`)
-    this.name = 'ConfioSubscriptionInputError'
-  }
-}
+// El contrato de rechazo local vive en `confio-subscription-error.ts` y se
+// RE-EXPORTA acá: `confio-buyer.ts` lo necesita y el provider importa a
+// `confio-buyer.ts`, así que definirlo acá sería un ciclo de módulos que en
+// CommonJS deja la clase `undefined` en tiempo de evaluación. El re-export
+// mantiene vivo el import histórico `from './confio.provider'`.
+export {
+  CONFIO_SUBSCRIPTION_INPUT_ERROR,
+  ConfioSubscriptionInputError,
+} from './confio-subscription-error'
+export type { ConfioSubscriptionInputErrorCode } from './confio-subscription-error'
 
 @Injectable()
 export class ConfioProvider implements PaymentProvider {
@@ -313,7 +296,9 @@ export class ConfioProvider implements PaymentProvider {
     }
 
     const planPath = this.assertPlanPath(params.planName)
-    const buyer = ConfioProvider.assertSubscriptionBuyer(params.buyer)
+    // Normalizador ÚNICO del comprador: `confio-buyer.ts`. Acá es validación de
+    // BORDE (el buyer ya viene separado en campos) y no tiene reglas propias.
+    const buyer = assertConfioBuyer(params.buyer)
 
     // Body armado campo por campo con `!== undefined`, NO por truthiness como
     // el `...(params.description ? … : {})` de createSubscriptionPlan: acá el 0
@@ -405,59 +390,6 @@ export class ConfioProvider implements PaymentProvider {
       )
     }
     return name.slice(at)
-  }
-
-  /**
-   * Valida el comprador contra las reglas del spec (`CreateSubscriptionRequest`)
-   * y devuelve la copia normalizada que se manda.
-   *
-   * ⚠️ **No usa `normalizeColombianPhone` como está**: ese helper sustituye en
-   * silencio un teléfono inválido por el `+573215786325` de la documentación.
-   * En un link one-shot es cosmético; pegado a un cobro RECURRENTE es un
-   * contacto falso que se repite todos los meses, y además rompe al comprador
-   * del plan en USD. Acá un E.164 válido pasa, un número local colombiano se
-   * normaliza, y cualquier otra cosa se RECHAZA.
-   */
-  private static assertSubscriptionBuyer(raw: ConfioBuyer): ConfioBuyer {
-    const buyer: ConfioBuyer = {
-      email: (raw?.email || '').trim(),
-      phoneNumber: (raw?.phoneNumber || '').trim(),
-      firstName: (raw?.firstName || '').trim(),
-      lastName: (raw?.lastName || '').trim(),
-    }
-
-    if (!buyer.email || !buyer.email.includes('@')) {
-      throw new ConfioSubscriptionInputError('invalid_buyer', 'buyer.email', 'email vacío o sin "@"')
-    }
-    for (const field of ['firstName', 'lastName'] as const) {
-      const value = buyer[field]
-      if (value.length < 3 || value.length > 64) {
-        throw new ConfioSubscriptionInputError(
-          'invalid_buyer',
-          `buyer.${field}`,
-          `ConfioPagos exige de 3 a 64 caracteres, llegó ${value.length}`,
-        )
-      }
-    }
-
-    buyer.phoneNumber = ConfioProvider.toE164(buyer.phoneNumber)
-    return buyer
-  }
-
-  /** E.164 estricto, o el número local colombiano ya normalizado. Si no, rechaza. */
-  private static toE164(phone: string): string {
-    if (/^\+[1-9]\d{7,14}$/.test(phone)) return phone
-
-    // Sólo para números locales: si `normalizeColombianPhone` tuvo que caer a su
-    // fallback, el teléfono era inválido y NO se inventa uno.
-    const normalized = ConfioProvider.normalizeColombianPhone(phone)
-    if (/^\+[1-9]\d{7,14}$/.test(normalized) && normalized !== '+573215786325') return normalized
-
-    throw new ConfioSubscriptionInputError(
-      'invalid_buyer',
-      'buyer.phoneNumber',
-      `se esperaba E.164 (+<país><número>), llegó "${phone}"`,
-    )
   }
 
   /**
@@ -584,6 +516,13 @@ export class ConfioProvider implements PaymentProvider {
   /**
    * Normaliza un teléfono colombiano a E.164 (+57XXXXXXXXXX). Fallback al
    * ejemplo de la documentación de ConfioPagos cuando falta o es inválido.
+   *
+   * ⚠️ **PROHIBIDO en el camino de suscripción.** Sólo lo usa `resolveBuyer`,
+   * para los links de pago one-shot, donde un teléfono de contacto equivocado es
+   * cosmético y el cobro es uno solo. Pegado a un cobro RECURRENTE, ese
+   * `+573215786325` de la documentación es un contacto falso que se repite todos
+   * los meses, y además rompe al comprador de un plan en USD. El comprador de
+   * una suscripción se arma con `confio-buyer.ts`, que nunca inventa un país.
    */
   static normalizeColombianPhone(raw?: string): string {
     const fallback = '+573215786325' // de la documentación de ConfioPagos

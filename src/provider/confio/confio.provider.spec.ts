@@ -514,16 +514,31 @@ describe('ConfioProvider', () => {
         expect(err.field).toBe(field)
       })
 
-      it('normaliza un teléfono colombiano local a E.164 en vez de rechazarlo', async () => {
+      /**
+       * CAMBIO DE CONTRATO: antes esta guarda normalizaba un local colombiano a
+       * `+57…`. Ahora el borde delega en `confio-buyer.ts`, que NO asume ningún
+       * país: acá no hay `callingCode` que aportar —el país lo trae el usuario
+       * desde backend-auth, no una constante nuestra—, así que un local suelto
+       * se rechaza en vez de convertirse en un contacto adivinado pegado a un
+       * cobro que se repite todos los meses.
+       */
+      it('rechaza un teléfono local suelto: en el borde no se inventa el país', async () => {
         replyWith(subResponse())
 
         const provider = new ConfioProvider()
-        await provider.createSubscription({
-          planName: PLAN,
-          buyer: { ...buyer(), phoneNumber: '3001234567' },
-        })
+        const err = await rechazo(
+          provider.createSubscription({
+            planName: PLAN,
+            buyer: { ...buyer(), phoneNumber: '3001234567' },
+          }),
+        )
 
-        expect(received[0].body.buyer.phoneNumber).toBe('+573001234567')
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('invalid_buyer')
+        expect(err.field).toBe('buyer.phoneNumber')
+        expect(err.message).not.toContain('+573215786325')
+        // Nada salió por la red: el rechazo es ANTES del fetch.
+        expect(received).toHaveLength(0)
       })
 
       it('rechaza un plan de OTRO store sin pegarle a la red', async () => {
