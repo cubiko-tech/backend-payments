@@ -1,11 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { SubscriptionService } from './subscription.service'
-import { Subscription, SubscriptionStatus } from './entities/subscription.entity'
+import { Subscription, SubscriptionStatus, SubscriptionProvider } from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
+import { ConfioCancellationService } from './confio-cancellation.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 /** Resource name completo de la suscripción del lado de ConfioPagos. */
@@ -56,6 +57,7 @@ describe('SubscriptionService', () => {
   let eventReadRepo: ReturnType<typeof createMockRepo>
   let clientRoles: { assignPlanToBrand: jest.Mock; removePlanFromBrand: jest.Mock; renewPlanForBrand: jest.Mock }
   let confioTrial: { createForTrial: jest.Mock; fetchAcceptance: jest.Mock }
+  let confioCancellation: { cancel: jest.Mock }
   let eventBus: { publishNotification: jest.Mock }
   /**
    * EntityManager de la transacción del alta. Tiene `findOne` PROPIO —y no el del
@@ -63,7 +65,7 @@ describe('SubscriptionService', () => {
    * los casos de carrera no probarían nada. `save` delega en los repos falsos para
    * que las aserciones existentes sigan valiendo.
    */
-  let txManager: { findOne: jest.Mock; save: jest.Mock }
+  let txManager: { findOne: jest.Mock; save: jest.Mock; exists: jest.Mock }
 
   beforeEach(async () => {
     subscriptionRepo = createMockRepo()
@@ -77,6 +79,10 @@ describe('SubscriptionService', () => {
       save: jest.fn((entity, data) =>
         entity === Subscription ? subscriptionRepo.save(data) : eventRepo.save(data),
       ),
+      // Predicado de idempotencia de la baja: «¿esta fila YA tiene su
+      // `SubscriptionEvent` CANCELLED?». Por defecto NO, que es el caso de una
+      // baja nueva y también el de la fila a reparar.
+      exists: jest.fn().mockResolvedValue(false),
     }
 
     Object.values(mockQueryRunner).forEach((fn) => {
@@ -114,6 +120,10 @@ describe('SubscriptionService', () => {
           },
         },
         {
+          provide: ConfioCancellationService,
+          useValue: { cancel: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
           provide: ClientRolesService,
           useValue: {
             assignPlanToBrand: jest.fn().mockResolvedValue(true),
@@ -131,6 +141,7 @@ describe('SubscriptionService', () => {
     service = module.get<SubscriptionService>(SubscriptionService)
     clientRoles = module.get(ClientRolesService)
     confioTrial = module.get(ConfioTrialService)
+    confioCancellation = module.get(ConfioCancellationService)
     eventBus = module.get(EventBusService)
   })
 
@@ -635,48 +646,400 @@ describe('SubscriptionService', () => {
   })
 
   describe('cancel', () => {
-    it('cancela suscripción y registra evento', async () => {
-      const subscription: any = {
-        id: 'sub-1',
-        brandId: 'brand-1',
-        status: SubscriptionStatus.ACTIVE,
-        autoRenew: true,
-        cancelledAt: null,
-        cancelReason: null,
-      }
+    /**
+     * Fila de ConfioPagos tal cual la deja el alta: el `name` vive en
+     * `metadata.confio.name` y `providerSubscriptionId` es el mismo valor.
+     */
+    const filaConfio = (over: Record<string, any> = {}): any => ({
+      id: 'sub-1',
+      brandId: 'brand-1',
+      userId: 'user-1',
+      planSlug: 'dropi-roax',
+      provider: SubscriptionProvider.CONFIO,
+      providerSubscriptionId: CONFIO_NAME,
+      status: SubscriptionStatus.TRIAL,
+      autoRenew: true,
+      cancelledAt: null,
+      cancelReason: null,
+      metadata: { confio: { name: CONFIO_NAME } },
+      ...over,
+    })
+
+    const bajaEscrita = () => ({
+      filas: subscriptionRepo.save.mock.calls.length,
+      eventos: eventRepo.save.mock.calls.length,
+      roles: clientRoles.removePlanFromBrand.mock.calls.length,
+    })
+
+    it('cancela en ConfioPagos ANTES de escribir, y recién ahí sella la fila y el evento', async () => {
+      const subscription = filaConfio()
       subscriptionRepo.findOne.mockResolvedValue(subscription)
       subscriptionRepo.save.mockResolvedValue(subscription)
       eventRepo.create.mockImplementation((data) => data)
       eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      const orden: string[] = []
+      confioCancellation.cancel.mockImplementation(async () => {
+        orden.push('confio')
+      })
+      subscriptionRepo.save.mockImplementation(async (d: any) => {
+        orden.push('save')
+        return d
+      })
 
       const result = await service.cancel('brand-1', {
         reason: 'Ya no necesito el servicio',
         triggeredBy: 'user-1',
       })
 
+      // El `name` sale de metadata.confio, igual que en getAcceptanceLink.
+      expect(confioCancellation.cancel).toHaveBeenCalledWith(CONFIO_NAME, 'Ya no necesito el servicio')
+      // El ORDEN es la invariante: nada se escribe antes de que Confío confirme.
+      expect(orden[0]).toBe('confio')
+      expect(orden).toContain('save')
+
       expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
       expect(subscription.autoRenew).toBe(false)
       expect(subscription.cancelledAt).toBeInstanceOf(Date)
       expect(subscription.cancelReason).toBe('Ya no necesito el servicio')
 
-      // Verifica evento de cancelación
-      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
-        subscriptionId: 'sub-1',
-        eventType: SubscriptionEventType.CANCELLED,
-        fromStatus: SubscriptionStatus.ACTIVE,
-        toStatus: SubscriptionStatus.CANCELLED,
-        triggeredBy: 'user-1',
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-1',
+          eventType: SubscriptionEventType.CANCELLED,
+          fromStatus: SubscriptionStatus.TRIAL,
+          toStatus: SubscriptionStatus.CANCELLED,
+          triggeredBy: 'user-1',
+          reason: 'Ya no necesito el servicio',
+        }),
+      )
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'dropi-roax')
+      expect(result.data).toBeDefined()
+    })
+
+    it('la traza lleva marca, usuario, plan y la referencia de ConfioPagos, sin providerEventId', async () => {
+      const subscription = filaConfio()
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      const traza = eventRepo.create.mock.calls[0][0]
+      expect(traza.metadata).toEqual(
+        expect.objectContaining({
+          event: 'subscription.cancel',
+          brandId: 'brand-1',
+          userId: 'user-1',
+          planSlug: 'dropi-roax',
+          confirmadoPorConfio: true,
+          providerRef: { name: CONFIO_NAME },
+        }),
+      )
+      // `providerEventId` es el predicado de idempotencia del WEBHOOK: escribirlo
+      // acá haría que una notificación posterior se creyera ya aplicada.
+      expect(traza.metadata).not.toHaveProperty('providerEventId')
+    })
+
+    /**
+     * RESTRICCIÓN 1 de la aceptación: nunca escribir un hecho que ConfioPagos no
+     * confirmó. Los dos rechazos de la pasarela propagan su `RequestException` y
+     * dejan CERO escrituras — ni fila, ni evento, ni baja en roles.
+     */
+    it.each([
+      ['CONFIO_SUBSCRIPTION_NAME_INVALID'],
+      ['CONFIO_CANCEL_UNAVAILABLE'],
+    ])('%s propaga tal cual y no escribe NADA', async (code) => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+      confioCancellation.cancel.mockRejectedValue(
+        new RequestException({ code, message: 'no se pudo' }, 503),
+      )
+
+      const error = await service
+        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe(code)
+      expect(error.getStatus()).toBe(503)
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+    })
+
+    /**
+     * RESTRICCIÓN 5: camino de reparación. Una fila ya terminal (sin la traza) se
+     * vuelve a cancelar en ConfioPagos —es idempotente, medido 2026-08-27— y esta
+     * vez SÍ deja su `SubscriptionEvent`. El `cancelledAt` que ya estaba no se
+     * re-sella, igual que hace el webhook.
+     */
+    it('repara una fila terminal: re-cancela en Confío y deja el evento sin re-sellar cancelledAt', async () => {
+      const sello = new Date('2026-08-01T00:00:00.000Z')
+      const subscription = filaConfio({
+        status: SubscriptionStatus.EXPIRED,
+        cancelledAt: sello,
+        autoRenew: false,
+      })
+      // Lo que hace que esto sea REPARACIÓN y no repetición: falta la traza.
+      txManager.exists.mockResolvedValue(false)
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'reintento', triggeredBy: 'user-1' })
+
+      expect(confioCancellation.cancel).toHaveBeenCalledWith(CONFIO_NAME, 'reintento')
+      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.cancelledAt).toBe(sello)
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SubscriptionEventType.CANCELLED,
+          fromStatus: SubscriptionStatus.EXPIRED,
+          toStatus: SubscriptionStatus.CANCELLED,
+        }),
+      )
+    })
+
+    it('un motivo en blanco es 422 CANCEL_REASON_REQUIRED, sin llamar a Confío ni escribir', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+
+      const error = await service
+        .cancel('brand-1', { reason: '   ', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('CANCEL_REASON_REQUIRED')
+      expect(error.getStatus()).toBe(422)
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+    })
+
+    it('una fila que no es de ConfioPagos se cancela local y no habla con la pasarela', async () => {
+      const subscription = filaConfio({
+        provider: SubscriptionProvider.WALLET,
+        providerSubscriptionId: null,
+        metadata: null,
+        status: SubscriptionStatus.ACTIVE,
+      })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      const result = await service.cancel('brand-1', {
         reason: 'Ya no necesito el servicio',
-      }))
+        triggeredBy: 'user-1',
+      })
+
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.autoRenew).toBe(false)
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: SubscriptionEventType.CANCELLED }),
+      )
       expect(result.data).toBeDefined()
     })
 
     it('lanza error si la suscripción no existe', async () => {
       subscriptionRepo.findOne.mockResolvedValue(null)
 
-      await expect(
-        service.cancel('brand-1', { reason: 'test', triggeredBy: 'user-1' }),
-      ).rejects.toThrow(RequestException)
+      const error = await service
+        .cancel('brand-1', { reason: 'test', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('SUBSCRIPTION_NOT_FOUND')
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Antes esto devolvía `{ error }` con HTTP 200: un fallo de la escritura local
+     * se leía como una baja exitosa. Ahora es 503 — y el reintento se auto-repara,
+     * porque la cancelación de ConfioPagos es idempotente.
+     */
+    it('un fallo inesperado de la escritura es 503 SUBSCRIPTION_CANCEL_FAILED, no un 200 con {error}', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+      subscriptionRepo.save.mockRejectedValue(new Error('deadlock detected'))
+
+      const error = await service
+        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('SUBSCRIPTION_CANCEL_FAILED')
+      expect(error.getStatus()).toBe(503)
+      // El detalle interno no se reexpone.
+      expect(JSON.stringify(error.getResponse())).not.toContain('deadlock')
+    })
+
+    /**
+     * IDEMPOTENCIA. Una fila YA sellada y CON su traza describe una baja ya
+     * registrada: el doble click en «cancelar» —o el reintento del cliente
+     * después de un 200 que se perdió— no puede duplicar el `SubscriptionEvent`
+     * de la MISMA transición ni reescribir el motivo original. Es la otra mitad
+     * de la restricción 5: reparar sí, repetir no.
+     */
+    it('una baja YA registrada no duplica la traza ni pisa el motivo original', async () => {
+      const sello = new Date('2026-08-01T00:00:00.000Z')
+      const subscription = filaConfio({
+        status: SubscriptionStatus.CANCELLED,
+        cancelledAt: sello,
+        cancelReason: 'motivo original',
+        autoRenew: false,
+      })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      txManager.exists.mockResolvedValue(true)
+
+      await service.cancel('brand-1', { reason: 'segundo click', triggeredBy: 'user-1' })
+
+      expect(txManager.exists).toHaveBeenCalledWith(SubscriptionEvent, {
+        where: { subscriptionId: 'sub-1', eventType: SubscriptionEventType.CANCELLED },
+      })
+      expect(eventRepo.create).not.toHaveBeenCalled()
+      expect(eventRepo.save).not.toHaveBeenCalled()
+      expect(subscription.cancelReason).toBe('motivo original')
+      expect(subscription.cancelledAt).toBe(sello)
+      // Roles SÍ se vuelve a llamar: el reintento puede venir justo de que esta
+      // llamada falló la primera vez, y saltearla dejaría el plan puesto.
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'dropi-roax')
+    })
+
+    /**
+     * `triggeredBy` es `varchar NOT NULL` en `subscription_events` y el body de
+     * este endpoint NO pasa por un DTO. Si no se valida ACÁ, la baja se hace de
+     * verdad en ConfioPagos y recién después muere la escritura: cancelada allá,
+     * viva acá, y el reintento muriendo igual para siempre.
+     */
+    it.each([
+      ['ausente', 'CANCEL_TRIGGERED_BY_REQUIRED', undefined],
+      ['en blanco', 'CANCEL_TRIGGERED_BY_REQUIRED', '   '],
+      ['más largo que la columna', 'CANCEL_TRIGGERED_BY_TOO_LONG', 'u'.repeat(256)],
+    ])('un triggeredBy %s es 422 %s ANTES de tocar ConfioPagos', async (_caso, code, valor) => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+
+      const error = await service
+        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: valor as any })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe(code)
+      expect(error.getStatus()).toBe(422)
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+    })
+
+    it('un motivo más largo que el tope es 422 CANCEL_REASON_TOO_LONG, sin llamar a Confío', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+
+      const error = await service
+        .cancel('brand-1', { reason: 'x'.repeat(501), triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('CANCEL_REASON_TOO_LONG')
+      expect(error.getStatus()).toBe(422)
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+    })
+
+    /**
+     * Fila `confio` SIN resource name: la que deja el checkout, que marca
+     * `provider = confio` y nunca escribe el `name` (sólo `startTrial` lo hace).
+     * Nunca hubo suscripción del otro lado, así que la baja es local — y es lo
+     * ÚNICO que la saca del cron horario de re-emisión de cobro. Antes esto era
+     * un 503 eterno con el cobro siguiendo su curso.
+     */
+    it('una fila confio SIN resource name se cancela local, sin hablar con la pasarela', async () => {
+      const subscription = filaConfio({
+        providerSubscriptionId: null,
+        metadata: null,
+        status: SubscriptionStatus.ACTIVE,
+      })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      const result = await service.cancel('brand-1', {
+        reason: 'baja voluntaria',
+        triggeredBy: 'user-1',
+      })
+
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      // El cron horario filtra por `autoRenew`: esto es lo que corta el cobro.
+      expect(subscription.autoRenew).toBe(false)
+      const traza = eventRepo.create.mock.calls[0][0]
+      expect(traza.metadata.confirmadoPorConfio).toBe(false)
+      expect(traza.metadata).not.toHaveProperty('providerRef')
+      expect(result.data).toBeDefined()
+    })
+
+    it('un name vacío en metadata no tapa el providerSubscriptionId bueno', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio({ metadata: { confio: { name: '' } } }))
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      expect(confioCancellation.cancel).toHaveBeenCalledWith(CONFIO_NAME, 'baja voluntaria')
+    })
+
+    /**
+     * `metadata` es jsonb SIN tipar: un `name` que no es string está CORRUPTO, no
+     * ausente. Va al borde del provider —que lo rechaza sin tocar la red— y sale
+     * 503 con cero escrituras, porque del otro lado puede haber una suscripción
+     * cobrando. Jamás se cancela local por las dudas.
+     */
+    it('un name corrupto (no string) va a la pasarela y termina en 503 sin escribir nada', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(
+        filaConfio({ metadata: { confio: { name: { roto: true } } }, providerSubscriptionId: null }),
+      )
+      confioCancellation.cancel.mockRejectedValue(
+        new RequestException({ code: 'CONFIO_SUBSCRIPTION_NAME_INVALID', message: 'no' }, 503),
+      )
+
+      const error = await service
+        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(confioCancellation.cancel).toHaveBeenCalledWith({ roto: true }, 'baja voluntaria')
+      expect(error.code).toBe('CONFIO_SUBSCRIPTION_NAME_INVALID')
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+    })
+
+    /**
+     * La relectura bajo lock existe porque entre la pre-lectura y la escritura
+     * hubo una llamada HTTP. Acá se ejerce de verdad: la fila cambió de plan en
+     * esa ventana y TODO —la traza y la baja en roles— sale de la fila releída.
+     */
+    it('usa la fila releída bajo lock, no la de la pre-lectura', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+      const bajoLock = filaConfio({ planSlug: 'plan-nuevo', status: SubscriptionStatus.PAST_DUE })
+      txManager.findOne.mockResolvedValue(bajoLock)
+      subscriptionRepo.save.mockResolvedValue(bajoLock)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      const traza = eventRepo.create.mock.calls[0][0]
+      expect(traza.fromStatus).toBe(SubscriptionStatus.PAST_DUE)
+      expect(traza.metadata.planSlug).toBe('plan-nuevo')
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'plan-nuevo')
+    })
+
+    /**
+     * Si la fila desapareció en la ventana de la llamada HTTP, `manager.save`
+     * sobre el objeto detached la RE-INSERTARÍA: resurrección de datos borrados.
+     */
+    it('si la fila desapareció bajo lock, es 404 y no se re-inserta nada', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+      txManager.findOne.mockResolvedValue(null)
+
+      const error = await service
+        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+        .catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('SUBSCRIPTION_NOT_FOUND')
+      expect(error.getStatus()).toBe(404)
+      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
     })
   })
 
@@ -685,6 +1048,7 @@ describe('SubscriptionService', () => {
       const subscription = {
         id: 'sub-1',
         brandId: 'brand-1',
+        provider: SubscriptionProvider.WALLET,
         status: SubscriptionStatus.CANCELLED,
         cancelledAt: new Date(),
         cancelReason: 'motivo',
@@ -717,11 +1081,39 @@ describe('SubscriptionService', () => {
       const subscription = {
         id: 'sub-1',
         brandId: 'brand-1',
+        provider: SubscriptionProvider.WALLET,
         status: SubscriptionStatus.ACTIVE,
       }
       subscriptionRepo.findOne.mockResolvedValue(subscription)
 
       await expect(service.reactivate('brand-1', 'user-1')).rejects.toThrow(RequestException)
+    })
+
+    /**
+     * Con la cancelación REAL, revivir una fila `confio` sería pro gratis: este
+     * endpoint sólo recibe `{brandId, triggeredBy}` y no hay pago detrás, y del
+     * lado de ConfioPagos la suscripción ya está `CANCELED` y no vuelve a cobrar.
+     */
+    it('una fila de ConfioPagos cancelada NO se reactiva: 422 y cero escrituras', async () => {
+      const subscription = {
+        id: 'sub-1',
+        brandId: 'brand-1',
+        provider: SubscriptionProvider.CONFIO,
+        status: SubscriptionStatus.CANCELLED,
+        cancelledAt: new Date(),
+        cancelReason: 'motivo',
+        autoRenew: false,
+      }
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+
+      const error = await service.reactivate('brand-1', 'user-1').catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('CONFIO_REACTIVATE_NOT_SUPPORTED')
+      expect(error.getStatus()).toBe(422)
+      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(eventRepo.save).not.toHaveBeenCalled()
     })
   })
 

@@ -76,22 +76,77 @@ Content-Type: application/json
 }
 
 ### Cancelar suscripción
+# CAMBIO DE CONTRATO: para una fila de ConfioPagos esto CANCELA DE VERDAD allá
+# (`POST …/subscriptions/{sub}/cancel`) antes de tocar nada local, y `reason` pasó
+# a ser OBLIGATORIO porque ConfioPagos lo exige. Antes este endpoint respondía
+# siempre 200, incluso tragándose los fallos en `{ error }`.
+#
+# La regla que ordena todo: **nunca se escribe un hecho que ConfioPagos no
+# confirmó**. Su HTTP 200 es la confirmación (la respuesta viene vacía) y recién
+# ahí se sella `status=cancelled` + `cancelledAt` + `autoRenew=false` junto con el
+# `SubscriptionEvent` CANCELLED, en una sola transacción.
+#
+# Los 422 se resuelven ANTES de hablar con ConfioPagos, todos con cero escrituras
+# —incluidos los dos de `triggeredBy`, que no es cosmética: es `varchar NOT NULL`
+# en `subscription_events`, así que dejarlo pasar cancelaba de verdad allá y recién
+# después moría la escritura acá, sin reintento posible—:
+# 422 CANCEL_REASON_REQUIRED: falta el motivo (o vino en blanco).
+# 422 CANCEL_REASON_TOO_LONG: el motivo supera los 500 caracteres.
+# 422 CANCEL_TRIGGERED_BY_REQUIRED: falta indicar quién origina la baja.
+# 422 CANCEL_TRIGGERED_BY_TOO_LONG: `triggeredBy` supera los 255 (el largo de la
+#     columna que lo guarda).
+# 404 SUBSCRIPTION_NOT_FOUND: la marca no tiene suscripción —o desapareció entre
+#     la lectura y la escritura, en cuyo caso NO se re-inserta.
+# 503 CONFIO_SUBSCRIPTION_NAME_INVALID: el resource name que tenemos guardado no
+#     es cancelable (dato NUESTRO, no del comprador): no tiene la forma exacta de
+#     una suscripción. **CERO escrituras**: no se marca cancelada una suscripción
+#     que del otro lado sigue cobrando.
+# 503 CONFIO_PLAN_STORE_MISMATCH: el recurso no es del `CONFIO_STORE_ID`
+#     configurado. Configuración nuestra, también con CERO escrituras. La
+#     cancelación valida el store igual que el alta, ANTES de POSTear con nuestro
+#     token: sin eso, un `name` elegido por el llamador dirigía la baja a la
+#     suscripción de otro store (el store está compartido con backend-ads).
+# 503 CONFIO_CANCEL_UNAVAILABLE: ConfioPagos no respondió o falló. CERO escrituras
+#     — un fallo del canal no es un hecho sobre el objeto.
+# 503 SUBSCRIPTION_CANCEL_FAILED: ConfioPagos SÍ canceló y la escritura local no
+#     llegó. Reintentar es seguro y se auto-repara: su cancelación es IDEMPOTENTE
+#     (cancelar dos veces también responde 200, medido contra dev el 2026-08-27).
+#
+# REPETIR la baja es seguro y NO deja rastro de más: si la fila ya está sellada y
+# ya tiene su `SubscriptionEvent` CANCELLED, el segundo llamado responde 200 sin
+# duplicar la traza y sin pisar el motivo original (el doble click y el reintento
+# del cliente son el caso normal, no el raro). Si la traza FALTA —la fila a
+# reparar— sí se escribe.
+#
+# Una fila que NO es de ConfioPagos (wallet, stripe…) se cancela local, sin hablar
+# con ninguna pasarela, pero el `reason` sigue siendo obligatorio. Lo mismo una
+# fila marcada `confio` SIN resource name (las que deja el checkout: sólo el alta
+# de trial escribe ese dato): nunca hubo suscripción del otro lado que cancelar,
+# así que la baja es local y la traza lo dice con `confirmadoPorConfio: false`.
 POST {{HOST}}/subscription/cancel HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
 
 {
   "brandId": "{{BRAND_ID}}",
-  "reason": "Too expensive"
+  "reason": "Too expensive",
+  "triggeredBy": "{{USER_ID}}"
 }
 
 ### Reactivar suscripción
+# 422 SUBSCRIPTION_NOT_CANCELLED: sólo se reactiva lo cancelado.
+# 422 CONFIO_REACTIVATE_NOT_SUPPORTED: una suscripción de ConfioPagos cancelada NO
+#     se reactiva. Este endpoint revive la fila SIN pago (sólo recibe `brandId` y
+#     `triggeredBy`), y del lado de ConfioPagos la suscripción ya quedó `CANCELED`
+#     y no vuelve a cobrar: reactivarla sería pro gratis. La vuelta es un alta
+#     nueva (`POST /subscription/trial` o el checkout), nunca una resurrección local.
 POST {{HOST}}/subscription/reactivate HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
 
 {
-  "brandId": "{{BRAND_ID}}"
+  "brandId": "{{BRAND_ID}}",
+  "triggeredBy": "{{USER_ID}}"
 }
 
 ### Historial de eventos de suscripción

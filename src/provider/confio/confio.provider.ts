@@ -51,10 +51,12 @@ import {
  * ⚠️ `getSubscription` **no forma parte de `PaymentProvider`**: se consume con
  * el tipo concreto `ConfioProvider`, no por `ProviderFactory.getProvider()`.
  *
- * 🔧 Deuda conocida: `cancelSubscription` sigue siendo un no-op y ahora miente
- * más que antes, porque el endpoint existe (`POST …/{sub}/cancel`, con `reason`
- * obligatorio). Fuera del alcance de esta tarea: lo cubre
- * `cancelacion-de-la-renovacion`.
+ * `cancelSubscription` cancela DE VERDAD (`POST …/{sub}/cancel`, con `reason`
+ * obligatorio). Medido contra dev el 2026-08-27: se puede cancelar incluso en
+ * `PENDING_ACCEPTANCE`, la suscripción queda en `CANCELED`, el `acceptanceUrl`
+ * desaparece y la respuesta trae cuerpo VACÍO — la confirmación es el HTTP 200,
+ * no un objeto de vuelta. Cancelar dos veces también da 200: es idempotente, así
+ * que reintentar es seguro y no hace falta preguntar antes si ya estaba cancelada.
  *
  * ⚠️ `CONFIO_API_BASE_URL` **ya termina en `/v1`** y `confioFetch` concatena, así
  * que los paths van SIN ese prefijo. Con `/v1` repetido ConfioPagos responde un
@@ -362,16 +364,55 @@ export class ConfioProvider implements PaymentProvider {
    * existe». Mejor cortar acá y decir cuál era el store esperado.
    */
   private assertPlanPath(planName: string): string {
-    const path = ConfioProvider.toSubscriptionPath(planName)
-    if (!path.startsWith(`stores/${this.storeId}/`)) {
+    return this.assertStorePath(planName, 'planName')
+  }
+
+  /**
+   * Valida que un resource name de SUSCRIPCIÓN sea de nuestro store Y tenga la
+   * forma exacta, y devuelve la ruta relativa a la base.
+   *
+   * Es la misma guarda del alta (`assertPlanPath`) MÁS la forma, y no un lujo:
+   * el `name` lo persistimos nosotros pero entra por caminos que no lo validan
+   * (`POST /subscription` acepta el body sin DTO), así que interpolarlo crudo
+   * dejaba elegir la ruta del POST que sale con NUESTRO Bearer — la suscripción
+   * de otro store (el store está COMPARTIDO con backend-ads) o, vía segmentos
+   * `..` que `fetch` normaliza, cualquier otro endpoint de ConfioPagos. El
+   * charset cerrado (sin `.`, sin `%`, sin `#`, sin espacios) cierra de paso la
+   * inyección de líneas en el log de más abajo.
+   */
+  private assertSubscriptionPath(name: string): string {
+    const path = this.assertStorePath(name, 'name')
+    if (!ConfioProvider.SUBSCRIPTION_PATH.test(path)) {
       throw new ConfioSubscriptionInputError(
-        'plan_store_mismatch',
-        'planName',
-        `el plan ${planName} no pertenece al store configurado (${this.storeId})`,
+        'invalid_subscription_name',
+        'name',
+        `el resource name "${name}" no tiene la forma de una suscripción de ConfioPagos`,
       )
     }
     return path
   }
+
+  /** Guarda de store compartida por el alta y por la cancelación. */
+  private assertStorePath(name: string, field: 'planName' | 'name'): string {
+    const path = ConfioProvider.toSubscriptionPath(name)
+    if (!path.startsWith(`stores/${this.storeId}/`)) {
+      throw new ConfioSubscriptionInputError(
+        'plan_store_mismatch',
+        field,
+        `el recurso ${name} no pertenece al store configurado (${this.storeId})`,
+      )
+    }
+    return path
+  }
+
+  /**
+   * Forma exacta de la ruta de una suscripción, ya recortada a `stores/`.
+   * Charset cerrado a propósito: los ids de ConfioPagos son ULIDs y cualquier
+   * otra cosa (un `..`, un `#`, un salto de línea) es un intento de irse de la
+   * ruta, no un id.
+   */
+  private static readonly SUBSCRIPTION_PATH =
+    /^stores\/[A-Za-z0-9_-]+\/subscription-plans\/[A-Za-z0-9_-]+\/subscriptions\/[A-Za-z0-9_-]+$/
 
   /**
    * Normaliza un resource name a ruta relativa a la base (que ya trae `/v1`).
@@ -381,7 +422,10 @@ export class ConfioProvider implements PaymentProvider {
    * `stores/`. Un id suelto se rechaza: de ahí no se puede componer la ruta.
    */
   private static toSubscriptionPath(name: string): string {
-    const at = (name || '').indexOf('stores/')
+    // `name` viene de `metadata` (jsonb SIN tipar): si no es string se rechaza
+    // acá y no explota con un TypeError opaco más abajo.
+    const raw = typeof name === 'string' ? name : ''
+    const at = raw.indexOf('stores/')
     if (at < 0) {
       throw new ConfioSubscriptionInputError(
         'invalid_subscription_name',
@@ -389,7 +433,7 @@ export class ConfioProvider implements PaymentProvider {
         `se esperaba un resource name que contenga "stores/", llegó "${name}"`,
       )
     }
-    return name.slice(at)
+    return raw.slice(at)
   }
 
   /**
@@ -419,9 +463,55 @@ export class ConfioProvider implements PaymentProvider {
     }
   }
 
-  async cancelSubscription(_providerSubscriptionId: string): Promise<void> {
-    // Nada que cancelar: se deja de emitir links de pago.
-    logger.log('info', 'ConfioProvider: suscripción cancelada (se dejan de emitir links)')
+  /**
+   * Cancelar una suscripción — `POST …/subscription-plans/{plan}/subscriptions/{sub}/cancel`.
+   *
+   * **Medido contra dev el 2026-08-27**, y de ahí sale el contrato de este método:
+   * ConfioPagos acepta cancelar incluso en `PENDING_ACCEPTANCE` (no hace falta
+   * esperar a que el comprador acepte), la suscripción queda en `CANCELED`, el
+   * `acceptanceUrl` desaparece y la respuesta viene con **cuerpo vacío** (`{}`).
+   * O sea: la confirmación es el **HTTP 200**, no un objeto de vuelta — por eso
+   * devuelve `void`. Cancelar dos veces también responde 200: **es idempotente**,
+   * así que un reintento no necesita ninguna guarda de «ya estaba cancelada».
+   *
+   * `reason` es OBLIGATORIO del lado de ConfioPagos y se rechaza acá, ANTES de la
+   * red, con `ConfioSubscriptionInputError` — el mismo contrato de rechazo local
+   * que usa el alta y que el llamador mapea por `instanceof` + `code`, nunca por
+   * el texto del mensaje.
+   *
+   * ⚠️ El `reason` es texto libre del usuario: NO se loguea. En el log va sólo el
+   * resource name, que para ese punto ya pasó por `assertSubscriptionPath` y por
+   * lo tanto no puede traer saltos de línea.
+   *
+   * ⚠️ La ruta se valida ENTERA antes de interpolarla (`assertSubscriptionPath`):
+   * store propio + forma exacta. Sin eso, un `name` elegido por el llamador
+   * dirigía este POST —con nuestro Bearer— a la suscripción de otro store o a
+   * otro endpoint de la API.
+   */
+  async cancelSubscription(providerSubscriptionId: string, reason?: string): Promise<void> {
+    this.ensureConfigured()
+
+    // Va antes de resolver la ruta: sin `reason` la petición no puede salir, y
+    // mandarla igual sería un 4xx de ConfioPagos disfrazado de fallo del canal.
+    if (!String(reason || '').trim()) {
+      throw new ConfioSubscriptionInputError(
+        'missing_cancel_reason',
+        'reason',
+        'ConfioPagos exige un motivo para cancelar la suscripción',
+      )
+    }
+
+    // Un `name` vacío, corrupto, de OTRO store o con forma rara (lo persistimos
+    // nosotros, por caminos que no lo validan) sale por acá como rechazo LOCAL:
+    // la petición nunca salió. Es la MISMA guarda que el alta, más la forma.
+    const path = this.assertSubscriptionPath(providerSubscriptionId)
+
+    await this.confioFetch(`/${path}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    })
+
+    logger.log('info', `ConfioProvider: suscripción cancelada ${path}`)
   }
 
   async savePaymentMethod(_params: SaveMethodParams): Promise<{ setupUrl: string }> {

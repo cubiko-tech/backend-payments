@@ -77,7 +77,11 @@ export interface PaymentProvider {
 
   // Suscripciones
   createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult>
-  cancelSubscription(providerSubscriptionId: string): Promise<void>
+  // `reason` es OBLIGATORIO también en la firma: ConfioPagos lo EXIGE en runtime,
+  // así que dejarlo opcional acá le regalaba al primer llamador que pase por
+  // `ProviderFactory` un 503 que el compilador podía atajar. Stripe, mercadopago y
+  // dropi lo ignoran: implementarlo con un solo parámetro satisface igual la firma.
+  cancelSubscription(providerSubscriptionId: string, reason: string): Promise<void>
 
   // Métodos de pago
   savePaymentMethod(params: SaveMethodParams): Promise<{ setupUrl: string }>

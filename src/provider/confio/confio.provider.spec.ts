@@ -630,6 +630,159 @@ describe('ConfioProvider', () => {
         expect(received).toHaveLength(0)
       })
     })
+
+    /**
+     * Cancelación real — `POST …/subscription-plans/{plan}/subscriptions/{sub}/cancel`.
+     *
+     * Medido contra dev el 2026-08-27: el endpoint acepta cancelar incluso en
+     * `PENDING_ACCEPTANCE`, deja la suscripción en `CANCELED`, hace desaparecer el
+     * `acceptanceUrl` y devuelve **cuerpo vacío** (`{}`). O sea: la confirmación es
+     * el HTTP 200, no un objeto de vuelta — por eso el método devuelve `void` y por
+     * eso hay un caso que prueba que un 200 con texto vacío NO explota.
+     *
+     * `reason` es OBLIGATORIO del lado de ConfioPagos. Se rechaza acá, antes de la
+     * red, y el caso lo demuestra con `received` en cero: no alcanza con que tire.
+     */
+    describe('cancelSubscription', () => {
+      it('POSTea a …/{sub}/cancel (sin duplicar /v1) con el reason en el body', async () => {
+        const provider = new ConfioProvider()
+        await provider.cancelSubscription(SUB, 'el usuario canceló la renovación')
+
+        expect(received).toHaveLength(1)
+        expect(received[0].method).toBe('POST')
+        expect(received[0].url).toBe(
+          '/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions/01SUB/cancel',
+        )
+        expect(received[0].headers.authorization).toBe('Bearer test-token-123')
+        // Qué claves salieron por el socket, no sólo qué valor tiene `reason`.
+        expect(Object.keys(received[0].body).sort()).toEqual(['reason'])
+        expect(received[0].body.reason).toBe('el usuario canceló la renovación')
+      })
+
+      it('resuelve con un 200 de cuerpo vacío: la confirmación es el status, no el body', async () => {
+        // Ni `{}` ni JSON: texto vacío, que es lo que rompería un `JSON.parse` ciego.
+        respond = (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end('')
+        }
+
+        const provider = new ConfioProvider()
+        await expect(provider.cancelSubscription(SUB, 'baja voluntaria')).resolves.toBeUndefined()
+        expect(received).toHaveLength(1)
+      })
+
+      it('rechaza un reason en blanco ANTES de tocar la red', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.cancelSubscription(SUB, '   '))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('missing_cancel_reason')
+        expect(err.field).toBe('reason')
+        expect(received).toHaveLength(0)
+      })
+
+      it('rechaza un reason ausente ANTES de tocar la red', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.cancelSubscription(SUB))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('missing_cancel_reason')
+        expect(received).toHaveLength(0)
+      })
+
+      it('rechaza un id suelto: de ahí no se puede componer la ruta', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.cancelSubscription('01SUB', 'baja voluntaria'))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('invalid_subscription_name')
+        expect(received).toHaveLength(0)
+      })
+
+      /**
+       * La ruta se valida ENTERA antes de interpolarla, con la misma guarda de
+       * store que el alta MÁS la forma. Sin eso, el `name` —que persistimos
+       * nosotros, por caminos que no lo validan— elegía a qué recurso le pegaba
+       * este POST con NUESTRO Bearer: la suscripción de otro store (el store está
+       * compartido con backend-ads) o, con segmentos `..` que `fetch` normaliza,
+       * cualquier otro endpoint de la API. `received` en cero es la mitad de la
+       * prueba: no alcanza con que tire.
+       */
+      it('rechaza una suscripción de OTRO store sin pegarle a la red', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(
+          provider.cancelSubscription(
+            'stores/01OTROSTORE/subscription-plans/01PLAN/subscriptions/01SUB',
+            'baja voluntaria',
+          ),
+        )
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('plan_store_mismatch')
+        expect(err.field).toBe('name')
+        expect(received).toHaveLength(0)
+      })
+
+      it.each([
+        ['segmentos de escape', `${SUB}/../../../../payments`],
+        ['truncado con #', `${SUB}#/../payments`],
+        ['un salto de línea', `${SUB}\ninyectado`],
+        ['un sufijo de más', `${SUB}/cancel`],
+        ['sólo el plan, sin suscripción', 'stores/01TESTSTORE/subscription-plans/01PLAN'],
+      ])('rechaza un name con %s sin pegarle a la red', async (_caso, name) => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.cancelSubscription(name, 'baja voluntaria'))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('invalid_subscription_name')
+        expect(received).toHaveLength(0)
+      })
+
+      it('rechaza un name que ni siquiera es string: `metadata` es jsonb sin tipar', async () => {
+        const provider = new ConfioProvider()
+
+        const err = await rechazo(provider.cancelSubscription({ roto: true } as any, 'baja'))
+
+        expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
+        expect(err.code).toBe('invalid_subscription_name')
+        expect(received).toHaveLength(0)
+      })
+
+      it('recorta el prefijo `organizations/…` igual que getSubscription', async () => {
+        const provider = new ConfioProvider()
+        await provider.cancelSubscription(`organizations/01ORG/${SUB}`, 'baja voluntaria')
+
+        expect(received[0].url).toBe(
+          '/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions/01SUB/cancel',
+        )
+      })
+
+      it('propaga un no-2xx con su status y su cuerpo', async () => {
+        replyWith({ message: 'subscription already canceled' }, 409)
+
+        const provider = new ConfioProvider()
+
+        await expect(provider.cancelSubscription(SUB, 'baja voluntaria')).rejects.toThrow(
+          /ConfioPagos error 409/,
+        )
+      })
+
+      it('lanza si el provider no está configurado', async () => {
+        process.env.CONFIO_STORE_ID = ''
+        process.env.CONFIO_ACCESS_TOKEN = ''
+
+        const provider = new ConfioProvider()
+        await expect(provider.cancelSubscription(SUB, 'baja voluntaria')).rejects.toThrow(
+          /no configurado/,
+        )
+        expect(received).toHaveLength(0)
+      })
+    })
   })
 
   describe('mapStatus', () => {

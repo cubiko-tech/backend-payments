@@ -6,6 +6,7 @@ import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptio
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
+import { ConfioCancellationService } from './confio-cancellation.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 // Estados en los que la marca tiene servicio vigente; `expired` y `cancelled` son ciclos
@@ -15,6 +16,17 @@ const LIVE_SUBSCRIPTION_STATUSES = [
   SubscriptionStatus.ACTIVE,
   SubscriptionStatus.PAST_DUE,
 ]
+
+/**
+ * Topes del BORDE para los dos textos libres de la baja. No son gusto: los dos
+ * viajan a una escritura que ocurre DESPUÉS de que ConfioPagos ya canceló, y
+ * `subscription_events.triggeredBy` es `varchar` (255) `NOT NULL`
+ * (`migrations/1742600000000-InitialSchema.ts`). Un valor más largo revienta la
+ * transacción con la baja ya hecha del otro lado, y el reintento vuelve a
+ * reventar igual: su cancelación es idempotente, el límite de la columna no.
+ */
+const MAX_CANCEL_REASON_LENGTH = 500
+const MAX_TRIGGERED_BY_LENGTH = 255
 
 /**
  * Violación de índice único en Postgres (verificado contra dev: `code=23505`).
@@ -46,6 +58,7 @@ export class SubscriptionService {
     private readonly clientRoles: ClientRolesService,
     private readonly eventBus: EventBusService,
     private readonly confioTrial: ConfioTrialService,
+    private readonly confioCancellation: ConfioCancellationService,
   ) {}
 
   /**
@@ -510,46 +523,246 @@ export class SubscriptionService {
   }
 
   /**
-   * Cancelar suscripción
+   * Cancelar la suscripción: primero en ConfioPagos, después acá.
+   *
+   * ORDEN, que es la invariante de esta tarea: **la pasarela primero, la
+   * escritura después**. El HTTP 200 de ConfioPagos ES la confirmación (su
+   * respuesta viene vacía), y recién con esa confirmación se sella la fila. Si
+   * ellos rechazan, la `RequestException` sube tal cual y NO se escribe nada:
+   * jamás se marca como cancelado algo que del otro lado sigue cobrando
+   * (restricción 1 de la aceptación — mismo criterio que el alta, que tampoco
+   * persiste nada antes del POST).
+   *
+   * ⚠️ REPARACIÓN sí, REPETICIÓN no. La cancelación de ConfioPagos es IDEMPOTENTE
+   * (cancelar dos veces responde 200, medido contra dev el 2026-08-27), así que
+   * una fila terminal SIN su `SubscriptionEvent` —el camino de reparación de la
+   * restricción 5— vuelve a pasar por el mismo código y esta vez sí deja la
+   * traza. Pero una fila YA sellada (`cancelledAt`) y CON su traza no se
+   * reescribe: el doble click o el reintento del cliente tras un 200 perdido
+   * duplicaba el `SubscriptionEvent` de UNA sola transición y pisaba el
+   * `cancelReason` original con el motivo del reintento. Ni el `cancelledAt` ni
+   * el `cancelReason` se re-sellan: los dos describen el MISMO hecho y el hecho
+   * es el primero, igual que hace el webhook
+   * (`confio-subscription-webhook.service.ts`).
+   *
+   * ⚠️ Una fila `confio` SIN resource name (`metadata.confio.name` y
+   * `providerSubscriptionId` en null) NUNCA tuvo suscripción del otro lado: sólo
+   * `startTrial` escribe ese dato, y el checkout (`checkout.service.ts`) marca
+   * `provider = confio` sin tocarlo. Esas filas se cancelan LOCAL, con la traza
+   * diciendo `confirmadoPorConfio: false`. No es una excepción a la restricción 1
+   * —no hay nada allá que confirmar— y es lo único que las saca del cron horario
+   * de re-emisión de cobro (`tasks.service.ts`, filtra por `autoRenew`). Distinto
+   * es un name PRESENTE pero corrupto o de otro store: ahí sí 503 con cero
+   * escrituras, porque del otro lado puede haber una suscripción cobrando.
+   *
+   * ⚠️ RESIDUAL ACEPTADO, y en una sola dirección: si ConfioPagos confirma y la
+   * escritura local falla, la fila queda viva acá mientras allá ya no se cobra —
+   * el llamador recibe un 503 y el reintento se auto-repara, justamente porque su
+   * cancelación es idempotente. La inversa (afirmar una baja que ellos no
+   * confirmaron) es imposible por construcción.
+   *
+   * ⚠️ El marcador de «confirmado» NO va en `metadata`: es la columna
+   * `cancelledAt` —el mismo lugar que sella el webhook— más el
+   * `SubscriptionEvent` CANCELLED, escritos en la MISMA transacción que el estado.
    */
   async cancel(brandId: string, reason: { reason: string; triggeredBy: string }) {
+    // Chequeos de DOMINIO, TODOS antes de la llamada IRREVERSIBLE a la pasarela.
+    // El borde del provider tiene el suyo (`missing_cancel_reason`), pero llegar
+    // hasta allá para descubrir que falta el motivo sería gastar una llamada HTTP
+    // en un rechazo que se ve desde acá; y lo que valida la ESCRITURA posterior
+    // tiene que estar acá sí o sí (ver `triggeredBy`).
+    const motivo = String(reason?.reason || '').trim()
+    if (!motivo) {
+      throw new RequestException(
+        {
+          code: 'CANCEL_REASON_REQUIRED',
+          message: 'ConfioPagos exige un motivo para cancelar la suscripción',
+          field: 'reason',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+    if (motivo.length > MAX_CANCEL_REASON_LENGTH) {
+      throw new RequestException(
+        {
+          code: 'CANCEL_REASON_TOO_LONG',
+          message: `El motivo no puede superar los ${MAX_CANCEL_REASON_LENGTH} caracteres`,
+          field: 'reason',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    // `triggeredBy` se valida ACÁ, antes del POST, y no es cosmética: es
+    // `varchar NOT NULL` en `subscription_events` y el body de este endpoint NO
+    // pasa por un DTO (`@Body() data: { … }` es un tipo inline, sin metatype: el
+    // `ValidationPipe({whitelist, forbidNonWhitelisted})` de `main.ts` no puede
+    // chequearlo, tal como ya documenta `checkout.controller.ts`). Sin esta
+    // guarda un body sin `triggeredBy` cancelaba DE VERDAD en ConfioPagos y
+    // recién después moría la transacción con un 23502: cancelada allá, viva
+    // acá, y el reintento muriendo igual para siempre —el único 503 de este
+    // camino que NO se auto-repara.
+    const triggeredBy = String(reason?.triggeredBy || '').trim()
+    if (!triggeredBy) {
+      throw new RequestException(
+        {
+          code: 'CANCEL_TRIGGERED_BY_REQUIRED',
+          message: 'Falta indicar quién origina la baja',
+          field: 'triggeredBy',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+    if (triggeredBy.length > MAX_TRIGGERED_BY_LENGTH) {
+      throw new RequestException(
+        {
+          code: 'CANCEL_TRIGGERED_BY_TOO_LONG',
+          message: `El origen de la baja no puede superar los ${MAX_TRIGGERED_BY_LENGTH} caracteres`,
+          field: 'triggeredBy',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    // Repo de ESCRITURA: a partir de acá esto es read-modify-write y la réplica
+    // puede venir atrasada. Es también la lectura que resuelve el `name`.
+    const subscription = await this.subscriptionRepository.findOne({ where: { brandId } })
+    if (!subscription) {
+      throw new RequestException(
+        { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+
+    const esConfio = subscription.provider === SubscriptionProvider.CONFIO
+    // Mismo orden de resolución que `getAcceptanceLink`, pero quedándose con el
+    // PRIMER valor no vacío: un `metadata.confio.name` en `''` no puede tapar un
+    // `providerSubscriptionId` bueno y mandar la fila al camino local. `metadata`
+    // es jsonb SIN tipar, así que un valor que no es string cuenta como PRESENTE
+    // (o sea corrupto) y se va al borde del provider, que lo rechaza con
+    // `invalid_subscription_name` → 503 y cero escrituras.
+    const confioName =
+      [subscription.metadata?.confio?.name, subscription.providerSubscriptionId]
+        .map((valor) => (typeof valor === 'string' ? valor.trim() : valor))
+        .find((valor) => valor !== null && valor !== undefined && valor !== '') ?? null
+
+    // Se habla con la pasarela sólo si hay a quién: sin `name` nunca hubo
+    // suscripción allá (ver el docblock) y la baja es puramente local.
+    const confirmadoPorConfio = esConfio && confioName !== null
+    if (esConfio && !confirmadoPorConfio) {
+      this.logger.warn(
+        `Suscripción de marca ${brandId} marcada como confio SIN resource name: ` +
+          'se cancela local, no hay suscripción que cancelar en ConfioPagos',
+      )
+    }
+
     try {
-      const subscription = await this.subscriptionRepository.findOne({ where: { brandId } })
-      if (!subscription) {
-        throw new RequestException(
-          { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
-          HttpStatus.NOT_FOUND,
-        )
+      if (confirmadoPorConfio) {
+        // Fuera de la transacción: es HTTP y adentro retendría el lock de la fila.
+        await this.confioCancellation.cancel(confioName, motivo)
       }
 
-      const fromStatus = subscription.status
-      subscription.status = SubscriptionStatus.CANCELLED
-      subscription.cancelledAt = new Date()
-      subscription.cancelReason = reason.reason
-      subscription.autoRenew = false
-      await this.subscriptionRepository.save(subscription)
+      const { row: saved, planSlug } = await this.dataSource.transaction(async (manager) => {
+        // Relectura bajo lock, mismo precedente que `startTrial` y que
+        // `ConfioSubscriptionWebhookService.aplicar`: entre la lectura de arriba y
+        // esta escritura hubo una llamada HTTP, o sea una ventana de segundos.
+        const current = await manager.findOne(Subscription, {
+          where: { brandId },
+          lock: { mode: 'pessimistic_write' },
+        })
+        // Si la fila desapareció en esa ventana NO se cae al objeto detached de la
+        // pre-lectura: `manager.save` lo RE-INSERTARÍA, resucitando datos borrados.
+        // Mismo criterio que `aplicar`, que ante la fila ausente corta.
+        if (!current) {
+          throw new RequestException(
+            { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
+            HttpStatus.NOT_FOUND,
+          )
+        }
 
-      // Registrar evento de cancelación
-      await this.subscriptionEventRepository.save(
-        this.subscriptionEventRepository.create({
-          subscriptionId: subscription.id,
-          eventType: SubscriptionEventType.CANCELLED,
-          fromStatus,
-          toStatus: SubscriptionStatus.CANCELLED,
-          triggeredBy: reason.triggeredBy,
-          reason: reason.reason,
-        }),
+        // IDEMPOTENCIA. Una fila ya sellada y CON su traza describe una baja YA
+        // registrada: el segundo click —o el reintento del cliente tras un 200
+        // perdido— no agrega otro `SubscriptionEvent` para la MISMA transición ni
+        // reescribe el motivo original. Si falta la traza —la fila que hay que
+        // reparar (restricción 5)— esto da `false` y el evento se escribe igual.
+        const yaRegistrada =
+          !!current.cancelledAt &&
+          (await manager.exists(SubscriptionEvent, {
+            where: { subscriptionId: current.id, eventType: SubscriptionEventType.CANCELLED },
+          }))
+
+        const fromStatus = current.status
+        current.status = SubscriptionStatus.CANCELLED
+        // Se SELLA una sola vez, como el webhook: la fecha de la baja es la
+        // primera, no la del reintento que reparó la traza. El motivo va con el
+        // MISMO criterio —describe el mismo hecho— y por eso tampoco se pisa.
+        if (!current.cancelledAt) current.cancelledAt = new Date()
+        if (!yaRegistrada) current.cancelReason = motivo
+        current.autoRenew = false
+        const row = await manager.save(Subscription, current)
+
+        if (!yaRegistrada) {
+          // La fila y su traza se escriben JUNTAS: un estado terminal sin
+          // `SubscriptionEvent` es justamente la fila que hay que reparar.
+          await manager.save(
+            SubscriptionEvent,
+            this.subscriptionEventRepository.create({
+              subscriptionId: current.id,
+              eventType: SubscriptionEventType.CANCELLED,
+              fromStatus,
+              toStatus: SubscriptionStatus.CANCELLED,
+              triggeredBy,
+              reason: motivo,
+              // Forma espejo de `armarTrazaDelMovimiento`, escrita inline porque ese
+              // helper es del webhook y estampa `triggeredBy: 'confio-webhook'`.
+              // NUNCA lleva `providerEventId`: esa clave es el predicado de
+              // idempotencia del webhook y escribirla acá haría que una notificación
+              // posterior se creyera ya aplicada.
+              metadata: {
+                event: 'subscription.cancel',
+                brandId,
+                userId: current.userId,
+                planSlug: current.planSlug,
+                // Qué respalda esta baja: el 200 de ConfioPagos, o sólo nosotros.
+                confirmadoPorConfio,
+                ...(confirmadoPorConfio ? { providerRef: { name: confioName } } : {}),
+              },
+            }),
+          )
+        }
+
+        // El plan sale de la fila RELEÍDA bajo lock, no de la pre-lectura: es la
+        // única versión que la transacción vio.
+        return { row, planSlug: current.planSlug }
+      })
+
+      // Después del commit, igual que antes de esta tarea. Se llama SIEMPRE, también
+      // cuando la baja ya estaba registrada: si la primera vez esto falló (503 con la
+      // fila ya cancelada), saltearlo en el reintento dejaría el plan puesto para
+      // siempre — que es justo lo que el reintento viene a arreglar.
+      await this.clientRoles.removePlanFromBrand(brandId, planSlug)
+
+      this.logger.log(
+        `Suscripción cancelada para marca ${brandId}` +
+          (confirmadoPorConfio ? ` (confirmada por ConfioPagos ${confioName})` : ''),
       )
-
-      // Remover plan de la marca en backend-roles
-      await this.clientRoles.removePlanFromBrand(brandId, subscription.planSlug)
-
-      this.logger.log(`Suscripción cancelada para marca ${brandId}`)
-      return { data: subscription }
+      return { data: saved }
     } catch (error) {
+      // Los rechazos de la pasarela ya vienen con su código y su status: suben
+      // tal cual, con cero escrituras detrás.
       if (error instanceof RequestException) throw error
-      this.logger.error(`Error al cancelar suscripción de marca ${brandId}: ${error.message}`)
-      return { error: error.message }
+      this.logger.error(`Error al cancelar suscripción de marca ${brandId}: ${error?.message}`)
+      // NO se devuelve `{ error }` con 200: acá caen los fallos POSTERIORES a la
+      // confirmación de ConfioPagos, o sea justo los casos en los que el llamador
+      // tiene que reintentar (y puede: su cancelación es idempotente). El detalle
+      // interno queda en el log de arriba.
+      throw new RequestException(
+        {
+          code: 'SUBSCRIPTION_CANCEL_FAILED',
+          message: 'No se pudo registrar la cancelación, reintentá en unos minutos',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
     }
   }
 
@@ -569,6 +782,25 @@ export class SubscriptionService {
       if (subscription.status !== SubscriptionStatus.CANCELLED) {
         throw new RequestException(
           { code: 'SUBSCRIPTION_NOT_CANCELLED', message: 'Solo se pueden reactivar suscripciones canceladas' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+
+      // Hasta hoy esto daba igual: `cancelSubscription` era un no-op, así que una
+      // fila `confio` "cancelada" seguía viva del otro lado y reactivarla acá sólo
+      // re-sincronizaba. Con la cancelación REAL ya no: allá quedó `CANCELED` y no
+      // hay nada que pueda volver a cobrar. Y este endpoint recibe sólo
+      // `{brandId, triggeredBy}` y revive la fila SIN pago —a diferencia de
+      // `checkout.service.ts` (`createOrRenewSubscription`), que sólo corre detrás
+      // de un `Payment` real—, o sea que reactivar sería pro gratis. La vuelta es
+      // un alta nueva, nunca una resurrección local.
+      if (subscription.provider === SubscriptionProvider.CONFIO) {
+        throw new RequestException(
+          {
+            code: 'CONFIO_REACTIVATE_NOT_SUPPORTED',
+            message:
+              'Una suscripción de ConfioPagos cancelada no se reactiva: hay que darse de alta de nuevo',
+          },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
@@ -595,7 +827,9 @@ export class SubscriptionService {
       return { data: subscription }
     } catch (error) {
       if (error instanceof RequestException) throw error
-      this.logger.error(`Error al reactivar suscripción de marca ${brandId}: ${error.message}`)
+      // `error?.message` y no `error.message`: un rechazo que no es `Error` haría
+      // explotar este catch y subiría un 500 opaco. Mismo criterio que `cancel`.
+      this.logger.error(`Error al reactivar suscripción de marca ${brandId}: ${error?.message}`)
       return { error: error.message }
     }
   }

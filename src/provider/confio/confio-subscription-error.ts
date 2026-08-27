@@ -17,6 +17,7 @@ export type ConfioSubscriptionInputErrorCode =
   | 'invalid_buyer'
   | 'plan_store_mismatch'
   | 'invalid_subscription_name'
+  | 'missing_cancel_reason'
 
 /**
  * Rechazo de entrada del cliente de suscripciones: la petición nunca salió.
