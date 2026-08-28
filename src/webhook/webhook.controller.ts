@@ -24,7 +24,7 @@ import {
   timingSafeEqualStrings,
   verifyConfioWebhookSignature,
 } from '../provider/confio/confio-webhook-signature'
-import { isProductionEnv, readConfioWebhookKey } from '../provider/confio/confio-webhook-env'
+import { readConfioWebhookKey } from '../provider/confio/confio-webhook-env'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 
 /**
@@ -87,7 +87,6 @@ export class WebhookController {
   // Entorno leído UNA sola vez, al construir —mismo hábito que `ConfioProvider`—:
   // rotar CONFIO_WEBHOOK_KEY exige reiniciar el servicio.
   private readonly webhookKey = readConfioWebhookKey()
-  private readonly isProduction = isProductionEnv()
 
   @Post('stripe')
   @HttpCode(200)
@@ -244,22 +243,25 @@ export class WebhookController {
    * La política de "sin clave configurada" es DE ESTE RAMO, no del endpoint:
    * los eventos one-shot nunca traen `signature` y hoy se autentican con el
    * access token, así que aplicarles esta compuerta apagaría cobros vivos.
+   *
+   * Sin clave se rechaza EN TODOS LOS AMBIENTES, no sólo en producción. Antes
+   * fallaba abierto fuera de producción, y eso dejó de ser inocuo cuando
+   * `subscription.subscriptionStatusChanged` pasó a tener efecto CROSS-SERVICE:
+   * un `status: CANCELED` sin autenticar ya no mueve nada más que una columna
+   * local, ahora revoca el plan de la marca en backend-roles y la baja a `free`.
+   * Un default que falla abierto no puede gobernar un efecto irreversible sobre
+   * los permisos de otro servicio, aunque sea en dev.
+   *
+   * Precio: dev y staging necesitan `CONFIO_WEBHOOK_KEY` sembrada en Infisical
+   * para poder recibir estos dos eventos (registrado en HUMAN_ACTIONS).
    */
   private autenticarRamoFirmado(payload: ConfioWebhookPayload, bearer: string): void {
     if (!this.webhookKey) {
-      if (this.isProduction) {
-        this.logger.error(
-          `Webhook ConfioPagos rechazado: reason=missing_key ${SIN_CAMPOS_DE_FIRMA} ` +
-            'detail=CONFIO_WEBHOOK_KEY vacía o CHANGEME en producción',
-        )
-        throw new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)
-      }
-
-      this.logger.warn(
-        'Webhook ConfioPagos: reason=missing_key, verificación de firma OMITIDA (solo fuera de producción)',
+      this.logger.error(
+        `Webhook ConfioPagos rechazado: reason=missing_key ${SIN_CAMPOS_DE_FIRMA} ` +
+          'detail=CONFIO_WEBHOOK_KEY vacía o CHANGEME',
       )
-
-      return
+      throw new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)
     }
 
     // El bearer se compara ANTES del checksum: es la comprobación barata, y va

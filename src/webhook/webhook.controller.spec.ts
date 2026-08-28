@@ -268,16 +268,33 @@ describe('WebhookController (confio)', () => {
       },
     )
 
-    it('fuera de producción omite la verificación con warning, aunque el bearer sea basura', async () => {
-      const { controller, receive, warn } = await construirController({ ENV: 'development' })
+    // El fail-open de dev/stg se cerró cuando `subscriptionStatusChanged` pasó a
+    // tener efecto CROSS-SERVICE: un `CANCELED` sin autenticar ya no mueve sólo
+    // una columna local, revoca el plan de la marca en backend-roles.
+    it.each([['development'], ['staging']])(
+      'también rechaza en %s: sin clave no se acepta el ramo firmado en ningún ambiente',
+      async (ambiente) => {
+        const { controller, receive, error } = await construirController({ ENV: ambiente })
+
+        const estado = await estadoHttp(() =>
+          controller.confio('Bearer basura', reqCon(cobroFirmado(3))),
+        )
+
+        expect(estado).toBe(401)
+        expect(receive).not.toHaveBeenCalled()
+        expect(lineas(error)).toContain('missing_key')
+      },
+    )
+
+    it('el ramo one-shot NO queda apagado por la clave ausente fuera de producción', async () => {
+      const { controller, receive } = await construirController({ ENV: 'development' })
 
       const estado = await estadoHttp(() =>
-        controller.confio('Bearer basura', reqCon(cobroFirmado(3))),
+        controller.confio(`Bearer ${ACCESS_TOKEN}`, reqCon(pagoOneShot())),
       )
 
       expect(estado).toBe(200)
       expect(receive).toHaveBeenCalledTimes(1)
-      expect(lineas(warn)).toContain('missing_key')
     })
 
     it('trata CHANGEME como no configurada aunque el payload venga firmado con CHANGEME', async () => {
