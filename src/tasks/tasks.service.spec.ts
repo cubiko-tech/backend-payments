@@ -320,7 +320,7 @@ describe('TasksService — processTrialConversions', () => {
       // veces (los `@Cron` de Nest no se excluyen entre sí).
       expect(subscriptionRepo.update).toHaveBeenCalledWith(
         { id: 's1', status: SubscriptionStatus.PAST_DUE },
-        { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
       expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -375,7 +375,7 @@ describe('TasksService — processTrialConversions', () => {
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('b1', 'free')
       expect(subscriptionRepo.update).toHaveBeenCalledWith(
         { id: 's1', status: SubscriptionStatus.PAST_DUE },
-        { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
     })
 
@@ -393,6 +393,22 @@ describe('TasksService — processTrialConversions', () => {
       expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
     })
 
+
+    // La invariante de `accessEndsAt` es «no nula ⇔ baja PENDIENTE»: una fila
+    // terminal no tiene baja pendiente. Este cron se queda además con las filas de
+    // la intersección (baja sellada + mora agotada), que si no dejarían colgada la
+    // fecha de corte de una baja que ya se consumó.
+    it('la fila vencida no conserva fecha de corte', async () => {
+      subscriptionRepo.find.mockResolvedValue([enMora({ accessEndsAt: new Date('2026-08-27T10:00:00.000Z') })])
+
+      await service.expireSubscriptions()
+
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        { id: 's1', status: SubscriptionStatus.PAST_DUE },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
+      )
+    })
+
     // Un segmento vacío en el path de roles (`/v1/brand//plan/slug/`) da 404 →
     // `false`, indistinguible de un canal caído: sin esta guarda la fila no
     // vencería NUNCA. Misma decisión que `efectoRoles` en el webhook.
@@ -405,8 +421,325 @@ describe('TasksService — processTrialConversions', () => {
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
       expect(subscriptionRepo.update).toHaveBeenCalledWith(
         { id: 's1', status: SubscriptionStatus.PAST_DUE },
-        { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
+    })
+  })
+
+
+  /**
+   * `retiro-de-plan-al-vencer-el-periodo` (épica 002, criterio 3).
+   *
+   * Desde el corte diferido, la baja NO mueve el `status`: sella `accessEndsAt` y
+   * apaga la renovación, y la fila sigue viva —`trial`/`active`/`past_due`— con el
+   * plan pago puesto hasta que llegue esa fecha. Nadie la cerraba: `accessEndsAt`
+   * sólo tenía escritores. Este cron es su único lector.
+   *
+   * Rojo si: se quita `assignPlanToBrand(brandId, FREE_PLAN_SLUG)` de
+   * `downgradeBrandToFree` (la mutación de control que comparten los disparadores).
+   */
+  describe('expireCancelledSubscriptions', () => {
+    const finDeAcceso = new Date('2026-08-27T10:00:00.000Z')
+
+    const dadaDeBaja = (over: Record<string, any> = {}) => ({
+      id: 's1',
+      brandId: 'b1',
+      planSlug: 'pro',
+      status: SubscriptionStatus.ACTIVE,
+      autoRenew: false,
+      retryCount: 0,
+      cancelledAt: new Date('2026-08-20T10:00:00.000Z'),
+      accessEndsAt: finDeAcceso,
+      currentPeriodEnd: new Date('2026-09-20T10:00:00.000Z'),
+      ...over,
+    })
+
+    /**
+     * El compare-and-set del cron, que tiene CUATRO condiciones y no tres: además
+     * del estado leído y `autoRenew: false`, repite la cota temporal de la consulta
+     * (`accessEndsAt < ahora`). Sin ella una pasada vieja podía cerrar una baja
+     * DISTINTA —la fila se reactivó y se volvió a dar de baja con fecha futura— y
+     * borrarle una fecha de corte todavía por venir.
+     */
+    const esperarCierre = (status: SubscriptionStatus, llamada = 0) => {
+      const [criterio, cambio] = subscriptionRepo.update.mock.calls[llamada]
+      expect(criterio.id).toBe('s1')
+      expect(criterio.status).toBe(status)
+      expect(criterio.autoRenew).toBe(false)
+      expect(criterio.accessEndsAt.type).toBe('lessThan')
+      expect(criterio.accessEndsAt.value).toBeInstanceOf(Date)
+      expect(cambio).toEqual({ status: SubscriptionStatus.CANCELLED, accessEndsAt: null })
+    }
+
+    it('vencido el acceso pagado saca el plan pago y deja free', async () => {
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('b1', 'pro')
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('b1', 'free')
+      // `free` SIN `expiresAt`: un plan que no se cobra no vence.
+      expect(clientRoles.assignPlanToBrand.mock.calls[0]).toHaveLength(2)
+      expect(clientRoles.removePlanFromBrand.mock.invocationCallOrder[0]).toBeLessThan(
+        clientRoles.assignPlanToBrand.mock.invocationCallOrder[0],
+      )
+      // Compare-and-set contra el estado vigente: dos pasadas solapadas no cierran
+      // la fila dos veces. `accessEndsAt: null` porque la invariante de la entidad
+      // dice «no nula ⇔ baja PENDIENTE» y acá la baja se acaba de consumar.
+      esperarCierre(SubscriptionStatus.ACTIVE)
+      expect(subscriptionEventRepo.create).toHaveBeenCalledTimes(1)
+      expect(eventBus.publishSubscriptionExpired).toHaveBeenCalledTimes(1)
+    })
+
+    // La fecha de corte se borra en el mismo CAS, así que el evento es el ÚNICO
+    // rastro de hasta cuándo corrió el acceso pagado: `cancelledAt` es la fecha de
+    // la BAJA, no la del corte. Rojo si el `metadata` se arma después de nular.
+    it('deja en la traza hasta cuándo corrió el acceso pagado', async () => {
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SubscriptionEventType.EXPIRED,
+          fromStatus: SubscriptionStatus.ACTIVE,
+          toStatus: SubscriptionStatus.CANCELLED,
+          triggeredBy: 'system',
+          metadata: expect.objectContaining({
+            event: 'subscription.access_ended',
+            accessEndsAt: finDeAcceso.toISOString(),
+            brandId: 'b1',
+            planSlug: 'pro',
+          }),
+        }),
+      )
+    })
+
+    // El dueño del aviso «tu plan venció» para filas con baja sellada pasa a ser
+    // este cron: `sendExpirationWarnings` corre a las 9am y para entonces la fila
+    // ya está cerrada y sin `accessEndsAt`, o sea que no matchea ninguna rama.
+    it('avisa que el plan venció, después de cerrar la fila', async () => {
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(eventBus.notifySubscriptionExpired).toHaveBeenCalledTimes(1)
+      expect(eventBus.notifySubscriptionExpired).toHaveBeenCalledWith('b1', 'pro')
+      expect(subscriptionRepo.update.mock.invocationCallOrder[0]).toBeLessThan(
+        eventBus.notifySubscriptionExpired.mock.invocationCallOrder[0],
+      )
+    })
+
+    // Pasada solapada: el compare-and-set no afecta filas, así que esta pasada no
+    // escribe historial, no publica y —sobre todo— no manda un segundo aviso.
+    it('una pasada solapada que ya cerró la fila no escribe ni avisa dos veces', async () => {
+      subscriptionRepo.update.mockResolvedValue({ affected: 0 })
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      // La fila que dejó la otra pasada: cerrada y sin fecha de corte.
+      subscriptionRepo.findOne.mockResolvedValue(
+        dadaDeBaja({ status: SubscriptionStatus.CANCELLED, accessEndsAt: null }),
+      )
+
+      await service.expireCancelledSubscriptions()
+
+      expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
+      expect(eventBus.notifySubscriptionExpired).not.toHaveBeenCalled()
+      // Y NO le devuelve el plan pago a una marca legítimamente dada de baja: la
+      // fila releída ya está cerrada.
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'pro', expect.anything())
+    })
+
+    /**
+     * TOCTOU entre la degradación y el compare-and-set: la degradación corre sobre
+     * la copia leída al principio y es HTTP con 10 s de timeout. Si en esa ventana
+     * la fila se reactiva, roles YA se quedó sin el plan pago y con `free`, el CAS
+     * no afecta nada y —sin reparación— una marca que paga se quedaba en `free` sin
+     * traza local y sin ningún cron que la retome.
+     *
+     * Rojo si: el `affected: 0` se deja pasar de largo, o si se repone a ciegas sin
+     * releer la fila.
+     */
+    it('si la fila revivió mientras se degradaba, repone el plan pago en roles', async () => {
+      const periodoVigente = new Date('2026-09-20T10:00:00.000Z')
+      subscriptionRepo.update.mockResolvedValue({ affected: 0 })
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        cancelledAt: null,
+        accessEndsAt: null,
+        currentPeriodEnd: periodoVigente,
+      })
+
+      await service.expireCancelledSubscriptions()
+
+      // Con `expiresAt` —y el del período que hoy tiene pago, no el de la copia
+      // vieja—: un plan pago SIN vencimiento no lo barre nunca el cron de roles.
+      expect(clientRoles.assignPlanToBrand).toHaveBeenLastCalledWith('b1', 'pro', periodoVigente)
+      expect(clientRoles.assignPlanToBrand.mock.calls[1]).toHaveLength(3)
+      // La reparación es sólo del lado de roles: la fila local ya es correcta.
+      expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
+      expect(eventBus.notifySubscriptionExpired).not.toHaveBeenCalled()
+    })
+
+    // La baja se rehízo con una fecha de corte FUTURA: la fila tiene acceso pagado
+    // por delante, así que el plan vuelve aunque `autoRenew` siga apagado.
+    it('repone el plan si la nueva baja todavía tiene acceso por delante', async () => {
+      const enUnMes = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+      subscriptionRepo.update.mockResolvedValue({ affected: 0 })
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: false,
+        cancelledAt: new Date(),
+        accessEndsAt: enUnMes,
+        currentPeriodEnd: enUnMes,
+      })
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.assignPlanToBrand).toHaveBeenLastCalledWith('b1', 'pro', enUnMes)
+    })
+
+    // Intersección de los dos crons horarios: una fila dada de baja MIENTRAS estaba
+    // en mora cae en las dos consultas. Dueño único: `expireSubscriptions`, que ya
+    // existía y tiene la causa de negocio más específica (reintentos agotados).
+    it('la mora con reintentos agotados es de expireSubscriptions, no de este cron', async () => {
+      subscriptionRepo.find.mockResolvedValue([
+        dadaDeBaja({ status: SubscriptionStatus.PAST_DUE, retryCount: 3 }),
+      ])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.update).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
+      expect(eventBus.notifySubscriptionExpired).not.toHaveBeenCalled()
+    })
+
+    it('la mora con reintentos disponibles sí la cierra este cron', async () => {
+      subscriptionRepo.find.mockResolvedValue([
+        dadaDeBaja({ status: SubscriptionStatus.PAST_DUE, retryCount: 0 }),
+      ])
+
+      await service.expireCancelledSubscriptions()
+
+      esperarCierre(SubscriptionStatus.PAST_DUE)
+    })
+
+    it('si roles rechaza el retiro no cierra la fila y la pasada siguiente reintenta', async () => {
+      clientRoles.removePlanFromBrand.mockResolvedValue(false)
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.update).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
+      expect(eventBus.notifySubscriptionExpired).not.toHaveBeenCalled()
+
+      // La fila sigue viva con su fecha de corte sellada: el cron la vuelve a tomar
+      // y, con roles de pie, la degrada. Idempotencia por reintento.
+      clientRoles.removePlanFromBrand.mockResolvedValue(true)
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('b1', 'free')
+      esperarCierre(SubscriptionStatus.ACTIVE)
+    })
+
+    /**
+     * La otra mitad de «roles rechaza»: el retiro SÍ pasa y falla la asignación de
+     * `free` (`plan-downgrade.util.ts`). El `false` es el mismo, pero el estado del
+     * otro lado no: la marca quedó sin NINGÚN plan. Ese hueco es deliberado —dejar
+     * el plan pago puesto y `free` encima es peor—, y lo que lo cierra es que acá no
+     * se escriba NADA local, para que la pasada siguiente rehaga las DOS llamadas.
+     */
+    it('si falla la asignación de free tampoco escribe, y la pasada siguiente rehace las dos llamadas', async () => {
+      clientRoles.assignPlanToBrand.mockResolvedValue(false)
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(subscriptionRepo.update).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
+      expect(eventBus.notifySubscriptionExpired).not.toHaveBeenCalled()
+
+      clientRoles.assignPlanToBrand.mockResolvedValue(true)
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledTimes(2)
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(2)
+      esperarCierre(SubscriptionStatus.ACTIVE)
+    })
+
+    // La consulta ES el contrato: qué filas toma este cron y cuántas por pasada. Se
+    // asserta el argumento, no el resultado — verificarlo devolviendo filas desde un
+    // repo falso que implemente el mismo filtro probaría el doble.
+    it('toma sólo bajas selladas ya vencidas, acotadas y en orden', async () => {
+      await service.expireCancelledSubscriptions()
+
+      const [args] = subscriptionRepo.find.mock.calls[0]
+      const [vivas, mora] = args.where
+
+      expect(Object.keys(vivas).sort()).toEqual(['accessEndsAt', 'autoRenew', 'status'])
+      expect(vivas.autoRenew).toBe(false)
+      expect(vivas.status.value).toEqual([SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE])
+      expect(vivas.accessEndsAt.type).toBe('lessThan')
+      expect(vivas.accessEndsAt.value).toBeInstanceOf(Date)
+
+      // La mora entra por su propia rama y con los reintentos DISPONIBLES: la
+      // agotada es de `expireSubscriptions`. Filtrarla recién en el loop la dejaba
+      // gastando la cota de 200 en cada pasada —y con el orden por fecha, primero—,
+      // así que una baja nueva podía no degradarse nunca.
+      expect(mora.status).toBe(SubscriptionStatus.PAST_DUE)
+      expect(mora.retryCount.type).toBe('lessThan')
+      expect(mora.retryCount.value).toBe(3)
+      expect(mora.autoRenew).toBe(false)
+      expect(mora.accessEndsAt.type).toBe('lessThan')
+
+      // Un solo reloj para toda la pasada: la consulta y el compare-and-set exigen
+      // el MISMO instante.
+      expect(mora.accessEndsAt.value).toBe(vivas.accessEndsAt.value)
+
+      // La cota es parte del contrato, no una optimización: una pasada sin cota se
+      // solapa consigo misma mientras backend-roles esté lento.
+      expect(args.take).toBe(200)
+      expect(args.order.accessEndsAt).toBe('ASC')
+    })
+
+    // El CAS respeta el estado vigente en vez de un `active` hardcodeado: una baja
+    // sellada durante la prueba cierra desde `trial`.
+    it('una fila en prueba se cierra desde trial', async () => {
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja({ status: SubscriptionStatus.TRIAL })])
+
+      await service.expireCancelledSubscriptions()
+
+      esperarCierre(SubscriptionStatus.TRIAL)
+    })
+
+    // Un segmento vacío en el path de roles da 404 → `false`, indistinguible de un
+    // canal caído: sin esta guarda la fila no se cerraría NUNCA.
+    it('una fila sin brandId/planSlug no llama a roles pero igual se cierra', async () => {
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja({ brandId: '', planSlug: '' })])
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      esperarCierre(SubscriptionStatus.ACTIVE)
     })
   })
 
@@ -469,6 +802,27 @@ describe('TasksService — processTrialConversions', () => {
       expect(porPeriodo.autoRenew).toBe(false)
       expect(porPeriodo.currentPeriodEnd).toBeDefined()
       expect(porPeriodo.status.value).toEqual([SubscriptionStatus.ACTIVE])
+    })
+
+    // El aviso de día 0 por `accessEndsAt` ya no se agenda acá: para las 9am toda
+    // fila con baja sellada que venció entre 00:00 y 09:00 la cerró
+    // `expireCancelledSubscriptions`, que ya avisó en la hora real del corte. La
+    // rama de `currentPeriodEnd` —filas SIN baja sellada, que ese cron nunca toca
+    // porque `LessThan` excluye NULL— conserva su aviso de día 0.
+    it('cede el aviso de día 0 por fin de acceso y conserva el de período', async () => {
+      await service.sendExpirationWarnings()
+
+      expect(subscriptionRepo.find).toHaveBeenCalledTimes(4)
+      const dia0 = subscriptionRepo.find.mock.calls[3][0].where
+      expect(dia0).toHaveLength(1)
+      expect(dia0[0].currentPeriodEnd).toBeDefined()
+      expect(dia0[0].accessEndsAt).toBeDefined()
+      expect(dia0[0].status.value).toEqual([SubscriptionStatus.ACTIVE])
+
+      // Los hitos previos (7, 3 y 1 días) conservan sus dos ramas.
+      for (const i of [0, 1, 2]) {
+        expect(subscriptionRepo.find.mock.calls[i][0].where).toHaveLength(2)
+      }
     })
   })
 })

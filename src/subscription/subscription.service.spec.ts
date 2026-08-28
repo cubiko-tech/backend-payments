@@ -1174,41 +1174,59 @@ describe('SubscriptionService', () => {
   })
 
   describe('reactivate', () => {
-    it('reactiva una suscripción de un ciclo ya cerrado', async () => {
+    /**
+     * ⚠️ DINERO. El cron `TasksService.expireCancelledSubscriptions` cierra la fila
+     * DEJANDO el sello `cancelledAt` puesto, y antes degradó la marca a `free` en
+     * backend-roles. El sello es lo único que este endpoint miraba, así que toda
+     * baja no-confio terminaba en una fila que pasaba el gate: volvía a `active`
+     * SIN pago, sin reponer el plan en roles y otra vez elegible para el cobro de
+     * `processSubscriptionRenewals`. Y el endpoint es sólo-autenticado con el
+     * `brandId` en el body: cualquier llamador, sobre cualquier marca cerrada.
+     *
+     * Rojo si: el gate vuelve a mirar únicamente `cancelledAt`.
+     */
+    it('una fila ya cerrada NO se revive: 422 SUBSCRIPTION_CLOSED y cero escrituras', async () => {
       const subscription = {
         id: 'sub-1',
         brandId: 'brand-1',
         provider: SubscriptionProvider.WALLET,
+        // Exactamente lo que deja el cron: estado terminal y el sello de la baja.
         status: SubscriptionStatus.CANCELLED,
         cancelledAt: new Date(),
         cancelReason: 'motivo',
-        accessEndsAt: new Date('2026-09-01T00:00:00.000Z'),
+        accessEndsAt: null,
         autoRenew: false,
       }
       subscriptionRepo.findOne.mockResolvedValue(subscription)
-      subscriptionRepo.save.mockResolvedValue(subscription)
-      eventRepo.create.mockImplementation((data) => data)
-      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
 
-      const result = await service.reactivate('brand-1', 'user-1')
+      const error = await service.reactivate('brand-1', 'user-1').catch((e) => e)
 
-      expect(subscription.status).toBe(SubscriptionStatus.ACTIVE)
-      expect(subscription.cancelledAt).toBeNull()
-      expect(subscription.cancelReason).toBeNull()
-      // La fila vuelve a renovarse: dejarle la fecha de corte vieja mostraría un fin
-      // de acceso para una suscripción viva (y es la invariante de la columna).
-      expect(subscription.accessEndsAt).toBeNull()
-      expect(subscription.autoRenew).toBe(true)
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('SUBSCRIPTION_CLOSED')
+      expect(error.getStatus()).toBe(422)
+      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.autoRenew).toBe(false)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(eventRepo.save).not.toHaveBeenCalled()
+    })
 
-      // Verifica evento de reactivación
-      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
-        subscriptionId: 'sub-1',
-        eventType: SubscriptionEventType.REACTIVATED,
-        fromStatus: SubscriptionStatus.CANCELLED,
-        toStatus: SubscriptionStatus.ACTIVE,
-        triggeredBy: 'user-1',
-      }))
-      expect(result.data).toBeDefined()
+    // Un ciclo agotado tampoco: nadie le sella `cancelledAt` a un vencimiento, pero
+    // el gate de estado lo cubre igual aunque alguien se lo selle.
+    it('una fila expirada con el sello puesto tampoco se revive', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        provider: SubscriptionProvider.WALLET,
+        status: SubscriptionStatus.EXPIRED,
+        cancelledAt: new Date(),
+        autoRenew: false,
+      })
+
+      const error = await service.reactivate('brand-1', 'user-1').catch((e) => e)
+
+      expect(error.code).toBe('SUBSCRIPTION_CLOSED')
+      expect(error.getStatus()).toBe(422)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
     })
 
     /**
@@ -1287,9 +1305,12 @@ describe('SubscriptionService', () => {
         id: 'sub-1',
         brandId: 'brand-1',
         provider: SubscriptionProvider.CONFIO,
-        status: SubscriptionStatus.CANCELLED,
+        // Baja PENDIENTE, que es la única forma en que una fila `confio` llega hasta
+        // este gate: un ciclo ya cerrado lo corta antes el gate de estado.
+        status: SubscriptionStatus.ACTIVE,
         cancelledAt: new Date(),
         cancelReason: 'motivo',
+        accessEndsAt: new Date('2026-09-10T00:00:00.000Z'),
         autoRenew: false,
       }
       subscriptionRepo.findOne.mockResolvedValue(subscription)
@@ -1299,7 +1320,7 @@ describe('SubscriptionService', () => {
       expect(error).toBeInstanceOf(RequestException)
       expect(error.code).toBe('CONFIO_REACTIVATE_NOT_SUPPORTED')
       expect(error.getStatus()).toBe(422)
-      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.autoRenew).toBe(false)
       expect(subscriptionRepo.save).not.toHaveBeenCalled()
       expect(eventRepo.save).not.toHaveBeenCalled()
     })

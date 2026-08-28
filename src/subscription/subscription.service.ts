@@ -1,7 +1,12 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
-import { Subscription, SubscriptionStatus, SubscriptionProvider } from './entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionStatus,
+  SubscriptionProvider,
+  TERMINAL_SUBSCRIPTION_STATUSES,
+} from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -16,15 +21,6 @@ const LIVE_SUBSCRIPTION_STATUSES = [
   SubscriptionStatus.ACTIVE,
   SubscriptionStatus.PAST_DUE,
 ]
-
-/**
- * Ciclos ya cerrados. Es el complemento exacto de `LIVE_SUBSCRIPTION_STATUSES` y
- * el MISMO conjunto que `ESTADOS_TERMINALES` en
- * `confio-subscription-webhook.service.ts`: una fila así no tiene acceso que
- * preservar, así que la baja no le sella `accessEndsAt` (ver la invariante de esa
- * columna en la entidad) y `reactivate` sí tiene que devolverla a `active`.
- */
-const TERMINAL_SUBSCRIPTION_STATUSES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
 
 /**
  * Topes del BORDE para los dos textos libres de la baja. No son gusto: los dos
@@ -607,22 +603,16 @@ export class SubscriptionService {
    * Lo que se difiere es el CORTE LOCAL, no el cobro: la baja en ConfioPagos sigue
    * siendo inmediata e irreversible (y sigue siendo lo primero que pasa, ver arriba).
    *
-   * ⚠️ QUIÉN VA A EJECUTAR EL RETIRO — TODAVÍA NADIE. El retiro será del cron de
-   * `retiro-de-plan-al-vencer-el-periodo` (BACKLOG, épica 002, la tarea siguiente a
-   * ésta), que barrerá por el par `autoRenew = false` + `accessEndsAt` pasado. **Ese
-   * cron NO existe hoy**: `accessEndsAt` no tiene ningún lector en el repo, así que
-   * mientras no aterrice lo único que le corta el acceso a una marca dada de baja es
-   * el `expiresAt` que roles ya tenía de antes —`assignPlanToBrand(brandId, planSlug,
-   * trialEnd)` en `startTrial`, `now + BILLING_PERIOD_DAYS` en
-   * `checkout.service.ts`—, que coincide con `accessEndsAt` por construcción pero es
-   * un mecanismo INCIDENTAL, no el diseñado. Para las filas de TRIAL esa coincidencia
-   * alcanza; para el resto, una marca que cancela puede quedarse con el plan pago
-   * pasado el corte hasta que el cron llegue. No se despliega el par de tareas por
-   * separado sin saberlo.
+   * ⚠️ QUIÉN EJECUTA EL RETIRO: el cron horario
+   * `TasksService.expireCancelledSubscriptions`, que barre por el par
+   * `autoRenew = false` + `accessEndsAt` pasado, degrada a `free` en roles y sólo si
+   * roles acepta cierra la fila en `cancelled`. Hasta esa hora el acceso lo sigue
+   * sosteniendo el `expiresAt` que roles ya tenía del alta, que coincide con
+   * `accessEndsAt` por construcción; el corte con nombre y traza es el del cron.
    *
    * ⚠️ Cancelar con el período YA vencido tampoco retira acá: la fila queda con
-   * `accessEndsAt` en el pasado y la tomará la primera pasada del cron. Hacerlo
-   * inline exigiría `downgradeBrandToFree` —`removePlanFromBrand` a secas dejaría a la
+   * `accessEndsAt` en el pasado y la tomará la primera pasada del cron (a lo sumo,
+   * una hora). Hacerlo inline exigiría `downgradeBrandToFree` —`removePlanFromBrand` a secas dejaría a la
    * marca SIN NINGÚN plan, ver `plan-downgrade.util.ts`— y pondría un segundo dueño
    * sobre la misma degradación, además de reintroducir una llamada HTTP post-commit
    * que puede fallar a medias.
@@ -865,11 +855,20 @@ export class SubscriptionService {
    * —como hacía— dejaba el endpoint respondiendo 422 SUBSCRIPTION_NOT_CANCELLED
    * durante TODA la ventana de gracia, que es justo el período en el que
    * arrepentirse tiene sentido. La marca de «esta fila está dada de baja» es
-   * `cancelledAt`, la misma que sella el webhook, y por eso las filas `cancelled`
-   * de antes de este cambio (y las que sella el webhook) siguen entrando.
+   * `cancelledAt`, la misma que sella el webhook.
    *
-   * `expired` NO entra: nadie le sella `cancelledAt` a un vencimiento, y revivir un
-   * ciclo agotado sin pago sería regalar servicio.
+   * ⚠️ DINERO — SÓLO ENTRA UNA BAJA PENDIENTE. Un ciclo ya cerrado
+   * (`cancelled`/`expired`) NO se revive por acá, y desde el cron horario
+   * `TasksService.expireCancelledSubscriptions` eso dejó de ser un caso raro: ese
+   * cron es el final de TODA baja no-confio, y cierra la fila dejándole el
+   * `cancelledAt` sellado. Sin el gate de estado, el sello —que es lo que este
+   * endpoint mira— alcanzaba para devolver a `active` una fila que el cron acababa
+   * de degradar a `free` en backend-roles: suscripción viva, SIN pago, sobre una
+   * marca sin plan pago, y encima elegible otra vez para
+   * `processSubscriptionRenewals`, que para `provider = wallet` DEBITA. El endpoint
+   * es sólo-autenticado y el `brandId` viaja en el body, así que cualquier llamador
+   * podía dispararlo sobre cualquier marca cerrada. La vuelta es un alta nueva por
+   * checkout, detrás de un `Payment` real.
    */
   async reactivate(brandId: string, triggeredBy: string) {
     try {
@@ -884,6 +883,21 @@ export class SubscriptionService {
       if (!subscription.cancelledAt) {
         throw new RequestException(
           { code: 'SUBSCRIPTION_NOT_CANCELLED', message: 'Solo se pueden reactivar suscripciones canceladas' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+
+      // El acceso pagado YA se consumió: la fila la cerró un cron —o el webhook— que
+      // antes de escribir el estado terminal degradó la marca a `free` en
+      // backend-roles. Revivirla acá no repone ese plan y no cobra nada. Va ANTES
+      // del gate de proveedor a propósito: es el gate de seguridad y no depende de
+      // quién cobre.
+      if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+        throw new RequestException(
+          {
+            code: 'SUBSCRIPTION_CLOSED',
+            message: 'El acceso ya venció: la vuelta es un alta nueva por checkout',
+          },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
@@ -907,14 +921,12 @@ export class SubscriptionService {
         )
       }
 
+      // NO se toca el `status`: acá abajo sólo llegan bajas PENDIENTES —los ciclos
+      // cerrados los rechazó el gate de arriba—, y una baja pendiente nunca movió el
+      // estado, así que deshacerla tampoco lo mueve. Forzar `active` sobre una fila
+      // en prueba le comería los días de trial que le quedan, y sobre una `past_due`
+      // borraría la mora sin que nadie haya pagado.
       const fromStatus = subscription.status
-      // Sólo un ciclo YA cerrado necesita volver a `active`. Una baja PENDIENTE no
-      // movió el estado, así que deshacerla tampoco lo mueve: forzar `active` sobre
-      // una fila en prueba le comería los días de trial que todavía le quedan, y
-      // sobre una `past_due` borraría la mora sin que nadie haya pagado.
-      if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
-        subscription.status = SubscriptionStatus.ACTIVE
-      }
       subscription.cancelledAt = null
       subscription.cancelReason = null
       // La fila vuelve a renovarse: ya no hay baja pendiente que datar (invariante de
@@ -929,8 +941,9 @@ export class SubscriptionService {
           subscriptionId: subscription.id,
           eventType: SubscriptionEventType.REACTIVATED,
           fromStatus,
-          // El estado REAL en el que quedó la fila, no un `active` de oficio: sobre
-          // una baja pendiente los dos son iguales, igual que en la traza de `cancel`.
+          // El estado REAL en el que quedó la fila —igual al de partida, porque
+          // deshacer una baja pendiente no lo mueve—, no un `active` de oficio.
+          // Mismo criterio que la traza de `cancel`.
           toStatus: subscription.status,
           triggeredBy,
         }),

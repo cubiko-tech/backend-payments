@@ -8,7 +8,11 @@ import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
-import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionStatus,
+  TERMINAL_SUBSCRIPTION_STATUSES,
+} from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
@@ -370,9 +374,14 @@ export class TasksService {
       //
       // ⚠️ DINERO: sin apagar `autoRenew` la fila seguiría siendo elegible para
       // `processSubscriptionRenewals` y `retryFailedPayments`, que emiten cobro.
+      //
+      // `accessEndsAt: null` porque este cron se queda además con las filas de la
+      // intersección (baja sellada + mora agotada), que `expireCancelledSubscriptions`
+      // le cede: sin nular, la fila terminal conservaría la fecha de corte de una baja
+      // ya consumada y rompería la invariante de la entidad («no nula ⇔ baja PENDIENTE»).
       const vencida = await this.subscriptionRepo.update(
         { id: sub.id, status: SubscriptionStatus.PAST_DUE },
-        { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
       if (!vencida.affected) {
         logger.log('info', `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`)
@@ -412,6 +421,162 @@ export class TasksService {
       logger.log(
         'error',
         `[CRON] expireSubscriptions: ${rechazadas} sin vencer, backend-roles rechazó la degradación`,
+      )
+    }
+  }
+
+  // =============================================================
+  // 4b. Retirar el plan cuando vence el acceso ya pagado (cada hora)
+  // =============================================================
+  /**
+   * Cierre de las bajas cuya fecha de corte ya pasó (épica 002,
+   * `retiro-de-plan-al-vencer-el-periodo`).
+   *
+   * Desde el corte diferido, `SubscriptionService.cancel` apaga la renovación y
+   * sella `accessEndsAt` pero YA NO mueve el `status`: la fila sigue viva
+   * —`trial`/`active`/`past_due`— con el plan pago puesto hasta esa fecha. Esa
+   * columna tenía sólo escritores; este cron es su ÚNICO lector y el que consuma
+   * la baja: degrada en roles y recién ahí escribe el estado terminal.
+   *
+   * ⚠️ OPERACIÓN: para volver a dar de alta una marca cerrada por acá va un alta
+   * nueva por checkout, NUNCA `POST /subscription/reactivate`. Ese endpoint gatea
+   * por el sello `cancelledAt`, que este cron deja puesto, así que las filas que
+   * cierra pasarían el gate: por eso `reactivate` rechaza además todo estado
+   * terminal (`SUBSCRIPTION_CLOSED`). Sin ese rechazo, la fila volvía a `active`
+   * sin pago y sin reponer el plan en roles —una suscripción viva sobre una marca
+   * en `free`, y otra vez elegible para el cobro de `processSubscriptionRenewals`—.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireCancelledSubscriptions() {
+    // Un solo instante para toda la pasada: es el que decide qué filas entran Y el
+    // que vuelve a exigir el compare-and-set más abajo, así que no pueden ser dos
+    // relojes distintos.
+    const ahora = new Date()
+
+    // `LessThan` excluye NULL en SQL, así que la consulta toma exactamente las
+    // filas con baja PENDIENTE ya vencida. La cota es parte del contrato y no una
+    // optimización: la degradación es HTTP con 10 s de timeout y sin `take` una
+    // pasada lenta se solaparía consigo misma. El orden por fecha hace que un
+    // backlog se drene por antigüedad y no al azar.
+    //
+    // Las dos ramas son el DUEÑO ÚNICO DEL RIEL DE MORA hecho SQL: la mora con los
+    // reintentos agotados es de `expireSubscriptions` (ver el guard del loop) y por
+    // eso no entra acá. Filtrarla recién en el loop la dejaba consumiendo la cota de
+    // 200 pasada tras pasada —`order: accessEndsAt ASC` le da además la prioridad
+    // más alta—, y con suficientes filas trabadas ninguna baja NUEVA se degradaba
+    // nunca: la marca conservaba su plan pago indefinidamente.
+    const bajaVencida = { autoRenew: false, accessEndsAt: LessThan(ahora) }
+    const vencidas = await this.subscriptionRepo.find({
+      where: [
+        { status: In([SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE]), ...bajaVencida },
+        { status: SubscriptionStatus.PAST_DUE, retryCount: LessThan(this.MAX_RETRY), ...bajaVencida },
+      ],
+      order: { accessEndsAt: 'ASC' },
+      take: 200,
+    })
+
+    let cerradas = 0
+    let rechazadas = 0
+    for (const sub of vencidas) {
+      // DUEÑO ÚNICO DEL RIEL DE MORA, repetido acá pegado a la escritura. Una fila
+      // dada de baja MIENTRAS estaba en mora cae en las dos consultas horarias:
+      // `expireSubscriptions` toma TODO `past_due` y filtra por `retryCount` dentro
+      // del loop. Los dos crons disparan al minuto 0 y el compare-and-set impide la
+      // doble escritura, pero el estado terminal y el `SubscriptionEvent` quedarían
+      // a suerte —`expired` por un lado, `cancelled` por el otro— para el MISMO
+      // hecho. Gana `expireSubscriptions`: los reintentos agotados son la causa de
+      // negocio más específica y ese cron ya existía.
+      //
+      // No es redundante con la rama `past_due` de la consulta: allá la regla evita
+      // que estas filas gasten la cota; acá evita que una llegue a degradarse por
+      // otro camino de lectura. La regla vale para el WRITE, y vive con él.
+      if (sub.status === SubscriptionStatus.PAST_DUE && sub.retryCount >= this.MAX_RETRY) continue
+
+      // La degradación va PRIMERO, igual que en los otros dos disparadores: si
+      // roles la rechaza no se escribe NADA local y la fila —que conserva su
+      // `accessEndsAt`— la retoma la pasada siguiente. Retirar y asignar son
+      // idempotentes del otro lado (`plan-downgrade.util.ts` §3).
+      //
+      // NO se llama a `detenerCobroRecurrente`: toda fila que esta consulta
+      // devuelve ya tiene `autoRenew: false`. Ese helper es del riel `past_due`.
+      if (!(await this.degradarEnRoles(sub))) {
+        rechazadas++
+        continue
+      }
+
+      // Se lee ANTES del compare-and-set, que borra la columna.
+      const finDeAcceso = sub.accessEndsAt
+
+      // Compare-and-set contra el estado VIGENTE (no un `active` hardcodeado: la
+      // baja pudo sellarse en prueba o en mora) y contra `autoRenew: false`: si
+      // entre el `find` y esta escritura alguien reactivó o recompró la fila, ese
+      // camino gana y acá no se cierra nada. `accessEndsAt: null` mantiene la
+      // invariante de la entidad: no nula ⇔ baja PENDIENTE, y ésta se consumó.
+      //
+      // `accessEndsAt: LessThan(ahora)` —el MISMO predicado de la consulta— cierra
+      // el hueco de una baja DISTINTA: entre el `find` y esta escritura la fila pudo
+      // reactivarse y volver a darse de baja con una fecha de corte FUTURA, y ese
+      // trío `{id, status, autoRenew:false}` es idéntico al que se leyó. Sin esta
+      // cuarta condición la pasada vieja cerraba un acceso pagado todavía vigente y
+      // le borraba la fecha.
+      const cerrada = await this.subscriptionRepo.update(
+        { id: sub.id, status: sub.status, autoRenew: false, accessEndsAt: LessThan(ahora) },
+        { status: SubscriptionStatus.CANCELLED, accessEndsAt: null },
+      )
+      if (!cerrada.affected) {
+        await this.reponerPlanSiSigueVigente(sub, ahora)
+        continue
+      }
+
+      // La traza es el ÚNICO rastro que queda de hasta cuándo corrió el acceso
+      // pagado: la columna se acaba de borrar y `cancelledAt` es la fecha de la
+      // BAJA, no la del corte. Forma espejo de la que estampa
+      // `SubscriptionService.cancel`.
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: sub.id,
+          eventType: SubscriptionEventType.EXPIRED,
+          fromStatus: sub.status,
+          toStatus: SubscriptionStatus.CANCELLED,
+          triggeredBy: 'system',
+          reason: `Fin del acceso pagado tras la baja — degradado a ${freePlanSlug()}`,
+          metadata: {
+            event: 'subscription.access_ended',
+            accessEndsAt: finDeAcceso ? finDeAcceso.toISOString() : null,
+            brandId: sub.brandId,
+            planSlug: sub.planSlug,
+          },
+        }),
+      )
+
+      // Redundancia para el consumer de backend-roles, espejo de expireSubscriptions.
+      this.eventBus.publishSubscriptionExpired({
+        brandId: sub.brandId,
+        subscriptionId: sub.id,
+        planSlug: sub.planSlug,
+      })
+
+      // El aviso «tu plan venció» va DESPUÉS del compare-and-set para que sólo
+      // notifique la pasada que realmente cerró la fila. Este cron es su dueño
+      // para las filas con baja sellada: ver el comentario en
+      // `sendExpirationWarnings`, que le cedió el hito de 0 días.
+      await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
+
+      logger.log('info', `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`)
+      cerradas++
+    }
+
+    if (cerradas > 0) {
+      logger.log('info', `[CRON] expireCancelledSubscriptions: ${cerradas} suscripciones cerradas`)
+    }
+
+    // Sin esta línea una caída de backend-roles se lee como «0 filas cerradas»,
+    // que es lo mismo que un día sin bajas vencidas. Mismo razonamiento que en
+    // `expireSubscriptions`.
+    if (rechazadas > 0) {
+      logger.log(
+        'error',
+        `[CRON] expireCancelledSubscriptions: ${rechazadas} sin cerrar, backend-roles rechazó la degradación`,
       )
     }
   }
@@ -567,24 +732,35 @@ export class TasksService {
       //  - Sin ella se conserva el criterio de siempre (`currentPeriodEnd` sobre una
       //    fila `active` que no auto-renueva). `IsNull()` mantiene las dos ramas
       //    DISJUNTAS: ninguna fila puede recibir el mismo aviso dos veces.
+      const porAccesoSellado = {
+        status: In([
+          SubscriptionStatus.TRIAL,
+          SubscriptionStatus.ACTIVE,
+          SubscriptionStatus.PAST_DUE,
+        ]),
+        autoRenew: false, // Solo avisar a los que NO auto-renuevan
+        accessEndsAt: Between(rangeStart, rangeEnd),
+      }
+
+      const porPeriodo = {
+        status: In([SubscriptionStatus.ACTIVE]),
+        autoRenew: false,
+        accessEndsAt: IsNull(),
+        currentPeriodEnd: Between(rangeStart, rangeEnd),
+      }
+
+      // El hito de 0 días («tu plan venció») se le CEDE a
+      // `expireCancelledSubscriptions` en la rama de la baja sellada: ese cron corre
+      // en punto, así que toda fila cuyo `accessEndsAt` caiga entre 00:00 y 09:00
+      // llega acá ya `cancelled` y con la columna en NULL — no matchearía NI esta
+      // rama (fecha nula) NI la de `currentPeriodEnd` (pide `active` + `IsNull`), y
+      // el usuario nunca se enteraría. Ahora avisa él, en la HORA real del corte.
+      // Balance por población — selladas: 1 aviso antes (9am) y 1 ahora (hora del
+      // corte); sin sellar (rama 2): sin cambio, conservan su aviso de día 0 porque
+      // ese cron no las toca (`LessThan` excluye NULL); `past_due` con reintentos
+      // agotados: 0 antes y 0 ahora (a las 9 ya están en `expired`, fuera de la rama 1).
       const subscriptions = await this.subscriptionRepo.find({
-        where: [
-          {
-            status: In([
-              SubscriptionStatus.TRIAL,
-              SubscriptionStatus.ACTIVE,
-              SubscriptionStatus.PAST_DUE,
-            ]),
-            autoRenew: false, // Solo avisar a los que NO auto-renuevan
-            accessEndsAt: Between(rangeStart, rangeEnd),
-          },
-          {
-            status: In([SubscriptionStatus.ACTIVE]),
-            autoRenew: false,
-            accessEndsAt: IsNull(),
-            currentPeriodEnd: Between(rangeStart, rangeEnd),
-          },
-        ],
+        where: days === 0 ? [porPeriodo] : [porAccesoSellado, porPeriodo],
       })
 
       for (const sub of subscriptions) {
@@ -681,6 +857,55 @@ export class TasksService {
     }
 
     return downgradeBrandToFree(this.clientRoles, sub.brandId, sub.planSlug)
+  }
+
+  /**
+   * Repara la ventana entre la degradación en roles y el compare-and-set que no
+   * cerró la fila.
+   *
+   * ⚠️ DINERO / ACCESO. `degradarEnRoles` corre sobre la copia leída al principio
+   * de la pasada y es HTTP con 10 s de timeout; el compare-and-set va después. Si
+   * en ese rato alguien reactivó o recompró la suscripción, roles YA se quedó sin
+   * el plan pago y con `free` encima, el CAS no afecta filas y —sin esto— el cron
+   * seguía de largo: una marca que paga, viva y `active` en la base local, sentada
+   * en `free` del otro lado, sin traza y sin ningún cron que la retome (la fila ya
+   * no matchea la consulta).
+   *
+   * NO se repone a ciegas: el caso ABRUMADORAMENTE más común de `affected: 0` es
+   * la pasada solapada que ya cerró la fila legítimamente, y reponer ahí sería
+   * regalarle el plan pago a una marca dada de baja. Por eso se relee la fila y
+   * sólo se repone si sigue con derecho: no está en un estado terminal y o bien
+   * volvió a renovarse, o tiene una fecha de corte todavía futura.
+   *
+   * El `expiresAt` sale de `currentPeriodEnd` de la fila RELEÍDA —el período que
+   * hoy tiene paga—, igual que `checkout.assignPlanInRoles`. Si roles rechaza,
+   * queda el log de error: no hay nada local que revertir, la fila ya es correcta.
+   */
+  private async reponerPlanSiSigueVigente(sub: Subscription, ahora: Date): Promise<void> {
+    logger.log(
+      'error',
+      `[CRON] La suscripción ${sub.id} cambió mientras se degradaba en roles: el cierre no se aplicó`,
+    )
+
+    if (!sub.brandId || !sub.planSlug || sub.planSlug === freePlanSlug()) return
+
+    const vigente = await this.subscriptionRepo.findOne({ where: { id: sub.id } })
+    const sigueConDerecho =
+      !!vigente &&
+      !TERMINAL_SUBSCRIPTION_STATUSES.includes(vigente.status) &&
+      (vigente.autoRenew || (!!vigente.accessEndsAt && vigente.accessEndsAt > ahora))
+    if (!sigueConDerecho) return
+
+    const repuesto = await this.clientRoles.assignPlanToBrand(
+      vigente.brandId,
+      vigente.planSlug,
+      vigente.currentPeriodEnd,
+    )
+    logger.log(
+      repuesto ? 'info' : 'error',
+      `[CRON] Plan ${vigente.planSlug} ${repuesto ? 'repuesto' : 'NO repuesto'} en backend-roles ` +
+        `tras el cierre abortado: brandId=${vigente.brandId}`,
+    )
   }
 
   /**
