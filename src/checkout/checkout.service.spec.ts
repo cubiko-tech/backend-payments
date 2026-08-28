@@ -66,6 +66,8 @@ const priceRow = (over: PriceRowOver = {}) => ({
 describe('CheckoutService — precio del alta por país de la marca', () => {
   let service: CheckoutService
   let paymentRepo: ReturnType<typeof createMockRepo>
+  /** Se nombra para poder sembrar la fila que el checkout REUSA y ver qué guarda encima. */
+  let subscriptionRepo: ReturnType<typeof createMockRepo>
   let clientRoles: { getPlanPrice: jest.Mock; resolvePriceForCountry: jest.Mock; assignPlanToBrand: jest.Mock }
   let clientPlatform: { resolveBrandCountry: jest.Mock; getBrandCountry: jest.Mock }
   let enterprisePricing: { getForBrand: jest.Mock }
@@ -85,6 +87,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
   beforeEach(async () => {
     paymentRepo = createMockRepo()
+    subscriptionRepo = createMockRepo()
     createCheckout = jest.fn().mockResolvedValue({ providerPaymentId: 'ext-1', checkoutUrl: 'https://pay/1' })
 
     const module: TestingModule = await Test.createTestingModule({
@@ -92,7 +95,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         CheckoutService,
         { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: paymentRepo },
         { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
-        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
+        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionRepo },
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
         { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
@@ -755,6 +758,50 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       )
       // La guarda de moneda es del camino wallet: acá no hay wallet que comparar.
       expect(walletService.findById).not.toHaveBeenCalled()
+    })
+  })
+  /**
+   * LA RECOMPRA NO DEVUELVE LA PRUEBA. El checkout REUSA la fila de la marca —hay una
+   * sola por `brandId`, índice único— y la revive campo por campo. `trialStart` es la
+   * marca durable de prueba consumida (la invariante vive al lado de la columna en
+   * `subscription.entity.ts`) y este es el único camino que revive una fila muerta sin
+   * pasar por `startTrial`: si alguna vez la limpiara, la marca volvería a tener prueba
+   * gratis cada vez que paga y cancela.
+   */
+  describe('reuso de la fila (la marca de prueba consumida sobrevive)', () => {
+    // MUTACIÓN QUE LO PONE ROJO: agregar `subscription.trialStart = null` (o `trialEnd`)
+    // en la rama de reuso de `createOrRenewSubscription` ⇒ este caso se cae.
+    it('la fila terminal que se recompra vuelve a active con trialStart y trialEnd intactos', async () => {
+      const INICIO_TRIAL = new Date('2026-01-01T00:00:00.000Z')
+      const FIN_TRIAL = new Date('2026-01-16T00:00:00.000Z')
+      // La fila tal cual la dejó el cierre del ciclo anterior: terminal, sin renovación
+      // y con la prueba ya gastada.
+      const fila: any = {
+        id: 'sub-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        planSlug: 'dropi-roax',
+        status: 'expired',
+        autoRenew: false,
+        accessEndsAt: null,
+        cancelledAt: new Date('2026-01-16T00:00:00.000Z'),
+        cancelReason: 'baja voluntaria',
+        retryCount: 3,
+        trialStart: INICIO_TRIAL,
+        trialEnd: FIN_TRIAL,
+      }
+      subscriptionRepo.findOne.mockResolvedValue(fila)
+
+      await service.processCheckout(altaConWallet())
+
+      // Se guardó ESA fila (reuso, no alta nueva) y ya revivida.
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-1', status: 'active', autoRenew: true }),
+      )
+      // Y con la marca de prueba intacta: la vuelta fue PAGANDO, no con otra prueba.
+      const guardada = subscriptionRepo.save.mock.calls[0][0]
+      expect(guardada.trialStart).toBe(INICIO_TRIAL)
+      expect(guardada.trialEnd).toBe(FIN_TRIAL)
     })
   })
 })

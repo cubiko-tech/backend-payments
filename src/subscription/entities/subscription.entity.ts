@@ -29,6 +29,37 @@ export class Subscription extends Content {
   @Column({ nullable: true }) providerSubscriptionId: string
   @Column({ type: 'timestamptz' }) currentPeriodStart: Date
   @Column({ type: 'timestamptz' }) currentPeriodEnd: Date
+  // INVARIANTE: marca DURABLE de prueba consumida — **`trialStart` no nula ⇔ la marca ya usó su prueba**.
+  // Es lo que hace cumplible la regla «una prueba por marca» de la épica 002 sobre una tabla de UNA fila
+  // por marca (índice único por `brandId`): la fila se reusa ciclo tras ciclo, así que la única memoria de
+  // que la prueba ya se gastó son estas dos fechas. Su ÚNICO lector es el guard `TRIAL_ALREADY_USED` de
+  // `SubscriptionService.startTrial` (pre-guardia barata + relectura bajo lock).
+  // Hoy ningún camino las limpia. ⚠️ Pero esta lista NO se cierra con `grep trialStart`: los caminos que
+  // guardan la fila ENTERA desde un payload las escriben sin nombrarlas nunca. Escritores auditados:
+  //   · `SubscriptionService.startTrial` — el único que las PONE (`now`/`trialEnd`), incluso cuando REUSA
+  //     una fila muerta. Es el alta, y ahí es donde la prueba se consume.
+  //   · `SubscriptionService.create` (`POST /subscription`) — el que el grep NO encuentra: hace
+  //     `repository.create(data)` + `save(data)` con el body. Escribe lo que le manden, y con un `id` ajeno
+  //     el `save` es un UPDATE de la fila de OTRA marca. Lo que lo cierra no está en este archivo: es la
+  //     lista blanca de `subscription/dto/create-subscription.dto.ts` —sin `id`, sin `trialStart`, sin
+  //     `trialEnd`— que aplica el `ValidationPipe` global. Volver a poner `@Body() data: any` ahí reabre el
+  //     agujero completo: sin metatype el pipe no filtra NADA.
+  //   · `SubscriptionService.cancel` / `reactivate` — guardan la fila releída bajo lock sin nombrarlas.
+  //   · `CheckoutService.createOrRenewSubscription` — revive la fila campo por campo (estado, período,
+  //     `autoRenew`, `cancelledAt`, `accessEndsAt`…) y NO las nombra: recomprar NO devuelve la prueba.
+  //   · `TasksService` — los tres cierres escriben con `update` y una lista CERRADA de columnas:
+  //     `endTrialWithoutPayment`, `expireSubscriptions` y `expireCancelledSubscriptions`.
+  //   · `ConfioSubscriptionWebhookService.aplicar` / `AdminController.extendSubscription` — tampoco.
+  // Custodiado por tests, citados por NOMBRE porque los números de línea se pudren solos:
+  // `tasks.service.spec.ts` asserta los tres parches de cron por IGUALDAD EXACTA del payload
+  // (`toHaveBeenCalledWith` y el helper `esperarCierre`), así que agregarles `trialStart: null` los pone
+  // rojos hoy —verificado a mano—; `subscription.service.spec.ts` → «la prueba no vuelve tras la baja ni
+  // tras el vencimiento» cubre los dos estados terminales y la ventana de baja PENDIENTE;
+  // `checkout.service.spec.ts` cubre que la recompra guarda la fila con las dos fechas intactas; y
+  // `dto/create-subscription.dto.spec.ts` fija la lista blanca del alta genérica.
+  // ⚠️ Todos esos candados miran el PAYLOAD que escribe el código, no lo que acepta Postgres: un camino
+  // nuevo que limpie estas columnas con SQL crudo pasaría por al lado. Si vas a agregar uno, esta
+  // invariante es lo que estás rompiendo. La vuelta de una marca que ya usó su prueba es SIEMPRE pagando.
   @Column({ type: 'timestamptz', nullable: true }) trialStart: Date
   @Column({ type: 'timestamptz', nullable: true }) trialEnd: Date
   @Column({ default: true }) autoRenew: boolean

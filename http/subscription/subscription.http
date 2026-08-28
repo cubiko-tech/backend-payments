@@ -9,6 +9,18 @@ GET {{HOST}}/subscription?brandId={{BRAND_ID}} HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 
 ### Crear suscripción
+# Alta GENÉRICA (no es el alta de producto: esa es `POST /subscription/trial` o el
+# checkout). El body va contra la lista blanca de `CreateSubscriptionDto` y el
+# `ValidationPipe` global corre con `forbidNonWhitelisted`, así que:
+# 400 Bad Request: el body trajo un campo que no está en la lista. En particular
+#     `id`, `trialStart`, `trialEnd`, `cancelledAt`, `accessEndsAt`, `retryCount` y
+#     `lastPaymentId` NO se aceptan: el `id` convertía el `save` en un UPDATE de la
+#     fila de otra marca, y `trialStart: null` devolvía la prueba gratuita.
+# Campos aceptados: `brandId`, `userId`, `planSlug` (obligatorios) y `status`,
+#     `provider`, `walletId`, `providerSubscriptionId`, `currentPeriodStart`,
+#     `currentPeriodEnd`, `nextBillingDate`, `autoRenew`, `metadata` (las fechas,
+#     ISO 8601). `walletId` tiene que ser un UUID con versión válida: el placeholder
+#     en ceros de arriba se rechaza con 400.
 POST {{HOST}}/subscription HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
@@ -34,7 +46,10 @@ Content-Type: application/json
 # 422 INVALID_TRIAL_PLAN: sin plan, o con el plan free.
 # 409 SUBSCRIPTION_ALREADY_EXISTS: la marca ya tiene una suscripción vigente
 #     (también por CARRERA: dos altas simultáneas, una gana y la otra recibe 409).
+#     También es el 409 que llega MIENTRAS una baja está PENDIENTE: la baja no mueve
+#     el estado, así que hasta que el cron horario cierre la fila sigue vigente.
 # 409 TRIAL_ALREADY_USED: la marca ya consumió su prueba; solo puede volver pagando.
+#     Sobrevive a la baja y al vencimiento: recomprar por checkout tampoco la devuelve.
 # 503 BRAND_LOOKUP_UNAVAILABLE / 404 BRAND_NOT_FOUND / 422 BRAND_WITHOUT_COUNTRY:
 #     país de la marca (backend-platform).
 # 503 PLAN_NOT_FOUND / 422 PRICE_NOT_FOUND_FOR_COUNTRY: precio del plan (backend-roles).
@@ -93,11 +108,12 @@ Content-Type: application/json
 # suscripción está dada de baja» hay que mirar `cancelledAt`/`accessEndsAt`, ya no
 # `status === 'cancelled'`.
 #
-# ⚠️ El corte al vencer esa fecha va a hacerlo un cron que TODAVÍA NO EXISTE
-# (`retiro-de-plan-al-vencer-el-periodo`, la tarea siguiente en el BACKLOG): será él
-# quien retire el plan de roles barriendo las filas con la renovación apagada y la
-# fecha ya pasada. Mientras tanto lo único que caduca el acceso es el `expiresAt`
-# que `backend-roles` ya recibió en el alta.
+# El corte al vencer esa fecha lo hace el cron HORARIO
+# `TasksService.expireCancelledSubscriptions`: barre las filas con la renovación
+# apagada y `accessEndsAt` ya pasado, degrada la marca a `free` en backend-roles y
+# recién ahí cierra la fila en `cancelled` (y le borra `accessEndsAt`, que sólo
+# significa «baja PENDIENTE»). `trialStart`/`trialEnd` NO se tocan: la prueba
+# consumida sobrevive al cierre.
 #
 # DESHACER la baja: `POST /subscription/reactivate` mientras `accessEndsAt` no venció
 # (fila NO confío; una de ConfioPagos ya está cancelada allá y la vuelta es un alta
@@ -152,7 +168,13 @@ Content-Type: application/json
 }
 
 ### Reactivar suscripción
-# 422 SUBSCRIPTION_NOT_CANCELLED: sólo se reactiva lo cancelado.
+# 422 SUBSCRIPTION_NOT_CANCELLED: sólo se reactiva lo cancelado (sin `cancelledAt`).
+# 422 SUBSCRIPTION_CLOSED: la fila YA está en un estado terminal (`cancelled` /
+#     `expired`), o sea que el acceso pagado se consumió y un cron —o el webhook— ya
+#     degradó la marca a `free`. Es el gate que MÁS importa con el corte diferido:
+#     `expireCancelledSubscriptions` cierra la fila pero DEJA puesto `cancelledAt`,
+#     así que sin este 422 esas filas pasaban el gate de arriba y volvían a `active`
+#     sin pago y sin reponer el plan. La vuelta es un alta nueva por checkout.
 # 422 CONFIO_REACTIVATE_NOT_SUPPORTED: una suscripción de ConfioPagos cancelada NO
 #     se reactiva. Este endpoint revive la fila SIN pago (sólo recibe `brandId` y
 #     `triggeredBy`), y del lado de ConfioPagos la suscripción ya quedó `CANCELED`

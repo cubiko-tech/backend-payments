@@ -162,8 +162,22 @@ export class SubscriptionService {
     }
 
     // `trialStart` es la marca durable de prueba consumida: ningún camino la limpia
-    // (el checkout revive la fila sin tocar `trialStart`/`trialEnd` y el cron de
-    // expiración solo mueve el estado a EXPIRED).
+    // (la invariante completa, con el enumerado de escritores, vive al lado de la
+    // columna en `subscription.entity.ts`). Los cierres de HOY, que son los que dejan
+    // una fila terminal delante de este guard:
+    //   · `cancel` apaga `autoRenew`, sella `cancelledAt` y `accessEndsAt`, y YA NO
+    //     mueve el `status` — la fila sigue viva hasta que la cierre el cron.
+    //   · `TasksService.expireCancelledSubscriptions` (cron horario) consume esa baja
+    //     y la cierra en `cancelled`; `expireSubscriptions` y `endTrialWithoutPayment`
+    //     la cierran en `expired`. Ninguno toca `trialStart`/`trialEnd`.
+    //   · `checkout.createOrRenewSubscription` la revive en `active`, también sin
+    //     tocarlas: recomprar no devuelve la prueba.
+    // ⚠️ MATIZ OBSERVABLE del corte diferido: MIENTRAS la baja está PENDIENTE la fila
+    // sigue viva (`trial`/`active`/`past_due`), así que gana el guard de vigencia de
+    // arriba y el alta se rechaza con `SUBSCRIPTION_ALREADY_EXISTS` —también 409,
+    // también sin segunda prueba—; recién cuando el cron la cierra este guard responde
+    // `TRIAL_ALREADY_USED`. El orden es deliberado: con acceso pagado todavía vigente
+    // lo cierto es que la marca YA tiene suscripción, no sólo que gastó su prueba.
     if (existing && existing.trialStart) {
       throw new RequestException(
         {

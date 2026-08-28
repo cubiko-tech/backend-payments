@@ -27,6 +27,41 @@ const ALTA_CONFIO = {
   raw: { name: CONFIO_NAME, status: 'PENDING_ACCEPTANCE' },
 }
 
+/** Inicio de la prueba: la marca DURABLE de prueba consumida (`subscription.entity.ts`). */
+const INICIO_TRIAL = new Date('2026-08-26T00:00:00.000Z')
+
+/** Fin del trial y fin del período de cobro, DISTINTOS a propósito: son las dos
+ *  fechas candidatas a fin de acceso y un caso que las confunda no discrimina. */
+const FIN_TRIAL = new Date('2026-09-10T00:00:00.000Z')
+const FIN_PERIODO = new Date('2026-10-01T00:00:00.000Z')
+
+/**
+ * Fila de ConfioPagos tal cual la deja el alta: el `name` vive en
+ * `metadata.confio.name`, `providerSubscriptionId` es el mismo valor y `trialStart`
+ * está puesto — el alta SIEMPRE lo escribe, y es lo que recuerda que la prueba ya
+ * se gastó. Vive en el scope del archivo (y no dentro de `describe('cancel')`)
+ * porque los casos de «la prueba no vuelve» encadenan baja y alta sobre la MISMA
+ * fila: con dos formas distintas no probarían el mismo objeto.
+ */
+const filaConfio = (over: Record<string, any> = {}): any => ({
+  id: 'sub-1',
+  brandId: 'brand-1',
+  userId: 'user-1',
+  planSlug: 'dropi-roax',
+  provider: SubscriptionProvider.CONFIO,
+  providerSubscriptionId: CONFIO_NAME,
+  status: SubscriptionStatus.TRIAL,
+  autoRenew: true,
+  trialStart: INICIO_TRIAL,
+  trialEnd: FIN_TRIAL,
+  currentPeriodEnd: FIN_PERIODO,
+  cancelledAt: null,
+  cancelReason: null,
+  accessEndsAt: null,
+  metadata: { confio: { name: CONFIO_NAME } },
+  ...over,
+})
+
 const createMockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
   findOne: jest.fn().mockResolvedValue(null),
@@ -266,11 +301,19 @@ describe('SubscriptionService', () => {
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
     })
 
-    it('rechaza si la marca ya consumió su prueba', async () => {
+    // MUTACIÓN QUE LO PONE ROJO: borrar el guard `existing.trialStart` de `startTrial`
+    // ⇒ el alta reusa la fila muerta y le arranca una SEGUNDA prueba.
+    it('la fila que el cron dejó vencida no recupera la prueba', async () => {
+      // La forma REAL que deja `TasksService.expireSubscriptions` (`tasks.service.ts:382`):
+      // apaga `autoRenew`, nula `accessEndsAt` y deja el `retryCount` agotado. Ninguna de
+      // esas columnas es `trialStart`/`trialEnd`, y por eso la marca sigue puesta.
       subscriptionRepo.findOne.mockResolvedValue({
         id: 'sub-1',
         brandId: 'brand-1',
         status: SubscriptionStatus.EXPIRED,
+        autoRenew: false,
+        accessEndsAt: null,
+        retryCount: 3,
         trialStart: new Date('2026-01-01'),
         trialEnd: new Date('2026-01-16'),
       })
@@ -278,6 +321,8 @@ describe('SubscriptionService', () => {
       await expect(
         service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
       ).rejects.toMatchObject({ code: 'TRIAL_ALREADY_USED' })
+      // Una prueba rechazada no puede dejar una suscripción huérfana en ConfioPagos.
+      expect(confioTrial.createForTrial).not.toHaveBeenCalled()
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
       expect(subscriptionRepo.save).not.toHaveBeenCalled()
     })
@@ -598,6 +643,102 @@ describe('SubscriptionService', () => {
     })
   })
 
+  /**
+   * LA PRUEBA ES UNA SOLA POR MARCA, y sobrevive a los estados que introdujo el corte
+   * diferido de la baja. La tabla tiene UNA fila por marca (índice único por `brandId`)
+   * y esa fila se reusa ciclo tras ciclo, así que la única memoria de que la prueba ya
+   * se gastó es `trialStart` — la invariante está escrita al lado de la columna en
+   * `subscription.entity.ts`. Acá se ejerce el contrato de punta a punta, encadenando
+   * baja y alta sobre la MISMA fila: con dos objetos distintos no se probaría que la
+   * marca sobrevivió a la escritura anterior, que es justamente lo que está en juego.
+   */
+  describe('startTrial — la prueba no vuelve tras la baja ni tras el vencimiento', () => {
+    /** El alta que la marca reintenta después de haber cerrado su ciclo. */
+    const reintentarAlta = () =>
+      service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax' })
+
+    /**
+     * Rechazo esperado: 409 con el código que corresponde, y —lo importante— SIN
+     * efectos. Una prueba rechazada no puede dejar una suscripción huérfana en
+     * ConfioPagos, ni plan puesto en roles, ni fila escrita.
+     */
+    const esperarRechazoSinEfectos = async (codigo: string) => {
+      const error = await reintentarAlta().catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe(codigo)
+      expect(error.getStatus()).toBe(409)
+      expect(confioTrial.createForTrial).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    }
+
+    /** Sólo los CONTADORES: las implementaciones de los mocks siguen en pie. */
+    const olvidarLlamadasPrevias = () => {
+      confioTrial.createForTrial.mockClear()
+      clientRoles.assignPlanToBrand.mockClear()
+      subscriptionRepo.save.mockClear()
+    }
+
+    // MUTACIÓN QUE LO PONE ROJO: agregar `current.trialStart = null` en
+    // `SubscriptionService.cancel` antes del `manager.save` ⇒ el alta encadenada pasa
+    // y la marca se lleva una segunda prueba gratis.
+    it('la baja EN PRUEBA no devuelve la prueba, ni siquiera después de que el cron cierre la fila', async () => {
+      const fila = filaConfio({ status: SubscriptionStatus.TRIAL })
+      subscriptionRepo.findOne.mockResolvedValue(fila)
+      subscriptionRepo.save.mockImplementation(async (d: any) => d)
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      // (1) La baja REAL, con su llamada a ConfioPagos y su escritura bajo lock.
+      await service.cancel('brand-1', { reason: 'Ya no lo necesito', triggeredBy: 'user-1' })
+
+      // La baja apaga la renovación y sella el corte, pero NO toca la marca de prueba.
+      expect(fila.autoRenew).toBe(false)
+      expect(fila.accessEndsAt).toBe(FIN_TRIAL)
+      expect(fila.trialStart).toBe(INICIO_TRIAL)
+      expect(fila.trialEnd).toBe(FIN_TRIAL)
+
+      // (2) El parche EXACTO del cron horario que consume esa baja
+      // (`TasksService.expireCancelledSubscriptions`, `tasks.service.ts:522`, asertado
+      // por igualdad en el helper `esperarCierre` de `tasks.service.spec.ts:470`).
+      // Se aplica a mano porque el cron vive en otro servicio y esta aceptación pide
+      // specs de `subscription.service`; lo que importa es que su `update` nombra dos
+      // columnas y ninguna es `trialStart`/`trialEnd`.
+      fila.status = SubscriptionStatus.CANCELLED
+      fila.accessEndsAt = null
+
+      // (3) La marca vuelve a pedir la prueba sobre esa misma fila, ya cerrada.
+      olvidarLlamadasPrevias()
+      await esperarRechazoSinEfectos('TRIAL_ALREADY_USED')
+
+      // Y la fila sigue con su marca intacta: el rechazo tampoco la limpió.
+      expect(fila.trialStart).toBe(INICIO_TRIAL)
+      expect(fila.trialEnd).toBe(FIN_TRIAL)
+    })
+
+    // MUTACIÓN QUE LO PONE ROJO: sacar `TRIAL` de `LIVE_SUBSCRIPTION_STATUSES` ⇒ el
+    // rechazo pasa a ser `TRIAL_ALREADY_USED` y este caso se cae.
+    it('mientras la baja está PENDIENTE el rechazo es por suscripción vigente, y tampoco hay segunda prueba', async () => {
+      // La ventana entre la baja y la pasada del cron: `cancel` ya no mueve el
+      // `status`, así que la fila sigue EN PRUEBA con acceso pagado hasta `accessEndsAt`.
+      // Ahí lo cierto es que la marca todavía TIENE suscripción, no sólo que gastó su
+      // prueba, y por eso gana el guard de vigencia. En ningún estado hay segunda prueba.
+      const finFuturo = new Date(Date.now() + 3 * 24 * 3600 * 1000)
+      subscriptionRepo.findOne.mockResolvedValue(
+        filaConfio({
+          status: SubscriptionStatus.TRIAL,
+          autoRenew: false,
+          cancelledAt: new Date('2026-08-27T00:00:00.000Z'),
+          cancelReason: 'Ya no lo necesito',
+          accessEndsAt: finFuturo,
+        }),
+      )
+
+      await esperarRechazoSinEfectos('SUBSCRIPTION_ALREADY_EXISTS')
+    })
+  })
+
   describe('getAcceptanceLink', () => {
     it('re-pide el link a partir del `name` guardado en metadata', async () => {
       subscriptionReadRepo.findOne.mockResolvedValue({
@@ -650,33 +791,6 @@ describe('SubscriptionService', () => {
   })
 
   describe('cancel', () => {
-    /** Fin del trial y fin del período de cobro, DISTINTOS a propósito: son las dos
-     *  fechas candidatas a fin de acceso y un caso que las confunda no discrimina. */
-    const FIN_TRIAL = new Date('2026-09-10T00:00:00.000Z')
-    const FIN_PERIODO = new Date('2026-10-01T00:00:00.000Z')
-
-    /**
-     * Fila de ConfioPagos tal cual la deja el alta: el `name` vive en
-     * `metadata.confio.name` y `providerSubscriptionId` es el mismo valor.
-     */
-    const filaConfio = (over: Record<string, any> = {}): any => ({
-      id: 'sub-1',
-      brandId: 'brand-1',
-      userId: 'user-1',
-      planSlug: 'dropi-roax',
-      provider: SubscriptionProvider.CONFIO,
-      providerSubscriptionId: CONFIO_NAME,
-      status: SubscriptionStatus.TRIAL,
-      autoRenew: true,
-      trialEnd: FIN_TRIAL,
-      currentPeriodEnd: FIN_PERIODO,
-      cancelledAt: null,
-      cancelReason: null,
-      accessEndsAt: null,
-      metadata: { confio: { name: CONFIO_NAME } },
-      ...over,
-    })
-
     const bajaEscrita = () => ({
       filas: subscriptionRepo.save.mock.calls.length,
       eventos: eventRepo.save.mock.calls.length,
