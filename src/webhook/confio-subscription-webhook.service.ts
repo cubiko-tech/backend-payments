@@ -14,6 +14,7 @@ import { WebhookEvent } from './entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { aFecha, estaVencido, PeriodoConfio, periodoLocal } from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
+import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -81,6 +82,11 @@ interface EfectoConfio {
   sellaCancelacion?: boolean
   /** Movimiento de acceso en `backend-roles`; ausente = no se toca roles. */
   roles?: EfectoRoles
+  /**
+   * Motivo para la COLUMNA `reason` cuando el payload no trae uno propio: el
+   * hecho que degradó tiene que ser identificable desde la fila sola.
+   */
+  reason?: string
 }
 
 /**
@@ -91,7 +97,11 @@ interface EfectoConfio {
  * dato, incluso si otra escritura le cambiara el plan a la fila en el medio.
  */
 interface EfectoRoles {
-  accion: 'retirar' | 'reponer'
+  /**
+   * `retirar` es la mora (saca el plan pago y nada más), `degradar` es la baja
+   * definitiva (saca el pago y deja `free`) y `reponer` es el cobro exitoso.
+   */
+  accion: 'retirar' | 'reponer' | 'degradar'
   brandId: string
   planSlug: string
   /** Sólo la reposición: fin del período que se acaba de cobrar. */
@@ -302,7 +312,10 @@ export class ConfioSubscriptionWebhookService {
    *     reintento HOY no reprocesa solo (`webhook.processor.ts` incrementa el
    *     contador y relanza): la reparación entra por `POST /webhook/:id/retry`.
    *     Deuda preexistente de todos los proveedores, no de este camino.
-   * (4) La reposición usa `assignPlanToBrand` y NUNCA `renewPlanForBrand`:
+   * (4) La degradación (`degradar`) delega en `plan-downgrade.util.ts`, que es el
+   *     único dueño del movimiento y lo comparte con los dos crons de
+   *     `tasks.service.ts`: retira el plan pago y deja `free` SIN `expiresAt`.
+   * (5) La reposición usa `assignPlanToBrand` y NUNCA `renewPlanForBrand`:
    *     `assignPlanToBrandBySlug` es un upsert (actualiza `expiresAt` si el
    *     vínculo existe, lo crea si no), mientras que el `renew` tira 404 cuando
    *     la marca no tiene el plan — que es justo el estado que dejó el retiro.
@@ -320,9 +333,11 @@ export class ConfioSubscriptionWebhookService {
   ): Promise<void> {
     const traza = `brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId} event=${providerEventId}`
 
-    const ok = roles.accion === 'retirar'
-      ? await this.clientRoles.removePlanFromBrand(roles.brandId, roles.planSlug)
-      : await this.clientRoles.assignPlanToBrand(roles.brandId, roles.planSlug, roles.expiresAt)
+    const ok = roles.accion === 'degradar'
+      ? await downgradeBrandToFree(this.clientRoles, roles.brandId, roles.planSlug)
+      : roles.accion === 'retirar'
+        ? await this.clientRoles.removePlanFromBrand(roles.brandId, roles.planSlug)
+        : await this.clientRoles.assignPlanToBrand(roles.brandId, roles.planSlug, roles.expiresAt)
 
     if (!ok) {
       throw new Error(`No se pudo ${roles.accion} el plan en backend-roles: ${traza}`)
@@ -404,30 +419,60 @@ export class ConfioSubscriptionWebhookService {
 
     // Se indexa con un cast porque la clave viene de la red y el tipo `Wire`
     // admite un estado que Confío agregue mañana: ese cae acá como no mapeado.
-    const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
+    //
+    // El `hasOwnProperty` NO es ceremonia: `wire` es texto de la red y el mapa es
+    // un object literal, así que `"constructor"` o `"valueOf"` devuelven una
+    // FUNCIÓN heredada del prototipo —truthy, o sea que pasa el guard de abajo— y
+    // terminaría asignada a `sub.status`, que es un enum de Postgres.
+    const mapeado = Object.prototype.hasOwnProperty.call(CONFIO_SUBSCRIPTION_STATUS_MAP, wire)
+    const toStatus = mapeado ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus] : undefined
     if (!toStatus) {
       this.logger.warn(`Confio estado no mapeado: ${wire} (${data?.name})`)
       return null
     }
 
-    // Un solo predicado, y cubre EXACTAMENTE los dos estados de la aceptación:
-    // `PAST_DUE` y `SUSPENDED` son los dos wire states que
-    // `CONFIO_SUBSCRIPTION_STATUS_MAP` manda a `past_due`. `CANCELED`/`EXPIRED`
-    // quedan sin efecto en roles A PROPÓSITO: la baja definitiva es de
-    // `degradacion-a-free-y-baja-en-roles`.
+    // Idempotencia por ESTADO TERMINAL, no sólo por `providerEventId`: ese id se
+    // acuña con `resource:event:status:updateTime` (`confio-webhook.ts`), así que
+    // la secuencia normal CANCELED→EXPIRED son DOS eventos distintos y los dos
+    // terminales. Sin esta guarda el segundo volvería a llamar a roles y
+    // escribiría un segundo `subscription_event` sobre una suscripción ya muerta,
+    // que es justo lo que prohíbe la aceptación 4. Peor todavía con el
+    // last-write-wins que documenta el header: un terminal fuera de orden que
+    // llegue DESPUÉS de un `SUCCEEDED` que repuso el plan le sacaría el plan pago
+    // a una marca que acaba de pagar y la dejaría en `free`. Es la guarda
+    // recíproca de la resurrección de `planearCobro`.
+    if (ESTADOS_TERMINALES.includes(toStatus) && ESTADOS_TERMINALES.includes(sub.status)) {
+      this.logger.log(
+        `Confio ${wire} sobre una suscripción ya ${sub.status} (${sub.id}): sin efecto, ya está de baja`,
+      )
+      return null
+    }
+
+    // Dos escalones distintos y un solo predicado para cada uno:
+    // - `PAST_DUE`/`SUSPENDED` (los dos wire states que el mapa manda a
+    //   `past_due`) son MORA: se retira el plan pago y NADA más. Un primer cobro
+    //   fallido es recuperable por definición y poner `free` ahí lo convertiría
+    //   en una baja de plan (`corte-de-acceso-al-primer-fallo`).
+    // - `CANCELED`/`EXPIRED` son terminales: ya no hay cobro posible, así que la
+    //   marca pierde el plan pago y baja a `free`.
     //
     // Hueco conocido y deliberado: un cambio de estado a `ACTIVE` NO repone el
     // plan, porque ese efecto no trae período y no habría `expiresAt` honesto
     // que prometerle a roles sin inventarlo. La reposición la dispara el cobro
     // `SUCCEEDED`, que es lo que pide la regla de negocio.
-    const roles = toStatus === SubscriptionStatus.PAST_DUE
-      ? this.efectoRoles('retirar', sub)
-      : undefined
+    const esTerminal = ESTADOS_TERMINALES.includes(toStatus)
+    const roles = esTerminal
+      ? this.efectoRoles('degradar', sub)
+      : toStatus === SubscriptionStatus.PAST_DUE
+        ? this.efectoRoles('retirar', sub)
+        : undefined
 
     return {
       eventType: CONFIO_TIPO_DE_EVENTO[wire as ConfioSubscriptionStatus],
       toStatus,
       sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
+      // El hecho que degradó, legible desde la fila de historial sin el payload.
+      ...(esTerminal ? { reason: `ConfioPagos reportó la suscripción ${wire}` } : {}),
       ...(roles ? { roles } : {}),
     }
   }
@@ -477,6 +522,11 @@ export class ConfioSubscriptionWebhookService {
       sub.status = efecto.toStatus
       if (efecto.reiniciaReintentos) sub.retryCount = 0
       if (efecto.sellaCancelacion && !sub.cancelledAt) sub.cancelledAt = new Date()
+      // ⚠️ DINERO: una fila terminal con `autoRenew` encendido sigue siendo
+      // elegible para `processSubscriptionRenewals` y `retryFailedPayments`, que
+      // emiten cobro. Se deriva del MISMO predicado con el que se decidió
+      // `degradar`, así que los dos no pueden divergir.
+      if (ESTADOS_TERMINALES.includes(efecto.toStatus)) sub.autoRenew = false
       // ⚠️ DINERO: `nextBillingDate` alimenta a `processSubscriptionRenewals`
       // (`tasks.service.ts:176-200`), que renueva lo que ya cobra ConfioPagos.
       if (efecto.avanzaPeriodo) ConfioSubscriptionWebhookService.avanzarPeriodo(sub, efecto.periodo)
@@ -495,6 +545,7 @@ export class ConfioSubscriptionWebhookService {
           payload,
           providerEventId,
           roles: efecto.roles,
+          reason: efecto.reason,
         }),
       )
     })

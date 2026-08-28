@@ -18,6 +18,8 @@ interface TrazaDelMovimiento {
   payload: ConfioWebhookPayload
   providerEventId: string
   roles?: { accion: string; brandId: string; planSlug: string; expiresAt?: Date }
+  /** Motivo del efecto cuando el payload no trae uno propio. */
+  reason?: string
 }
 
 /**
@@ -75,6 +77,7 @@ export function armarTrazaDelMovimiento({
   payload,
   providerEventId,
   roles,
+  reason,
 }: TrazaDelMovimiento): DeepPartial<SubscriptionEvent> {
   const data = payload?.data || {}
 
@@ -94,7 +97,10 @@ export function armarTrazaDelMovimiento({
     toStatus,
     triggeredBy: 'confio-webhook',
     // La aceptación pide el motivo del fallo en la COLUMNA, no en el metadata.
-    reason: data.reason,
+    // El del payload GANA: es el que da el proveedor sobre el hecho concreto
+    // (`INSUFFICIENT_FUNDS`); el del efecto es el respaldo para los cambios de
+    // estado, que no traen motivo propio y aun así tienen que decir qué pasó.
+    reason: data.reason || reason,
     metadata: {
       event: payload?.event,
       providerEventId,

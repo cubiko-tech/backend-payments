@@ -16,6 +16,7 @@ import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
+import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
 import { CheckoutService } from '../checkout/checkout.service'
 import { logger } from '../shared/logger/logger'
 
@@ -24,7 +25,6 @@ export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
   private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
-  private readonly FREE_PLAN_SLUG = process.env.FREE_PLAN_SLUG || 'free'
 
   constructor(
     @InjectRepository(Wallet, 'DBRead')
@@ -144,8 +144,7 @@ export class TasksService {
       // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
       if (sub.provider === 'wallet') {
         if (!sub.walletId) {
-          await this.endTrialWithoutPayment(sub)
-          downgraded++
+          if (await this.endTrialWithoutPayment(sub)) downgraded++
           continue
         }
         try {
@@ -176,7 +175,7 @@ export class TasksService {
     logger.log(
       'info',
       `[CRON] processTrialConversions: ${converted} cobrados, ${linked} con link emitido, ` +
-        `${downgraded} degradados a ${this.FREE_PLAN_SLUG}, ` +
+        `${downgraded} degradados a ${freePlanSlug()}, ` +
         `${skipped} salteados: link inicial ya emitido`,
     )
   }
@@ -337,26 +336,51 @@ export class TasksService {
     })
 
     let count = 0
+    let rechazadas = 0
     for (const sub of expired) {
       if (sub.retryCount < this.MAX_RETRY) continue
 
-      const previousStatus = sub.status
-      sub.status = SubscriptionStatus.EXPIRED
-      await this.subscriptionRepo.save(sub)
+      // La degradación va PRIMERO y nada se vence si roles la rechaza: marcar la
+      // fila vencida sin haber movido el acceso dejaría a la marca con el plan
+      // pago puesto y sin nadie que vuelva a intentarlo. La contracara es que una
+      // caída de backend-roles se ve como «suscripciones que no vencen»: la fila
+      // queda en `past_due` con los reintentos agotados y la pasada siguiente del
+      // cron la vuelve a tomar (retirar y asignar son idempotentes del otro lado).
+      if (!(await this.degradarEnRoles(sub))) {
+        await this.detenerCobroRecurrente(sub)
+        rechazadas++
+        continue
+      }
+
+      // Compare-and-set: sólo vence la fila que TODAVÍA está en `past_due`. Los
+      // `@Cron` de Nest no impiden que dos pasadas se solapen y la degradación de
+      // arriba es HTTP con 10 s de timeout, así que la ventana entre el `find` y
+      // esta escritura es ancha; sin el predicado de estado las dos pasadas
+      // escribirían `expired` y su fila de historial, y la aceptación 4 pide
+      // exactamente una. `update` y no `save` también evita reescribir columnas
+      // con la copia vieja que se leyó antes de la llamada a roles.
+      //
+      // ⚠️ DINERO: sin apagar `autoRenew` la fila seguiría siendo elegible para
+      // `processSubscriptionRenewals` y `retryFailedPayments`, que emiten cobro.
+      const vencida = await this.subscriptionRepo.update(
+        { id: sub.id, status: SubscriptionStatus.PAST_DUE },
+        { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+      )
+      if (!vencida.affected) {
+        logger.log('info', `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`)
+        continue
+      }
 
       await this.subscriptionEventRepo.save(
         this.subscriptionEventRepo.create({
           subscriptionId: sub.id,
           eventType: SubscriptionEventType.EXPIRED,
-          fromStatus: previousStatus,
+          fromStatus: SubscriptionStatus.PAST_DUE,
           toStatus: SubscriptionStatus.EXPIRED,
           triggeredBy: 'system',
           reason: `Reintentos de pago agotados (${this.MAX_RETRY} intentos)`,
         }),
       )
-
-      // Degradar la marca al plan free en backend-roles (remover pago + asignar free)
-      await this.downgradeBrandToFree(sub)
 
       // Publicar evento para redundancia (backend-roles consumer) y notificaciones
       this.eventBus.publishSubscriptionExpired({
@@ -371,6 +395,16 @@ export class TasksService {
 
     if (count > 0) {
       logger.log('info', `[CRON] expireSubscriptions: ${count} suscripciones expiradas`)
+    }
+
+    // Las salteadas se cuentan aparte: sin esta línea una caída de backend-roles
+    // se lee como «0 suscripciones expiradas», que es lo mismo que un día sin
+    // morosos y no deja señal de que hay filas atascadas.
+    if (rechazadas > 0) {
+      logger.log(
+        'error',
+        `[CRON] expireSubscriptions: ${rechazadas} sin vencer, backend-roles rechazó la degradación`,
+      )
     }
   }
 
@@ -592,26 +626,91 @@ export class TasksService {
   }
 
   /**
-   * Terminar un trial vencido que no tiene método de pago: degradar a free.
+   * Degradación a `free` de una fila tomada por un cron, con la guarda de fila
+   * incompleta que el webhook ya tiene en `efectoRoles`.
+   *
+   * Devuelve si el acceso quedó donde tiene que quedar, o sea si el llamador
+   * puede seguir y escribir el estado terminal.
+   *
+   * Sin `brandId` o sin `planSlug` no hay movimiento posible: los dos van al path
+   * de roles (`/v1/brand/{id}/plan/slug/{slug}`) y un segmento vacío da 404 →
+   * `false`, indistinguible de un canal caído, así que la fila quedaría sin
+   * vencer PARA SIEMPRE. Se registra el error y se deja seguir, que es lo mismo
+   * que hace el webhook (`efectoRoles` devuelve `undefined` y el efecto local se
+   * aplica igual): no hay acceso pago que retirar si no se sabe de quién.
    */
-  private async endTrialWithoutPayment(sub: Subscription) {
-    const previousStatus = sub.status
-    sub.status = SubscriptionStatus.EXPIRED
+  private async degradarEnRoles(sub: Subscription): Promise<boolean> {
+    if (!sub.brandId || !sub.planSlug) {
+      logger.log(
+        'error',
+        `[CRON] Suscripción ${sub.id} sin brandId/planSlug: no se degrada en roles ` +
+          `(brand=${sub.brandId} plan=${sub.planSlug})`,
+      )
+
+      return true
+    }
+
+    return downgradeBrandToFree(this.clientRoles, sub.brandId, sub.planSlug)
+  }
+
+  /**
+   * Apaga la renovación de una fila que NO se pudo degradar en roles.
+   *
+   * ⚠️ DINERO: la fila se queda en `past_due` a propósito para que la pasada
+   * siguiente reintente la degradación, pero con `autoRenew` encendido y
+   * `nextBillingDate` vencido sigue siendo elegible para
+   * `processSubscriptionRenewals` y `retryFailedPayments` —los dos filtran por
+   * `autoRenew: true`—, que para `provider === 'wallet'` DEBITAN la wallet y,
+   * vía `extendSubscriptionPeriod`, hasta reactivan la suscripción. Mientras
+   * durara la caída de backend-roles se estaría cobrando algo que el negocio ya
+   * decidió matar. Apagar la renovación corta el riel de COBRO y no toca el
+   * acceso, que lo sigue decidiendo roles; es lo único que se persiste acá.
+   *
+   * `update` acotado a la columna y no `save`: la entidad se leyó antes de la
+   * llamada HTTP y un `save` reescribiría todas sus columnas con esa copia vieja.
+   */
+  private async detenerCobroRecurrente(sub: Subscription): Promise<void> {
+    if (!sub.autoRenew) return
+
+    await this.subscriptionRepo.update({ id: sub.id }, { autoRenew: false })
     sub.autoRenew = false
-    await this.subscriptionRepo.save(sub)
+    logger.log('info', `[CRON] Renovación apagada mientras se reintenta la degradación: ${sub.id}`)
+  }
+
+  /**
+   * Terminar un trial vencido que no tiene método de pago: degradar a free.
+   *
+   * Devuelve si la degradación se concretó. Como en `expireSubscriptions`, el
+   * movimiento en roles va ANTES de tocar la fila: si roles lo rechaza no se
+   * escribe nada, la suscripción sigue en `TRIAL` con `nextBillingDate` vencido y
+   * el cron horario la retoma.
+   */
+  private async endTrialWithoutPayment(sub: Subscription): Promise<boolean> {
+    if (!(await this.degradarEnRoles(sub))) return false
+
+    // Compare-and-set contra `trial`, por el mismo motivo que en
+    // `expireSubscriptions`: dos pasadas solapadas del cron horario no pueden
+    // escribir dos veces el fin del trial ni dos filas de historial.
+    const terminado = await this.subscriptionRepo.update(
+      { id: sub.id, status: SubscriptionStatus.TRIAL },
+      { status: SubscriptionStatus.EXPIRED, autoRenew: false },
+    )
+    if (!terminado.affected) {
+      logger.log('info', `[CRON] Trial ${sub.id} ya no estaba en trial: no se degrada dos veces`)
+
+      return false
+    }
 
     await this.subscriptionEventRepo.save(
       this.subscriptionEventRepo.create({
         subscriptionId: sub.id,
         eventType: SubscriptionEventType.TRIAL_ENDED,
-        fromStatus: previousStatus,
+        fromStatus: SubscriptionStatus.TRIAL,
         toStatus: SubscriptionStatus.EXPIRED,
         triggeredBy: 'system',
-        reason: `Trial vencido sin método de pago — degradado a ${this.FREE_PLAN_SLUG}`,
+        reason: `Trial vencido sin método de pago — degradado a ${freePlanSlug()}`,
       }),
     )
-
-    await this.downgradeBrandToFree(sub)
 
     this.eventBus.publishSubscriptionExpired({
       brandId: sub.brandId,
@@ -620,18 +719,9 @@ export class TasksService {
     })
     await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
 
-    logger.log('info', `[CRON] Trial degradado a ${this.FREE_PLAN_SLUG}: brandId=${sub.brandId}`)
-  }
+    logger.log('info', `[CRON] Trial degradado a ${freePlanSlug()}: brandId=${sub.brandId}`)
 
-  /**
-   * Degradar la marca al plan free en backend-roles: remover el plan pago
-   * y asignar el plan free (sin expiración) para que conserve un baseline.
-   */
-  private async downgradeBrandToFree(sub: Subscription) {
-    await this.clientRoles.removePlanFromBrand(sub.brandId, sub.planSlug)
-    if (sub.planSlug !== this.FREE_PLAN_SLUG) {
-      await this.clientRoles.assignPlanToBrand(sub.brandId, this.FREE_PLAN_SLUG)
-    }
+    return true
   }
 
   /**

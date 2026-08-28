@@ -95,6 +95,7 @@ function suscripcion(over: Record<string, any> = {}): any {
     currentPeriodEnd: new Date('2026-02-01T00:00:00Z'),
     nextBillingDate: new Date('2026-02-01T00:00:00Z'),
     retryCount: 2,
+    autoRenew: true,
     cancelledAt: null,
     ...over,
   }
@@ -247,14 +248,27 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
     })
 
-    it.each(['CANCELED', 'EXPIRED'])('%s no toca roles: la baja es de otra tarea', async (wire) => {
+    // La mora NO degrada (aceptación 3): `past_due` retira el plan pago y NADA
+    // más. Poner `free` acá convertiría un primer cobro fallido —recuperable por
+    // definición— en una baja de plan.
+    it.each(['PAST_DUE', 'SUSPENDED'])('el cambio de estado a %s NO asigna free', async (wire) => {
       conSuscripcion(suscripcion())
 
       await despachar(cambioDeEstado(wire))
 
-      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
       expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
-      expect(historial()[0].metadata.roles).toBeUndefined()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
+      // La mora tampoco apaga la renovación: si un cobro posterior entra, vuelve.
+      expect(suscripcionGuardada().autoRenew).toBe(true)
+    })
+
+    it('el cobro fallido tampoco asigna free ni apaga la renovación', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cobro('FAILED'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().autoRenew).toBe(true)
     })
 
     it('una suscripción sin planSlug no pega en roles con un slug vacío', async () => {
@@ -265,6 +279,160 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
       expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
     })
+  })
+
+  // ------------------------------------------- (1b) degradación a free y baja
+  /**
+   * `degradacion-a-free-y-baja-en-roles` (épica 002, criterio 3): un estado
+   * TERMINAL reportado por ConfioPagos —cancelada o vencida— es «no hay cobro
+   * posible», y ahí la marca pierde el plan pago Y recibe `free`. Es el escalón
+   * siguiente de la mora, que sólo retira.
+   *
+   * Rojo si: se quita `assignPlanToBrand(brandId, FREE_PLAN_SLUG)` de
+   * `downgradeBrandToFree` (la mutación de control declarada por la tarea).
+   */
+  describe('un estado terminal degrada la marca a free', () => {
+    it.each([
+      ['CANCELED', SubscriptionStatus.CANCELLED],
+      ['EXPIRED', SubscriptionStatus.EXPIRED],
+    ])('%s saca el plan pago y deja free', async (wire, esperado) => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado(wire as string))
+
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(roles.removePlanFromBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(BRAND_ID, 'free')
+      // Aridad EXACTA: `free` va SIN `expiresAt` (aceptación 2). Un plan free no
+      // se cobra, así que no tiene vencimiento que prometer; pasarle uno lo
+      // dejaría barrido por el cron de roles y la marca sin NINGÚN plan.
+      expect(roles.assignPlanToBrand.mock.calls[0]).toHaveLength(2)
+      // Primero se saca el pago, recién después entra `free`.
+      expect(roles.removePlanFromBrand.mock.invocationCallOrder[0]).toBeLessThan(
+        roles.assignPlanToBrand.mock.invocationCallOrder[0],
+      )
+      // `renewPlanForBrand` tira 404 sobre una marca sin el plan: nunca acá.
+      expect(roles.renewPlanForBrand).not.toHaveBeenCalled()
+
+      const guardada = suscripcionGuardada()
+      expect(guardada.status).toBe(esperado)
+      // ⚠️ DINERO: sin apagar `autoRenew` la fila seguiría siendo elegible para
+      // los crons de renovación, que emiten cobros por un segundo riel.
+      expect(guardada.autoRenew).toBe(false)
+
+      expect(historial()).toHaveLength(1)
+      const fila = historial()[0]
+      expect(fila.fromStatus).toBe(SubscriptionStatus.ACTIVE)
+      expect(fila.toStatus).toBe(esperado)
+      expect(fila.triggeredBy).toBe('confio-webhook')
+      // El hecho que la degradó, identificable desde la fila sola (aceptación 1).
+      expect(fila.reason).toEqual(expect.stringContaining(wire as string))
+      expect(fila.metadata.roles.accion).toBe('degradar')
+    })
+
+    it('la reentrega del mismo providerEventId no vuelve a tocar roles', async () => {
+      conSuscripcion(suscripcion())
+      // Mismo doble realista que el test de guarda de la traza: los DOS builders,
+      // porque el pre-chequeo usa el repo y la relectura bajo lock usa el manager.
+      const buscador = () => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn(async () =>
+          historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
+        ),
+      })
+      eventRepo.createQueryBuilder.mockImplementation(buscador)
+      manager.createQueryBuilder.mockImplementation(buscador)
+
+      await despachar(cambioDeEstado('CANCELED'))
+      await despachar(cambioDeEstado('CANCELED'))
+
+      expect(historial()).toHaveLength(1)
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * La deduplicación por `providerEventId` NO cubre este caso: el id se acuña
+     * con `resource:event:status:updateTime`, así que la secuencia normal
+     * CANCELED→EXPIRED son DOS notificaciones distintas y las dos terminales.
+     * Sin la guarda por ESTADO la segunda volvería a llamar a roles y escribiría
+     * un segundo `subscription_event` sobre una suscripción ya muerta, que es lo
+     * que prohíbe la aceptación 4.
+     *
+     * Rojo si: se quita `ESTADOS_TERMINALES.includes(sub.status)` de
+     * `planearCambioDeEstado`.
+     */
+    it('EXPIRED después de CANCELED no vuelve a degradar ni escribe un segundo evento', async () => {
+      conSuscripcion(suscripcion())
+
+      await despachar(cambioDeEstado('CANCELED'), 'ev-cancel')
+      await despachar(cambioDeEstado('EXPIRED'), 'ev-expire')
+
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(historial()).toHaveLength(1)
+      expect(historial()[0].toStatus).toBe(SubscriptionStatus.CANCELLED)
+    })
+
+    it.each(['CANCELLED', 'EXPIRED'])(
+      'una suscripción que ya está %s no se vuelve a degradar',
+      async (estado) => {
+        conSuscripcion(suscripcion({ status: SubscriptionStatus[estado] }))
+
+        await despachar(cambioDeEstado('CANCELED'), 'ev-otro')
+
+        expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(dataSource.transaction).not.toHaveBeenCalled()
+      },
+    )
+
+    it('si roles rechaza el retiro no se asigna free ni se escribe nada', async () => {
+      conSuscripcion(suscripcion())
+      roles.removePlanFromBrand.mockResolvedValue(false)
+
+      await expect(despachar(cambioDeEstado('CANCELED'))).rejects.toThrow(/roles/i)
+
+      // Dejar el plan pago puesto Y `free` encima es peor que reintentar entero.
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(dataSource.transaction).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('si roles rechaza la asignación de free tampoco se marca la baja', async () => {
+      conSuscripcion(suscripcion())
+      roles.assignPlanToBrand.mockResolvedValue(false)
+
+      await expect(despachar(cambioDeEstado('EXPIRED'))).rejects.toThrow(/roles/i)
+
+      expect(dataSource.transaction).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+  })
+
+  /**
+   * El `status` es texto de la red y el mapa de estados es un object literal: sin
+   * `hasOwnProperty` una clave heredada del prototipo devuelve una FUNCIÓN (o
+   * `Object.prototype` para `__proto__`), truthy, que pasa el guard de «no
+   * mapeado» y termina asignada a `sub.status`, que es un enum de Postgres.
+   *
+   * Rojo si: se vuelve al acceso directo `CONFIO_SUBSCRIPTION_STATUS_MAP[wire]`.
+   */
+  describe('un estado que no está en el mapa nunca se aplica', () => {
+    it.each([['constructor'], ['valueOf'], ['toString'], ['__proto__'], ['CANCELADA']])(
+      'el status "%s" se descarta como no mapeado',
+      async (wire) => {
+        conSuscripcion(suscripcion())
+
+        await despachar(cambioDeEstado(wire))
+
+        expect(dataSource.transaction).not.toHaveBeenCalled()
+        expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      },
+    )
   })
 
   // --------------------------------------------------- (2) cobro exitoso
