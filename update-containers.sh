@@ -16,6 +16,7 @@ readonly HEALTH_INTERVAL=30
 readonly GATEWAY_API_PORT="10341"
 readonly UPSTREAM_CONF="platform"
 readonly UPSTREAM_STREAM="payments"
+readonly PRUNE_TIMEOUT=300
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -138,6 +139,30 @@ reload_gateway() {
     docker restart "$gateway"
   fi
 }
+# ---------------------------------------------------------------------------
+# Prune de imagenes huerfanas
+# ---------------------------------------------------------------------------
+# Cada deploy re-tagea la misma etiqueta (:develop / :staging), asi que la
+# imagen anterior queda <none> y hasta ahora nadie la borraba. Se acumularon
+# 50 en roax-dev, llenaron el disco (57G de 58G) y el `docker compose pull`
+# del deploy siguiente murio con ENOSPC a mitad de extraer una capa.
+#
+# Se corre al final, con el swap ya hecho: el container viejo ya no existe,
+# asi que su imagen quedo dangling y borrarla es seguro.
+#
+# Sin -a a proposito: solo dangling. Las imagenes etiquetadas de los otros
+# servicios que comparten la VM no se tocan, aunque esten paradas.
+prune_images() {
+  local out
+  log "Pruning dangling images ..."
+  if out=$(timeout "$PRUNE_TIMEOUT" docker image prune -f 2>&1); then
+    log "$(printf '%s' "$out" | tail -1)"
+  else
+    # Housekeeping: el deploy ya termino bien, esto nunca debe tumbarlo.
+    warn "Prune fallo o excedio ${PRUNE_TIMEOUT}s. Continuando."
+  fi
+  df -h / | awk 'NR==2 {printf "[INFO]  Disco: %s libres (%s usado)\n", $4, $5}'
+}
 
 # ---------------------------------------------------------------------------
 # Main
@@ -175,6 +200,7 @@ main() {
   done
 
   reload_gateway
+  prune_images
 
   log "Blue-green swap complete for ${UPSTREAM_CONF}"
 }
