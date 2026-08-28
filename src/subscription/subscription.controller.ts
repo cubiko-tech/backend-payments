@@ -13,6 +13,7 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
+import { CreateSubscriptionDto } from './dto/create-subscription.dto'
 
 /**
  * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
@@ -31,6 +32,15 @@ import { EnterprisePricingService } from './enterprise-pricing.service'
  * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
  * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
  * si hacen falta, son una decisión aparte.
+ *
+ * ⚠️ CONSECUENCIA ABIERTA: el `brandId` viaja en el query o en el body y NINGÚN
+ * handler lo compara contra `req.user.brand`, que `ApiAuthGuard` ya resolvió. O
+ * sea que un usuario autenticado puede leer, cambiar de plan o dar de baja la
+ * suscripción de CUALQUIER marca. Es deuda conocida y anotada en el INBOX de
+ * roax-ops (autorización por marca en `subscription.controller`); no se cierra acá
+ * porque exige decidir qué pasa con los llamadores server-to-server y con los
+ * superadmins. Lo que SÍ se cerró es lo que esa lectura habilitaba: el alta
+ * genérica ya no acepta campos arbitrarios (ver `create` más abajo).
  */
 @ApiTags('Subscription')
 @Controller('subscription')
@@ -65,11 +75,29 @@ export class SubscriptionController {
     return this.subscriptionService.getAcceptanceLink(brandId)
   }
 
+  /**
+   * ⚠️ El body va TIPADO y no es opcional: `SubscriptionService.create` guarda lo
+   * que reciba (`repository.create(data)` + `save(data)`), así que el DTO ES el
+   * control de acceso a las columnas. Con `@Body() data: any` no hay metatype y el
+   * `ValidationPipe` global no filtra nada: se podía mandar el `id` de la fila de
+   * otra marca —que el `GET` de arriba entrega— y convertir el `save` en un UPDATE
+   * ajeno, o mandar `trialStart: null` para que `POST /subscription/trial` regale
+   * una segunda prueba. El porqué de cada campo, en `dto/create-subscription.dto.ts`.
+   *
+   * Las fechas viajan ISO y se convierten acá, como en `upsertEnterprisePricing`:
+   * el pipe global corre sin `transform`, así que del body salen strings.
+   */
   @Post()
   @ApiOperation({ summary: 'Crear una suscripción' })
   @ApiResponse({ status: 201, description: 'Suscripción creada correctamente' })
-  async create(@Body() data: any) {
-    return this.subscriptionService.create(data)
+  @ApiResponse({ status: 400, description: 'Campo no permitido en el body' })
+  async create(@Body() data: CreateSubscriptionDto) {
+    return this.subscriptionService.create({
+      ...data,
+      currentPeriodStart: data.currentPeriodStart ? new Date(data.currentPeriodStart) : undefined,
+      currentPeriodEnd: data.currentPeriodEnd ? new Date(data.currentPeriodEnd) : undefined,
+      nextBillingDate: data.nextBillingDate ? new Date(data.nextBillingDate) : undefined,
+    })
   }
 
   @Post('trial')

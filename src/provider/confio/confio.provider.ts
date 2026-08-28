@@ -373,7 +373,8 @@ export class ConfioProvider implements PaymentProvider {
    *
    * Es la misma guarda del alta (`assertPlanPath`) MÁS la forma, y no un lujo:
    * el `name` lo persistimos nosotros pero entra por caminos que no lo validan
-   * (`POST /subscription` acepta el body sin DTO), así que interpolarlo crudo
+   * (`POST /subscription` lo acepta del body: `providerSubscriptionId` está en la
+   * lista blanca de `CreateSubscriptionDto`), así que interpolarlo crudo
    * dejaba elegir la ruta del POST que sale con NUESTRO Bearer — la suscripción
    * de otro store (el store está COMPARTIDO con backend-ads) o, vía segmentos
    * `..` que `fetch` normaliza, cualquier otro endpoint de ConfioPagos. El
