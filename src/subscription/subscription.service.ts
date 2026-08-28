@@ -18,6 +18,15 @@ const LIVE_SUBSCRIPTION_STATUSES = [
 ]
 
 /**
+ * Ciclos ya cerrados. Es el complemento exacto de `LIVE_SUBSCRIPTION_STATUSES` y
+ * el MISMO conjunto que `ESTADOS_TERMINALES` en
+ * `confio-subscription-webhook.service.ts`: una fila así no tiene acceso que
+ * preservar, así que la baja no le sella `accessEndsAt` (ver la invariante de esa
+ * columna en la entidad) y `reactivate` sí tiene que devolverla a `active`.
+ */
+const TERMINAL_SUBSCRIPTION_STATUSES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
+
+/**
  * Topes del BORDE para los dos textos libres de la baja. No son gusto: los dos
  * viajan a una escritura que ocurre DESPUÉS de que ConfioPagos ya canceló, y
  * `subscription_events.triggeredBy` es `varchar` (255) `NOT NULL`
@@ -276,6 +285,10 @@ export class SubscriptionService {
           autoRenew: true,
           cancelledAt: null,
           cancelReason: null,
+          // Invariante de la columna: no nula ⇔ hay una baja PENDIENTE. Un ciclo nuevo
+          // no la tiene, y dejar la fecha del ciclo anterior mostraría un fin de acceso
+          // sobre una suscripción que se renueva.
+          accessEndsAt: null,
           retryCount: 0,
           lastPaymentId: null,
           // Se reescribe entera y a mano: NUNCA el `raw` de ConfioPagos (lleva `buyer`,
@@ -523,6 +536,25 @@ export class SubscriptionService {
   }
 
   /**
+   * Hasta cuándo llega el acceso YA pagado de una fila a la que se le pide la baja.
+   *
+   * En trial es `trialEnd` y no `currentPeriodEnd`: el alta abre el período contra el
+   * fin de la prueba, pero son dos campos distintos y tomar el equivocado regalaría
+   * (o cortaría) días. Fuera del trial es el cierre del período que la marca pagó.
+   *
+   * Sin NINGUNA de las dos fechas el acceso termina AHORA: no se puede acotar un
+   * período que no existe y regalarlo sería peor que cortarlo — la fila queda
+   * inmediatamente elegible para el cron de retiro, que es el comportamiento seguro.
+   */
+  private static finDeAcceso(fila: Subscription): Date {
+    const fin =
+      fila.status === SubscriptionStatus.TRIAL
+        ? (fila.trialEnd ?? fila.currentPeriodEnd)
+        : fila.currentPeriodEnd
+    return fin ?? new Date()
+  }
+
+  /**
    * Cancelar la suscripción: primero en ConfioPagos, después acá.
    *
    * ORDEN, que es la invariante de esta tarea: **la pasarela primero, la
@@ -564,6 +596,43 @@ export class SubscriptionService {
    * ⚠️ El marcador de «confirmado» NO va en `metadata`: es la columna
    * `cancelledAt` —el mismo lugar que sella el webhook— más el
    * `SubscriptionEvent` CANCELLED, escritos en la MISMA transacción que el estado.
+   *
+   * ── EL CORTE DE ACCESO ES DIFERIDO ──────────────────────────────────────────
+   *
+   * Esto ya NO retira el plan de roles ni mueve la fila a `cancelled`: la baja es un
+   * apagado de RENOVACIÓN. Se sella `autoRenew = false` + `cancelledAt` +
+   * `accessEndsAt`, y la marca sigue con su plan hasta esa fecha —que es lo que ya
+   * pagó—.
+   *
+   * Lo que se difiere es el CORTE LOCAL, no el cobro: la baja en ConfioPagos sigue
+   * siendo inmediata e irreversible (y sigue siendo lo primero que pasa, ver arriba).
+   *
+   * ⚠️ QUIÉN VA A EJECUTAR EL RETIRO — TODAVÍA NADIE. El retiro será del cron de
+   * `retiro-de-plan-al-vencer-el-periodo` (BACKLOG, épica 002, la tarea siguiente a
+   * ésta), que barrerá por el par `autoRenew = false` + `accessEndsAt` pasado. **Ese
+   * cron NO existe hoy**: `accessEndsAt` no tiene ningún lector en el repo, así que
+   * mientras no aterrice lo único que le corta el acceso a una marca dada de baja es
+   * el `expiresAt` que roles ya tenía de antes —`assignPlanToBrand(brandId, planSlug,
+   * trialEnd)` en `startTrial`, `now + BILLING_PERIOD_DAYS` en
+   * `checkout.service.ts`—, que coincide con `accessEndsAt` por construcción pero es
+   * un mecanismo INCIDENTAL, no el diseñado. Para las filas de TRIAL esa coincidencia
+   * alcanza; para el resto, una marca que cancela puede quedarse con el plan pago
+   * pasado el corte hasta que el cron llegue. No se despliega el par de tareas por
+   * separado sin saberlo.
+   *
+   * ⚠️ Cancelar con el período YA vencido tampoco retira acá: la fila queda con
+   * `accessEndsAt` en el pasado y la tomará la primera pasada del cron. Hacerlo
+   * inline exigiría `downgradeBrandToFree` —`removePlanFromBrand` a secas dejaría a la
+   * marca SIN NINGÚN plan, ver `plan-downgrade.util.ts`— y pondría un segundo dueño
+   * sobre la misma degradación, además de reintroducir una llamada HTTP post-commit
+   * que puede fallar a medias.
+   *
+   * El eco de esta baja por webhook está NEUTRALIZADO: ConfioPagos emite
+   * `subscription.subscriptionStatusChanged` con `CANCELED` detrás nuestro, y
+   * `confio-subscription-webhook.service.ts` lo descarta sin efecto mientras
+   * `cancelledAt` esté sellado y `accessEndsAt` siga en el futuro (`bajaPendiente`).
+   * Sin esa guarda ese camino degradaba a `free` segundos después de que esto
+   * conservó el plan, y era el camino de la MAYORÍA de las bajas.
    */
   async cancel(brandId: string, reason: { reason: string; triggeredBy: string }) {
     // Chequeos de DOMINIO, TODOS antes de la llamada IRREVERSIBLE a la pasarela.
@@ -662,7 +731,7 @@ export class SubscriptionService {
         await this.confioCancellation.cancel(confioName, motivo)
       }
 
-      const { row: saved, planSlug } = await this.dataSource.transaction(async (manager) => {
+      const { row: saved } = await this.dataSource.transaction(async (manager) => {
         // Relectura bajo lock, mismo precedente que `startTrial` y que
         // `ConfioSubscriptionWebhookService.aplicar`: entre la lectura de arriba y
         // esta escritura hubo una llamada HTTP, o sea una ventana de segundos.
@@ -691,12 +760,26 @@ export class SubscriptionService {
             where: { subscriptionId: current.id, eventType: SubscriptionEventType.CANCELLED },
           }))
 
-        const fromStatus = current.status
-        current.status = SubscriptionStatus.CANCELLED
+        // El estado vigente NO se toca: la baja apaga la renovación, no el acceso.
+        // La fila sigue en `trial`/`active`/`past_due` hasta que el cron de retiro la
+        // degrade, así que `fromStatus` y `toStatus` de la traza son el MISMO valor.
+        const estadoVigente = current.status
         // Se SELLA una sola vez, como el webhook: la fecha de la baja es la
         // primera, no la del reintento que reparó la traza. El motivo va con el
-        // MISMO criterio —describe el mismo hecho— y por eso tampoco se pisa.
+        // MISMO criterio —describe el mismo hecho— y por eso tampoco se pisa. El
+        // fin de acceso sigue la misma regla: moverlo en el segundo click regalaría
+        // período sobre una baja ya tomada.
         if (!current.cancelledAt) current.cancelledAt = new Date()
+        // Sólo las filas VIVAS ganan fecha de corte. Un ciclo ya cerrado
+        // (`cancelled`/`expired`, el camino de REPARACIÓN de más arriba) no tiene
+        // acceso que preservar: `finDeAcceso` le devolvería su `currentPeriodEnd`,
+        // que en una fila cancelada a mitad de período está en el FUTURO, y la
+        // columna quedaría no nula sobre una fila terminal — exactamente lo que la
+        // invariante prohíbe («no nula ⇔ baja PENDIENTE») y lo que haría que el cron
+        // de retiro la degradara una SEGUNDA vez.
+        if (!current.accessEndsAt && !TERMINAL_SUBSCRIPTION_STATUSES.includes(current.status)) {
+          current.accessEndsAt = SubscriptionService.finDeAcceso(current)
+        }
         if (!yaRegistrada) current.cancelReason = motivo
         current.autoRenew = false
         const row = await manager.save(Subscription, current)
@@ -708,9 +791,12 @@ export class SubscriptionService {
             SubscriptionEvent,
             this.subscriptionEventRepository.create({
               subscriptionId: current.id,
+              // Sigue siendo CANCELLED: es el hecho de negocio (la baja) y es lo que
+              // `metrics.service.ts` cuenta como churn. Lo que cambió es que ya no
+              // describe una transición de estado, y por eso los dos son iguales.
               eventType: SubscriptionEventType.CANCELLED,
-              fromStatus,
-              toStatus: SubscriptionStatus.CANCELLED,
+              fromStatus: estadoVigente,
+              toStatus: estadoVigente,
               triggeredBy,
               reason: motivo,
               // Forma espejo de `armarTrazaDelMovimiento`, escrita inline porque ese
@@ -726,24 +812,28 @@ export class SubscriptionService {
                 // Qué respalda esta baja: el 200 de ConfioPagos, o sólo nosotros.
                 confirmadoPorConfio,
                 ...(confirmadoPorConfio ? { providerRef: { name: confioName } } : {}),
+                // Qué se apagó y hasta cuándo dura lo ya pagado: sin esto la traza no
+                // permite reconstruir por qué la marca siguió con plan después de la baja.
+                renovacionApagada: true,
+                // La clave falta cuando no hay acceso que datar (fila terminal): la
+                // traza describe lo que pasó, no completa un hueco con `null`.
+                ...(current.accessEndsAt
+                  ? { accessEndsAt: current.accessEndsAt.toISOString() }
+                  : {}),
               },
             }),
           )
         }
 
-        // El plan sale de la fila RELEÍDA bajo lock, no de la pre-lectura: es la
-        // única versión que la transacción vio.
-        return { row, planSlug: current.planSlug }
+        // La fila releída bajo lock es la única versión que la transacción vio.
+        return { row }
       })
 
-      // Después del commit, igual que antes de esta tarea. Se llama SIEMPRE, también
-      // cuando la baja ya estaba registrada: si la primera vez esto falló (503 con la
-      // fila ya cancelada), saltearlo en el reintento dejaría el plan puesto para
-      // siempre — que es justo lo que el reintento viene a arreglar.
-      await this.clientRoles.removePlanFromBrand(brandId, planSlug)
-
+      // Un solo criterio para la columna en todo el método: o hay fecha de corte (y
+      // es un `Date`), o la fila era terminal y no hay acceso que reportar.
+      const hasta = saved.accessEndsAt ? saved.accessEndsAt.toISOString() : 'un ciclo ya cerrado'
       this.logger.log(
-        `Suscripción cancelada para marca ${brandId}` +
+        `Renovación apagada para marca ${brandId}, acceso hasta ${hasta}` +
           (confirmadoPorConfio ? ` (confirmada por ConfioPagos ${confioName})` : ''),
       )
       return { data: saved }
@@ -767,7 +857,19 @@ export class SubscriptionService {
   }
 
   /**
-   * Reactivar suscripción cancelada
+   * Deshacer la baja: la suscripción vuelve a renovarse.
+   *
+   * EL PREDICADO ES EL SELLO, NO EL ESTADO. Desde el corte diferido `cancel` ya no
+   * escribe `status = cancelled`: la fila se queda en `trial`/`active`/`past_due`
+   * mientras le debamos el acceso pagado. Gatear esto por `status === CANCELLED`
+   * —como hacía— dejaba el endpoint respondiendo 422 SUBSCRIPTION_NOT_CANCELLED
+   * durante TODA la ventana de gracia, que es justo el período en el que
+   * arrepentirse tiene sentido. La marca de «esta fila está dada de baja» es
+   * `cancelledAt`, la misma que sella el webhook, y por eso las filas `cancelled`
+   * de antes de este cambio (y las que sella el webhook) siguen entrando.
+   *
+   * `expired` NO entra: nadie le sella `cancelledAt` a un vencimiento, y revivir un
+   * ciclo agotado sin pago sería regalar servicio.
    */
   async reactivate(brandId: string, triggeredBy: string) {
     try {
@@ -779,7 +881,7 @@ export class SubscriptionService {
         )
       }
 
-      if (subscription.status !== SubscriptionStatus.CANCELLED) {
+      if (!subscription.cancelledAt) {
         throw new RequestException(
           { code: 'SUBSCRIPTION_NOT_CANCELLED', message: 'Solo se pueden reactivar suscripciones canceladas' },
           HttpStatus.UNPROCESSABLE_ENTITY,
@@ -806,9 +908,18 @@ export class SubscriptionService {
       }
 
       const fromStatus = subscription.status
-      subscription.status = SubscriptionStatus.ACTIVE
+      // Sólo un ciclo YA cerrado necesita volver a `active`. Una baja PENDIENTE no
+      // movió el estado, así que deshacerla tampoco lo mueve: forzar `active` sobre
+      // una fila en prueba le comería los días de trial que todavía le quedan, y
+      // sobre una `past_due` borraría la mora sin que nadie haya pagado.
+      if (TERMINAL_SUBSCRIPTION_STATUSES.includes(subscription.status)) {
+        subscription.status = SubscriptionStatus.ACTIVE
+      }
       subscription.cancelledAt = null
       subscription.cancelReason = null
+      // La fila vuelve a renovarse: ya no hay baja pendiente que datar (invariante de
+      // `accessEndsAt`).
+      subscription.accessEndsAt = null
       subscription.autoRenew = true
       await this.subscriptionRepository.save(subscription)
 
@@ -818,7 +929,9 @@ export class SubscriptionService {
           subscriptionId: subscription.id,
           eventType: SubscriptionEventType.REACTIVATED,
           fromStatus,
-          toStatus: SubscriptionStatus.ACTIVE,
+          // El estado REAL en el que quedó la fila, no un `active` de oficio: sobre
+          // una baja pendiente los dos son iguales, igual que en la traza de `cancel`.
+          toStatus: subscription.status,
           triggeredBy,
         }),
       )

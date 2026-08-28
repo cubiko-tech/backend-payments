@@ -926,6 +926,10 @@ export class CheckoutService implements OnModuleInit {
       subscription.retryCount = 0
       subscription.cancelledAt = null
       subscription.cancelReason = null
+      // Invariante de `accessEndsAt`: no nula ⇔ hay una baja PENDIENTE. La marca que
+      // canceló y después pagó ya no la tiene, y dejarle la fecha de corte vieja la
+      // mostraría en `GET /subscription/current` sobre una suscripción que se renueva.
+      subscription.accessEndsAt = null
       subscription.autoRenew = true
 
       await this.subscriptionRepo.save(subscription)

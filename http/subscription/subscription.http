@@ -83,8 +83,26 @@ Content-Type: application/json
 #
 # La regla que ordena todo: **nunca se escribe un hecho que ConfioPagos no
 # confirmó**. Su HTTP 200 es la confirmación (la respuesta viene vacía) y recién
-# ahí se sella `status=cancelled` + `cancelledAt` + `autoRenew=false` junto con el
-# `SubscriptionEvent` CANCELLED, en una sola transacción.
+# ahí se escribe local, en una sola transacción.
+#
+# QUÉ ESCRIBE: esto apaga la RENOVACIÓN, no el acceso. Sella `autoRenew=false` +
+# `cancelledAt` + `cancelReason` + `accessEndsAt` (hasta cuándo dura lo ya pagado:
+# `trialEnd` si la fila está en prueba, si no el cierre del período), junto con el
+# `SubscriptionEvent` CANCELLED. El `status` NO cambia: la fila sigue en
+# `trial`/`active`/`past_due` y la marca CONSERVA su plan. Para leer «esta
+# suscripción está dada de baja» hay que mirar `cancelledAt`/`accessEndsAt`, ya no
+# `status === 'cancelled'`.
+#
+# ⚠️ El corte al vencer esa fecha va a hacerlo un cron que TODAVÍA NO EXISTE
+# (`retiro-de-plan-al-vencer-el-periodo`, la tarea siguiente en el BACKLOG): será él
+# quien retire el plan de roles barriendo las filas con la renovación apagada y la
+# fecha ya pasada. Mientras tanto lo único que caduca el acceso es el `expiresAt`
+# que `backend-roles` ya recibió en el alta.
+#
+# DESHACER la baja: `POST /subscription/reactivate` mientras `accessEndsAt` no venció
+# (fila NO confío; una de ConfioPagos ya está cancelada allá y la vuelta es un alta
+# nueva). Vuelve a encender la renovación y limpia los tres sellos SIN mover el
+# estado vigente.
 #
 # Los 422 se resuelven ANTES de hablar con ConfioPagos, todos con cero escrituras
 # —incluidos los dos de `triggeredBy`, que no es cosmética: es `varchar NOT NULL`

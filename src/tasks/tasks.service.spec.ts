@@ -266,6 +266,26 @@ describe('TasksService — processTrialConversions', () => {
   })
 
   /**
+   * ⚠️ DINERO. Desde `cancelar-marca-baja-al-fin-de-periodo` la baja YA NO mueve la
+   * fila a `cancelled`: apaga `autoRenew` y la deja en su estado vigente. Un trial
+   * dado de baja se queda entonces en `trial`, y sin este filtro volvería a caer en
+   * esta consulta: si es `provider = 'wallet'` con `walletId`, `renewFromWallet`
+   * DEBITARÍA la wallet de alguien que ya se dio de baja. El filtro es el candado.
+   */
+  it('no convierte un trial con la renovación apagada: la consulta filtra por autoRenew', async () => {
+    await service.processTrialConversions()
+
+    // Se afirma el `where` ENTERO, no un `objectContaining`: lo que hay que fijar es
+    // que la consulta no se afloje, y un criterio de más (o el `autoRenew` de menos)
+    // tiene que ponerlo rojo. Verificarlo devolviendo filas desde un repo falso que
+    // implemente el mismo filtro no probaría nada: probaría el doble.
+    const { where } = subscriptionRepo.find.mock.calls[0][0]
+    expect(Object.keys(where).sort()).toEqual(['autoRenew', 'nextBillingDate', 'status'])
+    expect(where.status).toBe(SubscriptionStatus.TRIAL)
+    expect(where.autoRenew).toBe(true)
+  })
+
+  /**
    * `degradacion-a-free-y-baja-en-roles` (épica 002, criterio 3), tercer
    * disparador: la suscripción vence con los reintentos agotados.
    *
@@ -415,6 +435,40 @@ describe('TasksService — processTrialConversions', () => {
       await service.reconcileExternalPayments()
 
       expect(checkoutService.completeExternalPayment).not.toHaveBeenCalled()
+    })
+  })
+
+  /**
+   * El aviso «tu acceso termina en N días» se agendaba contra `currentPeriodEnd` y
+   * sólo para filas `active`. Con el corte diferido esa fecha ya no es la que manda:
+   * una baja sella `accessEndsAt`, que para una fila en PRUEBA es `trialEnd` —otro
+   * día— y deja la fila en `trial`, fuera del filtro de estado. El aviso salía tarde
+   * o no salía.
+   *
+   * Rojo si: la consulta vuelve a mirar sólo `currentPeriodEnd` + `active`.
+   */
+  describe('sendExpirationWarnings', () => {
+    it('agenda por la fecha de fin de acceso cuando la baja ya está sellada', async () => {
+      await service.sendExpirationWarnings()
+
+      // Una pasada = un aviso por cada hito (7, 3, 1 y 0 días).
+      expect(subscriptionRepo.find).toHaveBeenCalledTimes(4)
+      const [porAcceso, porPeriodo] = subscriptionRepo.find.mock.calls[0][0].where
+
+      // Rama nueva: la baja pendiente manda, en CUALQUIER estado vigente.
+      expect(porAcceso.autoRenew).toBe(false)
+      expect(porAcceso.accessEndsAt).toBeDefined()
+      expect(porAcceso.currentPeriodEnd).toBeUndefined()
+      expect(porAcceso.status.value).toEqual([
+        SubscriptionStatus.TRIAL,
+        SubscriptionStatus.ACTIVE,
+        SubscriptionStatus.PAST_DUE,
+      ])
+
+      // Rama de siempre, intacta: sin fecha de corte sellada se agenda por período.
+      expect(porPeriodo.autoRenew).toBe(false)
+      expect(porPeriodo.currentPeriodEnd).toBeDefined()
+      expect(porPeriodo.status.value).toEqual([SubscriptionStatus.ACTIVE])
     })
   })
 })

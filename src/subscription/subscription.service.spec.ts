@@ -305,11 +305,15 @@ describe('SubscriptionService', () => {
       })
 
       // Reusa la fila existente: el índice único por brandId impide una segunda.
+      // `accessEndsAt: null` va en la MISMA lista de residuos del ciclo anterior: el
+      // ciclo nuevo no tiene baja pendiente, y la invariante de la columna es que sólo
+      // es no nula mientras la haya.
       expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({
         id: 'sub-1',
         status: SubscriptionStatus.TRIAL,
         cancelledAt: null,
         cancelReason: null,
+        accessEndsAt: null,
         retryCount: 0,
         lastPaymentId: null,
       }))
@@ -646,6 +650,11 @@ describe('SubscriptionService', () => {
   })
 
   describe('cancel', () => {
+    /** Fin del trial y fin del período de cobro, DISTINTOS a propósito: son las dos
+     *  fechas candidatas a fin de acceso y un caso que las confunda no discrimina. */
+    const FIN_TRIAL = new Date('2026-09-10T00:00:00.000Z')
+    const FIN_PERIODO = new Date('2026-10-01T00:00:00.000Z')
+
     /**
      * Fila de ConfioPagos tal cual la deja el alta: el `name` vive en
      * `metadata.confio.name` y `providerSubscriptionId` es el mismo valor.
@@ -659,8 +668,11 @@ describe('SubscriptionService', () => {
       providerSubscriptionId: CONFIO_NAME,
       status: SubscriptionStatus.TRIAL,
       autoRenew: true,
+      trialEnd: FIN_TRIAL,
+      currentPeriodEnd: FIN_PERIODO,
       cancelledAt: null,
       cancelReason: null,
+      accessEndsAt: null,
       metadata: { confio: { name: CONFIO_NAME } },
       ...over,
     })
@@ -698,23 +710,117 @@ describe('SubscriptionService', () => {
       expect(orden[0]).toBe('confio')
       expect(orden).toContain('save')
 
-      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      // La baja apaga la RENOVACIÓN, no el acceso: el estado vigente se conserva y
+      // lo que se sella es hasta cuándo dura lo ya pagado.
+      expect(subscription.status).toBe(SubscriptionStatus.TRIAL)
       expect(subscription.autoRenew).toBe(false)
       expect(subscription.cancelledAt).toBeInstanceOf(Date)
       expect(subscription.cancelReason).toBe('Ya no necesito el servicio')
+      expect(subscription.accessEndsAt).toBe(FIN_TRIAL)
 
       expect(eventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
           subscriptionId: 'sub-1',
           eventType: SubscriptionEventType.CANCELLED,
+          // La baja no mueve el estado: afirmar `toStatus: cancelled` sería mentir
+          // sobre la fila que quedó guardada.
           fromStatus: SubscriptionStatus.TRIAL,
-          toStatus: SubscriptionStatus.CANCELLED,
+          toStatus: SubscriptionStatus.TRIAL,
           triggeredBy: 'user-1',
           reason: 'Ya no necesito el servicio',
         }),
       )
-      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'dropi-roax')
       expect(result.data).toBeDefined()
+    })
+
+    /**
+     * EL PUNTO DE ESTA TAREA: la marca sigue teniendo el plan después de cancelar.
+     * El retiro es DIFERIDO y lo ejecuta el cron que lee `autoRenew = false` +
+     * `accessEndsAt` pasado, nunca esta llamada.
+     */
+    it('LA MARCA CONSERVA EL PLAN: no retira nada de roles en el camino feliz', async () => {
+      const subscription = filaConfio()
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(bajaEscrita()).toEqual({ filas: 1, eventos: 1, roles: 0 })
+    })
+
+    /**
+     * El estado vigente se conserva sea cual sea: la fila no se mueve a un estado
+     * terminal por pedir la baja, y la traza lo refleja (`fromStatus === toStatus`).
+     */
+    it.each([
+      [SubscriptionStatus.TRIAL],
+      [SubscriptionStatus.ACTIVE],
+      [SubscriptionStatus.PAST_DUE],
+    ])('una fila en %s conserva su estado y la traza no inventa una transición', async (estado) => {
+      const subscription = filaConfio({ status: estado })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      const [guardada] = subscriptionRepo.save.mock.calls[0]
+      expect(guardada.status).toBe(estado)
+      expect(guardada.autoRenew).toBe(false)
+
+      const traza = eventRepo.create.mock.calls[0][0]
+      expect(traza.eventType).toBe(SubscriptionEventType.CANCELLED)
+      expect(traza.fromStatus).toBe(estado)
+      expect(traza.toStatus).toBe(estado)
+    })
+
+    /**
+     * En trial el acceso ya pagado termina en `trialEnd`, NO en `currentPeriodEnd`:
+     * las dos fechas son distintas y tomar la equivocada regalaría (o cortaría) días.
+     */
+    it('en trial el acceso termina en trialEnd, no en el fin de período', async () => {
+      const subscription = filaConfio({ status: SubscriptionStatus.TRIAL })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      expect(subscription.accessEndsAt).toBe(FIN_TRIAL)
+      expect(subscription.accessEndsAt).not.toBe(FIN_PERIODO)
+      expect(eventRepo.create.mock.calls[0][0].metadata.accessEndsAt).toBe(FIN_TRIAL.toISOString())
+    })
+
+    it('fuera del trial el acceso termina al cerrar el período ya pagado', async () => {
+      const subscription = filaConfio({ status: SubscriptionStatus.ACTIVE })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      expect(subscription.accessEndsAt).toBe(FIN_PERIODO)
+    })
+
+    /**
+     * Sin ninguna fecha conocida el acceso termina YA: nunca se regala un período
+     * que nadie puede acotar, y la columna JAMÁS queda null tras una baja (es la
+     * invariante que el cron de retiro necesita para verla).
+     */
+    it('una fila sin fechas corta el acceso en el acto, nunca deja la columna en null', async () => {
+      const subscription = filaConfio({ trialEnd: null, currentPeriodEnd: null })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+
+      const antes = Date.now()
+      await service.cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+
+      expect(subscription.accessEndsAt).toBeInstanceOf(Date)
+      expect(subscription.accessEndsAt.getTime()).toBeGreaterThanOrEqual(antes)
+      expect(subscription.accessEndsAt.getTime()).toBeLessThanOrEqual(Date.now())
     })
 
     it('la traza lleva marca, usuario, plan y la referencia de ConfioPagos, sin providerEventId', async () => {
@@ -734,6 +840,8 @@ describe('SubscriptionService', () => {
           planSlug: 'dropi-roax',
           confirmadoPorConfio: true,
           providerRef: { name: CONFIO_NAME },
+          renovacionApagada: true,
+          accessEndsAt: FIN_TRIAL.toISOString(),
         }),
       )
       // `providerEventId` es el predicado de idempotencia del WEBHOOK: escribirlo
@@ -750,7 +858,8 @@ describe('SubscriptionService', () => {
       ['CONFIO_SUBSCRIPTION_NAME_INVALID'],
       ['CONFIO_CANCEL_UNAVAILABLE'],
     ])('%s propaga tal cual y no escribe NADA', async (code) => {
-      subscriptionRepo.findOne.mockResolvedValue(filaConfio())
+      const subscription = filaConfio()
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
       confioCancellation.cancel.mockRejectedValue(
         new RequestException({ code, message: 'no se pudo' }, 503),
       )
@@ -763,13 +872,16 @@ describe('SubscriptionService', () => {
       expect(error.code).toBe(code)
       expect(error.getStatus()).toBe(503)
       expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+      expect(subscription.accessEndsAt).toBeNull()
+      expect(subscription.autoRenew).toBe(true)
     })
 
     /**
      * RESTRICCIÓN 5: camino de reparación. Una fila ya terminal (sin la traza) se
      * vuelve a cancelar en ConfioPagos —es idempotente, medido 2026-08-27— y esta
      * vez SÍ deja su `SubscriptionEvent`. El `cancelledAt` que ya estaba no se
-     * re-sella, igual que hace el webhook.
+     * re-sella, igual que hace el webhook. Y la fila EXPIRED se queda EXPIRED: la
+     * baja no mueve estados, ni siquiera para "normalizar" uno terminal.
      */
     it('repara una fila terminal: re-cancela en Confío y deja el evento sin re-sellar cancelledAt', async () => {
       const sello = new Date('2026-08-01T00:00:00.000Z')
@@ -787,15 +899,23 @@ describe('SubscriptionService', () => {
       await service.cancel('brand-1', { reason: 'reintento', triggeredBy: 'user-1' })
 
       expect(confioCancellation.cancel).toHaveBeenCalledWith(CONFIO_NAME, 'reintento')
-      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.status).toBe(SubscriptionStatus.EXPIRED)
       expect(subscription.cancelledAt).toBe(sello)
+      // Un ciclo YA cerrado no tiene acceso que preservar: darle fecha de corte
+      // rompería la invariante («no nula ⇔ baja PENDIENTE») y, peor, la haría
+      // elegible para una SEGUNDA degradación en el cron de retiro. `finDeAcceso`
+      // devolvería `currentPeriodEnd`, que acá está en el FUTURO.
+      expect(subscription.accessEndsAt).toBeNull()
       expect(eventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
           eventType: SubscriptionEventType.CANCELLED,
           fromStatus: SubscriptionStatus.EXPIRED,
-          toStatus: SubscriptionStatus.CANCELLED,
+          toStatus: SubscriptionStatus.EXPIRED,
         }),
       )
+      // Y sin fecha de corte la traza no la inventa: la clave directamente no está.
+      expect(eventRepo.create.mock.calls[0][0].metadata).not.toHaveProperty('accessEndsAt')
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
     })
 
     it('un motivo en blanco es 422 CANCEL_REASON_REQUIRED, sin llamar a Confío ni escribir', async () => {
@@ -829,8 +949,9 @@ describe('SubscriptionService', () => {
       })
 
       expect(confioCancellation.cancel).not.toHaveBeenCalled()
-      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.status).toBe(SubscriptionStatus.ACTIVE)
       expect(subscription.autoRenew).toBe(false)
+      expect(subscription.accessEndsAt).toBe(FIN_PERIODO)
       expect(eventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({ eventType: SubscriptionEventType.CANCELLED }),
       )
@@ -873,15 +994,17 @@ describe('SubscriptionService', () => {
      * IDEMPOTENCIA. Una fila YA sellada y CON su traza describe una baja ya
      * registrada: el doble click en «cancelar» —o el reintento del cliente
      * después de un 200 que se perdió— no puede duplicar el `SubscriptionEvent`
-     * de la MISMA transición ni reescribir el motivo original. Es la otra mitad
-     * de la restricción 5: reparar sí, repetir no.
+     * de la MISMA transición, reescribir el motivo original ni MOVER la fecha de
+     * corte (mover `accessEndsAt` en el segundo click regalaría período).
      */
-    it('una baja YA registrada no duplica la traza ni pisa el motivo original', async () => {
+    it('una baja YA registrada no duplica la traza, ni pisa el motivo, ni re-sella el fin de acceso', async () => {
       const sello = new Date('2026-08-01T00:00:00.000Z')
+      const cortePrevio = new Date('2026-08-15T00:00:00.000Z')
       const subscription = filaConfio({
-        status: SubscriptionStatus.CANCELLED,
+        status: SubscriptionStatus.ACTIVE,
         cancelledAt: sello,
         cancelReason: 'motivo original',
+        accessEndsAt: cortePrevio,
         autoRenew: false,
       })
       subscriptionRepo.findOne.mockResolvedValue(subscription)
@@ -897,9 +1020,10 @@ describe('SubscriptionService', () => {
       expect(eventRepo.save).not.toHaveBeenCalled()
       expect(subscription.cancelReason).toBe('motivo original')
       expect(subscription.cancelledAt).toBe(sello)
-      // Roles SÍ se vuelve a llamar: el reintento puede venir justo de que esta
-      // llamada falló la primera vez, y saltearla dejaría el plan puesto.
-      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'dropi-roax')
+      expect(subscription.accessEndsAt).toBe(cortePrevio)
+      // El retiro del plan es del cron, no de acá: ni en la primera baja ni en el
+      // reintento se le toca el plan a la marca.
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
     })
 
     /**
@@ -963,7 +1087,7 @@ describe('SubscriptionService', () => {
       })
 
       expect(confioCancellation.cancel).not.toHaveBeenCalled()
-      expect(subscription.status).toBe(SubscriptionStatus.CANCELLED)
+      expect(subscription.status).toBe(SubscriptionStatus.ACTIVE)
       // El cron horario filtra por `autoRenew`: esto es lo que corta el cobro.
       expect(subscription.autoRenew).toBe(false)
       const traza = eventRepo.create.mock.calls[0][0]
@@ -1006,12 +1130,18 @@ describe('SubscriptionService', () => {
 
     /**
      * La relectura bajo lock existe porque entre la pre-lectura y la escritura
-     * hubo una llamada HTTP. Acá se ejerce de verdad: la fila cambió de plan en
-     * esa ventana y TODO —la traza y la baja en roles— sale de la fila releída.
+     * hubo una llamada HTTP. Acá se ejerce de verdad: la fila cambió de plan y de
+     * período en esa ventana, y TODO —la traza y la fecha de corte— sale de la
+     * fila releída, no de la pre-lectura.
      */
     it('usa la fila releída bajo lock, no la de la pre-lectura', async () => {
+      const otroPeriodo = new Date('2026-12-01T00:00:00.000Z')
       subscriptionRepo.findOne.mockResolvedValue(filaConfio())
-      const bajoLock = filaConfio({ planSlug: 'plan-nuevo', status: SubscriptionStatus.PAST_DUE })
+      const bajoLock = filaConfio({
+        planSlug: 'plan-nuevo',
+        status: SubscriptionStatus.PAST_DUE,
+        currentPeriodEnd: otroPeriodo,
+      })
       txManager.findOne.mockResolvedValue(bajoLock)
       subscriptionRepo.save.mockResolvedValue(bajoLock)
       eventRepo.create.mockImplementation((data) => data)
@@ -1021,7 +1151,7 @@ describe('SubscriptionService', () => {
       const traza = eventRepo.create.mock.calls[0][0]
       expect(traza.fromStatus).toBe(SubscriptionStatus.PAST_DUE)
       expect(traza.metadata.planSlug).toBe('plan-nuevo')
-      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-1', 'plan-nuevo')
+      expect(bajoLock.accessEndsAt).toBe(otroPeriodo)
     })
 
     /**
@@ -1044,7 +1174,7 @@ describe('SubscriptionService', () => {
   })
 
   describe('reactivate', () => {
-    it('reactiva una suscripción cancelada', async () => {
+    it('reactiva una suscripción de un ciclo ya cerrado', async () => {
       const subscription = {
         id: 'sub-1',
         brandId: 'brand-1',
@@ -1052,6 +1182,7 @@ describe('SubscriptionService', () => {
         status: SubscriptionStatus.CANCELLED,
         cancelledAt: new Date(),
         cancelReason: 'motivo',
+        accessEndsAt: new Date('2026-09-01T00:00:00.000Z'),
         autoRenew: false,
       }
       subscriptionRepo.findOne.mockResolvedValue(subscription)
@@ -1064,6 +1195,9 @@ describe('SubscriptionService', () => {
       expect(subscription.status).toBe(SubscriptionStatus.ACTIVE)
       expect(subscription.cancelledAt).toBeNull()
       expect(subscription.cancelReason).toBeNull()
+      // La fila vuelve a renovarse: dejarle la fecha de corte vieja mostraría un fin
+      // de acceso para una suscripción viva (y es la invariante de la columna).
+      expect(subscription.accessEndsAt).toBeNull()
       expect(subscription.autoRenew).toBe(true)
 
       // Verifica evento de reactivación
@@ -1077,16 +1211,70 @@ describe('SubscriptionService', () => {
       expect(result.data).toBeDefined()
     })
 
-    it('lanza error si la suscripción no está cancelada', async () => {
+    /**
+     * EL CASO QUE EL CORTE DIFERIDO EXISTE PARA PERMITIR: la baja ya no mueve el
+     * `status`, así que durante toda la ventana de gracia la fila sigue viva y
+     * `status === 'cancelled'` no puede ser el predicado de «está dada de baja».
+     * Gatear por el estado dejaba este endpoint respondiendo 422 para SIEMPRE.
+     */
+    it('deshace una baja PENDIENTE sin tocar el estado vigente de la fila', async () => {
+      const subscription = {
+        id: 'sub-1',
+        brandId: 'brand-1',
+        provider: SubscriptionProvider.WALLET,
+        // La fila que deja `cancel`: viva, con la renovación apagada y sellada.
+        status: SubscriptionStatus.TRIAL,
+        cancelledAt: new Date('2026-08-20T00:00:00.000Z'),
+        cancelReason: 'me arrepentí',
+        accessEndsAt: new Date('2026-09-10T00:00:00.000Z'),
+        autoRenew: false,
+      }
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      const result = await service.reactivate('brand-1', 'user-1')
+
+      expect(result.data).toBeDefined()
+      // Deshacer una baja que NO movió el estado tampoco lo mueve: forzar `active`
+      // sobre una fila en prueba le comería los días de trial que le quedan.
+      expect(subscription.status).toBe(SubscriptionStatus.TRIAL)
+      expect(subscription.autoRenew).toBe(true)
+      expect(subscription.cancelledAt).toBeNull()
+      expect(subscription.cancelReason).toBeNull()
+      // Ya no hay baja pendiente que datar (invariante de la columna).
+      expect(subscription.accessEndsAt).toBeNull()
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SubscriptionEventType.REACTIVATED,
+          fromStatus: SubscriptionStatus.TRIAL,
+          toStatus: SubscriptionStatus.TRIAL,
+        }),
+      )
+    })
+
+    it('una fila que nunca se dio de baja es 422 SUBSCRIPTION_NOT_CANCELLED', async () => {
       const subscription = {
         id: 'sub-1',
         brandId: 'brand-1',
         provider: SubscriptionProvider.WALLET,
         status: SubscriptionStatus.ACTIVE,
+        // Lo que la distingue de una baja pendiente NO es el `status` —el de arriba
+        // es idéntico— sino el sello ausente.
+        cancelledAt: null,
+        accessEndsAt: null,
+        autoRenew: true,
       }
       subscriptionRepo.findOne.mockResolvedValue(subscription)
 
-      await expect(service.reactivate('brand-1', 'user-1')).rejects.toThrow(RequestException)
+      const error = await service.reactivate('brand-1', 'user-1').catch((e) => e)
+
+      expect(error).toBeInstanceOf(RequestException)
+      expect(error.code).toBe('SUBSCRIPTION_NOT_CANCELLED')
+      expect(error.getStatus()).toBe(422)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(eventRepo.save).not.toHaveBeenCalled()
     })
 
     /**

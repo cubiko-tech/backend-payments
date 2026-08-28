@@ -64,6 +64,30 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ESTADOS_TERMINALES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
 
 /**
+ * ¿La fila tiene una baja NUESTRA todavía en curso?
+ *
+ * Es la invariante de `accessEndsAt` (`subscription.entity.ts`) leída desde este
+ * lado: sello local + acceso ya pagado que aún no venció. Desde
+ * `cancelar-marca-baja-al-fin-de-periodo` la baja NO mueve el `status` —la fila se
+ * queda en `trial`/`active`/`past_due` mientras le debamos el servicio—, así que
+ * `ESTADOS_TERMINALES.includes(sub.status)` dejó de alcanzar para reconocer una
+ * suscripción que del lado de ConfioPagos ya está cancelada. Este predicado es la
+ * mitad que faltaba, y las dos guardas del archivo lo usan: la que ignora el eco de
+ * nuestra propia baja y la que impide resucitarla con un cobro tardío.
+ *
+ * Discrimina por la FECHA, no sólo por el sello: una vez vencido el acceso la fila
+ * vuelve a ser un caso terminal común y el webhook la trata como siempre. La fecha
+ * pasa por `aFecha` como todo lo que este archivo lee de la fila: una columna que no
+ * vuelva como `Date` (o un `Invalid Date`) tiene que caer del lado de «no hay baja
+ * pendiente», que es el comportamiento de siempre, y nunca reventar el handler.
+ */
+function bajaPendiente(sub: Subscription): boolean {
+  const finDeAcceso = aFecha(sub.accessEndsAt)
+
+  return !!sub.cancelledAt && !!finDeAcceso && !estaVencido(finDeAcceso)
+}
+
+/**
  * Efecto YA DECIDIDO de un webhook, antes de tocar la base.
  *
  * Se calcula fuera de la transacción (incluida la consulta al proveedor, que es
@@ -255,10 +279,18 @@ export class ConfioSubscriptionWebhookService {
     // la fila bloqueada), pero conceder pro por el cobro de una suscripción que
     // consideramos muerta es la mitad IRREVERSIBLE: se decide ACÁ, no después de
     // haber empujado el movimiento a roles.
-    const revive = ESTADOS_TERMINALES.includes(sub.status)
+    //
+    // Una baja PENDIENTE cuenta como muerta a estos efectos, y por eso el predicado
+    // no es sólo el `status`: la fila sigue en `trial`/`active` porque le debemos el
+    // acceso ya pagado, pero del lado de ConfioPagos ya está `CANCELED` y no vuelve
+    // a cobrar. Un `SUCCEEDED` que llegue después —un link one-shot emitido ANTES de
+    // la baja y pagado a destiempo, o un cobro en vuelo— no puede volver a comprar
+    // el plan: la vuelta es un alta nueva por checkout, con pago propio.
+    const revive = ESTADOS_TERMINALES.includes(sub.status) || bajaPendiente(sub)
     if (revive) {
+      const porQue = ESTADOS_TERMINALES.includes(sub.status) ? sub.status : 'dada de baja'
       this.logger.warn(
-        `Confio cobro exitoso sobre una suscripción ${sub.status} (${sub.id}): no se repone el plan en roles`,
+        `Confio cobro exitoso sobre una suscripción ${porQue} (${sub.id}): no se repone el plan en roles`,
       )
     }
 
@@ -448,6 +480,33 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
+    const esTerminal = ESTADOS_TERMINALES.includes(toStatus)
+
+    // EL ECO DE NUESTRA PROPIA BAJA. `SubscriptionService.cancel` cancela PRIMERO en
+    // ConfioPagos y ellos devuelven el hecho por webhook: ese `CANCELED` describe la
+    // MISMA baja que nosotros ya sellamos, no una decisión del proveedor. La guarda
+    // de arriba no lo agarra porque desde el corte diferido la fila NO queda
+    // terminal, y sin ésta el camino principal de la baja quedaba anulado:
+    //   (a) `efectoRoles('degradar')` le sacaba el plan a la marca segundos después
+    //       de que la baja se lo conservó — la aceptación entera de
+    //       `cancelar-marca-baja-al-fin-de-periodo` sólo era cierta en los tests;
+    //   (b) `aplicar` escribía un SEGUNDO `SubscriptionEvent` CANCELLED del mismo
+    //       hecho, que es lo que la idempotencia de `cancel` existe para evitar;
+    //   (c) quedaba `status = cancelled` con `accessEndsAt` NO nula, rompiendo la
+    //       invariante de la columna y dejando a la fila lista para una SEGUNDA
+    //       degradación cuando aterrice el cron de retiro.
+    // Mientras le debamos el acceso ya pagado esto es SIN EFECTO —ni roles, ni
+    // estado, ni traza—: la degradación tiene un solo dueño, el cron que barre
+    // `autoRenew = false` + `accessEndsAt` vencida. Una vez pasada esa fecha
+    // `bajaPendiente` deja de valer y el terminal se aplica como siempre.
+    if (esTerminal && bajaPendiente(sub)) {
+      this.logger.log(
+        `Confio ${wire} sobre la baja que ya registramos (${sub.id}): sin efecto, ` +
+          `el acceso pagado corre hasta ${aFecha(sub.accessEndsAt).toISOString()}`,
+      )
+      return null
+    }
+
     // Dos escalones distintos y un solo predicado para cada uno:
     // - `PAST_DUE`/`SUSPENDED` (los dos wire states que el mapa manda a
     //   `past_due`) son MORA: se retira el plan pago y NADA más. Un primer cobro
@@ -460,7 +519,6 @@ export class ConfioSubscriptionWebhookService {
     // plan, porque ese efecto no trae período y no habría `expiresAt` honesto
     // que prometerle a roles sin inventarlo. La reposición la dispara el cobro
     // `SUCCEEDED`, que es lo que pide la regla de negocio.
-    const esTerminal = ESTADOS_TERMINALES.includes(toStatus)
     const roles = esTerminal
       ? this.efectoRoles('degradar', sub)
       : toStatus === SubscriptionStatus.PAST_DUE

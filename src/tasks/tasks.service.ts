@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, Repository } from 'typeorm'
+import { DataSource, LessThan, In, Between, IsNull, Repository } from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
@@ -130,6 +130,14 @@ export class TasksService {
       where: {
         status: SubscriptionStatus.TRIAL,
         nextBillingDate: LessThan(now),
+        // ⚠️ DINERO. La baja (`SubscriptionService.cancel`) ya no mueve la fila a
+        // `cancelled`: apaga `autoRenew` y la deja en su estado vigente, así que un
+        // trial dado de baja SIGUE siendo `trial` y sin este filtro volvería a caer
+        // acá. Si además es `provider = 'wallet'` con `walletId`, `renewFromWallet`
+        // debitaría la wallet de alguien que ya se dio de baja. Hoy es un no-op
+        // (ninguna fila viva combina `trial` con `autoRenew = false`); el filtro es
+        // el candado para mañana.
+        autoRenew: true,
       },
     })
 
@@ -549,12 +557,34 @@ export class TasksService {
       const rangeEnd = new Date(targetDate)
       rangeEnd.setHours(23, 59, 59, 999)
 
+      // Dos ramas porque hay dos fuentes posibles para la fecha del aviso, y la
+      // buena depende de si la fila tiene una baja sellada:
+      //  - Con `accessEndsAt` (baja PENDIENTE) esa columna ES el fin del servicio y
+      //    manda. Agendar por `currentPeriodEnd` avisaba tarde a una fila en prueba
+      //    —ahí el corte es `trialEnd`, otro día— y el filtro `active` directamente
+      //    la dejaba afuera: desde el corte diferido la baja ya no mueve el `status`,
+      //    así que la fila se queda en `trial`/`past_due`.
+      //  - Sin ella se conserva el criterio de siempre (`currentPeriodEnd` sobre una
+      //    fila `active` que no auto-renueva). `IsNull()` mantiene las dos ramas
+      //    DISJUNTAS: ninguna fila puede recibir el mismo aviso dos veces.
       const subscriptions = await this.subscriptionRepo.find({
-        where: {
-          status: In([SubscriptionStatus.ACTIVE]),
-          autoRenew: false, // Solo avisar a los que NO auto-renuevan
-          currentPeriodEnd: Between(rangeStart, rangeEnd),
-        },
+        where: [
+          {
+            status: In([
+              SubscriptionStatus.TRIAL,
+              SubscriptionStatus.ACTIVE,
+              SubscriptionStatus.PAST_DUE,
+            ]),
+            autoRenew: false, // Solo avisar a los que NO auto-renuevan
+            accessEndsAt: Between(rangeStart, rangeEnd),
+          },
+          {
+            status: In([SubscriptionStatus.ACTIVE]),
+            autoRenew: false,
+            accessEndsAt: IsNull(),
+            currentPeriodEnd: Between(rangeStart, rangeEnd),
+          },
+        ],
       })
 
       for (const sub of subscriptions) {

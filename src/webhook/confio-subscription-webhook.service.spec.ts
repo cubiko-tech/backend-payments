@@ -412,6 +412,84 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
     })
   })
 
+  // ------------------------------------------- (1.b) el eco de nuestra propia baja
+  /**
+   * `SubscriptionService.cancel` cancela PRIMERO en ConfioPagos y ellos devuelven
+   * el hecho por webhook: ese `CANCELED` describe la MISMA baja que nosotros ya
+   * sellamos, no una decisión del proveedor.
+   *
+   * Sin distinguirlo, el corte diferido de `cancelar-marca-baja-al-fin-de-periodo`
+   * quedaba anulado en su camino PRINCIPAL: la guarda de idempotencia terminal ya
+   * no da corto (la fila se queda en `trial`/`active`), así que el webhook degradaba
+   * a `free` segundos después de que la baja conservó el plan, escribía un SEGUNDO
+   * `SubscriptionEvent` CANCELLED del mismo hecho y dejaba `status = cancelled` con
+   * `accessEndsAt` NO nula — justo lo que la invariante de la columna prohíbe.
+   *
+   * Rojo si: se quita la guarda `bajaPendiente` de `planearCambioDeEstado`.
+   */
+  describe('el terminal que ConfioPagos devuelve detrás de NUESTRA baja no tiene efecto', () => {
+    /** Fila tal cual la deja `cancel`: viva, sellada y con acceso pagado por delante. */
+    const conBajaPendiente = (over: Record<string, any> = {}) =>
+      suscripcion({
+        cancelledAt: new Date('2026-01-14T09:59:00Z'),
+        // Posterior a AHORA (2026-01-14): el acceso ya pagado sigue vigente.
+        accessEndsAt: new Date('2026-02-01T00:00:00Z'),
+        autoRenew: false,
+        ...over,
+      })
+
+    it.each([['CANCELED'], ['EXPIRED']])(
+      '%s sobre una baja pendiente no degrada, no mueve el estado y no deja traza',
+      async (wire) => {
+        conSuscripcion(conBajaPendiente())
+
+        await despachar(cambioDeEstado(wire))
+
+        expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        // Ni fila ni historial: la degradación tiene UN dueño, el cron de retiro.
+        expect(dataSource.transaction).not.toHaveBeenCalled()
+        expect(manager.save).not.toHaveBeenCalled()
+      },
+    )
+
+    /**
+     * El predicado DISCRIMINA: lo que suprime el efecto no es «hay `cancelledAt`»
+     * sino «todavía le debemos acceso». Con la fecha de corte ya vencida el webhook
+     * degrada como siempre.
+     */
+    it('con el acceso ya vencido el mismo CANCELED sí degrada', async () => {
+      conSuscripcion(conBajaPendiente({ accessEndsAt: new Date('2026-01-10T00:00:00Z') }))
+
+      await despachar(cambioDeEstado('CANCELED'))
+
+      expect(roles.removePlanFromBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(BRAND_ID, 'free')
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.CANCELLED)
+    })
+
+    /**
+     * La otra mitad: un `SUCCEEDED` tardío (un link one-shot emitido ANTES de la
+     * baja y pagado después, o un cobro en vuelo) no puede volver a comprar el plan.
+     * La guarda de resurrección miraba sólo `status`, que con el corte diferido ya
+     * no es terminal, así que reponía el acceso de una suscripción cancelada del
+     * lado de ConfioPagos.
+     *
+     * Rojo si: `revive` vuelve a ser sólo `ESTADOS_TERMINALES.includes(sub.status)`.
+     */
+    it('un cobro exitoso tardío sobre una baja pendiente NO repone el plan en roles', async () => {
+      conSuscripcion(conBajaPendiente())
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(roles.renewPlanForBrand).not.toHaveBeenCalled()
+      // El hecho del cobro sí se registra: lo que no se concede es el acceso.
+      expect(historial()).toHaveLength(1)
+      expect(historial()[0].metadata.roles).toBeUndefined()
+    })
+  })
+
   /**
    * El `status` es texto de la red y el mapa de estados es un object literal: sin
    * `hasOwnProperty` una clave heredada del prototipo devuelve una FUNCIÓN (o

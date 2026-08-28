@@ -189,6 +189,16 @@ export class AdminController {
 
     sub.currentPeriodEnd = newEnd
     sub.nextBillingDate = newEnd
+    // Con una baja PENDIENTE el acceso lo gobierna `accessEndsAt`, no el período
+    // (ver la invariante en `subscription.entity.ts`): mover sólo `currentPeriodEnd`
+    // no le daría a la marca ni un día más de servicio. Se corre lo MISMO que el
+    // período, y sólo si la columna ya tenía fecha: escribirla acá afirmaría una
+    // baja que nadie pidió y dejaría la fila lista para el cron de retiro.
+    if (sub.accessEndsAt) {
+      const nuevoFinDeAcceso = new Date(sub.accessEndsAt)
+      nuevoFinDeAcceso.setDate(nuevoFinDeAcceso.getDate() + body.days)
+      sub.accessEndsAt = nuevoFinDeAcceso
+    }
     if (sub.status === SubscriptionStatus.PAST_DUE || sub.status === SubscriptionStatus.EXPIRED) {
       sub.status = SubscriptionStatus.ACTIVE
       sub.retryCount = 0
