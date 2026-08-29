@@ -332,6 +332,37 @@ describe('WebhookController (confio)', () => {
   })
 
   describe('eventos fuera del contrato', () => {
+    /**
+     * Un evento que no reconocemos no dice qué credencial esperar, pero eso no
+     * lo vuelve anónimo. Hasta el 2026-08-29 el `return { ignored: true }`
+     * estaba POR ENCIMA de la autenticación: cualquiera mandaba un JSON con un
+     * `event` inventado, recibía 200 y escribía un warn por request — un
+     * oráculo de qué eventos reconoce el sistema y una vía de ruido en el log
+     * (CWE-306). No despachaba ni persistía nada, pero contestaba.
+     *
+     * Mutación M1: mover la llamada a `autenticarRamoOneShot` por debajo del
+     * `return`, o borrarla → los dos casos anónimos se ponen rojos.
+     */
+    it.each([
+      ['sin Authorization', ''],
+      ['con un bearer que no es ninguna de las dos claves', 'Bearer no-soy-nadie'],
+    ])('%s responde 401 y no escribe log', async (_caso, authorization) => {
+      const { controller, receive, warn } = await construirController({
+        ENV: 'production',
+        CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
+      })
+
+      await expect(
+        controller.confio(
+          authorization,
+          reqCon({ event: 'invoice.created', data: { name: 'x' }, timestamp: TIMESTAMP }),
+        ),
+      ).rejects.toBeInstanceOf(HttpException)
+
+      expect(receive).not.toHaveBeenCalled()
+      expect(lineas(warn)).not.toContain('fuera del contrato')
+    })
+
     it('responde 200 ignorado sin despachar', async () => {
       const { controller, receive } = await construirController({
         ENV: 'production',

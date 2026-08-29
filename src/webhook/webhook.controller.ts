@@ -193,8 +193,18 @@ export class WebhookController {
     // Fuera del contrato: no sabemos cómo autenticarlo, así que no se despacha.
     // Se responde 200 igual para que Confío no reintente en bucle un evento que
     // nunca vamos a aceptar.
+    //
+    // Pero primero se AUTENTICA. No saber qué credencial espera un evento no lo
+    // vuelve anónimo: se exige la del ramo one-shot, que acepta cualquiera de las
+    // dos claves que ya conocemos, así que un llamador legítimo pasa igual que
+    // antes. Hasta acá el `return` de abajo estaba por encima de esto y un
+    // anónimo mandaba cualquier JSON con un `event` inventado, recibía 200 y
+    // escribía un warn por request: le regalaba un oráculo de qué eventos
+    // reconoce el sistema y una vía de ruido en el log (CWE-306).
     const ramo = classifyConfioWebhookEvent(payload.event)
     if (ramo === 'fuera_de_contrato') {
+      this.autenticarRamoOneShot(rawBody, bearer)
+
       this.logger.warn(
         `Webhook ConfioPagos ignorado: evento fuera del contrato "${ecoDeLog(payload.event)}"`,
       )
