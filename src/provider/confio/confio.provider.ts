@@ -9,6 +9,7 @@ import {
   CreateSubscriptionParams,
   SaveMethodParams,
 } from '../provider.interface'
+import { isProductionEnv } from '../../shared/env/is-production'
 import { logger } from '../../shared/logger/logger'
 import { ConfioSubscriptionInputError } from './confio-subscription-error'
 import { assertConfioBuyer } from './confio-buyer'
@@ -86,7 +87,7 @@ export class ConfioProvider implements PaymentProvider {
   constructor() {
     this.baseUrl =
       process.env.CONFIO_API_BASE_URL ||
-      (process.env.GO_ENV === 'production' || process.env.NODE_ENV === 'production'
+      (isProductionEnv()
         ? 'https://api.confiopagos.com/v1'
         : 'https://api.dev.confiopagos.com/v1')
 
@@ -531,7 +532,7 @@ export class ConfioProvider implements PaymentProvider {
   validateWebhookSignature(_payload: Buffer, signature: string): boolean {
     if (!this.accessToken) {
       // Sin token configurado: solo permitir fuera de producción.
-      const isProd = process.env.GO_ENV === 'production' || process.env.NODE_ENV === 'production'
+      const isProd = isProductionEnv()
       if (isProd) {
         logger.log('error', 'ConfioProvider: access token no configurado en producción — webhook rechazado')
         return false
