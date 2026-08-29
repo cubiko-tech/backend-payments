@@ -414,16 +414,19 @@ export class SubscriptionService {
   /**
    * Re-pedir el link de aceptación de la suscripción de una marca.
    *
-   * SIN RUTA HTTP a propósito. El `acceptanceUrl` es un link PORTADOR
-   * (`confio.types.ts:158`) y este controller es autenticación SOLA, sin ningún
-   * `@RequirePermission` (`subscription.controller.ts:29`): un
-   * `GET /subscription/acceptance-link?brandId=` le daría a CUALQUIER usuario
-   * autenticado el link de CUALQUIER marca. Hoy ese link sólo se obtiene creando el
-   * trial, y los guards de una-prueba-por-marca cierran ese camino.
+   * La ruta HTTP ya existe: `GET /subscription/acceptance-link`
+   * (`subscription.controller.ts`). El `acceptanceUrl` es un link PORTADOR
+   * (`confio.types.ts:158`) y este controller sigue siendo autenticación SOLA, sin
+   * ningún `@RequirePermission`, así que el reparo que este bloque advertía —que
+   * cualquier usuario autenticado pidiera el link de cualquier marca— quedó acotado
+   * por dónde sale el `brandId`, no por un permiso: `resolveBrandId` le entrega al
+   * principal usuario SU propia marca (`req.user.brand`) e ignora el query, y sólo
+   * el principal de servicio (`ACCESS_SERVER` / superadmin) puede nombrar una marca
+   * ajena. Un usuario ya no puede pedir el link de una marca que no es la suya.
    *
-   * La ruta la agrega `front-alta-de-suscripcion`, su único consumidor, y cuando se
-   * agregue el `brandId` tiene que salir de `req.user`, no del query. El método se
-   * entrega probado para que esa tarea sea sólo cablear.
+   * Lo que NO cubre esa regla: `req.user.brand` es un claim del token, no una
+   * verificación de pertenencia contra backend-platform (ver la deuda anotada en
+   * `resolveBrandId`), y el principal de servicio sigue siendo confianza total.
    */
   async getAcceptanceLink(brandId: string) {
     const subscription = await this.subscriptionReadRepository.findOne({ where: { brandId } })

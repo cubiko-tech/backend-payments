@@ -1,15 +1,18 @@
 import {
   Controller,
   Get,
+  HttpStatus,
   Post,
   Patch,
   Delete,
   Body,
   Param,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequestException } from '../shared/exception/request.exception'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
@@ -33,14 +36,18 @@ import { CreateSubscriptionDto } from './dto/create-subscription.dto'
  * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
  * si hacen falta, son una decisión aparte.
  *
- * ⚠️ CONSECUENCIA ABIERTA: el `brandId` viaja en el query o en el body y NINGÚN
- * handler lo compara contra `req.user.brand`, que `ApiAuthGuard` ya resolvió. O
- * sea que un usuario autenticado puede leer, cambiar de plan o dar de baja la
- * suscripción de CUALQUIER marca. Es deuda conocida y anotada en el INBOX de
- * roax-ops (autorización por marca en `subscription.controller`); no se cierra acá
- * porque exige decidir qué pasa con los llamadores server-to-server y con los
- * superadmins. Lo que SÍ se cerró es lo que esa lectura habilitaba: el alta
- * genérica ya no acepta campos arbitrarios (ver `create` más abajo).
+ * ⚠️ CONSECUENCIA ABIERTA, YA NO ENTERA: las tres LECTURAS (`GET /subscription`,
+ * `/acceptance-link` y `/history`) sí resuelven la marca contra `req.user` — la
+ * regla completa está en `resolveBrandId`, al final de la clase. Lo que sigue
+ * abierto son las ESCRITURAS: `create`, `startTrial`, `changePlan`, `cancel` y
+ * `reactivate` toman el `brandId` del BODY y NINGUNA lo compara contra
+ * `req.user.brand`, así que un usuario autenticado todavía puede cambiar de plan o
+ * dar de baja la suscripción de CUALQUIER marca. Es deuda conocida y anotada en el
+ * INBOX de roax-ops (autorización por marca en `subscription.controller`); queda
+ * deliberadamente fuera de esta tarea porque un body es un contrato con más
+ * llamadores que un query y exige decidir qué pasa con cada uno. Lo que SÍ se cerró
+ * antes es lo que esa lectura habilitaba: el alta genérica ya no acepta campos
+ * arbitrarios (ver `create` más abajo).
  */
 @ApiTags('Subscription')
 @Controller('subscription')
@@ -54,8 +61,10 @@ export class SubscriptionController {
   @Get()
   @ApiOperation({ summary: 'Obtener suscripción actual de una marca' })
   @ApiResponse({ status: 200, description: 'Suscripción obtenida correctamente' })
-  async getCurrent(@Query('brandId') brandId: string) {
-    return this.subscriptionService.getCurrent(brandId)
+  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  async getCurrent(@Query('brandId') brandId: string, @Req() req: any) {
+    return this.subscriptionService.getCurrent(this.resolveBrandId(brandId, req))
   }
 
   /**
@@ -70,9 +79,11 @@ export class SubscriptionController {
   @Get('acceptance-link')
   @ApiOperation({ summary: 'Obtener el link de aceptación vigente de una marca' })
   @ApiResponse({ status: 200, description: 'Link de aceptación obtenido' })
+  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
-  async getAcceptanceLink(@Query('brandId') brandId: string) {
-    return this.subscriptionService.getAcceptanceLink(brandId)
+  async getAcceptanceLink(@Query('brandId') brandId: string, @Req() req: any) {
+    return this.subscriptionService.getAcceptanceLink(this.resolveBrandId(brandId, req))
   }
 
   /**
@@ -139,8 +150,10 @@ export class SubscriptionController {
   @Get('history')
   @ApiOperation({ summary: 'Historial de eventos de suscripción' })
   @ApiResponse({ status: 200, description: 'Historial obtenido correctamente' })
-  async getHistory(@Query('brandId') brandId: string) {
-    return this.subscriptionService.getHistory(brandId)
+  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  async getHistory(@Query('brandId') brandId: string, @Req() req: any) {
+    return this.subscriptionService.getHistory(this.resolveBrandId(brandId, req))
   }
 
   // ============================================
@@ -186,5 +199,53 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Precio enterprise eliminado' })
   async removeEnterprisePricing(@Param('brandId') brandId: string) {
     return this.enterprisePricingService.remove(brandId)
+  }
+
+  /**
+   * De qué marca es la lectura. Regla ÚNICA de las tres lecturas del controller,
+   * escrita una sola vez para que no puedan divergir entre sí.
+   *
+   * - Principal de SERVICIO (`isSuperAdmin`): se honra el `brandId` del query tal
+   *   cual. Es el único que puede nombrar una marca ajena, y tiene que poder: el
+   *   `ACCESS_SERVER` llega como `{ id: 'server', isSuperAdmin: true, brand: null }`
+   *   —no tiene marca propia—, así que sin el query no podría direccionar nada. Por
+   *   eso mismo, si el query falta, es 400 y no un fallback silencioso a "ninguna".
+   * - Principal USUARIO: se lee SU marca y el query se IGNORA, incluso si trae otra.
+   *   Se ignora en vez de rechazar por dos razones. Una, un 400 ante el desacuerdo
+   *   convertiría el endpoint en un oráculo de existencia de marcas —el mismo motivo
+   *   por el que `credit.controller` no distingue la causa de su 403—. Dos, los
+   *   llamadores de hoy mandan su propio `brandId` en el query y rechazarlos los
+   *   rompería sin ganar nada: la propiedad que importa es que por ningún camino
+   *   salga el dato de la marca del query, y ignorarla ya la cumple.
+   * - Usuario SIN marca: 403 con el mismo `{ error: 'forbidden', code: 'forbidden' }`
+   *   que usa el guard, para que el cliente no pueda distinguir "no tengo marca" de
+   *   "no tengo permiso".
+   *
+   * El chequeo por falsy cubre a la vez el `brandId` ausente (`undefined`) y el
+   * vacío (`?brandId=` llega como `''`), igual que `credit.controller.ts`.
+   *
+   * ⚠️ DEUDA RESIDUAL: `req.user.brand` es un CLAIM, no una verificación de
+   * pertenencia. Sale del JWT local (`payload.brand`) o de lo que devuelve
+   * backend-auth (`body.data.brand`), y acá no se contrasta contra backend-platform
+   * como sí hace `credit.controller.preapproval` con `canViewBrandCredit`. Un token
+   * con una marca vieja sigue leyendo esa marca; cerrarlo exige el mismo llamado
+   * cross-servicio y es una decisión aparte.
+   */
+  private resolveBrandId(brandId: string, req: any): string {
+    if (req?.user?.isSuperAdmin) {
+      if (!brandId) {
+        throw new RequestException(
+          { code: 'BRAND_ID_REQUIRED', message: 'brandId es obligatorio para un principal de servicio' },
+          HttpStatus.BAD_REQUEST,
+        )
+      }
+      return brandId
+    }
+
+    const brand = req?.user?.brand
+    if (!brand) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
+    return brand
   }
 }

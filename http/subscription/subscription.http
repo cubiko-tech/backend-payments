@@ -5,7 +5,36 @@
 @WALLET_ID = 00000000-0000-0000-0000-000000000001
 
 ### Obtener suscripción actual de la marca
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
 GET {{HOST}}/subscription?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
+### Obtener el link de aceptación vigente
+# Re-pide el link a ConfioPagos en vez de devolver uno guardado: el `acceptanceUrl`
+# es un link PORTADOR —quien lo tenga registra una tarjeta— y por eso no se persiste.
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
+# 404 SUBSCRIPTION_NOT_FOUND: la marca no tiene suscripción.
+# 422 NO_CONFIO_SUBSCRIPTION: la fila no es de ConfioPagos (o no tiene resource
+#     name), así que no hay link que re-pedir.
+GET {{HOST}}/subscription/acceptance-link?brandId={{BRAND_ID}} HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 
 ### Crear suscripción
@@ -190,5 +219,15 @@ Content-Type: application/json
 }
 
 ### Historial de eventos de suscripción
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
 GET {{HOST}}/subscription/history?brandId={{BRAND_ID}} HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
