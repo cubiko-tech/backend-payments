@@ -549,7 +549,22 @@ export class CheckoutService implements OnModuleInit {
    * Resolver monto y moneda según el tipo de checkout.
    */
   private async resolveAmountAndCurrency(req: CheckoutRequest): Promise<ResolvedPricing> {
-    if (req.purpose === 'plan_purchase' && req.planSlug) {
+    // El `planSlug` es parte del CONTRATO de `plan_purchase`, no un opcional: la rama
+    // NO se gatea con `&& req.planSlug`. Cuando lo hacía, una compra de plan sin slug
+    // caía a la rama genérica de abajo y cobraba el `amount`/`currency` que eligió el
+    // llamador, con `purposeId=null`, la wallet debitada y una factura "Plan undefined";
+    // el precio por país nunca se consultaba. Ahora entra siempre y la guarda decide.
+    //
+    // Se reusa el 400 `INVALID_PLAN_SLUG` en vez de crear un `MISSING_PLAN_SLUG`: es la
+    // simetría exacta de `INVALID_BRAND_ID`, que ya cubre "ausente o que no es un UUID",
+    // y no obliga a ningún cliente a aprender un código nuevo para el mismo rechazo.
+    //
+    // Vale también para `renewal: true`: la indulgencia del cron (`renewalPlanPrice`)
+    // está acotada por diseño a los CÓDIGOS de resolución de país/precio, no al
+    // contrato —sin slug no hay precio legacy que resolver—. Ese caso ya moría antes,
+    // sólo que con `MISSING_AMOUNT`; para `TasksService` el desenlace observable sigue
+    // siendo excepción → `past_due`, ahora con un código que dice la verdad.
+    if (req.purpose === 'plan_purchase') {
       this.assertUsablePlanSlug(req.planSlug)
 
       // Moneda pedida por el llamador. Sobrevive SÓLO para el precio negociado
@@ -776,9 +791,15 @@ export class CheckoutService implements OnModuleInit {
    * Un slug con `\n` inyecta líneas falsas en el log (CWE-117) y uno con `/` o `?`
    * reescribe la ruta de `assignPlanToBrand`. El catálogo real usa `a-z`, `0-9`,
    * `-` y `_` (`dropi-roax`, `ally_dropi_pro`), así que la clase es holgada.
+   *
+   * El `typeof` es LOAD-BEARING, no ruido defensivo: `regex.test(undefined)` coacciona
+   * el argumento a la cadena `"undefined"`, que MATCHEA la clase y pasaría la guarda.
+   * Sin él, exigir el slug en la rama de plan no cerraría la ausencia —justo el caso
+   * que esta guarda tiene que rechazar—. El valor crudo no se loguea ni se devuelve:
+   * es texto libre del llamador (CWE-117), la misma razón por la que existe la clase.
    */
   private assertUsablePlanSlug(planSlug: string) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(planSlug)) {
+    if (typeof planSlug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(planSlug)) {
       throw new RequestException(
         { code: 'INVALID_PLAN_SLUG', message: 'planSlug inválido' },
         HttpStatus.BAD_REQUEST,

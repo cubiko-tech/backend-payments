@@ -12,7 +12,9 @@
 # NOTA (alta de plan): en `plan_purchase` el precio se resuelve por `brand.country`
 # contra el catálogo de backend-roles y la moneda es un dato DERIVADO de la fila de
 # precio (o de la fila negociada, en enterprise): `currency` se IGNORA y por eso no
-# aparece en estos ejemplos. `brandId` debe ser un UUID o la request se rechaza con
+# aparece en estos ejemplos. El `planSlug` es OBLIGATORIO en `plan_purchase`: su
+# ausencia se rechaza con 400 INVALID_PLAN_SLUG y nunca cobra el `amount`/`currency`
+# que mande el llamador. `brandId` debe ser un UUID o la request se rechaza con
 # 400 INVALID_BRAND_ID, y si se paga con wallet hay que mandar `walletId` (400
 # MISSING_WALLET_ID), la wallet tiene que ser de esa marca (404 WALLET_NOT_FOUND) y
 # estar en la moneda resuelta (422 WALLET_CURRENCY_MISMATCH).

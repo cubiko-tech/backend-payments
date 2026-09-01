@@ -396,6 +396,79 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
   })
 
+  /**
+   * El `planSlug` es parte del CONTRATO de `plan_purchase`, no un extra opcional:
+   * sin él no hay plan que comprar y el precio por país no se puede resolver.
+   * Antes la rama de plan se gateaba con `&& req.planSlug`, así que una compra sin
+   * slug caía a la rama genérica y cobraba el `amount`/`currency` que mandaba el
+   * llamador, dejando una fila de `payments` con `purpose=plan_purchase` y
+   * `purposeId=null`, la wallet debitada y una factura "Plan undefined".
+   */
+  describe('planSlug obligatorio en la compra de plan', () => {
+    const ausentes: Array<[string, any]> = [
+      ['ausente', undefined],
+      ['null', null],
+      ['vacío', ''],
+      ['sólo espacios', '   '],
+    ]
+
+    it.each(ausentes)('planSlug %s → 400 INVALID_PLAN_SLUG sin consultar nada', async (_label, planSlug) => {
+      expect.assertions(6)
+      try {
+        await service.processCheckout(altaConWallet({ planSlug }))
+      } catch (error) {
+        expect((error as RequestException).code).toBe('INVALID_PLAN_SLUG')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      }
+      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+      expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+      expect(walletService.debit).not.toHaveBeenCalled()
+    })
+
+    /**
+     * La regresión exacta que cierra la tarea: con `amount`/`currency` en la request,
+     * la compra sin slug cobraba 1 USD elegidos por el llamador.
+     */
+    it('no cobra el amount/currency del llamador cuando falta el planSlug', async () => {
+      await expect(
+        service.processCheckout(altaConWallet({ planSlug: undefined, amount: 1, currency: 'USD' })),
+      ).rejects.toMatchObject({ code: 'INVALID_PLAN_SLUG' })
+
+      expect(paymentRepo.create).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    /**
+     * La indulgencia de la renovación está acotada a los CÓDIGOS de resolución de
+     * país/precio, no al contrato: sin slug no hay precio legacy que resolver.
+     */
+    it('renewal:true sin planSlug también se rechaza y no cae al precio legacy', async () => {
+      await expect(
+        service.processCheckout(altaConWallet({ planSlug: undefined, renewal: true, amount: 1, currency: 'COP' })),
+      ).rejects.toMatchObject({ code: 'INVALID_PLAN_SLUG' })
+
+      expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    /** La guarda quedó acotada a `plan_purchase`: los otros propósitos no la ven. */
+    const otrosPropositos: Array<[string, CheckoutRequest['purpose']]> = [
+      ['wallet_recharge', 'wallet_recharge'],
+      ['service_payment', 'service_payment'],
+    ]
+
+    it.each(otrosPropositos)('%s sin planSlug sigue cobrando el amount/currency del llamador', async (_label, purpose) => {
+      await service.processCheckout(
+        altaConWallet({ purpose, planSlug: undefined, amount: 50000, currency: 'COP' }),
+      )
+
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 50000, currency: 'COP' }),
+      )
+    })
+  })
+
   describe('renovación del cron (indulgente: intenta el país, cae al legacy)', () => {
     /**
      * El criterio (e) pide "estricto en el alta, indulgente en la renovación": la
