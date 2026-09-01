@@ -182,14 +182,18 @@ export class CheckoutService implements OnModuleInit {
       await this.assertWalletCurrency(req, currency)
     }
 
-    // 4. El impuesto sigue saliendo del perfil de facturación —alinear los dos países
-    // es una tarea aparte, con decisión de negocio—, SALVO cuando el precio se resolvió
-    // en una moneda que no es COP: cobrar 19% de IVA colombiano sobre un precio en USD
-    // no es un default conservador, es un total equivocado. Con COP el comportamiento
-    // es idéntico al de hoy.
-    const taxCountry = country && currency !== 'COP'
-      ? country
-      : await this.getBillingCountry(req.brandId)
+    // 4. UN SOLO DUEÑO DEL PAÍS: el que ya decidió el precio. Antes esto se conformaba
+    // con `currency !== 'COP'`, que es un PROXY de «hay país del precio» y falla donde
+    // más importa: una marca mexicana con precio en COP pagaba 19% de IVA colombiano en
+    // vez de su 16%. Si `resolveAmountAndCurrency` resolvió un país, ése manda; el perfil
+    // de facturación sólo cubre el alta enterprise, que no trae precio de catálogo.
+    //
+    // Censo de `tax_config` al 2026-09-01 (base local): CO 19%, MX 16%, US 0% «Sales tax»,
+    // las tres activas. O sea que un país con configuración propia YA no cae al 19%, y uno
+    // sin fila cae a la rama de 0% + warn que `TaxService` ya tiene: la aceptación («o no
+    // lleva impuesto, o falla con un error que lo dice») se cumple sin inventar un error
+    // nuevo sobre un endpoint de plata.
+    const taxCountry = country || (await this.getBillingCountry(req.brandId))
     const tax = await this.taxService.getTaxForCountry(taxCountry)
     const taxAmount = tax.taxRate > 0 && !tax.isInclusive
       ? Math.round(amount * tax.taxRate * 100) / 100
@@ -207,6 +211,13 @@ export class CheckoutService implements OnModuleInit {
       status: PaymentStatus.PENDING,
       purpose: req.purpose as PaymentPurpose,
       purposeId: req.planSlug || null,
+      // El país viaja CON el pago porque el camino externo factura después, en otro
+      // request (`completeExternalPayment`), donde `resolveAmountAndCurrency` ya no está.
+      // Sin esto, esa factura vuelve a resolver por perfil de facturación y una marca sin
+      // perfil cae al 19% colombiano — el bug que esta tarea cierra. Va en `metadata` y no
+      // en una columna nueva: es un dato del checkout, no del dominio del pago, y no
+      // necesita migración.
+      metadata: { country: taxCountry },
     })
     await this.paymentRepo.save(payment)
 
@@ -417,8 +428,10 @@ export class CheckoutService implements OnModuleInit {
     }
     await this.paymentRepo.save(payment)
 
-    // Calcular impuestos para factura
-    const country = await this.getBillingCountry(payment.brandId)
+    // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
+    // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
+    // los pagos anteriores a este cambio, que no lo llevan.
+    const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
     const tax = await this.taxService.getTaxForCountry(country)
     const totalAmount = parseFloat(String(payment.amount))
     const taxAmount = tax.taxRate > 0 && !tax.isInclusive

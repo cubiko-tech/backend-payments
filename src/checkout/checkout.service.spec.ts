@@ -785,8 +785,85 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(taxService.getTaxForCountry).toHaveBeenCalledWith('US')
     })
 
-    it('precio en COP → el impuesto sigue saliendo del perfil de facturación', async () => {
+    /**
+     * REESCRITO el 2026-09-01: este caso afirmaba «con COP el impuesto sigue saliendo del
+     * perfil de facturación», que era la conducta VIEJA —y encima no discriminaba, porque
+     * la marca por defecto es CO y las dos reglas dan el mismo país—. La tarea
+     * `impuesto-y-gate-por-pais-de-la-marca` la cambia: manda el país del precio, haya o
+     * no COP de por medio.
+     */
+    it('el país del precio manda aunque la moneda sea COP', async () => {
+      // Mutación: volver a `country && currency !== 'COP' ? country : billing` — esta
+      // marca mexicana pagaría 19% de IVA colombiano en vez de su 16%.
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: true,
+        price: priceRow({ id: 'price-mx', countryCode: 'MX', currency: 'COP', price: 19900, isDefault: false }),
+      })
+
       await service.processCheckout(altaConWallet())
+
+      expect(taxService.getTaxForCountry).toHaveBeenCalledWith('MX')
+    })
+
+    it('el país del checkout viaja en el pago', async () => {
+      // Mutación: sacar `metadata: { country: taxCountry }` del `create` — el pago sale sin
+      // país y la factura, que se emite en OTRO request, ya no tiene de dónde leerlo.
+      marcaUS()
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      await service.processCheckout(altaConWallet())
+
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: expect.objectContaining({ country: 'US' }) }),
+      )
+    })
+
+    it('la factura del pago externo usa el país del pago, no el del perfil', async () => {
+      // Mutación: volver a `const country = await this.getBillingCountry(...)` en
+      // `completeExternalPayment` — la factura de una marca US sin perfil de facturación
+      // vuelve a llevar 19% de IVA colombiano. Es el bug que la aceptación nombra, y sólo
+      // se ve ejercitando ESTE camino: el pago se factura en otro request, donde
+      // `resolveAmountAndCurrency` ya no existe.
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        amount: '6.99',
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'plan_purchase',
+        metadata: { country: 'US' },
+      })
+
+      await service.completeExternalPayment('pay-1')
+
+      expect(taxService.getTaxForCountry).toHaveBeenCalledWith('US')
+    })
+
+    /**
+     * Sub-alcance DELIBERADO (R3): la recarga de wallet y el pago de servicio siguen
+     * resolviendo su país por el perfil de facturación, porque no tienen precio de
+     * catálogo del que derivarlo. Se fija con una aserción para que se vea que es una
+     * decisión y no un olvido.
+     */
+    it('la recarga de wallet sigue con el país del perfil de facturación', async () => {
+      // Mutación: extender la regla del precio a `wallet_recharge` — este caso se pone
+      // rojo y, en producción, una recarga empezaría a gatear por un país que nadie
+      // resolvió para ese propósito.
+      // La marca es MX a propósito: con el país del perfil de facturación (`CO`) y el de
+      // la marca (`MX`) DISTINTOS, el caso distingue las dos reglas. Con los dos en `CO`
+      // pasaría igual con cualquiera de las dos y no probaría nada.
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
+
+      await service.processCheckout(
+        altaConWallet({
+          purpose: 'wallet_recharge',
+          planSlug: undefined,
+          amount: 50000,
+          currency: 'COP',
+        } as never),
+      )
 
       expect(taxService.getTaxForCountry).toHaveBeenCalledWith('CO')
     })
