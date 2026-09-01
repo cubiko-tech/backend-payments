@@ -99,3 +99,45 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
     expect(service[method]).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * `POST /subscription/paid` es una ESCRITURA, y como el resto de las escrituras del
+ * controller recibe la marca por body — `resolveBrandId` es de las tres lecturas y el
+ * docblock del controller lo dice—. Este spec fija lo único que sí es de esta tarea:
+ * que el handler pase el body validado tal cual, sin completar ni reinterpretar nada.
+ */
+describe('SubscriptionController — alta paga', () => {
+  let controller: SubscriptionController
+  let service: Record<string, jest.Mock>
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [SubscriptionController],
+      providers: [
+        {
+          provide: SubscriptionService,
+          useValue: { startPaid: jest.fn().mockResolvedValue({ data: {}, acceptanceUrl: 'https://pay/x' }) },
+        },
+        { provide: EnterprisePricingService, useValue: {} },
+      ],
+    })
+      .overrideGuard(ApiAuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile()
+
+    controller = module.get<SubscriptionController>(SubscriptionController)
+    service = module.get(SubscriptionService)
+  })
+
+  it('delega el body validado al servicio y devuelve el link en el TOPE', async () => {
+    // Mutación: que el handler arme el objeto a mano (por ejemplo agregando un
+    // `provider` o leyendo la marca de otro lado) o que envuelva la respuesta en
+    // `data` → este caso se pone rojo. El front lee `res.acceptanceUrl`.
+    const body = { brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax' }
+
+    const result = await controller.startPaid(body)
+
+    expect(service.startPaid).toHaveBeenCalledWith(body)
+    expect(result.acceptanceUrl).toBe('https://pay/x')
+  })
+})

@@ -389,6 +389,184 @@ export class SubscriptionService {
     }
   }
 
+
+  /**
+   * ALTA PAGA, sin prueba: la vuelta de la marca que ya consumió su trial.
+   *
+   * Es el destino del CTA de «volver a suscribirse»: `POST /subscription/trial` le
+   * responde 409 `TRIAL_ALREADY_USED` a quien ya la gastó, y `POST /subscription/reactivate`
+   * rechaza a propósito las filas de ConfioPagos («la vuelta es un alta nueva»). Hasta
+   * acá no había ninguna puerta para volver a pagar.
+   *
+   * Del lado de ConfioPagos es EXACTAMENTE la misma alta que la de la prueba —su API no
+   * distingue: `createSubscription({planName, buyer})` no tiene parámetro de trial—; la
+   * prueba es un concepto NUESTRO (`trialStart`/`trialEnd` + los 15 días). Por eso reusa
+   * `ConfioTrialService`, cuyo nombre habla del llamador original y no de lo que hace.
+   *
+   * Las dos diferencias con `startTrial`, y son las que definen esta tarea:
+   *   · la fila nace en `PENDING`, no en `TRIAL`: no hay período abierto ni acceso, y el
+   *     estado se mueve recién cuando ConfioPagos confirme el primer cobro;
+   *   · NO se asigna plan en roles. El trial lo hace desde el alta porque la prueba
+   *     empieza ahí; acá no hay nada que regalar y el acceso lo abre el webhook
+   *     (`confio-subscription-webhook.service.ts`), que sobre una fila `pending` —que NO
+   *     es terminal— sí repone el plan.
+   */
+  async startPaid(input: { brandId: string; userId: string; planSlug: string }) {
+    const { brandId, userId, planSlug } = input
+
+    // Mismo rechazo que el alta de prueba y por lo mismo: sin plan pago no hay nada que
+    // crear en ConfioPagos. Código propio para que el llamador no lea «trial» en la
+    // respuesta de un endpoint que no lo tiene.
+    const freePlan = process.env.FREE_PLAN_SLUG || 'free'
+    if (!planSlug || planSlug === freePlan) {
+      throw new RequestException(
+        { code: 'INVALID_PAID_PLAN', message: 'El alta paga requiere un plan de pago válido' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    // Guardia BARATA contra el repo de ESCRITURA, igual que `startTrial`: corta antes de
+    // gastar la llamada HTTP, y la garantía la da la relectura bajo lock de más abajo.
+    const existing = await this.subscriptionRepository.findOne({ where: { brandId } })
+
+    if (existing && LIVE_SUBSCRIPTION_STATUSES.includes(existing.status)) {
+      throw new RequestException(
+        { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+        HttpStatus.CONFLICT,
+      )
+    }
+
+    // NO hay guard de `trialStart`: este endpoint existe justamente para la marca que ya
+    // gastó su prueba. Y una fila `pending` TAMPOCO bloquea —no está en
+    // `LIVE_SUBSCRIPTION_STATUSES`—: se REUSA. Es la conducta que fijó
+    // `estado-pending-en-suscripciones` y que su test cierra («una fila `pending` no
+    // bloquea el alta: la reusa en vez de responder 409»). Rechazar acá dejaría encerrada
+    // a la marca que abandonó su link, porque `PENDING_ACCEPTANCE` está en
+    // `CONFIO_ESTADOS_SIN_EFECTO`: ningún webhook ni cron mueve esa fila.
+
+    try {
+      const confioSub = await this.confioTrial.createForTrial({
+        brandId,
+        userId,
+        planSlug,
+        // `correlationId` sólo con fila muerta que reusar, mismo criterio que el trial.
+        ...(existing ? { correlationId: existing.id } : {}),
+      })
+
+      const confioName = confioSub.providerSubscriptionId
+      const confioPlanName = SubscriptionService.derivePlanName(confioName)
+      const now = new Date()
+
+      const saved = await this.dataSource.transaction(async (manager) => {
+        const current = await manager.findOne(Subscription, {
+          where: { brandId },
+          lock: { mode: 'pessimistic_write' },
+        })
+
+        // El MISMO guard, revalidado contra la fila lockeada: entre la guardia barata y
+        // esta escritura pasó una llamada HTTP.
+        if (current && LIVE_SUBSCRIPTION_STATUSES.includes(current.status)) {
+          throw new RequestException(
+            { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+            HttpStatus.CONFLICT,
+          )
+        }
+
+        const subscription = this.subscriptionRepository.create({
+          ...(current ? { id: current.id } : {}),
+          brandId,
+          userId,
+          planSlug,
+          status: SubscriptionStatus.PENDING,
+          provider: SubscriptionProvider.CONFIO,
+          walletId: null,
+          providerSubscriptionId: confioName,
+          // NO hay período todavía: el ciclo lo abre el primer cobro. Las dos columnas son
+          // NOT NULL, así que se sellan en `now` —un período de largo cero, que es lo
+          // honesto— y el webhook las reescribe: `periodoLocal` toma el fin anterior sólo
+          // si está en el FUTURO y si no pone piso en el ahora, así que este valor no se
+          // filtra a la fecha de acceso ni a `nextBillingDate`.
+          currentPeriodStart: now,
+          currentPeriodEnd: now,
+          // `trialStart` y `trialEnd` NO se listan A PROPÓSITO: omitirlos deja intactos los
+          // que la fila ya tenga. Escribirlos en `null` acá le devolvería la prueba gratis
+          // a la marca que la gastó, que es exactamente lo que este endpoint viene a cobrar.
+          initialPaymentLinkIssuedAt: now,
+          // Nada agendado de nuestro lado: la recurrencia la arranca ConfioPagos cuando el
+          // comprador acepta. Un `nextBillingDate` puesto acá despertaría a
+          // `processSubscriptionRenewals` sobre una fila que todavía no pagó nada.
+          nextBillingDate: null,
+          autoRenew: true,
+          // Residuos del ciclo anterior, reseteados como en el alta de prueba: la fila que
+          // se reusa viene de una baja o de un vencimiento.
+          cancelledAt: null,
+          cancelReason: null,
+          accessEndsAt: null,
+          retryCount: 0,
+          lastPaymentId: null,
+          metadata: {
+            confio: {
+              name: confioName,
+              status: confioSub.status,
+              planName: confioPlanName,
+              correlationId: confioSub.correlationId ?? current?.id ?? null,
+              acceptanceExpireTime: confioSub.acceptanceExpireTime
+                ? confioSub.acceptanceExpireTime.toISOString()
+                : null,
+            },
+          },
+        })
+        const row = await manager.save(Subscription, subscription)
+
+        // La fila y su traza, juntas. `CREATED` y no `TRIAL_STARTED`: acá no empieza
+        // ninguna prueba, y el enum de Postgres no admite un valor que no exista.
+        await manager.save(
+          SubscriptionEvent,
+          this.subscriptionEventRepository.create({
+            subscriptionId: row.id,
+            eventType: SubscriptionEventType.CREATED,
+            toPlanSlug: planSlug,
+            fromStatus: current?.status ?? null,
+            toStatus: SubscriptionStatus.PENDING,
+            triggeredBy: userId,
+            reason: 'Alta paga sin prueba: link de aceptación emitido',
+          }),
+        )
+
+        return row
+      })
+
+      this.logger.log(
+        `Alta paga creada: ${saved.id} marca ${brandId} plan ${planSlug} en estado pending ` +
+          `(ConfioPagos ${confioName}, link de aceptación: ${confioSub.acceptanceUrl ? 'sí' : 'no'})`,
+      )
+      // El link viaja en la respuesta y en ningún otro lado: es PORTADOR, no se persiste
+      // ni se loguea. Se re-pide con `getAcceptanceLink`.
+      return {
+        data: saved,
+        acceptanceUrl: confioSub.acceptanceUrl,
+        acceptanceExpireTime: confioSub.acceptanceExpireTime,
+      }
+    } catch (error) {
+      // Marca sin fila previa: la carrera la serializa el índice único por `brandId`, y el
+      // perdedor recibe 409 y no 500.
+      if (isUniqueViolation(error)) {
+        throw new RequestException(
+          { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+          HttpStatus.CONFLICT,
+        )
+      }
+      if (error instanceof RequestException) throw error
+      this.logger.error(`Error en el alta paga de marca ${brandId}: ${error?.message}`)
+      // Mismo criterio que el alta de prueba: NUNCA un 200 sin `acceptanceUrl`, que un
+      // front que lee `res.acceptanceUrl` no puede distinguir de un éxito.
+      throw new RequestException(
+        { code: 'PAID_START_FAILED', message: 'No se pudo crear la suscripción, reintentá en unos minutos' },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
+    }
+  }
+
   /**
    * Deriva el resource name del PLAN a partir del de la suscripción
    * (`…/subscription-plans/{plan}/subscriptions/{sub}`).

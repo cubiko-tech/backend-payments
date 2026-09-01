@@ -109,6 +109,41 @@ Content-Type: application/json
   "planSlug": "dropi-roax"
 }
 
+### Alta PAGA, sin prueba (la vuelta de la marca que ya gastó su trial)
+# Crea la suscripción en ConfioPagos y devuelve su link de aceptación, igual que
+# `/trial`, pero SIN prueba: la fila nace en `pending`, no se toca el plan en
+# backend-roles y el acceso lo abre el webhook con el primer cobro confirmado.
+# Es a dónde apunta el CTA de «volver a suscribirse»: `/trial` responde 409
+# `TRIAL_ALREADY_USED` a quien ya la consumió, y `/reactivate` rechaza las filas de
+# ConfioPagos a propósito («la vuelta es un alta nueva»).
+# El body va contra la lista blanca de `StartPaidSubscriptionDto` — sólo `brandId`,
+# `userId` y `planSlug`—, así que:
+# 400 Bad Request: el body trajo cualquier otro campo. En particular `trialStart` y
+#     `trialEnd` NO se aceptan: mandarlas en `null` le devolvería la prueba gratuita
+#     a la marca que este endpoint viene justamente a cobrar.
+# 201: `{ data, acceptanceUrl, acceptanceExpireTime }`, con el link en el TOPE y
+#     nunca dentro de `data`. Es un link PORTADOR: no se persiste ni se loguea, y se
+#     re-pide con `GET /subscription/acceptance-link`.
+# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca tiene servicio vigente (`trial`,
+#     `active` o `past_due`). Una fila `pending`, `cancelled` o `expired` NO bloquea:
+#     se REUSA, conservando su `trialStart`.
+# 422 INVALID_PAID_PLAN: falta el plan o vino el free.
+# 422 CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED / _ARCHIVED: el par (plan, moneda) no
+#     tiene plan en ConfioPagos.
+# 422 contacto de comprador incompleto (email/teléfono del usuario en backend-auth).
+# 503 PAID_START_FAILED: fallo inesperado (la escritura de la fila, el commit). La
+#     suscripción en ConfioPagos puede haber quedado creada: el reintento deja un
+#     huérfano en PENDING_ACCEPTANCE, que vence solo y no cobra.
+POST {{HOST}}/subscription/paid HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "planSlug": "dropi-roax"
+}
+
 ### Cambiar plan de suscripción
 PATCH {{HOST}}/subscription/plan HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}

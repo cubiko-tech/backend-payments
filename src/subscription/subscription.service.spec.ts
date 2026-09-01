@@ -668,6 +668,124 @@ describe('SubscriptionService', () => {
   })
 
   /**
+   * ALTA PAGA (`startPaid`) — la vuelta de la marca que ya gastó su prueba.
+   *
+   * Lo que estos casos protegen, y que ningún test del trial cubre: que la fila nazca en
+   * `pending` SIN acceso (roles intacto), que `trialStart` sobreviva al alta —si se
+   * pisara, la marca recuperaría la prueba por la puerta de al lado— y que una fila
+   * `pending` abandonada no encierre a nadie.
+   */
+  describe('startPaid — alta paga sin prueba', () => {
+    const alta = (extra: Record<string, any> = {}) =>
+      service.startPaid({ brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax', ...extra })
+
+    it('crea la suscripción en ConfioPagos, deja la fila en `pending` y NO toca roles', async () => {
+      // Mutación: `status: SubscriptionStatus.ACTIVE` en el alta, o agregar el
+      // `assignPlanToBrand` del trial → esta caso se pone rojo. Es la diferencia entera
+      // entre esta alta y la de prueba: acá no se regala acceso antes de cobrar.
+      const result = await alta()
+
+      expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: SubscriptionStatus.PENDING,
+          provider: 'confio',
+          providerSubscriptionId: CONFIO_NAME,
+          // Sin nada agendado de nuestro lado hasta que ConfioPagos cobre.
+          nextBillingDate: null,
+        }),
+      )
+      // El link es PORTADOR: no puede quedar en ninguna escritura.
+      const escrito =
+        JSON.stringify(subscriptionRepo.save.mock.calls) + JSON.stringify(eventRepo.save.mock.calls)
+      expect(escrito).not.toContain(ACCEPTANCE_URL)
+    })
+
+    it('reusa la fila de la marca que ya gastó la prueba SIN pisarle `trialStart`', async () => {
+      // Mutación: listar `trialStart: null` / `trialEnd: null` en el `create` del alta
+      // paga → este caso se pone rojo. Con la marca borrada, `POST /subscription/trial`
+      // pasa sus dos guards y regala una segunda prueba gratis.
+      const muerta = filaConfio({ status: SubscriptionStatus.EXPIRED, trialStart: INICIO_TRIAL })
+      subscriptionRepo.findOne.mockResolvedValue(muerta)
+      txManager.findOne.mockResolvedValue(muerta)
+
+      await alta()
+
+      const escrita = subscriptionRepo.save.mock.calls[0][0]
+      expect(escrita.id).toBe('sub-1')
+      expect(escrita).not.toHaveProperty('trialStart')
+      expect(escrita).not.toHaveProperty('trialEnd')
+      expect(escrita.status).toBe(SubscriptionStatus.PENDING)
+      // Residuos del ciclo muerto, reseteados.
+      expect(escrita.cancelledAt).toBeNull()
+      expect(escrita.accessEndsAt).toBeNull()
+      expect(escrita.retryCount).toBe(0)
+    })
+
+    it('una fila `pending` abandonada NO encierra a la marca: se reusa', async () => {
+      // Mutación: sumar `PENDING` a `LIVE_SUBSCRIPTION_STATUSES`, o rechazar acá con 409
+      // → este caso se pone rojo. `PENDING_ACCEPTANCE` está en `CONFIO_ESTADOS_SIN_EFECTO`
+      // y ningún cron barre `pending`: un 409 acá sería un encierro permanente, sin nadie
+      // que pueda cambiarle la precondición.
+      const pendiente = filaConfio({ status: SubscriptionStatus.PENDING, trialStart: INICIO_TRIAL })
+      subscriptionRepo.findOne.mockResolvedValue(pendiente)
+      txManager.findOne.mockResolvedValue(pendiente)
+
+      const result = await alta()
+
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
+      expect(subscriptionRepo.save.mock.calls[0][0].id).toBe('sub-1')
+    })
+
+    it('con servicio vigente rechaza 409 ANTES de crear nada en ConfioPagos', async () => {
+      // Mutación: mover el guard debajo del `createForTrial` → este caso se pone rojo, y
+      // en producción quedaría una suscripción huérfana en el store por cada rechazo.
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio({ status: SubscriptionStatus.ACTIVE }))
+
+      await expect(alta()).rejects.toMatchObject({ response: { code: 'SUBSCRIPTION_ALREADY_EXISTS' } })
+      expect(confioTrial.createForTrial).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('el plan free se rechaza con `INVALID_PAID_PLAN` y sin tocar el proveedor', async () => {
+      // Mutación: sacar el guard del plan free → este caso se pone rojo; se le pediría a
+      // ConfioPagos una suscripción sobre un plan que no está mapeado.
+      await expect(alta({ planSlug: 'free' })).rejects.toMatchObject({
+        response: { code: 'INVALID_PAID_PLAN' },
+      })
+      expect(confioTrial.createForTrial).not.toHaveBeenCalled()
+    })
+
+    it('registra el evento como `created`, con el estado del que viene', async () => {
+      // Mutación: usar `TRIAL_STARTED` → este caso se pone rojo. Acá no empieza ninguna
+      // prueba, y la traza es lo que después explica por qué la marca tiene acceso.
+      subscriptionRepo.findOne.mockResolvedValue(filaConfio({ status: SubscriptionStatus.EXPIRED }))
+      txManager.findOne.mockResolvedValue(filaConfio({ status: SubscriptionStatus.EXPIRED }))
+
+      await alta()
+
+      expect(eventRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SubscriptionEventType.CREATED,
+          fromStatus: SubscriptionStatus.EXPIRED,
+          toStatus: SubscriptionStatus.PENDING,
+        }),
+      )
+    })
+
+    it('un fallo inesperado es 503 `PAID_START_FAILED`, nunca un 200 sin link', async () => {
+      // Mutación: devolver `{ error }` con 200 → este caso se pone rojo. Un front que lee
+      // `res.acceptanceUrl` no distingue ese 200 de un éxito.
+      confioTrial.createForTrial.mockRejectedValue(new Error('confio caído'))
+
+      await expect(alta()).rejects.toMatchObject({ response: { code: 'PAID_START_FAILED' } })
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
+  })
+
+  /**
    * LA PRUEBA ES UNA SOLA POR MARCA, y sobrevive a los estados que introdujo el corte
    * diferido de la baja. La tabla tiene UNA fila por marca (índice único por `brandId`)
    * y esa fila se reusa ciclo tras ciclo, así que la única memoria de que la prueba ya

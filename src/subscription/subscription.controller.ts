@@ -17,6 +17,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
 import { CreateSubscriptionDto } from './dto/create-subscription.dto'
+import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
 
 /**
  * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
@@ -118,6 +119,25 @@ export class SubscriptionController {
     @Body() data: { brandId: string; userId: string; planSlug: string; provider?: any; walletId?: string },
   ) {
     return this.subscriptionService.startTrial(data)
+  }
+
+  /**
+   * Alta PAGA, sin prueba: para la marca que ya consumió su trial y quiere volver.
+   *
+   * Devuelve el `acceptanceUrl` en el TOPE de la respuesta —igual que `/trial`— y NUNCA
+   * dentro de `data`: es un link PORTADOR y `data` es la fila, que se serializa entera.
+   */
+  @Post('paid')
+  @ApiOperation({ summary: 'Alta de suscripción paga (sin prueba) contra ConfioPagos' })
+  @ApiResponse({ status: 201, description: 'Suscripción creada en `pending` con su link de aceptación' })
+  @ApiResponse({ status: 409, description: 'SUBSCRIPTION_ALREADY_EXISTS (la marca ya tiene servicio vigente)' })
+  @ApiResponse({
+    status: 422,
+    description: 'INVALID_PAID_PLAN, CONFIO_PLAN_NOT_MAPPED, o contacto de comprador incompleto',
+  })
+  @ApiResponse({ status: 503, description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)' })
+  async startPaid(@Body() data: StartPaidSubscriptionDto) {
+    return this.subscriptionService.startPaid(data)
   }
 
   @Patch('plan')
