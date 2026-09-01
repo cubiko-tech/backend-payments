@@ -640,6 +640,29 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       },
     )
 
+    // La otra cara del `it.each` de arriba: `pending` es el alta PAGA que todavía no
+    // pagó su primer ciclo, así que este `SUCCEEDED` NO es un cobro tardío sobre algo
+    // muerto — es el cobro que la fila estaba esperando — y sí tiene que reponer.
+    //
+    // Rojo si: se agrega `SubscriptionStatus.PENDING` a `ESTADOS_TERMINALES`
+    // (⇒ `revive = true` ⇒ el efecto sale con `roles: undefined` ⇒ la fila pasa a
+    // `active` sin que se le asigne el plan en roles: la marca paga y no habilita nada).
+    it('el primer cobro exitoso sobre una fila `pending` la activa y le asigna el plan en roles', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.PENDING }))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-03-01T00:00:00Z'),
+      )
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+    })
+
     it('empuja a roles ANTES de abrir la transacción, para no sostener el lock', async () => {
       conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
       confio.getSubscription.mockRejectedValue(new Error('502 confio'))

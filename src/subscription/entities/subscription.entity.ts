@@ -1,20 +1,96 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-export enum SubscriptionStatus { TRIAL = 'trial', ACTIVE = 'active', PAST_DUE = 'past_due', CANCELLED = 'cancelled', EXPIRED = 'expired' }
+/**
+ * Estados locales de una suscripción. `PENDING` va ÚLTIMO a propósito: es el orden
+ * físico en que `ALTER TYPE … ADD VALUE` lo agrega en Postgres
+ * (`migrations/1788270915241-AddPendingSubscriptionStatus.ts`), y con la lista TS
+ * ordenada igual las dos no divergen. Hoy da lo mismo —ninguna consulta del servicio
+ * ordena por `status`—, pero el día que alguna lo haga la sorpresa ya está evitada.
+ *
+ * `PENDING` es el estado del alta **PAGA** entre el alta y el primer cobro: la
+ * suscripción existe de los dos lados pero todavía no pagó nada, así que no habilita
+ * nada. Modela el `PENDING_ACCEPTANCE` de ConfioPagos —el único estado en el que
+ * viaja el `acceptanceUrl`, el link portador del alta (`confio.types.ts:145`)—, pero
+ * NO se deriva de él: lo escribe NUESTRO endpoint de alta, nunca el wire status del
+ * webhook (ver `CONFIO_ESTADOS_SIN_EFECTO` en
+ * `confio-subscription-webhook.service.ts`).
+ *
+ * ⚠️ Su ÚNICO productor será `alta-paga-sin-prueba`, la tarea que entra
+ * inmediatamente después de ésta: **hoy no lo escribe nadie, y eso es esperado, no un
+ * cableado a medias**. Lo que existe ya es el contrato: los tres conjuntos que
+ * deciden sobre `status` (`TERMINAL_SUBSCRIPTION_STATUSES` y
+ * `LIVE_SUBSCRIPTION_STATUSES` acá, `ESTADOS_TERMINALES` en el webhook) declaran por
+ * qué lo dejan afuera, y sus tests lo fijan.
+ *
+ * El alta de **PRUEBA no cambia**: sigue naciendo `TRIAL` y sigue asignando el plan
+ * en roles desde el alta (`assignPlanToBrand(brandId, planSlug, trialEnd)`,
+ * `subscription.service.ts`), así que la prueba de 15 días arranca en el alta como
+ * siempre.
+ */
+export enum SubscriptionStatus {
+  TRIAL = 'trial',
+  ACTIVE = 'active',
+  PAST_DUE = 'past_due',
+  CANCELLED = 'cancelled',
+  EXPIRED = 'expired',
+  PENDING = 'pending',
+}
 export enum SubscriptionProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago', WALLET = 'wallet', DROPI = 'dropi', CONFIO = 'confio' }
 
 /**
- * Ciclos YA CERRADOS: el complemento exacto de los estados vivos
- * (`trial`/`active`/`past_due`) y el mismo conjunto que `ESTADOS_TERMINALES` en
+ * Ciclos YA CERRADOS, y el mismo conjunto que `ESTADOS_TERMINALES` en
  * `confio-subscription-webhook.service.ts`.
+ *
+ * Ya NO es el complemento de los estados vivos (`trial`/`active`/`past_due`): desde
+ * que existe `pending` hay un estado que no está ni acá ni en
+ * `LIVE_SUBSCRIPTION_STATUSES`, y está afuera de los dos a propósito. No leer este
+ * conjunto como «todo lo que no está vivo».
  *
  * Una fila así no tiene acceso que preservar —la baja no le sella `accessEndsAt`— y
  * **no se revive**: la vuelta es un alta nueva por checkout, detrás de un `Payment`
  * real. Vive acá y no en `subscription.service.ts` porque `TasksService` decide con
  * el mismo conjunto y un hecho con dos dueños deriva.
+ *
+ * ⚠️ **`pending` NO entra**, y no es un olvido: `ConfioSubscriptionWebhookService`
+ * usa el conjunto espejo para decidir si un `SUCCEEDED` es una RESURRECCIÓN. Con
+ * `pending` adentro, `planearCobro` calcularía `revive = true`, devolvería
+ * `roles: undefined` y el PRIMER cobro del alta paga —que no es una resurrección
+ * sino el cobro que la suscripción estaba esperando— movería la fila a `active` SIN
+ * reponer el plan en roles: la marca paga y no habilita nada. Lo fija por el otro
+ * lado el caso «el primer cobro exitoso sobre una fila `pending` la activa y le
+ * asigna el plan en roles» de `confio-subscription-webhook.service.spec.ts`.
  */
 export const TERMINAL_SUBSCRIPTION_STATUSES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
+
+/**
+ * Estados en los que la marca tiene servicio VIGENTE: es el criterio POSITIVO de
+ * «esta fila tiene derecho a su plan». `expired` y `cancelled` son ciclos terminados.
+ *
+ * ⚠️ `pending` NO entra, y el motivo es operativo, no taxonómico. La tabla tiene
+ * índice ÚNICO por `brandId`: un alta nueva no crea otra fila, REUSA la que hay. Si
+ * `pending` contara como vigente, la marca que abrió su link de pago y no lo aceptó
+ * quedaría con un 409 `SUBSCRIPTION_ALREADY_EXISTS` permanente —su fila no está viva
+ * pero la bloquearía igual— y no tendría forma de reintentar el alta nunca. Lo fija el
+ * caso «una fila `pending` no bloquea el alta» de `subscription.service.spec.ts`.
+ *
+ * ⚠️ ACCESO — por qué este conjunto es el que decide el derecho y NO el complemento de
+ * `TERMINAL_SUBSCRIPTION_STATUSES`: desde que existe `pending` los dos ya no son
+ * complementarios, y un predicado negativo (`!TERMINAL…`) le concede el plan PAGO a
+ * una fila que todavía no pagó su primer ciclo. Le pasó a
+ * `TasksService.reponerPlanSiSigueVigente`, que hoy lee de acá. Todo predicado de
+ * derecho se escribe ENUMERANDO este conjunto; el estado que se agregue mañana tiene
+ * que entrar a mano, no colarse por la negación.
+ *
+ * Vive acá —y no en `subscription.service.ts`, su dueño original— por la misma razón
+ * que el conjunto de arriba: `TasksService` decide con él y un hecho con dos dueños
+ * deriva.
+ */
+export const LIVE_SUBSCRIPTION_STATUSES = [
+  SubscriptionStatus.TRIAL,
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.PAST_DUE,
+]
 
 @Entity('subscriptions')
 @Index(['brandId'], { unique: true })

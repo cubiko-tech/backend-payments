@@ -28,6 +28,18 @@ import { downgradeBrandToFree } from '../client/plan-downgrade.util'
  * `CONFIO_ESTADOS_SIN_EFECTO`: son del ALTA, no del ciclo de cobro. Mientras la
  * suscripción espera que el comprador acepte, el estado local ya lo fijó el alta
  * y pisarlo con un `trial`/`active` prematuro mentiría sobre lo que se pagó.
+ *
+ * ⚠️ Ahora que existe un `SubscriptionStatus.PENDING` local, la mutación tentadora
+ * es completar el mapa con `PENDING_ACCEPTANCE → PENDING`. **NO se hace**, y no por
+ * pereza: el alta de PRUEBA también crea su suscripción en ConfioPagos y ellos la
+ * dejan en `PENDING_ACCEPTANCE`, disparando el webhook ANTES de que exista nuestra
+ * fila (la «CARRERA DEL WEBHOOK» documentada en `SubscriptionService.startTrial`).
+ * Con ese mapeo, el re-despacho de ese evento pisaría una fila `trial` YA VIVA —con
+ * el plan puesto en roles— devolviéndola a `pending`. `pending` lo escribe NUESTRO
+ * endpoint de alta, nunca el wire status.
+ * Candado que ya existe y que se pone rojo ante ese mapeo (asserta `manager.save` no
+ * llamado): `webhook.service.spec.ts` →
+ * `it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])('%s no cambia el estado ni escribe')`.
  */
 export const CONFIO_SUBSCRIPTION_STATUS_MAP: { [K in ConfioSubscriptionStatus]?: SubscriptionStatus } = {
   TRIALING: SubscriptionStatus.TRIAL,
@@ -60,7 +72,18 @@ const CONFIO_TIPO_DE_EVENTO: { [K in ConfioSubscriptionStatus]?: SubscriptionEve
 /** UUID canónico: `subscriptions.id`. Mismo formato que `checkout.service.ts:740`. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-/** Estados terminales del lado nuestro: revivirlos merece un aviso. */
+/**
+ * Estados terminales del lado nuestro: revivirlos merece un aviso. Espejo exacto de
+ * `TERMINAL_SUBSCRIPTION_STATUSES` (`subscription.entity.ts`).
+ *
+ * ⚠️ `pending` NO entra. Este conjunto es el que `planearCobro` usa para decidir si
+ * un `SUCCEEDED` es una RESURRECCIÓN; el primer cobro del alta PAGA no lo es: es
+ * exactamente el cobro que la fila `pending` estaba esperando. Metiéndolo acá,
+ * `revive` daría `true`, el efecto saldría con `roles: undefined` y la fila pasaría a
+ * `active` SIN que se le asigne el plan en roles — la marca paga y no habilita nada.
+ * Lo fija el caso «el primer cobro exitoso sobre una fila `pending` la activa y le
+ * asigna el plan en roles» de `confio-subscription-webhook.service.spec.ts`.
+ */
 const ESTADOS_TERMINALES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
 
 /**
@@ -286,6 +309,12 @@ export class ConfioSubscriptionWebhookService {
     // a cobrar. Un `SUCCEEDED` que llegue después —un link one-shot emitido ANTES de
     // la baja y pagado a destiempo, o un cobro en vuelo— no puede volver a comprar
     // el plan: la vuelta es un alta nueva por checkout, con pago propio.
+    //
+    // Una fila `pending` (alta PAGA que todavía no pagó su primer ciclo) NO cae acá,
+    // y tiene que seguir sin caer: ese `SUCCEEDED` es su PRIMER cobro, no un cobro
+    // tardío sobre algo que dimos por muerto, así que baja por el camino normal y
+    // repone el plan en roles con `efectoRoles('reponer', …)`. La guarda muerde sólo
+    // sobre `cancelled`/`expired` y sobre la baja pendiente.
     const revive = ESTADOS_TERMINALES.includes(sub.status) || bajaPendiente(sub)
     if (revive) {
       const porQue = ESTADOS_TERMINALES.includes(sub.status) ? sub.status : 'dada de baja'

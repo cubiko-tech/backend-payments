@@ -1,3 +1,5 @@
+import { In } from 'typeorm'
+
 import { TasksService } from './tasks.service'
 import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
@@ -608,6 +610,39 @@ describe('TasksService — processTrialConversions', () => {
       expect(clientRoles.assignPlanToBrand).toHaveBeenLastCalledWith('b1', 'pro', enUnMes)
     })
 
+    /**
+     * ⚠️ ACCESO SIN PAGO — el caso que obliga a que «sigue con derecho» sea una lista
+     * CERRADA de estados vivos y no «no es terminal».
+     *
+     * La tabla tiene índice único por `brandId`, así que el alta paga que entra en la
+     * ventana TOCTOU no crea otra fila: REUSA ésta y la deja `pending` con
+     * `autoRenew: true`. Con un predicado negativo (`!TERMINAL…`) `pending` cae del
+     * lado del derecho y el reponedor le devuelve el plan PAGO a una fila que todavía
+     * no pagó su primer ciclo: entitlement regalado.
+     *
+     * MUTACIÓN QUE LO PONE ROJO: volver el predicado de `reponerPlanSiSigueVigente` a
+     * `!TERMINAL_SUBSCRIPTION_STATUSES.includes(vigente.status)` ⇒ se llama a
+     * `assignPlanToBrand('b1', 'pro', …)`.
+     */
+    it('NO repone el plan pago si la fila quedó `pending`: todavía no pagó nada', async () => {
+      subscriptionRepo.update.mockResolvedValue({ affected: 0 })
+      subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        status: SubscriptionStatus.PENDING,
+        autoRenew: true,
+        cancelledAt: null,
+        accessEndsAt: null,
+        currentPeriodEnd: new Date('2026-09-20T10:00:00.000Z'),
+      })
+
+      await service.expireCancelledSubscriptions()
+
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'pro', expect.anything())
+    })
+
     // Intersección de los dos crons horarios: una fila dada de baja MIENTRAS estaba
     // en mora cae en las dos consultas. Dueño único: `expireSubscriptions`, que ya
     // existía y tiene la causa de negocio más específica (reintentos agotados).
@@ -823,6 +858,50 @@ describe('TasksService — processTrialConversions', () => {
       for (const i of [0, 1, 2]) {
         expect(subscriptionRepo.find.mock.calls[i][0].where).toHaveLength(2)
       }
+    })
+  })
+
+  /**
+   * ⚠️ DINERO. `pending` es el alta PAGA que todavía no aceptó su link INICIAL. Los
+   * dos barridos de acá emiten un link de cobro REAL (`issueExternalCharge`), así que
+   * dejarla entrar le abriría un SEGUNDO riel de cobro para el mismo primer período.
+   * Que hoy no entre no es casualidad: las consultas ENUMERAN estados y el loop tiene
+   * además su propio guard. Se fijan los dos, porque son defensas independientes.
+   */
+  describe('ningún barrido que emite cobro incluye `pending`', () => {
+    // MUTACIÓN QUE LO PONE ROJO: agregar `SubscriptionStatus.PENDING` a cualquiera de
+    // los dos criterios de estado ⇒ la fila `pending` entra al barrido que cobra.
+    it('el criterio de estado de los dos barridos es una lista cerrada sin `pending`', async () => {
+      await service.processSubscriptionRenewals()
+      expect(subscriptionRepo.find.mock.calls[0][0].where.status).toEqual(
+        In([SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]),
+      )
+
+      subscriptionRepo.find.mockClear()
+
+      await service.retryFailedPayments()
+      expect(subscriptionRepo.find.mock.calls[0][0].where.status).toBe(SubscriptionStatus.PAST_DUE)
+    })
+
+    // Defensa en profundidad, y conductual: aunque la consulta la dejara pasar, el
+    // guard del loop (`sub.status === ACTIVE` para `confio`) impide el cobro.
+    // MUTACIÓN QUE LO PONE ROJO: aflojar ese guard a `sub.status !== TRIAL`.
+    it('una fila `pending` que llegara igual al loop no dispara el cobro', async () => {
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 's-pending',
+          brandId: 'b1',
+          userId: 'u1',
+          planSlug: 'dropi-roax',
+          provider: 'confio',
+          status: SubscriptionStatus.PENDING,
+          autoRenew: true,
+        },
+      ])
+
+      await service.processSubscriptionRenewals()
+
+      expect(checkoutService.processCheckout).not.toHaveBeenCalled()
     })
   })
 })

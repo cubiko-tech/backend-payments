@@ -459,6 +459,30 @@ describe('SubscriptionService', () => {
       )
     })
 
+    // `pending` es el alta PAGA que abrió su link y todavía no lo aceptó: no está viva
+    // —no pagó nada— así que NO puede bloquear un alta nueva. Como la tabla tiene UNA
+    // fila por marca (índice único por `brandId`), «no bloquear» significa REUSAR esa
+    // misma fila, igual que con una muerta.
+    //
+    // MUTACIÓN QUE LO PONE ROJO: agregar `PENDING` a `LIVE_SUBSCRIPTION_STATUSES` ⇒ 409
+    // `SUBSCRIPTION_ALREADY_EXISTS` permanente y la marca que abandonó el link no puede
+    // reintentar nunca.
+    it('una fila `pending` no bloquea el alta: la reusa en vez de responder 409', async () => {
+      const pendiente = {
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.PENDING,
+        trialStart: null,
+      }
+      subscriptionRepo.findOne.mockResolvedValue(pendiente)
+      txManager.findOne.mockResolvedValue(pendiente)
+
+      await expect(alta()).resolves.toBeDefined()
+
+      const [, data] = txManager.save.mock.calls.find(([entity]) => entity === Subscription)
+      expect(data).toEqual(expect.objectContaining({ id: 'sub-1' }))
+    })
+
     it('escribe DESPUÉS de tener el link: Confío → roles → fila', async () => {
       await alta()
 

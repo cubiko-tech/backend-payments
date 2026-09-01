@@ -102,6 +102,15 @@ export class MetricsService {
 
   /**
    * LTV — Valor promedio de vida del cliente por plan.
+   *
+   * El criterio de qué fila es un CLIENTE es la lista CERRADA del `WHERE`, y no el
+   * `status != 'trial'` que estaba: un filtro negativo absorbe solo cada estado nuevo,
+   * y `pending` —el alta paga que todavía no pagó su primer ciclo— entraba como
+   * cliente. Su antigüedad se mide desde `createdAt`, así que cada alta abandonada
+   * sumaba días de «vida útil» que nadie pagó y arrastraba el promedio del plan.
+   * `trial` sigue afuera por lo mismo, y ahora está dicho enumerando. Mismo criterio
+   * que `getConversion`/`getMRR`, que cuentan marcas pagas; lo fija
+   * `metrics.service.spec.ts`.
    */
   async getLTV() {
     const result = await this.readDataSource.query(`
@@ -115,7 +124,7 @@ export class MetricsService {
           EXTRACT(EPOCH FROM (COALESCE(s."cancelledAt", NOW()) - s."createdAt")) / 86400 / 30
         ), 1) as avg_months_active
       FROM subscriptions s
-      WHERE s.status != 'trial'
+      WHERE s.status IN ('active', 'past_due', 'cancelled', 'expired')
       GROUP BY s."planSlug"
       ORDER BY avg_days_active DESC
     `)
@@ -165,6 +174,13 @@ export class MetricsService {
     const freeCount = await this.readDataSource.query(`
       SELECT COUNT(*) as count FROM subscriptions WHERE "planSlug" = 'free'
     `)
+    // El criterio de «marca paga» es esta lista CERRADA de estados, y `pending` no
+    // está: es un alta que todavía no pagó su primer ciclo. Contarla inflaría la
+    // conversión free→paid con altas abandonadas —el que abrió el link y nunca lo
+    // aceptó figuraría como convertido— y la métrica dejaría de medir plata cobrada.
+    // `getMRR` usa el MISMO criterio para contar suscriptores, así que tampoco lo
+    // cuenta: si algún día este conjunto cambia, los dos tienen que cambiar juntos.
+    // Lo fija el caso de `metrics.service.spec.ts` sobre este SQL.
     const paidCount = await this.readDataSource.query(`
       SELECT COUNT(*) as count FROM subscriptions WHERE "planSlug" != 'free' AND status IN ('active', 'trial')
     `)

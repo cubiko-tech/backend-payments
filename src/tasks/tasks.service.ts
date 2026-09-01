@@ -11,7 +11,7 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import {
   Subscription,
   SubscriptionStatus,
-  TERMINAL_SUBSCRIPTION_STATUSES,
+  LIVE_SUBSCRIPTION_STATUSES,
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
@@ -24,6 +24,49 @@ import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.uti
 import { CheckoutService } from '../checkout/checkout.service'
 import { logger } from '../shared/logger/logger'
 
+/**
+ * Los crons del servicio. Qué hace este archivo con `SubscriptionStatus.PENDING`
+ * (el alta PAGA que todavía no pagó su primer ciclo): **nada, salvo excluirlo a
+ * mano donde se reparte acceso**. El criterio se declara en dos lugares, y hacen
+ * falta los dos:
+ *
+ * 1. **Las siete consultas** ENUMERAN los estados que toman y ninguna lo nombra —
+ *    `processTrialConversions` filtra `TRIAL`; `processSubscriptionRenewals`
+ *    `In([ACTIVE, PAST_DUE])`; `retryFailedPayments` y `expireSubscriptions`
+ *    `PAST_DUE`; `expireCancelledSubscriptions` y `sendExpirationWarnings` enumeran
+ *    `TRIAL`/`ACTIVE`/`PAST_DUE`. Un estado nuevo entra sólo si alguien lo agrega a
+ *    mano, que es como tiene que ser.
+ * 2. **Los predicados sobre una fila RELEÍDA**, que las consultas no cubren: el
+ *    reponedor `reponerPlanSiSigueVigente` decide entitlement sobre lo que la
+ *    relectura devuelve, no sobre lo que la consulta filtró. Ahí el criterio es
+ *    `LIVE_SUBSCRIPTION_STATUSES` (positivo) y no `!TERMINAL_…`: la negación
+ *    admitía `pending` y le regalaba el plan pago. Ver el ⚠️ de ese método.
+ *
+ * ⚠️ DINERO — por qué `pending` no puede entrar a las dos primeras:
+ * `processSubscriptionRenewals` y `retryFailedPayments` emiten un link de cobro REAL
+ * (`issueExternalCharge`). Una fila que todavía no aceptó su link INICIAL no puede
+ * recibir un segundo riel de cobro en paralelo: serían dos links vivos para el mismo
+ * primer período. El guard del loop de `processSubscriptionRenewals`
+ * (`sub.status === ACTIVE` para `confio`) es la segunda línea de defensa, y las dos
+ * están fijadas por «ningún barrido que emite cobro incluye `pending`» en
+ * `tasks.service.spec.ts`.
+ *
+ * ⚠️ Esa invariante vale mientras la fila SIGA en `pending`, y hay un camino que la
+ * saca — es DEUDA ABIERTA del productor, no algo cerrado acá: la rama de cobro no
+ * exitoso de `ConfioSubscriptionWebhookService` (`confio-subscription-webhook.service.ts`)
+ * no filtra por estado y escribe `past_due`. Una fila `pending` que reciba ese
+ * webhook cae en la consulta de `retryFailedPayments`, que barre `PAST_DUE` +
+ * `autoRenew` SIN el guard `status === ACTIVE` que sí tiene
+ * `processSubscriptionRenewals`, y emitiría un segundo link con el inicial
+ * posiblemente vivo. Cerrarlo es del productor (`alta-paga-sin-prueba`), que es
+ * quien puede decidir si la rama filtra por estado o si el guard se replica acá.
+ *
+ * ⚠️ DEUDA VERIFICADA, NO SE ARREGLA ACÁ (también del productor): la baja de
+ * `SubscriptionService.cancel` sobre una fila `pending` le sella `accessEndsAt` y
+ * ningún cron la consume después. El detalle vive PEGADO a ese código
+ * (`subscription.service.ts`, el guard de `accessEndsAt`), que es donde lo va a leer
+ * quien lo toque; acá sólo queda el puntero.
+ */
 @Injectable()
 export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
@@ -874,8 +917,17 @@ export class TasksService {
    * NO se repone a ciegas: el caso ABRUMADORAMENTE más común de `affected: 0` es
    * la pasada solapada que ya cerró la fila legítimamente, y reponer ahí sería
    * regalarle el plan pago a una marca dada de baja. Por eso se relee la fila y
-   * sólo se repone si sigue con derecho: no está en un estado terminal y o bien
-   * volvió a renovarse, o tiene una fecha de corte todavía futura.
+   * sólo se repone si sigue con derecho: está en un estado VIVO y o bien volvió a
+   * renovarse, o tiene una fecha de corte todavía futura.
+   *
+   * ⚠️ El criterio de estado es POSITIVO (`LIVE_SUBSCRIPTION_STATUSES`) y no la
+   * negación de `TERMINAL_SUBSCRIPTION_STATUSES`, que es lo que era: los dos
+   * conjuntos dejaron de ser complementarios cuando entró `pending` y la negación
+   * le concedía el plan PAGO a una fila que no pagó nada. El camino no es teórico
+   * —el índice único por `brandId` lo hace el más probable—: el alta paga que entra
+   * en esta misma ventana TOCTOU REUSA la fila y la deja `pending` con `autoRenew:
+   * true`, así que la relectura veía exactamente eso. Enumerar es también lo que
+   * hace que un estado futuro tenga que sumarse a mano en vez de colarse.
    *
    * El `expiresAt` sale de `currentPeriodEnd` de la fila RELEÍDA —el período que
    * hoy tiene paga—, igual que `checkout.assignPlanInRoles`. Si roles rechaza,
@@ -892,7 +944,7 @@ export class TasksService {
     const vigente = await this.subscriptionRepo.findOne({ where: { id: sub.id } })
     const sigueConDerecho =
       !!vigente &&
-      !TERMINAL_SUBSCRIPTION_STATUSES.includes(vigente.status) &&
+      LIVE_SUBSCRIPTION_STATUSES.includes(vigente.status) &&
       (vigente.autoRenew || (!!vigente.accessEndsAt && vigente.accessEndsAt > ahora))
     if (!sigueConDerecho) return
 

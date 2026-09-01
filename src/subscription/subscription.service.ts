@@ -6,6 +6,7 @@ import {
   SubscriptionStatus,
   SubscriptionProvider,
   TERMINAL_SUBSCRIPTION_STATUSES,
+  LIVE_SUBSCRIPTION_STATUSES,
 } from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
@@ -13,14 +14,6 @@ import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { RequestException } from '../shared/exception/request.exception'
-
-// Estados en los que la marca tiene servicio vigente; `expired` y `cancelled` son ciclos
-// terminados y no deben bloquear un alta nueva.
-const LIVE_SUBSCRIPTION_STATUSES = [
-  SubscriptionStatus.TRIAL,
-  SubscriptionStatus.ACTIVE,
-  SubscriptionStatus.PAST_DUE,
-]
 
 /**
  * Topes del BORDE para los dos textos libres de la baja. No son gusto: los dos
@@ -784,6 +777,17 @@ export class SubscriptionService {
         // columna quedaría no nula sobre una fila terminal — exactamente lo que la
         // invariante prohíbe («no nula ⇔ baja PENDIENTE») y lo que haría que el cron
         // de retiro la degradara una SEGUNDA vez.
+        //
+        // ⚠️ DEUDA VERIFICADA, del productor `alta-paga-sin-prueba` — y el predicado
+        // que hay que arreglar es ÉSTE. `pending` no es terminal, así que una baja
+        // sobre una fila `pending` entra por acá y le SELLA la fecha de corte; después
+        // ningún cron la consume: `expireCancelledSubscriptions` enumera
+        // `TRIAL`/`ACTIVE`/`PAST_DUE` (`tasks.service.ts`) y no la ve. La fila queda
+        // con la marca de baja PENDIENTE para siempre, violando en la práctica la
+        // invariante de acá arriba. El día que algo escriba `pending`, este guard pasa
+        // a enumerar `LIVE_SUBSCRIPTION_STATUSES` en positivo —el mismo movimiento que
+        // ya se hizo en `TasksService.reponerPlanSiSigueVigente`— en vez de negar el
+        // conjunto terminal, que desde `pending` dejó de ser su complemento.
         if (!current.accessEndsAt && !TERMINAL_SUBSCRIPTION_STATUSES.includes(current.status)) {
           current.accessEndsAt = SubscriptionService.finDeAcceso(current)
         }
