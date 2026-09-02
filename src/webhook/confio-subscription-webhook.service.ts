@@ -76,6 +76,19 @@ export const CONFIO_ESTADOS_SIN_EFECTO: ConfioSubscriptionStatusWire[] = ['PENDI
 export const CONFIO_ESTADOS_QUE_OTORGAN: ConfioSubscriptionStatus[] = ['TRIALING', 'ACTIVE']
 
 /**
+ * Los estados con los que ConfioPagos da por MUERTA su suscripción: ya no va a
+ * cobrarla ni a aceptarla nunca.
+ *
+ * La confirmación activa los aplica sobre una fila que todavía espera, y es la
+ * ÚNICA escritura de estado que esa vía se permite. La asimetría es deliberada:
+ * revivir con un sondeo sería atribuirnos una autoridad que no tenemos, pero
+ * cerrar lo que el dueño de la suscripción declaró cerrado es monótono —no
+ * devuelve acceso, no cobra— y es lo que corta el sondeo infinito sobre un alta
+ * que nadie va a pagar.
+ */
+export const CONFIO_ESTADOS_MUERTOS: ConfioSubscriptionStatus[] = ['CANCELED', 'EXPIRED']
+
+/**
  * `subscription_events.eventType` es un enum de Postgres con exactamente diez
  * valores y NO tiene un `status_changed` genérico; agregarle uno exige una
  * migración, que está fuera del alcance de esta tarea. Se mapea al miembro más
@@ -130,6 +143,8 @@ export interface ResultadoDeConfirmacion {
     | 'sin_confirmar'
     /** Ya estaba aplicado, o las guardas lo impiden (fila terminal, baja pendiente). */
     | 'sin_efecto'
+    /** El proveedor la dio por muerta y la fila se cerró: deja de repescarse. */
+    | 'cerrada'
     /** La fila no tiene suscripción en ConfioPagos que consultar. */
     | 'sin_suscripcion_en_el_proveedor'
     /** No se pudo preguntar. NO significa «no aceptó». */
@@ -742,6 +757,31 @@ export class ConfioSubscriptionWebhookService {
     }
 
     const wire = String(remota?.status || '') as ConfioSubscriptionStatus
+
+    // El alta que ConfioPagos ya dio por muerta se CIERRA. Sin esto la fila se queda
+    // en `pending` y el barrido la vuelve a consultar cada pasada hasta que vence la
+    // ventana: llamadas al proveedor por un alta que nadie va a pagar. No se toca
+    // roles —una fila que espera confirmación nunca tuvo plan que retirar—, así que
+    // el cierre no puede quitarle acceso a nadie.
+    if (CONFIO_ESTADOS_MUERTOS.includes(wire) && sub.status === SubscriptionStatus.PENDING) {
+      const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
+      const data = { name: resourceName, status: wire }
+      await this.aplicar(
+        sub.id,
+        {
+          eventType: CONFIO_TIPO_DE_EVENTO[wire],
+          toStatus,
+          sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
+          reason: `ConfioPagos reportó la suscripción ${wire} sin que se completara el pago`,
+        },
+        { event: CONFIRMACION_ACTIVA, data },
+        `${resourceName}:confirmacion:${wire}`,
+      )
+      this.logger.log(`Confio dio por muerta el alta ${sub.id} (${wire}): se cierra y deja de repescarse`)
+
+      return { resultado: 'cerrada', estadoRemoto: wire }
+    }
+
     if (!CONFIO_ESTADOS_QUE_OTORGAN.includes(wire)) {
       // El caso NORMAL mientras el comprador no completó el pago. No es un error.
       return { resultado: 'sin_confirmar', estadoRemoto: wire }

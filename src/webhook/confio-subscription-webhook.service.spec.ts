@@ -959,6 +959,46 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       expect(confio.getSubscription).not.toHaveBeenCalled()
     })
 
+    // Lo que corta el sondeo infinito: un alta que ConfioPagos ya dio por muerta se
+    // cierra, sale de `pending` y el barrido deja de consultarla.
+    it.each([['CANCELED', SubscriptionStatus.CANCELLED], ['EXPIRED', SubscriptionStatus.EXPIRED]])(
+      'con %s el alta que esperaba se CIERRA y deja de repescarse',
+      async (wire, esperado) => {
+        // Mutación: no aplicar los terminales — la fila se queda en `pending` y se la
+        // vuelve a consultar cada pasada hasta que vence la ventana.
+        confio.getSubscription.mockResolvedValue({ ...REMOTA, status: wire })
+
+        const res = await service.confirmarContraElProveedor(esperando())
+
+        expect(res.resultado).toBe('cerrada')
+        expect(suscripcionGuardada().status).toBe(esperado)
+      },
+    )
+
+    it('al cerrarla NO toca roles: una fila que esperaba nunca tuvo plan que retirar', async () => {
+      // Mutación: degradar en roles al cerrar — una llamada al servicio de acceso por
+      // un plan que nunca se otorgó.
+      confio.getSubscription.mockResolvedValue({ ...REMOTA, status: 'CANCELED' })
+
+      await service.confirmarContraElProveedor(esperando())
+
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('el terminal NO se aplica sobre una fila que ya está viva: sondear no revive ni mata', async () => {
+      // Mutación: aplicar el terminal sobre cualquier estado — un sondeo podría matar
+      // una suscripción viva por una lectura desactualizada, sin la traza del webhook.
+      confio.getSubscription.mockResolvedValue({ ...REMOTA, status: 'CANCELED' })
+
+      const res = await service.confirmarContraElProveedor(
+        esperando({ status: SubscriptionStatus.TRIAL }),
+      )
+
+      expect(res.resultado).not.toBe('cerrada')
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
     it('las guardas del webhook siguen valiendo: sobre una fila terminal no otorga', async () => {
       confio.getSubscription.mockResolvedValue(REMOTA)
 

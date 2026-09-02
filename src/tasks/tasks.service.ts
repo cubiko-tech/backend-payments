@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, IsNull, MoreThan, Not, Repository } from 'typeorm'
+import { DataSource, LessThan, In, Between, IsNull, Not, Repository } from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
@@ -71,6 +71,65 @@ import { logger } from '../shared/logger/logger'
  * (`subscription.service.ts`, el guard de `accessEndsAt`), que es donde lo va a leer
  * quien lo toque; acá sólo queda el puntero.
  */
+/**
+ * Cadencia de la repesca por ANTIGÜEDAD del alta.
+ *
+ * El barrido corre cada 5 minutos, pero no todas las filas se consultan en todas las
+ * pasadas: un alta recién creada está en el momento en que el comprador realmente
+ * está pagando, y una de hace tres días casi seguro no se va a pagar nunca. Sin esta
+ * escalera, un alta ABANDONADA se consultaba 288 veces por día durante 8 días —unas
+ * 2.300 llamadas a ConfioPagos por alguien que no compró—.
+ *
+ * `cada` está en minutos y es múltiplo del período del cron, para que la franja caiga
+ * en una pasada real. El criterio sale del RELOJ y de la edad de la fila, no de un
+ * contador de intentos: no hay estado que persistir, que se desincronice, ni que se
+ * pierda en un reinicio.
+ */
+const TRAMOS_DE_REPESCA = [
+  /** La primera hora: cada pasada. Es cuando el pago está ocurriendo de verdad. */
+  { hastaMinutos: 60, cada: 5 },
+  /** El primer día: cada media hora. */
+  { hastaMinutos: 24 * 60, cada: 30 },
+  /** De ahí hasta el fin de la ventana: cada 6 horas. */
+  { hastaMinutos: Infinity, cada: 360 },
+]
+
+/** Período del cron, en minutos. La franja «toca» si su cadencia cae en esta pasada. */
+const PERIODO_DEL_CRON_MINUTOS = 5
+
+/**
+ * Franjas de edad que corresponde consultar en ESTA pasada, como fechas absolutas
+ * listas para el `Between` de la consulta.
+ *
+ * El primer tramo siempre toca (su cadencia ES el período del cron); los demás sólo
+ * cuando el minuto del día es múltiplo de su cadencia. `ventanaMinutos` recorta el
+ * tramo más viejo: pasada la ventana total no queda nada por confirmar.
+ */
+export function franjasDeRepesca(
+  ahora: Date,
+  ventanaMinutos: number,
+): { desde: Date; hasta: Date }[] {
+  const minutoDelDia = ahora.getHours() * 60 + ahora.getMinutes()
+  const ms = (minutos: number) => new Date(ahora.getTime() - minutos * 60 * 1000)
+
+  const franjas: { desde: Date; hasta: Date }[] = []
+  let desdeMinutos = 0
+  for (const tramo of TRAMOS_DE_REPESCA) {
+    // El tramo se acota a la ventana total: el que empieza después de ella no existe.
+    const hastaMinutos = Math.min(tramo.hastaMinutos, ventanaMinutos)
+    if (desdeMinutos >= hastaMinutos) break
+
+    if (minutoDelDia % tramo.cada < PERIODO_DEL_CRON_MINUTOS) {
+      // `desde`/`hasta` van al revés que los minutos: más minutos de antigüedad es
+      // una fecha MÁS VIEJA.
+      franjas.push({ desde: ms(hastaMinutos), hasta: ms(desdeMinutos) })
+    }
+    desdeMinutos = tramo.hastaMinutos
+  }
+
+  return franjas
+}
+
 @Injectable()
 export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
@@ -284,19 +343,27 @@ export class TasksService {
     this.repescaEnCurso = true
 
     try {
-      const desde = new Date(Date.now() - this.DIAS_DE_REPESCA * 24 * 60 * 60 * 1000)
+      const tramos = franjasDeRepesca(new Date(), this.DIAS_DE_REPESCA * 24 * 60)
+      if (tramos.length === 0) {
+        // Ninguna franja toca en esta pasada: no hay consulta que hacer.
+        return
+      }
+
       const pendientes = await this.subscriptionRepo.find({
-        where: {
+        // Un `where` por tramo activo (TypeORM los une con OR). Cada uno lleva los
+        // MISMOS cuatro criterios base y se diferencia sólo en la franja de edad.
+        where: tramos.map((franja) => ({
           // ENUMERA el estado, como las otras siete consultas del archivo: `pending`
           // es el único que espera confirmación. Una fila viva o terminal no se toca.
           status: SubscriptionStatus.PENDING,
           provider: SubscriptionProvider.CONFIO,
           // Sin suscripción del otro lado no hay nada que consultar.
           providerSubscriptionId: Not(IsNull()),
-          // Pasada la ventana del link no queda nada por confirmar: se deja de
-          // preguntar en vez de arrastrar esas filas para siempre.
-          initialPaymentLinkIssuedAt: MoreThan(desde),
-        },
+          // La franja de edad de este tramo. El extremo lejano cumple además la
+          // ventana total: pasado eso no queda nada por confirmar y se deja de
+          // preguntar, en vez de arrastrar esas filas para siempre.
+          initialPaymentLinkIssuedAt: Between(franja.desde, franja.hasta),
+        })),
         // La más vieja primero: con más altas que cota, ninguna queda postergada
         // indefinidamente entre pasadas.
         order: { updatedAt: 'ASC' },
@@ -306,6 +373,7 @@ export class TasksService {
       if (pendientes.length === 0) return
 
       let otorgadas = 0
+      let cerradas = 0
       let sinConfirmar = 0
       let fallidas = 0
       for (const sub of pendientes) {
@@ -313,6 +381,7 @@ export class TasksService {
           // La regla de qué se otorga NO está acá: es la misma que aplica el webhook.
           const { resultado } = await this.confioWebhook.confirmarContraElProveedor(sub)
           if (resultado === 'otorgada') otorgadas++
+          else if (resultado === 'cerrada') cerradas++
           else if (resultado === 'sin_confirmar') sinConfirmar++
         } catch (error) {
           // Una fila que falla —típicamente porque `backend-roles` rechazó el
@@ -326,7 +395,8 @@ export class TasksService {
       logger.log(
         'info',
         `[CRON] confirmarAltasPendientes: ${pendientes.length} revisadas, ${otorgadas} otorgadas, ` +
-          `${sinConfirmar} todavía sin aceptar, ${fallidas} con error`,
+          `${cerradas} cerradas por el proveedor, ${sinConfirmar} todavía sin aceptar, ` +
+          `${fallidas} con error`,
       )
     } finally {
       this.repescaEnCurso = false

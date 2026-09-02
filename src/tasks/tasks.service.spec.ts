@@ -1,6 +1,6 @@
 import { In } from 'typeorm'
 
-import { TasksService } from './tasks.service'
+import { TasksService, franjasDeRepesca } from './tasks.service'
 import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 
@@ -882,16 +882,78 @@ describe('TasksService — processTrialConversions', () => {
 
     it('barre SÓLO altas esperando confirmación, de confío y con suscripción del otro lado', async () => {
       // Mutación: ampliar el filtro a filas vivas ⇒ el barrido consultaría (y podría
-      // reescribir) suscripciones que ya están andando.
+      // reescribir) suscripciones que ya están andando. El `where` es un ARRAY —un
+      // criterio por franja de edad activa— y los cuatro criterios base tienen que
+      // repetirse en TODAS: una franja que se saltee uno abre el mismo agujero.
       subscriptionRepo.find.mockResolvedValue([])
 
       await service.confirmarAltasPendientes()
 
       const where = subscriptionRepo.find.mock.calls[0][0].where
-      expect(where.status).toBe(SubscriptionStatus.PENDING)
-      expect(where.provider).toBe('confio')
-      expect(where.providerSubscriptionId).toBeDefined()
-      expect(where.initialPaymentLinkIssuedAt).toBeDefined()
+      expect(Array.isArray(where)).toBe(true)
+      expect(where.length).toBeGreaterThan(0)
+      for (const criterio of where) {
+        expect(criterio.status).toBe(SubscriptionStatus.PENDING)
+        expect(criterio.provider).toBe('confio')
+        expect(criterio.providerSubscriptionId).toBeDefined()
+        expect(criterio.initialPaymentLinkIssuedAt).toBeDefined()
+      }
+    })
+
+    // La escalera de cadencia: sin ella, un alta abandonada se consultaba 288 veces
+    // por día durante 8 días. Se prueba la función pura, con el reloj inyectado.
+    describe('cadencia por antigüedad', () => {
+      const VENTANA = 8 * 24 * 60
+
+      const enMinuto = (h: number, m: number) => new Date(2026, 8, 2, h, m, 0)
+
+      it('la franja de la primera hora entra en TODAS las pasadas', () => {
+        // Mutación: darle al primer tramo una cadencia mayor que el período del cron
+        // ⇒ el alta que se está pagando AHORA deja de consultarse cada pasada.
+        for (const [h, m] of [[10, 0], [10, 5], [10, 10], [10, 35], [11, 55]]) {
+          expect(franjasDeRepesca(enMinuto(h, m), VENTANA).length).toBeGreaterThan(0)
+        }
+      })
+
+      it('las franjas viejas NO entran en todas las pasadas', () => {
+        // Mutación: volver al ritmo fijo (una sola franja que cubre todo) ⇒ este caso
+        // se pone rojo porque todas las pasadas traerían la misma cantidad.
+        const enUnaCualquiera = franjasDeRepesca(enMinuto(10, 10), VENTANA).length
+        const enLaMediaHora = franjasDeRepesca(enMinuto(10, 30), VENTANA).length
+        const enLasSeisHoras = franjasDeRepesca(enMinuto(12, 0), VENTANA).length
+
+        expect(enUnaCualquiera).toBe(1)
+        expect(enLaMediaHora).toBe(2)
+        expect(enLasSeisHoras).toBe(3)
+      })
+
+      it('la franja más vieja se recorta a la ventana total', () => {
+        // Mutación: no acotar con `ventanaMinutos` ⇒ se vuelven a consultar filas
+        // cuyo link ya venció, que es lo que la ventana existe para cortar.
+        const ahora = enMinuto(12, 0)
+        const [, , masVieja] = franjasDeRepesca(ahora, VENTANA)
+        // La antigüedad se mide contra el reloj INYECTADO, no contra `Date.now()`:
+        // la función es pura y su salida es relativa al `ahora` que recibe.
+        const antiguedadMax = (ahora.getTime() - masVieja.desde.getTime()) / 60000
+
+        expect(Math.round(antiguedadMax)).toBeLessThanOrEqual(VENTANA + 1)
+      })
+
+      it('con la ventana en cero no hay ninguna franja que consultar', () => {
+        expect(franjasDeRepesca(enMinuto(12, 0), 0)).toEqual([])
+      })
+    })
+
+    it('sin franjas activas no se consulta la base siquiera', async () => {
+      // No hay hora en la que no toque ninguna franja (la primera siempre entra), así
+      // que el caso se fuerza por la ventana: con 0 minutos no hay nada que barrer.
+      const original = (service as any).DIAS_DE_REPESCA
+      ;(service as any).DIAS_DE_REPESCA = 0
+
+      await service.confirmarAltasPendientes()
+
+      expect(subscriptionRepo.find).not.toHaveBeenCalled()
+      ;(service as any).DIAS_DE_REPESCA = original
     })
 
     it('la consulta va acotada por pasada y toma primero la más vieja', async () => {
