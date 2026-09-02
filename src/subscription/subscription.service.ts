@@ -9,7 +9,6 @@ import {
   LIVE_SUBSCRIPTION_STATUSES,
 } from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
-import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
@@ -53,7 +52,6 @@ export class SubscriptionService {
     private readonly subscriptionEventReadRepository: Repository<SubscriptionEvent>,
     @InjectDataSource('DBWrite')
     private readonly dataSource: DataSource,
-    private readonly clientRoles: ClientRolesService,
     private readonly eventBus: EventBusService,
     private readonly confioTrial: ConfioTrialService,
     private readonly confioCancellation: ConfioCancellationService,
@@ -68,27 +66,34 @@ export class SubscriptionService {
    * partir de entonces ConfioPagos cobra cada período por su cuenta y nos avisa
    * por webhook.
    *
-   * ORDEN, que es la invariante de esta tarea: **todo lo falible primero, la
-   * escritura después**. Guards de lectura → `POST` a ConfioPagos → plan en roles
-   * → transacción corta que escribe la fila y el `TRIAL_STARTED`. Un 5xx de
-   * ConfioPagos deja a la marca REINTENTABLE (sin `trialStart`, sin fila nueva) en
-   * vez de quemada en `TRIAL_ALREADY_USED`.
+   * **EL ALTA NO REPARTE ACCESO.** La fila nace en `pending` y `backend-roles` no se
+   * toca acá: el plan lo otorga la CONFIRMACIÓN de ConfioPagos —el webhook
+   * `TRIALING`, `confio-subscription-webhook.service.ts`—, que es el único momento
+   * en que consta que el comprador aceptó y registró tarjeta. Es la regla «no se
+   * otorga el plan sin suscripción de verdad» (Manuel, 2026-09-02), y cierra el
+   * desfase que este docblock declaraba sin resolver: nuestra prueba ya no puede
+   * empezar antes que la de ellos, porque empieza CON la de ellos.
    *
-   * ⚠️ DESFASE SIN RESOLVER (queda escrito a propósito, no lo arregla esta tarea):
-   * nuestro trial arranca en el ALTA y el de ConfioPagos en la ACEPTACIÓN. Si el
-   * usuario acepta el día 3, ellos cobran el día 18 y el plan en roles ya expiró el
-   * 15; si no acepta nunca, son 15 días de pro regalados que ConfioPagos no cobra
-   * jamás. Además su link de aceptación vence a los 7 días por default, contra
-   * nuestros 15 de prueba.
+   * ORDEN, que sigue siendo la invariante: **todo lo falible primero, la escritura
+   * después**. Guards de lectura → `POST` a ConfioPagos → transacción corta que
+   * escribe la fila y el `TRIAL_STARTED`. Un 5xx de ConfioPagos deja a la marca
+   * REINTENTABLE (sin `trialStart`, sin fila nueva) en vez de quemada en
+   * `TRIAL_ALREADY_USED`.
    *
    * ⚠️ RESIDUAL ACEPTADO: si la escritura local falla DESPUÉS del `POST`, queda del
-   * lado de ConfioPagos una suscripción huérfana en `PENDING_ACCEPTANCE` —que vence
-   * sola y no cobra— y un plan en roles que caduca por su `expiresAt`. Se elige eso
-   * antes que quemarle la prueba a la marca.
+   * lado de ConfioPagos una suscripción huérfana en `PENDING_ACCEPTANCE`, que vence
+   * sola y no cobra. Se elige eso antes que quemarle la prueba a la marca. Ya no
+   * queda además un plan colgado en roles: acá no se asigna ninguno.
+   *
+   * ⚠️ Lo que SIGUE abierto del desfase, y es de ellos: su link de aceptación vence
+   * a los 7 días por default, contra los 15 de nuestra prueba. Quien no acepte en
+   * esa ventana no consigue acceso —correcto— pero tampoco puede retomar: la fila
+   * queda `pending` con un link muerto y el alta responde
+   * `SUBSCRIPTION_PENDING_ACCEPTANCE`. Retomarla es de otra tarea.
    *
    * ⚠️ CARRERA DEL WEBHOOK, verificada y sin efecto hoy: el `POST` dispara
    * `subscription.subscriptionStatusChanged` con `PENDING_ACCEPTANCE` ANTES de que
-   * exista nuestra fila (la escritura llega después de roles, hasta ~10 s más
+   * exista nuestra fila (la escritura llega después del `POST`, hasta ~10 s más
    * tarde). `ConfioSubscriptionWebhookService.handle` no la resuelve, loguea un
    * warn y retorna (`:119`), y aunque la resolviera `PENDING_ACCEPTANCE` está en
    * `CONFIO_ESTADOS_SIN_EFECTO` (`:38`). El evento igual queda en `webhook_events`
@@ -154,6 +159,25 @@ export class SubscriptionService {
       )
     }
 
+    // El alta que quedó ESPERANDO la aceptación no es una prueba consumida ni una
+    // suscripción vigente: es la misma alta, sin terminar. Va ANTES del guard de
+    // `trialStart` a propósito —esa columna ya está sellada en la fila `pending`—
+    // porque el orden decide qué código sale, y `TRIAL_ALREADY_USED` mandaría al
+    // llamador al alta PAGA (`roax-suscription-modal.component.ts:404`), que reusa
+    // la fila `pending` y crearía una SEGUNDA suscripción en ConfioPagos: dos
+    // recurrencias vivas para la misma marca y el link inicial huérfano.
+    // Lo que corresponde es retomar la que ya existe, y el camino es
+    // `GET /subscription/acceptance-link`, que devuelve el link YA emitido.
+    if (existing && existing.status === SubscriptionStatus.PENDING && existing.providerSubscriptionId) {
+      throw new RequestException(
+        {
+          code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
+          message: 'El alta ya está creada y espera que completes el registro del medio de pago',
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
+
     // `trialStart` es la marca durable de prueba consumida: ningún camino la limpia
     // (la invariante completa, con el enumerado de escritores, vive al lado de la
     // columna en `subscription.entity.ts`). Los cierres de HOY, que son los que dejan
@@ -199,23 +223,12 @@ export class SubscriptionService {
         ...(existing ? { correlationId: existing.id } : {}),
       })
 
-      // Va ANTES de abrir la transacción: es HTTP con timeout de 10 s y adentro
-      // retendría el lock del índice único de `brandId` en el camino caliente.
-      // Y se ramifica sobre el BOOLEANO, no sobre un throw: `assignPlanToBrand` no
-      // lanza nunca —`callRolesApi` (`client-roles.service.ts:323`) atrapa 4xx, 5xx,
-      // timeout y `SERVICE_ROLES` ausente y devuelve `false`—, así que un rollback
-      // escrito sobre «si rechaza» dejaría pasar de largo una caída de roles y la
-      // marca quedaría con la prueba consumida y sin plan.
-      const assigned = await this.clientRoles.assignPlanToBrand(brandId, planSlug, trialEnd)
-      if (!assigned) {
-        throw new RequestException(
-          {
-            code: 'PLAN_ASSIGNMENT_FAILED',
-            message: 'No se pudo activar el plan en el servicio de roles, reintentá en unos minutos',
-          },
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
-      }
+      // Acá NO se toca `backend-roles`, y es el punto de esta tarea: el alta no
+      // reparte acceso. Lo otorga la CONFIRMACIÓN de ConfioPagos —el webhook
+      // `TRIALING`, `confio-subscription-webhook.service.ts`—, que es cuando la
+      // suscripción existe de verdad. Efecto colateral querido: una caída de roles
+      // ya no puede abortar un alta que del otro lado YA quedó creada, así que el
+      // modo de fallo `PLAN_ASSIGNMENT_FAILED` desaparece de este camino.
 
       const confioName = confioSub.providerSubscriptionId
       // El resource name de la suscripción CONTIENE el del plan
@@ -242,6 +255,15 @@ export class SubscriptionService {
             HttpStatus.CONFLICT,
           )
         }
+        if (current && current.status === SubscriptionStatus.PENDING && current.providerSubscriptionId) {
+          throw new RequestException(
+            {
+              code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
+              message: 'El alta ya está creada y espera que completes el registro del medio de pago',
+            },
+            HttpStatus.CONFLICT,
+          )
+        }
         if (current && current.trialStart) {
           throw new RequestException(
             {
@@ -259,7 +281,11 @@ export class SubscriptionService {
           brandId,
           userId,
           planSlug,
-          status: SubscriptionStatus.TRIAL,
+          // Esperando la confirmación, igual que el alta paga: `pending` es el único
+          // estado que NO reparte acceso ni entra en ningún barrido que cobre
+          // (`tasks.service.ts`, docblock del archivo). Pasa a `trial` cuando
+          // ConfioPagos reporte `TRIALING`, o sea cuando el comprador aceptó.
+          status: SubscriptionStatus.PENDING,
           // ⚠️ `provider = confio` + `nextBillingDate = trialEnd` cambian la rama del
           // cron: `processTrialConversions` (`tasks.service.ts:141`) ya NO puede tomar
           // `provider === 'wallet' && !walletId → endTrialWithoutPayment`, así que TODO
@@ -325,9 +351,11 @@ export class SubscriptionService {
             toPlanSlug: planSlug,
             // Deja reconstruible el reinicio: la fila puede acumular más de un ciclo.
             fromStatus: current?.status ?? null,
-            toStatus: SubscriptionStatus.TRIAL,
+            // El estado REAL al que llega la fila. Decir `trial` acá dejaría en el
+            // historial una prueba que empezó, cuando lo que empezó es el alta.
+            toStatus: SubscriptionStatus.PENDING,
             triggeredBy: userId,
-            reason: `Trial de ${trialDays} días iniciado`,
+            reason: `Alta de prueba de ${trialDays} días creada, esperando la aceptación`,
           }),
         )
 
@@ -352,7 +380,8 @@ export class SubscriptionService {
       }
 
       this.logger.log(
-        `Trial iniciado: ${saved.id} marca ${brandId} plan ${planSlug} hasta ${trialEnd.toISOString()} ` +
+        `Alta de prueba creada: ${saved.id} marca ${brandId} plan ${planSlug}, prueba hasta ` +
+          `${trialEnd.toISOString()} si acepta ` +
           `(ConfioPagos ${confioName}, link de aceptación: ${confioSub.acceptanceUrl ? 'sí' : 'no'})`,
       )
       // El link viaja en la respuesta y en ningún otro lado: no se persiste ni se loguea.

@@ -240,7 +240,7 @@ describe('SubscriptionService', () => {
   })
 
   describe('startTrial', () => {
-    it('crea un trial de 15 días, asigna el plan en roles y registra el evento', async () => {
+    it('crea un trial de 15 días esperando la aceptación, SIN tocar roles', async () => {
       subscriptionRepo.findOne.mockResolvedValue(null)
       subscriptionRepo.create.mockImplementation((data) => data)
       subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ id: 'sub-1', ...data }))
@@ -249,7 +249,7 @@ describe('SubscriptionService', () => {
 
       const result = await service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' })
 
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(result.data.trialStart).toBeInstanceOf(Date)
       expect(result.data.trialEnd).toBeInstanceOf(Date)
       // nextBillingDate = trialEnd para que el cron de conversión lo tome
@@ -260,14 +260,17 @@ describe('SubscriptionService', () => {
       )
       expect(days).toBe(15)
 
-      // plan asignado en roles con expiración = fin del trial
-      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('brand-1', 'pro', result.data.trialEnd)
+      // EL ALTA NO REPARTE ACCESO: el plan lo otorga el webhook `TRIALING`, o sea
+      // cuando consta que el comprador aceptó (`confio-subscription-webhook.service.ts`).
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
 
+      // El `TRIAL_STARTED` se conserva: describe el ALTA, que sí ocurrió. Lo que
+      // cambia es a qué estado llega la fila.
       expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
         subscriptionId: 'sub-1',
         eventType: SubscriptionEventType.TRIAL_STARTED,
         toPlanSlug: 'pro',
-        toStatus: SubscriptionStatus.TRIAL,
+        toStatus: SubscriptionStatus.PENDING,
         triggeredBy: 'user-1',
       }))
     })
@@ -355,19 +358,19 @@ describe('SubscriptionService', () => {
       // es no nula mientras la haya.
       expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({
         id: 'sub-1',
-        status: SubscriptionStatus.TRIAL,
+        status: SubscriptionStatus.PENDING,
         cancelledAt: null,
         cancelReason: null,
         accessEndsAt: null,
         retryCount: 0,
         lastPaymentId: null,
       }))
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
-      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('brand-1', 'pro', result.data.trialEnd)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
       expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
         eventType: SubscriptionEventType.TRIAL_STARTED,
         fromStatus: SubscriptionStatus.CANCELLED,
-        toStatus: SubscriptionStatus.TRIAL,
+        toStatus: SubscriptionStatus.PENDING,
       }))
     })
 
@@ -389,7 +392,7 @@ describe('SubscriptionService', () => {
         planSlug: 'pro',
       })
 
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'sub-1' }))
     })
 
@@ -409,7 +412,7 @@ describe('SubscriptionService', () => {
 
       expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
       expect(result.acceptanceExpireTime).toEqual(ALTA_CONFIO.acceptanceExpireTime)
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
 
       expect(subscriptionRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -467,7 +470,11 @@ describe('SubscriptionService', () => {
     // MUTACIÓN QUE LO PONE ROJO: agregar `PENDING` a `LIVE_SUBSCRIPTION_STATUSES` ⇒ 409
     // `SUBSCRIPTION_ALREADY_EXISTS` permanente y la marca que abandonó el link no puede
     // reintentar nunca.
-    it('una fila `pending` no bloquea el alta: la reusa en vez de responder 409', async () => {
+    //
+    // La fila de este caso NO tiene `providerSubscriptionId`: nadie creó una suscripción
+    // en ConfioPagos para ella, así que no hay nada que retomar y reusarla es correcto.
+    // El caso con `name` —que sí tiene un link vivo— es el bloque de abajo.
+    it('una fila `pending` SIN suscripción en ConfioPagos no bloquea el alta: la reusa', async () => {
       const pendiente = {
         id: 'sub-1',
         brandId: 'brand-1',
@@ -483,15 +490,56 @@ describe('SubscriptionService', () => {
       expect(data).toEqual(expect.objectContaining({ id: 'sub-1' }))
     })
 
-    it('escribe DESPUÉS de tener el link: Confío → roles → fila', async () => {
+    // El alta que quedó ESPERANDO la aceptación no es una prueba consumida: es la misma
+    // alta sin terminar, y lo que corresponde es retomarla con el link YA emitido.
+    // Sin esta guarda salía `TRIAL_ALREADY_USED`, el modal caía al alta PAGA
+    // (`roax-suscription-modal.component.ts:404`) —que reusa la fila `pending`— y se
+    // creaba una SEGUNDA suscripción recurrente en ConfioPagos para la misma marca,
+    // dejando huérfano el link inicial.
+    describe('el alta que espera la aceptación se retoma, no se duplica', () => {
+      const esperandoAceptacion = {
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.PENDING,
+        trialStart: new Date('2026-01-01T00:00:00Z'),
+        providerSubscriptionId: 'stores/s/subscription-plans/p/subscriptions/abc',
+      }
+
+      it('responde 409 `SUBSCRIPTION_PENDING_ACCEPTANCE` y no crea nada en ConfioPagos', async () => {
+        subscriptionRepo.findOne.mockResolvedValue(esperandoAceptacion)
+
+        await expect(alta()).rejects.toMatchObject({ code: 'SUBSCRIPTION_PENDING_ACCEPTANCE' })
+        expect(confioTrial.createForTrial).not.toHaveBeenCalled()
+        expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      })
+
+      // El código IMPORTA, no sólo el 409: `TRIAL_ALREADY_USED` es el que manda al
+      // llamador al alta paga, o sea el que duplicaría la suscripción.
+      it('NO responde `TRIAL_ALREADY_USED`, aunque la fila ya tenga `trialStart`', async () => {
+        subscriptionRepo.findOne.mockResolvedValue(esperandoAceptacion)
+
+        await expect(alta()).rejects.not.toMatchObject({ code: 'TRIAL_ALREADY_USED' })
+      })
+
+      it('la carrera también la corta bajo el lock, después de hablar con ConfioPagos', async () => {
+        subscriptionRepo.findOne.mockResolvedValue(null)
+        txManager.findOne.mockResolvedValue(esperandoAceptacion)
+
+        await expect(alta()).rejects.toMatchObject({ code: 'SUBSCRIPTION_PENDING_ACCEPTANCE' })
+        expect(txManager.save).not.toHaveBeenCalled()
+      })
+    })
+
+    it('escribe DESPUÉS de tener el link: Confío → fila, y roles no entra', async () => {
       await alta()
 
       const confioAt = confioTrial.createForTrial.mock.invocationCallOrder[0]
-      const rolesAt = clientRoles.assignPlanToBrand.mock.invocationCallOrder[0]
       const saveAt = subscriptionRepo.save.mock.invocationCallOrder[0]
 
-      expect(confioAt).toBeLessThan(rolesAt)
-      expect(rolesAt).toBeLessThan(saveAt)
+      // Sigue valiendo la invariante del orden —todo lo falible antes de escribir—;
+      // lo que desapareció del medio es el otorgamiento, que ahora lo hace el webhook.
+      expect(confioAt).toBeLessThan(saveAt)
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
     })
 
     it('Confío caído NO quema la marca: cero escrituras y el reintento crea el trial', async () => {
@@ -506,16 +554,22 @@ describe('SubscriptionService', () => {
 
       // Mismo `findOne`, Confío sano: la prueba sigue disponible.
       const result = await alta()
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
     })
 
-    it('`assignPlanToBrand` que RESUELVE false (no rechaza) → 503 y cero escrituras', async () => {
+    // El alta ya no depende de roles, así que una caída de roles NO puede abortarla:
+    // el caso que este bloque fijaba (503 `PLAN_ASSIGNMENT_FAILED`) dejó de existir en
+    // este camino. Lo que se fija ahora es la propiedad que lo reemplaza.
+    it('roles caído ya no puede abortar un alta que ConfioPagos YA creó', async () => {
       clientRoles.assignPlanToBrand.mockResolvedValue(false)
 
-      await expect(alta()).rejects.toMatchObject({ code: 'PLAN_ASSIGNMENT_FAILED' })
-      expect(subscriptionRepo.save).not.toHaveBeenCalled()
-      expect(eventRepo.save).not.toHaveBeenCalled()
+      const result = await alta()
+
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
+      expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalled()
     })
 
     it('carrera sobre fila muerta: bajo el lock ya tiene `trialStart` → 409 sin pisarla', async () => {
@@ -598,7 +652,7 @@ describe('SubscriptionService', () => {
 
       const result = await alta()
 
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
       expect((result as any).error).toBeUndefined()
     })
@@ -611,7 +665,7 @@ describe('SubscriptionService', () => {
 
       const result = await alta()
 
-      expect(result.data.status).toBe(SubscriptionStatus.TRIAL)
+      expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(result.acceptanceUrl).toBe(ACCEPTANCE_URL)
       expect((result as any).error).toBeUndefined()
     })

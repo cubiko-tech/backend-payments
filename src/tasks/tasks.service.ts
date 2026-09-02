@@ -26,8 +26,10 @@ import { logger } from '../shared/logger/logger'
 
 /**
  * Los crons del servicio. Qué hace este archivo con `SubscriptionStatus.PENDING`
- * (el alta PAGA que todavía no pagó su primer ciclo): **nada, salvo excluirlo a
- * mano donde se reparte acceso**. El criterio se declara en dos lugares, y hacen
+ * —el alta que todavía no confirmó, **de prueba o paga desde el 2026-09-02**: la
+ * de prueba también nace ahí y espera el `TRIALING` de ConfioPagos—: **nada,
+ * salvo excluirlo a mano donde se reparte acceso**. Re-verificado al hacer ese
+ * cambio: las siete consultas siguen enumerando estados y ninguna lo nombra. El criterio se declara en dos lugares, y hacen
  * falta los dos:
  *
  * 1. **Las siete consultas** ENUMERAN los estados que toman y ninguna lo nombra —
