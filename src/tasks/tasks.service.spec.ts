@@ -21,6 +21,7 @@ describe('TasksService — processTrialConversions', () => {
   let walletService: any
   let eventBus: any
   let checkoutService: any
+  let confioWebhook: any
   let paymentRepo: ReturnType<typeof mockRepo>
   let providerFactory: any
 
@@ -51,6 +52,9 @@ describe('TasksService — processTrialConversions', () => {
       processCheckout: jest.fn().mockResolvedValue({ paymentId: 'pay-1', status: 'pending', checkoutUrl: 'https://pay.confio/abc' }),
       completeExternalPayment: jest.fn().mockResolvedValue(undefined),
     }
+    confioWebhook = {
+      confirmarContraElProveedor: jest.fn().mockResolvedValue({ resultado: 'sin_confirmar' }),
+    }
 
     service = new TasksService(
       mockRepo() as any, // walletReadRepo
@@ -67,6 +71,7 @@ describe('TasksService — processTrialConversions', () => {
       eventBus as any,
       clientRoles as any,
       checkoutService as any,
+      confioWebhook as any,
     )
   })
 
@@ -868,6 +873,119 @@ describe('TasksService — processTrialConversions', () => {
    * Que hoy no entre no es casualidad: las consultas ENUMERAN estados y el loop tiene
    * además su propio guard. Se fijan los dos, porque son defensas independientes.
    */
+  // La segunda pata de «no se depende del webhook»: el que pagó y nunca volvió a la
+  // pantalla también consigue su plan.
+  describe('confirmarAltasPendientes', () => {
+    function fila(over: Record<string, any> = {}) {
+      return { id: 's-pend', brandId: 'b1', planSlug: 'dropi-roax', status: SubscriptionStatus.PENDING, ...over }
+    }
+
+    it('barre SÓLO altas esperando confirmación, de confío y con suscripción del otro lado', async () => {
+      // Mutación: ampliar el filtro a filas vivas ⇒ el barrido consultaría (y podría
+      // reescribir) suscripciones que ya están andando.
+      subscriptionRepo.find.mockResolvedValue([])
+
+      await service.confirmarAltasPendientes()
+
+      const where = subscriptionRepo.find.mock.calls[0][0].where
+      expect(where.status).toBe(SubscriptionStatus.PENDING)
+      expect(where.provider).toBe('confio')
+      expect(where.providerSubscriptionId).toBeDefined()
+      expect(where.initialPaymentLinkIssuedAt).toBeDefined()
+    })
+
+    it('la consulta va acotada por pasada y toma primero la más vieja', async () => {
+      // Mutación: quitar el `take` ⇒ una acumulación de altas sin confirmar dispara
+      // cientos de llamadas al proveedor en una sola pasada.
+      subscriptionRepo.find.mockResolvedValue([])
+
+      await service.confirmarAltasPendientes()
+
+      const opciones = subscriptionRepo.find.mock.calls[0][0]
+      expect(opciones.take).toBeGreaterThan(0)
+      expect(opciones.order).toEqual({ updatedAt: 'ASC' })
+    })
+
+    it('confirma cada fila con el MISMO motor que aplica el webhook', async () => {
+      subscriptionRepo.find.mockResolvedValue([fila(), fila({ id: 's-pend-2' })])
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({ resultado: 'otorgada' })
+
+      await service.confirmarAltasPendientes()
+
+      expect(confioWebhook.confirmarContraElProveedor).toHaveBeenCalledTimes(2)
+    })
+
+    // ⚠️ DINERO: es el único barrido que toca filas `pending`, y la invariante del
+    // archivo se sostiene sólo si NO emite cobro.
+    it('no emite ningún cobro ni link, ni siquiera cuando otorga', async () => {
+      // Mutación: agregarle un `issueExternalCharge` ⇒ segundo riel de cobro sobre
+      // una fila que todavía tiene vivo su link inicial.
+      subscriptionRepo.find.mockResolvedValue([fila()])
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({ resultado: 'otorgada' })
+
+      await service.confirmarAltasPendientes()
+
+      expect(checkoutService.processCheckout).not.toHaveBeenCalled()
+      expect(providerFactory.getProvider).not.toHaveBeenCalled()
+    })
+
+    it('la que todavía no aceptó se deja como está: ni se marca ni se degrada', async () => {
+      // Mutación: escribir la fila cuando el resultado es `sin_confirmar` ⇒ se
+      // castiga a quien todavía puede aceptar mañana, dentro de la ventana del link.
+      subscriptionRepo.find.mockResolvedValue([fila()])
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({ resultado: 'sin_confirmar' })
+
+      await service.confirmarAltasPendientes()
+
+      expect(subscriptionRepo.update).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+    })
+
+    it('una fila que falla no corta la pasada: las demás se siguen intentando', async () => {
+      // Mutación: sacar el try/catch del loop ⇒ un rechazo de roles sobre la primera
+      // fila deja sin revisar a todas las que vienen atrás.
+      subscriptionRepo.find.mockResolvedValue([fila(), fila({ id: 's-pend-2' })])
+      confioWebhook.confirmarContraElProveedor
+        .mockRejectedValueOnce(new Error('roles caído'))
+        .mockResolvedValueOnce({ resultado: 'otorgada' })
+
+      await expect(service.confirmarAltasPendientes()).resolves.toBeUndefined()
+      expect(confioWebhook.confirmarContraElProveedor).toHaveBeenCalledTimes(2)
+    })
+
+    it('dos pasadas no se solapan: la segunda se saltea mientras la primera corre', async () => {
+      // Mutación: quitar el candado ⇒ dos pasadas consultan las mismas filas y
+      // duplican el tráfico contra ConfioPagos sin ganar nada.
+      let resolver: (v: any) => void
+      subscriptionRepo.find.mockResolvedValue([fila()])
+      confioWebhook.confirmarContraElProveedor.mockReturnValue(
+        new Promise((r) => {
+          resolver = r
+        }),
+      )
+
+      const primera = service.confirmarAltasPendientes()
+      await service.confirmarAltasPendientes()
+
+      expect(confioWebhook.confirmarContraElProveedor).toHaveBeenCalledTimes(1)
+      resolver({ resultado: 'otorgada' })
+      await primera
+    })
+
+    it('el candado se libera aunque la consulta explote', async () => {
+      // Mutación: liberar el flag fuera del `finally` ⇒ un error de base deja el
+      // barrido apagado para siempre hasta que se reinicie el servicio.
+      subscriptionRepo.find.mockRejectedValueOnce(new Error('base caída'))
+
+      await expect(service.confirmarAltasPendientes()).rejects.toThrow('base caída')
+
+      subscriptionRepo.find.mockResolvedValue([])
+      await service.confirmarAltasPendientes()
+      expect(subscriptionRepo.find).toHaveBeenCalledTimes(2)
+    })
+  })
+
   describe('ningún barrido que emite cobro incluye `pending`', () => {
     // MUTACIÓN QUE LO PONE ROJO: agregar `SubscriptionStatus.PENDING` a cualquiera de
     // los dos criterios de estado ⇒ la fila `pending` entra al barrido que cobra.

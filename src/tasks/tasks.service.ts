@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, IsNull, Repository } from 'typeorm'
+import { DataSource, LessThan, In, Between, IsNull, MoreThan, Not, Repository } from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
@@ -10,11 +10,13 @@ import { Transaction } from '../transaction/entities/transaction.entity'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import {
   Subscription,
+  SubscriptionProvider,
   SubscriptionStatus,
   LIVE_SUBSCRIPTION_STATUSES,
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
+import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { WalletService } from '../wallet/wallet.service'
 import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
@@ -72,6 +74,16 @@ import { logger } from '../shared/logger/logger'
 @Injectable()
 export class TasksService {
   private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
+  /** Cuántas altas sin confirmar se consultan por pasada. Cota dura, no sugerencia. */
+  private readonly MAX_REPESCA = parseInt(process.env.MAX_PENDING_CONFIRMATIONS || '50')
+  /**
+   * Ventana de repesca, en días. El link de aceptación de ConfioPagos vence a los 7
+   * por default, así que después de eso no hay nada que confirmar y seguir
+   * preguntando por esas filas sería gastar llamadas para siempre.
+   */
+  private readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
+  /** Candado de solapamiento: `@Cron` de Nest no impide que dos pasadas se pisen. */
+  private repescaEnCurso = false
   private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
 
@@ -98,6 +110,7 @@ export class TasksService {
     private eventBus: EventBusService,
     private clientRoles: ClientRolesService,
     private checkoutService: CheckoutService,
+    private confioWebhook: ConfioSubscriptionWebhookService,
   ) {}
 
   /** Proveedores externos que cobran con link de pago (no wallet interna). */
@@ -235,6 +248,89 @@ export class TasksService {
         `${downgraded} degradados a ${freePlanSlug()}, ` +
         `${skipped} salteados: link inicial ya emitido`,
     )
+  }
+
+  // =============================================================
+  // 1.b Repescar las altas que nunca confirmamos (cada 5 minutos)
+  // =============================================================
+  /**
+   * El que pagó y NUNCA volvió a la pantalla también consigue su plan.
+   *
+   * El front confirma al volver del pago; esto cubre al que cerró la pestaña, pagó
+   * desde otro dispositivo o se quedó sin internet justo ahí. Es la segunda pata de
+   * «no se depende del webhook» (regla de la épica 002 desde el 2026-09-02).
+   *
+   * ⚠️ DINERO — LO QUE ESTE BARRIDO NO HACE: no emite ningún cobro ni ningún link.
+   * Es el único que toca filas `pending`, y la invariante declarada en el docblock
+   * del archivo («ningún barrido que emite cobro incluye `pending`») sigue intacta
+   * justamente porque éste sólo LEE del proveedor y otorga. Si algún día alguien le
+   * agrega un `issueExternalCharge`, se abre un segundo riel de cobro en paralelo al
+   * link inicial que esa fila ya tiene vivo.
+   *
+   * La fila que todavía no aceptó se deja como está: no se marca, no se cuenta como
+   * fallo y no se degrada. El comprador puede aceptar mañana, dentro de la ventana
+   * del link.
+   */
+  @Cron('*/5 * * * *')
+  async confirmarAltasPendientes() {
+    // Las pasadas no se solapan: cada fila es una llamada HTTP al proveedor con 30 s
+    // de timeout, así que una pasada lenta puede seguir viva cuando entra la
+    // siguiente, y dos pasadas sobre las mismas filas duplican el tráfico contra
+    // ConfioPagos sin ganar nada.
+    if (this.repescaEnCurso) {
+      logger.log('info', '[CRON] confirmarAltasPendientes: la pasada anterior sigue en curso, se saltea')
+      return
+    }
+    this.repescaEnCurso = true
+
+    try {
+      const desde = new Date(Date.now() - this.DIAS_DE_REPESCA * 24 * 60 * 60 * 1000)
+      const pendientes = await this.subscriptionRepo.find({
+        where: {
+          // ENUMERA el estado, como las otras siete consultas del archivo: `pending`
+          // es el único que espera confirmación. Una fila viva o terminal no se toca.
+          status: SubscriptionStatus.PENDING,
+          provider: SubscriptionProvider.CONFIO,
+          // Sin suscripción del otro lado no hay nada que consultar.
+          providerSubscriptionId: Not(IsNull()),
+          // Pasada la ventana del link no queda nada por confirmar: se deja de
+          // preguntar en vez de arrastrar esas filas para siempre.
+          initialPaymentLinkIssuedAt: MoreThan(desde),
+        },
+        // La más vieja primero: con más altas que cota, ninguna queda postergada
+        // indefinidamente entre pasadas.
+        order: { updatedAt: 'ASC' },
+        take: this.MAX_REPESCA,
+      })
+
+      if (pendientes.length === 0) return
+
+      let otorgadas = 0
+      let sinConfirmar = 0
+      let fallidas = 0
+      for (const sub of pendientes) {
+        try {
+          // La regla de qué se otorga NO está acá: es la misma que aplica el webhook.
+          const { resultado } = await this.confioWebhook.confirmarContraElProveedor(sub)
+          if (resultado === 'otorgada') otorgadas++
+          else if (resultado === 'sin_confirmar') sinConfirmar++
+        } catch (error) {
+          // Una fila que falla —típicamente porque `backend-roles` rechazó el
+          // movimiento— NO puede cortar la pasada: las demás siguen. La próxima
+          // vuelve a intentarla, que es el mismo criterio de `expireSubscriptions`.
+          fallidas++
+          logger.log('error', `[CRON] confirmarAltasPendientes: ${sub.id} falló: ${error?.message}`)
+        }
+      }
+
+      logger.log(
+        'info',
+        `[CRON] confirmarAltasPendientes: ${pendientes.length} revisadas, ${otorgadas} otorgadas, ` +
+          `${sinConfirmar} todavía sin aceptar, ${fallidas} con error`,
+      )
+    } finally {
+      this.repescaEnCurso = false
+    }
   }
 
   // =============================================================
