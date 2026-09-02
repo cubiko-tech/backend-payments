@@ -167,6 +167,27 @@ export class SubscriptionController {
     return this.subscriptionService.reactivate(data.brandId, data.triggeredBy)
   }
 
+  /**
+   * Confirma la suscripción preguntándole a ConfioPagos, sin esperar su webhook.
+   *
+   * Resuelve la marca del principal con la misma regla que las otras lecturas
+   * (`resolveBrandId`, al final de la clase): un usuario confirma SU marca y sólo un
+   * principal de servicio puede nombrar una ajena. Es `POST` porque escribe —puede
+   * dejar la fila viva y asignar el plan en roles—, aunque el hecho lo decida el
+   * proveedor y no el llamador.
+   */
+  @Post('confirm')
+  @ApiOperation({ summary: 'Confirmar la suscripción contra ConfioPagos, sin esperar el webhook' })
+  @ApiResponse({ status: 201, description: 'Estado consultado; `confirmed` dice si ya quedó activa' })
+  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
+  @ApiResponse({ status: 422, description: 'NO_CONFIO_SUBSCRIPTION' })
+  @ApiResponse({ status: 503, description: 'CONFIO_STATUS_UNAVAILABLE (no se pudo preguntar)' })
+  async confirm(@Query('brandId') brandId: string, @Req() req: any) {
+    return this.subscriptionService.confirm(this.resolveBrandId(brandId, req))
+  }
+
   @Get('history')
   @ApiOperation({ summary: 'Historial de eventos de suscripción' })
   @ApiResponse({ status: 200, description: 'Historial obtenido correctamente' })

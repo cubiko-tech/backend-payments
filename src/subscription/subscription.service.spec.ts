@@ -7,6 +7,7 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
+import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 /** Resource name completo de la suscripción del lado de ConfioPagos. */
@@ -93,6 +94,7 @@ describe('SubscriptionService', () => {
   let clientRoles: { assignPlanToBrand: jest.Mock; removePlanFromBrand: jest.Mock; renewPlanForBrand: jest.Mock }
   let confioTrial: { createForTrial: jest.Mock; fetchAcceptance: jest.Mock }
   let confioCancellation: { cancel: jest.Mock }
+  let confioWebhook: { confirmarContraElProveedor: jest.Mock }
   let eventBus: { publishNotification: jest.Mock }
   /**
    * EntityManager de la transacción del alta. Tiene `findOne` PROPIO —y no el del
@@ -159,6 +161,12 @@ describe('SubscriptionService', () => {
           useValue: { cancel: jest.fn().mockResolvedValue(undefined) },
         },
         {
+          provide: ConfioSubscriptionWebhookService,
+          useValue: {
+            confirmarContraElProveedor: jest.fn().mockResolvedValue({ resultado: 'sin_confirmar' }),
+          },
+        },
+        {
           provide: ClientRolesService,
           useValue: {
             assignPlanToBrand: jest.fn().mockResolvedValue(true),
@@ -177,6 +185,7 @@ describe('SubscriptionService', () => {
     clientRoles = module.get(ClientRolesService)
     confioTrial = module.get(ConfioTrialService)
     confioCancellation = module.get(ConfioCancellationService)
+    confioWebhook = module.get(ConfioSubscriptionWebhookService)
     eventBus = module.get(EventBusService)
   })
 
@@ -932,6 +941,83 @@ describe('SubscriptionService', () => {
       )
 
       await esperarRechazoSinEfectos('SUBSCRIPTION_ALREADY_EXISTS')
+    })
+  })
+
+  // La vía que hace que el estado no dependa del webhook. Acá sólo se prueba lo que
+  // ESTE servicio decide —de qué fila se habla y cómo se traduce a HTTP—; la regla de
+  // qué se otorga vive en `ConfioSubscriptionWebhookService` y tiene su propio spec.
+  describe('confirm', () => {
+    function conFila(over: Record<string, any> = {}) {
+      const fila = { id: 'sub-1', brandId: 'brand-1', status: SubscriptionStatus.PENDING, ...over }
+      subscriptionRepo.findOne.mockResolvedValue(fila)
+      return fila
+    }
+
+    it('confirmada: devuelve la fila COMO QUEDÓ y `confirmed` en true', async () => {
+      // Mutación: devolver la fila leída al principio — el llamador vería `pending`
+      // justo después de que se le otorgó el plan, y el front seguiría sondeando.
+      conFila()
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({
+        resultado: 'otorgada',
+        estadoRemoto: 'TRIALING',
+      })
+      subscriptionRepo.findOne
+        .mockResolvedValueOnce({ id: 'sub-1', brandId: 'brand-1', status: SubscriptionStatus.PENDING })
+        .mockResolvedValueOnce({ id: 'sub-1', brandId: 'brand-1', status: SubscriptionStatus.TRIAL })
+
+      const res = await service.confirm('brand-1')
+
+      expect(res.confirmed).toBe(true)
+      expect(res.data.status).toBe(SubscriptionStatus.TRIAL)
+    })
+
+    it('todavía sin aceptar: 200 con `confirmed` en false, NO un error', async () => {
+      // Mutación: lanzar cuando no está confirmada — el front no podría sondear, que
+      // es justamente para lo que existe este endpoint.
+      conFila()
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({
+        resultado: 'sin_confirmar',
+        estadoRemoto: 'PENDING_ACCEPTANCE',
+      })
+
+      const res = await service.confirm('brand-1')
+
+      expect(res.confirmed).toBe(false)
+      expect(res.providerStatus).toBe('PENDING_ACCEPTANCE')
+    })
+
+    it('el proveedor caído es 503, y NUNCA se cuenta como «no aceptó»', async () => {
+      // Mutación: mapearlo a `confirmed: false` — una caída de ConfioPagos se le
+      // contaría al usuario como que no pagó.
+      conFila()
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({
+        resultado: 'proveedor_no_disponible',
+      })
+
+      await expect(service.confirm('brand-1')).rejects.toMatchObject({
+        code: 'CONFIO_STATUS_UNAVAILABLE',
+      })
+    })
+
+    it('sin fila para la marca es 404, sin preguntarle nada al proveedor', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(null)
+
+      await expect(service.confirm('brand-1')).rejects.toMatchObject({
+        code: 'SUBSCRIPTION_NOT_FOUND',
+      })
+      expect(confioWebhook.confirmarContraElProveedor).not.toHaveBeenCalled()
+    })
+
+    it('una fila sin suscripción en ConfioPagos es 422, no un 500 opaco', async () => {
+      conFila()
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({
+        resultado: 'sin_suscripcion_en_el_proveedor',
+      })
+
+      await expect(service.confirm('brand-1')).rejects.toMatchObject({
+        code: 'NO_CONFIO_SUBSCRIPTION',
+      })
     })
   })
 

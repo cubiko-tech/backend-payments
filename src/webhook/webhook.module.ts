@@ -29,6 +29,11 @@ import { ClientModule } from '../client/client.module'
   ],
   controllers: [WebhookController],
   providers: [WebhookService, WebhookRetryProcessor, ConfioSubscriptionWebhookService],
-  exports: [WebhookService],
+  // `ConfioSubscriptionWebhookService` se exporta porque la confirmación ACTIVA
+  // (`SubscriptionService.confirm` y el barrido de repesca) aplica el MISMO efecto
+  // que la notificación: la regla vive acá y no se duplica del otro lado. No hay
+  // ciclo — este módulo NO importa `SubscriptionModule`, se inyecta las dos
+  // entidades directo, que es justo el motivo por el que se hizo así.
+  exports: [WebhookService, ConfioSubscriptionWebhookService],
 })
 export class WebhookModule {}

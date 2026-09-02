@@ -12,6 +12,7 @@ import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptio
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
+import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
@@ -55,6 +56,7 @@ export class SubscriptionService {
     private readonly eventBus: EventBusService,
     private readonly confioTrial: ConfioTrialService,
     private readonly confioCancellation: ConfioCancellationService,
+    private readonly confioWebhook: ConfioSubscriptionWebhookService,
   ) {}
 
   /**
@@ -651,6 +653,64 @@ export class SubscriptionService {
     }
 
     return { data: await this.confioTrial.fetchAcceptance(name) }
+  }
+
+  /**
+   * Confirmar contra ConfioPagos, sin esperar su notificación.
+   *
+   * Es la vía que hace que el estado NO dependa del webhook (regla de la épica 002
+   * desde el 2026-09-02): el front la llama al volver del pago y el barrido de
+   * repesca la usa para quien nunca vuelve.
+   *
+   * La regla de qué se otorga y con qué vencimiento NO vive acá: la aplica
+   * `ConfioSubscriptionWebhookService.confirmarContraElProveedor`, o sea el MISMO
+   * planificador y la misma escritura que el webhook. Este método sólo resuelve de
+   * qué fila se habla y traduce el desenlace a HTTP.
+   *
+   * `sin_confirmar` NO es un error: es lo que pasa mientras el comprador no completó
+   * el pago, y es la respuesta que el front sondea. El fallo del canal sí lo es, y va
+   * separado: confundirlos haría que una caída de ConfioPagos se le contara al
+   * usuario como «no pagaste».
+   */
+  async confirm(brandId: string) {
+    const subscription = await this.subscriptionRepository.findOne({ where: { brandId } })
+    if (!subscription) {
+      throw new RequestException(
+        { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+
+    const { resultado, estadoRemoto } = await this.confioWebhook.confirmarContraElProveedor(
+      subscription,
+    )
+
+    if (resultado === 'proveedor_no_disponible') {
+      throw new RequestException(
+        {
+          code: 'CONFIO_STATUS_UNAVAILABLE',
+          message: 'No se pudo consultar el estado en ConfioPagos, reintentá en unos minutos',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
+    }
+
+    if (resultado === 'sin_suscripcion_en_el_proveedor') {
+      throw new RequestException(
+        {
+          code: 'NO_CONFIO_SUBSCRIPTION',
+          message: 'La suscripción de la marca no tiene una suscripción en ConfioPagos asociada',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    // Se relee DESPUÉS de aplicar: el llamador necesita la fila como quedó, no como
+    // estaba. `data` es la misma forma que devuelve `getCurrent`, así que el front no
+    // aprende un segundo formato.
+    const actual = await this.subscriptionRepository.findOne({ where: { brandId } })
+
+    return { data: actual, confirmed: resultado !== 'sin_confirmar', providerStatus: estadoRemoto }
   }
 
   /**

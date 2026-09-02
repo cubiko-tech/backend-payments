@@ -9,6 +9,7 @@ import { EnterprisePricingService } from './enterprise-pricing.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { PaymentModule } from '../payment/payment.module'
+import { WebhookModule } from '../webhook/webhook.module'
 
 @Module({
   imports: [
@@ -18,6 +19,11 @@ import { PaymentModule } from '../payment/payment.module'
     // salen `ConfioProvider` y `ConfioPlanService`. La cadena queda `SubscriptionModule → PaymentModule →
     // WalletModule`, sin ciclo (`CheckoutModule` ya importa los dos).
     PaymentModule,
+    // La confirmación activa reusa el planificador y la escritura del webhook, en vez
+    // de tener una segunda regla de qué se otorga. La flecha va en este sentido y no
+    // al revés: `WebhookModule` no importa este módulo (se inyecta las entidades
+    // directo), así que no hay ciclo.
+    WebhookModule,
   ],
   controllers: [SubscriptionController],
   providers: [

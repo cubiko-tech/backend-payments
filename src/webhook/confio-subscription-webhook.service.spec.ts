@@ -864,6 +864,179 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
     })
   })
 
+  // ------------------------------- (8) confirmación ACTIVA: preguntar, no esperar
+  //
+  // La vía que hace que el estado no dependa del webhook (Manuel, 2026-09-02, tras un
+  // pago real que ConfioPagos registró y del que nunca llegó callback).
+  describe('confirmarContraElProveedor', () => {
+    const REMOTA = {
+      status: 'TRIALING',
+      currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+      currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+      nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+    }
+
+    function esperando(over: Record<string, any> = {}) {
+      return conSuscripcion(
+        suscripcion({
+          status: SubscriptionStatus.PENDING,
+          currentPeriodEnd: new Date('2026-01-29T10:00:00Z'),
+          trialStart: new Date('2026-01-14T10:00:00Z'),
+          trialEnd: new Date('2026-01-29T10:00:00Z'),
+          ...over,
+        }),
+      )
+    }
+
+    it('otorga el plan con el período del proveedor, igual que el webhook', async () => {
+      const sub = esperando()
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      const res = await service.confirmarContraElProveedor(sub)
+
+      expect(res.resultado).toBe('otorgada')
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-02-02T10:00:00Z'),
+      )
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.TRIAL)
+      expect(suscripcionGuardada().currentPeriodEnd).toEqual(
+        roles.assignPlanToBrand.mock.calls[0][2],
+      )
+    })
+
+    it('le pide el estado al proveedor UNA sola vez', async () => {
+      // Mutación: no pasarle la lectura al planificador — cada sondeo del front le
+      // pediría dos veces la misma suscripción a ConfioPagos.
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      await service.confirmarContraElProveedor(esperando())
+
+      expect(confio.getSubscription).toHaveBeenCalledTimes(1)
+    })
+
+    it('la traza dice que el hecho salió de preguntar, no de que nos avisaran', async () => {
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      await service.confirmarContraElProveedor(esperando())
+
+      expect(historial()[0].metadata.event).toBe('subscription.confirmacionActiva')
+    })
+
+    it('todavía sin aceptar NO es un error ni toca nada', async () => {
+      // Mutación: tratar cualquier estado remoto como otorgable — se le daría el plan
+      // a quien no completó el pago, que es lo contrario de toda esta épica.
+      confio.getSubscription.mockResolvedValue({ ...REMOTA, status: 'PENDING_ACCEPTANCE' })
+
+      const res = await service.confirmarContraElProveedor(esperando())
+
+      expect(res.resultado).toBe('sin_confirmar')
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('un fallo del canal NO se cuenta como «no aceptó»', async () => {
+      // Mutación: colapsar el catch en `sin_confirmar` — una caída de ConfioPagos se
+      // le contaría al usuario como que no pagó.
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      const res = await service.confirmarContraElProveedor(esperando())
+
+      expect(res.resultado).toBe('proveedor_no_disponible')
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('sin suscripción en el proveedor no se inventa una consulta', async () => {
+      const res = await service.confirmarContraElProveedor(
+        conSuscripcion(
+          suscripcion({ status: SubscriptionStatus.PENDING, providerSubscriptionId: '', metadata: null }),
+        ),
+      )
+
+      expect(res.resultado).toBe('sin_suscripcion_en_el_proveedor')
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+    })
+
+    it('las guardas del webhook siguen valiendo: sobre una fila terminal no otorga', async () => {
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      const res = await service.confirmarContraElProveedor(
+        esperando({ status: SubscriptionStatus.CANCELLED }),
+      )
+
+      expect(res.resultado).toBe('sin_efecto')
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+  })
+
+  // El mismo hecho contado por dos vías distintas no puede aplicarse dos veces: las
+  // claves de idempotencia NO coinciden (la del webhook la acuña Confío con su
+  // `updateTime`, que su API de consulta no devuelve), así que lo que lo impide es la
+  // guarda de estado + período.
+  describe('el mismo hecho por dos vías no produce dos efectos', () => {
+    const REMOTA = {
+      status: 'TRIALING',
+      currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+      currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+      nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+    }
+
+    it('confirmar dos veces seguidas otorga una sola vez', async () => {
+      const sub = conSuscripcion(
+        suscripcion({ status: SubscriptionStatus.PENDING, currentPeriodEnd: null }),
+      )
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      await service.confirmarContraElProveedor(sub)
+      // La segunda corre sobre la fila YA aplicada, como la relee el handler.
+      sub.status = SubscriptionStatus.TRIAL
+      sub.currentPeriodEnd = new Date('2026-02-02T10:00:00Z')
+      const segunda = await service.confirmarContraElProveedor(sub)
+
+      expect(segunda.resultado).toBe('sin_efecto')
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+    })
+
+    it('el webhook que llega DESPUÉS de haber confirmado no escribe un segundo evento', async () => {
+      // Mutación: quitar la guarda de «mismo estado y mismo período» — el historial
+      // acumula dos filas del mismo hecho y roles recibe un movimiento de más.
+      conSuscripcion(
+        suscripcion({
+          status: SubscriptionStatus.TRIAL,
+          currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        }),
+      )
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('una RENOVACIÓN sí pasa: mismo estado, período nuevo', async () => {
+      // Mutación: comparar sólo el estado — el cobro del ciclo siguiente dejaría de
+      // extender el acceso y la marca perdería el plan al vencer el período viejo.
+      conSuscripcion(
+        suscripcion({
+          status: SubscriptionStatus.TRIAL,
+          currentPeriodEnd: new Date('2026-01-20T10:00:00Z'),
+        }),
+      )
+      confio.getSubscription.mockResolvedValue(REMOTA)
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-02-02T10:00:00Z'),
+      )
+    })
+  })
+
   describe('una notificación reentregada no repite la escritura en roles', () => {
     it('el marcador previo corta antes de roles y antes del proveedor', async () => {
       conSuscripcion(suscripcion())

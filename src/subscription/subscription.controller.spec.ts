@@ -8,12 +8,16 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
- * Las tres LECTURAS (`GET /subscription`, `/acceptance-link`, `/history`) van en una
- * sola tabla a propósito: la regla de resolución de marca es una, y si mañana se
- * agrega una cuarta lectura que se saltee `resolveBrandId`, el que la agregue tiene
- * que sumarla acá o el spec deja de cubrir el endpoint nuevo de forma visible.
+ * Los CUATRO endpoints que resuelven la marca del principal van en una sola tabla a
+ * propósito: la regla de resolución es una, y si mañana se agrega otro que se saltee
+ * `resolveBrandId`, el que lo agregue tiene que sumarlo acá o el spec deja de cubrir
+ * el endpoint nuevo de forma visible.
+ *
+ * `confirm` es el único que ESCRIBE —puede dejar la fila viva y asignar el plan en
+ * roles—, y por eso está acá y no aparte: que escriba lo hace MÁS importante, no
+ * menos, que la marca no salga nunca del query de un usuario.
  */
-const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory']] as const
+const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory'], ['confirm']] as const
 
 const SERVER_PRINCIPAL = { id: 'server', isSuperAdmin: true, brand: null }
 const USER_WITH_BRAND = { id: 'u1', isSuperAdmin: false, brand: 'A' }
@@ -45,6 +49,7 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
             getCurrent: jest.fn().mockResolvedValue({ data: {} }),
             getAcceptanceLink: jest.fn().mockResolvedValue({ data: {} }),
             getHistory: jest.fn().mockResolvedValue({ data: [] }),
+            confirm: jest.fn().mockResolvedValue({ data: {}, confirmed: false }),
           },
         },
         { provide: EnterprisePricingService, useValue: {} },

@@ -6,6 +6,7 @@ import { Subscription, SubscriptionStatus } from '../subscription/entities/subsc
 import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import {
+  ConfioSubscriptionResult,
   ConfioSubscriptionStatus,
   ConfioSubscriptionStatusWire,
   ConfioWebhookPayload,
@@ -106,6 +107,42 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * asigna el plan en roles» de `confio-subscription-webhook.service.spec.ts`.
  */
 const ESTADOS_TERMINALES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
+
+/**
+ * `event` con el que queda registrada en el historial la confirmación ACTIVA.
+ *
+ * No es un evento de ConfioPagos y por eso no se parece a los suyos: la traza tiene
+ * que decir de qué vía salió el hecho. Quien lea `subscription_events` distingue
+ * «nos avisaron» de «preguntamos».
+ */
+export const CONFIRMACION_ACTIVA = 'subscription.confirmacionActiva'
+
+/**
+ * Qué pasó al preguntarle a ConfioPagos, con los cuatro desenlaces separados a
+ * propósito: el llamador los cuenta distinto y colapsarlos es justo lo que la regla
+ * «un fallo del canal nunca se convierte en un hecho sobre el objeto» prohíbe.
+ */
+export interface ResultadoDeConfirmacion {
+  resultado:
+    /** Se aplicó: la fila quedó viva y el plan asignado en roles. */
+    | 'otorgada'
+    /** El comprador todavía no completó el pago. Es el caso NORMAL, no un error. */
+    | 'sin_confirmar'
+    /** Ya estaba aplicado, o las guardas lo impiden (fila terminal, baja pendiente). */
+    | 'sin_efecto'
+    /** La fila no tiene suscripción en ConfioPagos que consultar. */
+    | 'sin_suscripcion_en_el_proveedor'
+    /** No se pudo preguntar. NO significa «no aceptó». */
+    | 'proveedor_no_disponible'
+  estadoRemoto?: string
+}
+
+/** ¿La fila ya está parada en el mismo fin de período que se le va a escribir? */
+function mismoFinDePeriodo(sub: Subscription, periodo: PeriodoConfio): boolean {
+  const actual = aFecha(sub.currentPeriodEnd)
+
+  return !!actual && actual.getTime() === periodo.end.getTime()
+}
 
 /**
  * ¿La fila tiene una baja NUESTRA todavía en curso?
@@ -445,6 +482,7 @@ export class ConfioSubscriptionWebhookService {
   private async leerPeriodoDelProveedor(
     data: ConfioWebhookPayload['data'],
     sub: Subscription,
+    yaLeida?: ConfioSubscriptionResult,
   ): Promise<PeriodoConfio | undefined> {
     const resourceName = data?.name || sub.providerSubscriptionId
     if (!resourceName) {
@@ -455,7 +493,11 @@ export class ConfioSubscriptionWebhookService {
     }
 
     try {
-      const remota = await this.confio.getSubscription(resourceName)
+      // `yaLeida` es la MISMA lectura que trajo el estado en la confirmación activa
+      // (`confirmarContraElProveedor`): sin esto se le pediría dos veces la misma
+      // suscripción al proveedor en cada sondeo del front. La validación de abajo
+      // es la única, venga de donde venga la lectura.
+      const remota = yaLeida || (await this.confio.getSubscription(resourceName))
       const start = aFecha(remota?.currentPeriodStart)
       const end = aFecha(remota?.currentPeriodEnd)
       const nextBilling = aFecha(remota?.nextBillingTime)
@@ -620,7 +662,8 @@ export class ConfioSubscriptionWebhookService {
     sub: Subscription,
     wire: ConfioSubscriptionStatus,
     toStatus: SubscriptionStatus,
-  ): Promise<EfectoConfio> {
+    yaLeida?: ConfioSubscriptionResult,
+  ): Promise<EfectoConfio | null> {
     const efecto: EfectoConfio = { eventType: CONFIO_TIPO_DE_EVENTO[wire], toStatus }
 
     // Misma guarda de resurrección que `planearCobro`, y por el mismo motivo: una
@@ -636,7 +679,7 @@ export class ConfioSubscriptionWebhookService {
     }
 
     const periodo =
-      (await this.leerPeriodoDelProveedor(data, sub)) ||
+      (await this.leerPeriodoDelProveedor(data, sub, yaLeida)) ||
       (toStatus === SubscriptionStatus.TRIAL ? periodoDePrueba(sub) : periodoLocal(sub))
     if (!periodo) {
       this.logger.warn(
@@ -646,9 +689,87 @@ export class ConfioSubscriptionWebhookService {
       return efecto
     }
 
+    // MISMO HECHO, YA APLICADO: sin efecto. La confirmación tiene ahora TRES vías
+    // —el webhook, la confirmación activa del front y el barrido de repesca— y sus
+    // claves de idempotencia no pueden coincidir: la del webhook la acuña Confío con
+    // su `updateTime`, que su API de consulta ni siquiera devuelve. El marcador por
+    // `providerEventId` sigue cubriendo la reentrega de LA MISMA notificación; esta
+    // guarda cubre lo otro: que dos vías distintas cuenten el mismo hecho. Se compara
+    // el estado Y el fin de período, así que una renovación —mismo estado, período
+    // nuevo— sí pasa.
+    if (sub.status === toStatus && mismoFinDePeriodo(sub, periodo)) {
+      this.logger.log(
+        `Confio ${wire} para ${sub.id} ya estaba aplicado (mismo estado y mismo período): sin efecto`,
+      )
+      return null
+    }
+
     const roles = this.efectoRoles('reponer', sub, periodo.end)
 
     return { ...efecto, avanzaPeriodo: true, periodo, ...(roles ? { roles } : {}) }
+  }
+
+  /**
+   * Confirmación ACTIVA: en vez de esperar la notificación, se le pregunta a
+   * ConfioPagos y se aplica el mismo efecto.
+   *
+   * Existe porque el webhook no puede ser la única vía de enterarse (decisión de
+   * Manuel del 2026-09-02, tras un pago real que ellos registraron y del que nunca
+   * llegó callback). Las consumen `POST /subscription/confirm` y el barrido de
+   * repesca.
+   *
+   * NO reimplementa la regla: arma el mismo `data` que traería la notificación y
+   * pasa por `planearOtorgamiento` —las guardas de fila terminal, baja pendiente,
+   * período utilizable y hecho ya aplicado son EXACTAMENTE las mismas— y por el
+   * mismo `sincronizarAccesoEnRoles` + `aplicar`.
+   *
+   * Una sola lectura del proveedor: la que trae el estado se le pasa al planificador
+   * para el período. Y ese `throw` de roles se propaga tal cual, igual que en el
+   * webhook: un canal caído no puede quedar registrado como un hecho.
+   */
+  async confirmarContraElProveedor(sub: Subscription): Promise<ResultadoDeConfirmacion> {
+    const resourceName = sub.metadata?.confio?.name || sub.providerSubscriptionId
+    if (!resourceName) return { resultado: 'sin_suscripcion_en_el_proveedor' }
+
+    let remota: ConfioSubscriptionResult
+    try {
+      remota = await this.confio.getSubscription(resourceName)
+    } catch (error) {
+      // Un fallo del canal NO es un hecho sobre la suscripción: no es «todavía no
+      // aceptó» ni una baja. Se distingue para que el llamador lo cuente distinto.
+      this.logger.warn(`Confio no respondió el estado de ${sub.id}: ${error?.message}`)
+      return { resultado: 'proveedor_no_disponible' }
+    }
+
+    const wire = String(remota?.status || '') as ConfioSubscriptionStatus
+    if (!CONFIO_ESTADOS_QUE_OTORGAN.includes(wire)) {
+      // El caso NORMAL mientras el comprador no completó el pago. No es un error.
+      return { resultado: 'sin_confirmar', estadoRemoto: wire }
+    }
+
+    const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
+    const data = { name: resourceName, status: wire }
+    const efecto = await this.planearOtorgamiento(data, sub, wire, toStatus, remota)
+
+    // Esta vía escribe SÓLO si hay acceso que dar. El webhook, en cambio, aplica el
+    // estado aunque no otorgue —lo trae una notificación, y el proveedor manda sobre
+    // su propio estado—; una consulta nuestra no tiene esa autoridad, y mover a
+    // `trial` una fila que dimos por muerta, sin acceso, sería un estado confuso
+    // escrito por un sondeo. Sin efecto de roles no se escribe nada y la próxima
+    // pasada —o el webhook— vuelve a intentar: queda REINTENTABLE en vez de a medias.
+    if (!efecto || !efecto.roles) return { resultado: 'sin_efecto', estadoRemoto: wire }
+
+    // Marcador propio de esta vía: el `updateTime` con el que Confío acuña el suyo no
+    // viaja en la consulta, así que no se puede reproducir. Lo que impide el efecto
+    // doble entre vías es la guarda de «mismo hecho ya aplicado», no este id.
+    const providerEventId = `${resourceName}:confirmacion:${wire}:${efecto.periodo.end.toISOString()}`
+
+    if (efecto.roles) {
+      await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, providerEventId)
+    }
+    await this.aplicar(sub.id, efecto, { event: CONFIRMACION_ACTIVA, data }, providerEventId)
+
+    return { resultado: 'otorgada', estadoRemoto: wire }
   }
 
   /**
