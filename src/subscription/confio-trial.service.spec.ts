@@ -1,5 +1,5 @@
+import { HttpStatus, Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
-import { HttpStatus } from '@nestjs/common'
 import { ConfioTrialService } from './confio-trial.service'
 import { ClientPlatformService, BRAND_LOOKUP_UNAVAILABLE, BRAND_NOT_FOUND, BRAND_WITHOUT_COUNTRY } from '../client/client-platform.service'
 import { ClientRolesService, PLAN_NOT_FOUND, PRICE_NOT_FOUND_FOR_COUNTRY } from '../client/client-roles.service'
@@ -108,6 +108,70 @@ describe('ConfioTrialService', () => {
 
       const params = confio.createSubscription.mock.calls[0][0]
       expect(Object.keys(params)).not.toContain('correlationId')
+    })
+  })
+
+  // A dónde vuelve el comprador después de registrar su medio de pago. Antes no se
+  // mandaba nunca y se quedaba en la página de ConfioPagos — verificado con un pago
+  // real el 2026-09-02.
+  describe('createForTrial — retorno del comprador', () => {
+    const RETORNO_ORIGINAL = process.env.SUBSCRIPTION_RETURN_URL
+
+    afterEach(() => {
+      if (RETORNO_ORIGINAL === undefined) delete process.env.SUBSCRIPTION_RETURN_URL
+      else process.env.SUBSCRIPTION_RETURN_URL = RETORNO_ORIGINAL
+    })
+
+    it('manda `redirectUri` con la URL configurada', async () => {
+      // Mutación: no pasar el parámetro — el comprador se queda en ConfioPagos.
+      process.env.SUBSCRIPTION_RETURN_URL = 'https://app.dropi.co/dashboard/roax/reports/subscription'
+
+      await alta()
+
+      expect(confio.createSubscription).toHaveBeenCalledWith(
+        expect.objectContaining({
+          redirectUri: 'https://app.dropi.co/dashboard/roax/reports/subscription',
+        }),
+      )
+    })
+
+    it('sin configurar, la CLAVE no existe: no se compone un host', async () => {
+      // Mutación: caer a un default con `DOMAIN` — el comprador vuelve a un dominio
+      // NUESTRO, que no es donde vive la pantalla de ROAX. La clave presente con
+      // `undefined` tampoco sirve: el provider la distingue con `!== undefined`.
+      delete process.env.SUBSCRIPTION_RETURN_URL
+      process.env.DOMAIN = 'cubiko.dev'
+
+      await alta()
+
+      const params = confio.createSubscription.mock.calls[0][0]
+      expect(Object.keys(params)).not.toContain('redirectUri')
+    })
+
+    it('una URL en blanco se trata como no configurada', async () => {
+      // Mutación: chequear sólo `!== undefined` en vez de `trim()` — viaja un
+      // `redirectUri: '   '` y ConfioPagos manda al comprador a la nada.
+      process.env.SUBSCRIPTION_RETURN_URL = '   '
+
+      await alta()
+
+      const params = confio.createSubscription.mock.calls[0][0]
+      expect(Object.keys(params)).not.toContain('redirectUri')
+    })
+
+    it('el aviso de que falta la URL se da UNA vez, no en cada alta', async () => {
+      // Mutación: loguear dentro del camino del alta en vez de tras el flag — un
+      // ambiente sin la variable llena el log con una línea por suscripción.
+      delete process.env.SUBSCRIPTION_RETURN_URL
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+
+      await alta()
+      await alta()
+      await alta()
+
+      const avisos = warn.mock.calls.filter((c) => String(c[0]).includes('SUBSCRIPTION_RETURN_URL'))
+      expect(avisos).toHaveLength(1)
+      warn.mockRestore()
     })
   })
 

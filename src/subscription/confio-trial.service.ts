@@ -54,6 +54,9 @@ import { RequestException } from '../shared/exception/request.exception'
 export class ConfioTrialService {
   private readonly logger = new Logger(ConfioTrialService.name)
 
+  /** El aviso de «no hay URL de retorno» se da UNA vez, no en cada alta. */
+  private avisoDeRetornoDado = false
+
   constructor(
     private readonly clientPlatform: ClientPlatformService,
     private readonly clientRoles: ClientRolesService,
@@ -61,6 +64,33 @@ export class ConfioTrialService {
     private readonly confioPlans: ConfioPlanService,
     private readonly confio: ConfioProvider,
   ) {}
+
+  /**
+   * A dónde vuelve el comprador después de registrar su medio de pago.
+   *
+   * Sale de su propia variable y NUNCA de `DOMAIN`: la pantalla de suscripción de
+   * ROAX vive en el front de DROPI —otro producto, otro dominio, y distinto en cada
+   * ambiente (local, `dev.dropi.co`, `app.dropi.co`)—, así que componerla desde
+   * nuestro dominio mandaría al comprador a un lugar que no existe.
+   *
+   * Sin configurar devuelve `undefined` y la clave NO viaja en el body, que es el
+   * comportamiento de siempre: el comprador se queda en la página de ConfioPagos,
+   * que es peor experiencia pero no es un destino equivocado. Inventar un host sí
+   * lo sería, y sobre un link que se le manda a una persona real.
+   */
+  private get redirectUri(): string | undefined {
+    const url = (process.env.SUBSCRIPTION_RETURN_URL || '').trim()
+    if (url) return url
+
+    if (!this.avisoDeRetornoDado) {
+      this.avisoDeRetornoDado = true
+      this.logger.warn(
+        'SUBSCRIPTION_RETURN_URL no configurada: el alta no manda `redirectUri` y el comprador ' +
+          'se queda en la página de ConfioPagos después de aceptar',
+      )
+    }
+    return undefined
+  }
 
   /**
    * Crea la suscripción en ConfioPagos para un alta de trial.
@@ -110,6 +140,10 @@ export class ConfioTrialService {
       // Se agrega la CLAVE sólo si hay valor: `correlationId: undefined` viajaría
       // en el body como un campo vacío y el provider lo distingue con `!== undefined`.
       if (correlationId !== undefined) params.correlationId = correlationId
+      // Misma regla para el retorno, y por el mismo motivo. Vale para las DOS altas:
+      // la paga (`startPaid`) también entra por acá.
+      const redirectUri = this.redirectUri
+      if (redirectUri !== undefined) params.redirectUri = redirectUri
       return this.confio.createSubscription(params)
     })
   }
