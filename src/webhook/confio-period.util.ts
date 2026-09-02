@@ -71,3 +71,25 @@ export function periodoLocal(sub: Subscription): PeriodoConfio {
 
   return { start: inicio, end: fin, nextBilling: fin }
 }
+
+/**
+ * Período de la PRUEBA que el alta ya selló en la fila, para cuando ConfioPagos
+ * confirma la aceptación pero no devuelve su propio período.
+ *
+ * NO se usa `periodoLocal` como respaldo de una prueba: aquél avanza un CICLO
+ * MENSUAL y le daría 30 días de acceso a quien contrató 15. `trialEnd` es la
+ * fecha que el alta ya le prometió al usuario, así que es el único fin honesto
+ * que tenemos sin preguntarle al proveedor.
+ *
+ * `undefined` cuando no hay un `trialEnd` utilizable o ya venció. Ahí no se
+ * otorga nada y se avisa: inventarle un vencimiento a un acceso es justo lo que
+ * la regla «no se otorga el plan sin suscripción de verdad» prohíbe, y un fin ya
+ * vencido lo barrería el cron de `backend-roles` acto seguido (mismo motivo que
+ * el piso de `periodoLocal`).
+ */
+export function periodoDePrueba(sub: Subscription): PeriodoConfio | undefined {
+  const fin = aFecha(sub.trialEnd)
+  if (!fin || estaVencido(fin)) return undefined
+
+  return { start: aFecha(sub.trialStart) || new Date(), end: fin, nextBilling: fin }
+}

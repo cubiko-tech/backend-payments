@@ -12,7 +12,13 @@ import {
 } from '../provider/confio/confio.types'
 import { WebhookEvent } from './entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
-import { aFecha, estaVencido, PeriodoConfio, periodoLocal } from './confio-period.util'
+import {
+  aFecha,
+  estaVencido,
+  PeriodoConfio,
+  periodoDePrueba,
+  periodoLocal,
+} from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 
@@ -52,6 +58,21 @@ export const CONFIO_SUBSCRIPTION_STATUS_MAP: { [K in ConfioSubscriptionStatus]?:
 
 /** Estados del alta: se loguean y NO tocan el estado local. */
 export const CONFIO_ESTADOS_SIN_EFECTO: ConfioSubscriptionStatusWire[] = ['PENDING_ACCEPTANCE', 'PROCESSING']
+
+/**
+ * Los dos estados con los que ConfioPagos reporta una suscripción YA ACEPTADA y
+ * corriendo: la prueba que arrancó del lado de ellos y el ciclo pago.
+ *
+ * Son los que OTORGAN el plan en `backend-roles`, y desde la regla «no se otorga
+ * el plan sin suscripción de verdad» son el único momento en que una prueba
+ * consigue acceso — el alta no reparte nada.
+ *
+ * ⚠️ Es DISJUNTO de `CONFIO_ESTADOS_SIN_EFECTO` y tiene que seguir siéndolo:
+ * `PENDING_ACCEPTANCE` es el alta esperando que el comprador acepte, o sea
+ * exactamente lo contrario de una confirmación. Meterlo acá le daría el plan a
+ * quien todavía no registró tarjeta, que es el defecto que esta tarea corrige.
+ */
+export const CONFIO_ESTADOS_QUE_OTORGAN: ConfioSubscriptionStatus[] = ['TRIALING', 'ACTIVE']
 
 /**
  * `subscription_events.eventType` es un enum de Postgres con exactamente diez
@@ -222,7 +243,7 @@ export class ConfioSubscriptionWebhookService {
 
     const efecto = payload.event === 'subscription.billingStatusChanged'
       ? await this.planearCobro(data, sub)
-      : this.planearCambioDeEstado(data, sub)
+      : await this.planearCambioDeEstado(data, sub)
     if (!efecto) return
 
     if (efecto.roles) {
@@ -466,11 +487,17 @@ export class ConfioSubscriptionWebhookService {
     }
   }
 
-  /** Cambio de estado de la suscripción. `null` = no hay nada que aplicar. */
-  private planearCambioDeEstado(
+  /**
+   * Cambio de estado de la suscripción. `null` = no hay nada que aplicar.
+   *
+   * Es `async` desde que la CONFIRMACIÓN otorga acceso: `TRIALING`/`ACTIVE`
+   * necesitan el período del proveedor, y eso es red. Sigue calculándose fuera
+   * de la transacción, como el cobro.
+   */
+  private async planearCambioDeEstado(
     data: ConfioWebhookPayload['data'],
     sub: Subscription,
-  ): EfectoConfio | null {
+  ): Promise<EfectoConfio | null> {
     const wire: ConfioSubscriptionStatusWire = data?.status || ''
 
     if (CONFIO_ESTADOS_SIN_EFECTO.includes(wire)) {
@@ -536,6 +563,17 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
+    // LA CONFIRMACIÓN ES LA QUE OTORGA. `TRIALING`/`ACTIVE` son los dos estados
+    // con los que ConfioPagos reporta una suscripción ya aceptada y corriendo, y
+    // desde la regla «no se otorga el plan sin suscripción de verdad» (Manuel,
+    // 2026-09-02) son el ÚNICO momento en el que la prueba consigue acceso: el
+    // alta ya no reparte nada. Antes acá había un hueco deliberado —`ACTIVE` no
+    // reponía «porque ese efecto no trae período»—, y lo que lo cierra es pedirle
+    // el período al proveedor, igual que hace el cobro.
+    if (CONFIO_ESTADOS_QUE_OTORGAN.includes(wire as ConfioSubscriptionStatus)) {
+      return await this.planearOtorgamiento(data, sub, wire as ConfioSubscriptionStatus, toStatus)
+    }
+
     // Dos escalones distintos y un solo predicado para cada uno:
     // - `PAST_DUE`/`SUSPENDED` (los dos wire states que el mapa manda a
     //   `past_due`) son MORA: se retira el plan pago y NADA más. Un primer cobro
@@ -543,11 +581,6 @@ export class ConfioSubscriptionWebhookService {
     //   en una baja de plan (`corte-de-acceso-al-primer-fallo`).
     // - `CANCELED`/`EXPIRED` son terminales: ya no hay cobro posible, así que la
     //   marca pierde el plan pago y baja a `free`.
-    //
-    // Hueco conocido y deliberado: un cambio de estado a `ACTIVE` NO repone el
-    // plan, porque ese efecto no trae período y no habría `expiresAt` honesto
-    // que prometerle a roles sin inventarlo. La reposición la dispara el cobro
-    // `SUCCEEDED`, que es lo que pide la regla de negocio.
     const roles = esTerminal
       ? this.efectoRoles('degradar', sub)
       : toStatus === SubscriptionStatus.PAST_DUE
@@ -562,6 +595,60 @@ export class ConfioSubscriptionWebhookService {
       ...(esTerminal ? { reason: `ConfioPagos reportó la suscripción ${wire}` } : {}),
       ...(roles ? { roles } : {}),
     }
+  }
+
+  /**
+   * La suscripción quedó aceptada del lado de ConfioPagos: acá es donde la marca
+   * consigue el acceso.
+   *
+   * El `expiresAt` que se le promete a roles y el `currentPeriodEnd` que después
+   * se persiste son EL MISMO objeto: el período se resuelve una sola vez, en la
+   * fase de decisión. Resolverlo dos veces —una para roles, otra para la fila—
+   * permitiría que difieran, que es el defecto que `planearCobro` ya evita.
+   *
+   * El respaldo depende de QUÉ se confirmó, y por eso no es uno solo:
+   * - `ACTIVE` es un ciclo pago: `periodoLocal`, el mismo del cobro.
+   * - `TRIALING` es la prueba: `periodoDePrueba`, que respeta el `trialEnd` ya
+   *   sellado. Caer al mensual acá regalaría 30 días de acceso sobre una prueba
+   *   de 15.
+   * Sin ningún período utilizable NO se otorga: el estado se aplica igual —lo
+   * dicta el proveedor— pero el acceso no se inventa. Queda el warn para
+   * re-despachar el evento (`POST /webhook/:id/retry`) cuando Confío conteste.
+   */
+  private async planearOtorgamiento(
+    data: ConfioWebhookPayload['data'],
+    sub: Subscription,
+    wire: ConfioSubscriptionStatus,
+    toStatus: SubscriptionStatus,
+  ): Promise<EfectoConfio> {
+    const efecto: EfectoConfio = { eventType: CONFIO_TIPO_DE_EVENTO[wire], toStatus }
+
+    // Misma guarda de resurrección que `planearCobro`, y por el mismo motivo: una
+    // confirmación tardía sobre algo que del lado NUESTRO ya está muerto —o con
+    // una baja pendiente, que del lado de ellos ya está `CANCELED`— no vuelve a
+    // comprar el plan. La vuelta es un alta nueva, con su propio pago.
+    if (ESTADOS_TERMINALES.includes(sub.status) || bajaPendiente(sub)) {
+      this.logger.warn(
+        `Confio ${wire} sobre una suscripción que dimos por muerta (${sub.id}, ${sub.status}): ` +
+          'se aplica el estado pero NO se otorga el plan en roles',
+      )
+      return efecto
+    }
+
+    const periodo =
+      (await this.leerPeriodoDelProveedor(data, sub)) ||
+      (toStatus === SubscriptionStatus.TRIAL ? periodoDePrueba(sub) : periodoLocal(sub))
+    if (!periodo) {
+      this.logger.warn(
+        `Confio ${wire} para ${sub.id} sin período utilizable (trialEnd=${sub.trialEnd}): ` +
+          'se aplica el estado pero NO se otorga el plan en roles',
+      )
+      return efecto
+    }
+
+    const roles = this.efectoRoles('reponer', sub, periodo.end)
+
+    return { ...efecto, avanzaPeriodo: true, periodo, ...(roles ? { roles } : {}) }
   }
 
   /**

@@ -676,6 +676,194 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
   })
 
   // ------------------------------------------------------ (3) idempotencia
+  // ---------------------------------------- (7) la confirmación es la que otorga
+  //
+  // `TRIALING` y `ACTIVE` son los dos estados con los que ConfioPagos reporta una
+  // suscripción YA ACEPTADA. Desde la regla «no se otorga el plan sin suscripción
+  // de verdad» (Manuel, 2026-09-02) son el único momento en que una prueba
+  // consigue acceso: el alta dejó de repartirlo.
+  describe('la confirmación de ConfioPagos otorga el plan', () => {
+    /** Alta de PRUEBA esperando la aceptación: sin acceso todavía. */
+    function pendienteDeAceptacion(over: Record<string, any> = {}) {
+      return suscripcion({
+        status: SubscriptionStatus.PENDING,
+        trialStart: new Date('2026-01-14T10:00:00Z'),
+        trialEnd: new Date('2026-01-29T10:00:00Z'),
+        ...over,
+      })
+    }
+
+    it('TRIALING asigna el plan con el fin de período del proveedor', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      // A propósito distinto del `trialEnd` de la fila (01-29) y del avance
+      // mensual (03-01): si el handler usara cualquiera de los dos, esto se pone rojo.
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-02-02T10:00:00Z'),
+      )
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.TRIAL)
+      // Lo prometido a roles y lo persistido son el MISMO valor: el período se
+      // resuelve una sola vez, en la fase de decisión.
+      expect(suscripcionGuardada().currentPeriodEnd).toEqual(
+        roles.assignPlanToBrand.mock.calls[0][2],
+      )
+    })
+
+    it('ACTIVE también otorga (antes era un hueco deliberado del handler)', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-14T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-14T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('ACTIVE'))
+
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-02-14T10:00:00Z'),
+      )
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.ACTIVE)
+    })
+
+    it('TRIALING sin período del proveedor respeta el `trialEnd`, NO el ciclo mensual', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      // 15 días de prueba, no 30 de un ciclo pago: el respaldo mensual regalaría
+      // el doble de acceso del que se contrató.
+      const finDePrueba = new Date('2026-01-29T10:00:00Z')
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG, finDePrueba)
+      expect(suscripcionGuardada().currentPeriodEnd).toEqual(finDePrueba)
+    })
+
+    it('ACTIVE sin período del proveedor sí cae al ciclo mensual', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cambioDeEstado('ACTIVE'))
+
+      // La fila trae `currentPeriodEnd` 2026-02-01, todavía vigente al reloj fijo.
+      expect(roles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        PLAN_SLUG,
+        new Date('2026-03-01T00:00:00Z'),
+      )
+    })
+
+    it.each([
+      ['sin trialEnd', { trialEnd: null }],
+      ['con el trialEnd ya vencido', { trialEnd: new Date('2026-01-01T00:00:00Z') }],
+      ['con un trialEnd inválido', { trialEnd: new Date('no-es-fecha') }],
+    ])(
+      'TRIALING %s aplica el estado pero NO otorga: no se inventa un vencimiento',
+      async (_caso, over) => {
+        conSuscripcion(pendienteDeAceptacion(over))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(suscripcionGuardada().status).toBe(SubscriptionStatus.TRIAL)
+      },
+    )
+
+    it.each([SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED])(
+      'una confirmación tardía sobre una fila %s no compra el plan de nuevo',
+      async (status) => {
+        conSuscripcion(pendienteDeAceptacion({ status }))
+        confio.getSubscription.mockResolvedValue({
+          currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+          currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+          nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+        })
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      },
+    )
+
+    it('una confirmación sobre una baja pendiente tampoco otorga', async () => {
+      // Estado vivo, pero con baja NUESTRA ya sellada y acceso todavía corriendo:
+      // del lado de ellos esa suscripción ya está cancelada y no vuelve a cobrar.
+      conSuscripcion(
+        pendienteDeAceptacion({
+          status: SubscriptionStatus.TRIAL,
+          cancelledAt: new Date('2026-01-10T00:00:00Z'),
+          accessEndsAt: new Date('2026-01-29T10:00:00Z'),
+        }),
+      )
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('una suscripción sin planSlug no otorga con un slug vacío', async () => {
+      conSuscripcion(pendienteDeAceptacion({ planSlug: '' }))
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('la reentrega de la MISMA confirmación no vuelve a otorgar', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+      })
+      // El marcador de ESE evento ya está escrito: corta antes de roles y antes
+      // de preguntarle el período al proveedor.
+      eventRepo.createQueryBuilder.mockReturnValue(qb({ id: 'se-1' }))
+
+      await despachar(cambioDeEstado('TRIALING'), 'ev-repetido')
+
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+      expect(confio.getSubscription).not.toHaveBeenCalled()
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
+    it('deja la traza del otorgamiento en la fila de historial', async () => {
+      conSuscripcion(pendienteDeAceptacion())
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(historial()[0].metadata.roles).toEqual({
+        accion: 'reponer',
+        brandId: BRAND_ID,
+        planSlug: PLAN_SLUG,
+        expiresAt: '2026-01-29T10:00:00.000Z',
+      })
+    })
+  })
+
   describe('una notificación reentregada no repite la escritura en roles', () => {
     it('el marcador previo corta antes de roles y antes del proveedor', async () => {
       conSuscripcion(suscripcion())
