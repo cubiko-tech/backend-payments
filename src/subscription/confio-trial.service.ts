@@ -19,6 +19,7 @@ import {
 } from '../client/client-auth.service'
 import { ConfioPlanService } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { buildConfioBuyer } from '../provider/confio/confio-buyer'
 import { CreateConfioSubscriptionParams, ConfioSubscriptionResult } from '../provider/confio/confio.types'
@@ -50,6 +51,15 @@ import { RequestException } from '../shared/exception/request.exception'
  * nombra; la extracción —resolución + mapeo juntos, no sólo el `switch`— queda
  * anotada en el INBOX.
  */
+/**
+ * Motivo con el que se cancela la suscripción ANTERIOR al dar de alta una nueva.
+ *
+ * ConfioPagos exige un motivo y lo persiste de su lado: quien mire esa suscripción
+ * allá tiene que poder entender por qué murió sin buscar en nuestros logs.
+ */
+const MOTIVO_DE_REEMPLAZO =
+  'Reemplazada por un alta nueva de la misma marca en ROAX'
+
 @Injectable()
 export class ConfioTrialService {
   private readonly logger = new Logger(ConfioTrialService.name)
@@ -63,6 +73,7 @@ export class ConfioTrialService {
     private readonly clientAuth: ClientAuthService,
     private readonly confioPlans: ConfioPlanService,
     private readonly confio: ConfioProvider,
+    private readonly confioCancellation: ConfioCancellationService,
   ) {}
 
   /**
@@ -109,8 +120,13 @@ export class ConfioTrialService {
     userId: string
     planSlug: string
     correlationId?: string
+    /**
+     * Resource name de la suscripción que esta alta REEMPLAZA, cuando se reusa una
+     * fila que ya tenía una en ConfioPagos. Se cancela antes de crear la nueva.
+     */
+    reemplazaA?: string
   }): Promise<ConfioSubscriptionResult> {
-    const { brandId, userId, planSlug, correlationId } = input
+    const { brandId, userId, planSlug, correlationId, reemplazaA } = input
 
     // Se usa `resolveBrandCountry` y no el envoltorio `getBrandCountry` porque éste
     // colapsa los tres modos de fallo en `null` y acá cada uno mapea a un HTTP
@@ -131,6 +147,26 @@ export class ConfioTrialService {
 
     const contact = await this.clientAuth.resolveBuyerContact(userId)
     if (!contact.ok) throw this.buyerContactException(contact.code)
+
+    // LA ANTERIOR SE CANCELA ANTES DE CREAR LA NUEVA, y va acá —lo más tarde
+    // posible— para no cancelar nada si el país, el precio, el plan o el comprador
+    // van a fallar igual.
+    //
+    // ConfioPagos permite VARIAS suscripciones simultáneas del mismo comprador sobre
+    // el mismo plan (medido el 2026-09-03: había tres) y no tiene forma de
+    // reactivar, así que la única herramienta es cancelar. Sin esto, la anterior
+    // queda viva: si el comprador llegó a aceptarla, queda en `TRIALING` y COBRA, sin
+    // ninguna fila nuestra que lo explique —el webhook de ese cobro muere en
+    // `resolverSuscripcion` sin encontrar a quién aplicarlo—.
+    //
+    // Si la cancelación falla, el alta NO sigue: su `RequestException` sube tal cual
+    // y deja cero escrituras, que es justo lo que evita quedarse con dos vivas.
+    // Cancelar una que ya estaba cancelada es seguro: su `/cancel` es idempotente
+    // (200 dos veces, medido el 2026-08-27 y otra vez el 2026-09-03).
+    if (reemplazaA) {
+      await this.confioCancellation.cancel(reemplazaA, MOTIVO_DE_REEMPLAZO)
+      this.logger.log(`Suscripción anterior cancelada en ConfioPagos antes del alta de ${brandId}`)
+    }
 
     return this.callConfio(() => {
       // `buildConfioBuyer` rechaza con `ConfioSubscriptionInputError` ANTES de

@@ -38,6 +38,18 @@ function isUniqueViolation(e: unknown): boolean {
   return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
 }
 
+/**
+ * Resource name de la suscripción que una fila tiene en ConfioPagos, o `undefined`.
+ *
+ * Mismo orden de preferencia que `getAcceptanceLink`: `metadata.confio.name` es la
+ * fuente principal y `providerSubscriptionId` el respaldo de las filas que escribió
+ * otro camino. Se lee acá una sola vez para que las dos altas no puedan divergir en
+ * QUÉ suscripción reemplazan.
+ */
+function nombreAnterior(fila?: Subscription | null): string | undefined {
+  return fila?.metadata?.confio?.name || fila?.providerSubscriptionId || undefined
+}
+
 @Injectable()
 export class SubscriptionService {
   private readonly logger = new Logger(SubscriptionService.name)
@@ -86,6 +98,12 @@ export class SubscriptionService {
    * lado de ConfioPagos una suscripción huérfana en `PENDING_ACCEPTANCE`, que vence
    * sola y no cobra. Se elige eso antes que quemarle la prueba a la marca. Ya no
    * queda además un plan colgado en roles: acá no se asigna ninguno.
+   *
+   * Ese residual vale SÓLO para la huérfana que nadie aceptó, y por poco: si el
+   * comprador llegara a aceptarla quedaría en `TRIALING` y COBRARÍA, sin fila que lo
+   * explique. Por eso el alta que REUSA una fila cancela primero la suscripción
+   * anterior del otro lado (`reemplazaA`): medido el 2026-09-03, ConfioPagos admite
+   * varias simultáneas del mismo comprador —había tres— y no tiene reactivar.
    *
    * ⚠️ Lo que SIGUE abierto del desfase, y es de ellos: su link de aceptación vence
    * a los 7 días por default, contra los 15 de nuestra prueba. Quien no acepte en
@@ -223,6 +241,9 @@ export class SubscriptionService {
         userId,
         planSlug,
         ...(existing ? { correlationId: existing.id } : {}),
+        // La fila que se reusa puede tener una suscripción VIVA del otro lado: se
+        // cancela antes de crear la nueva, o quedarían dos y la vieja podría cobrar.
+        ...(nombreAnterior(existing) ? { reemplazaA: nombreAnterior(existing) } : {}),
       })
 
       // Acá NO se toca `backend-roles`, y es el punto de esta tarea: el alta no
@@ -482,6 +503,9 @@ export class SubscriptionService {
         planSlug,
         // `correlationId` sólo con fila muerta que reusar, mismo criterio que el trial.
         ...(existing ? { correlationId: existing.id } : {}),
+        // Y el mismo reemplazo: acá la fila reusada puede ser una `pending` con su link
+        // todavía vivo, así que la de allá se cancela igual antes de crear la nueva.
+        ...(nombreAnterior(existing) ? { reemplazaA: nombreAnterior(existing) } : {}),
       })
 
       const confioName = confioSub.providerSubscriptionId

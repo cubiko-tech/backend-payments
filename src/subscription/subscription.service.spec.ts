@@ -539,6 +539,53 @@ describe('SubscriptionService', () => {
       })
     })
 
+    // La fila que se REUSA puede tener una suscripción viva del otro lado: si no se
+    // cancela, quedan dos y la vieja puede cobrar sin fila que lo explique.
+    it('al reusar una fila, le pasa al proveedor la suscripción que reemplaza', async () => {
+      // Mutación: no pasar `reemplazaA` — la vieja queda viva en ConfioPagos.
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: null,
+        providerSubscriptionId: 'stores/s/subscription-plans/p/subscriptions/vieja',
+      })
+
+      await alta()
+
+      expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+        expect.objectContaining({ reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vieja' }),
+      )
+    })
+
+    it('gana el `name` de metadata sobre el `providerSubscriptionId`', async () => {
+      // Mutación: leer sólo `providerSubscriptionId` — se cancelaría un recurso viejo
+      // en las filas donde metadata tiene el vigente. Mismo orden que `getAcceptanceLink`.
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: null,
+        providerSubscriptionId: 'stores/s/subscription-plans/p/subscriptions/respaldo',
+        metadata: { confio: { name: 'stores/s/subscription-plans/p/subscriptions/vigente' } },
+      })
+
+      await alta()
+
+      expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+        expect.objectContaining({ reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vigente' }),
+      )
+    })
+
+    it('una marca nueva no manda `reemplazaA`: no hay nada que reemplazar', async () => {
+      subscriptionRepo.findOne.mockResolvedValue(null)
+
+      await alta()
+
+      const params = confioTrial.createForTrial.mock.calls[0][0]
+      expect(Object.keys(params)).not.toContain('reemplazaA')
+    })
+
     it('escribe DESPUÉS de tener el link: Confío → fila, y roles no entra', async () => {
       await alta()
 

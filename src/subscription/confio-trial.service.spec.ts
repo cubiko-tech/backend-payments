@@ -6,6 +6,7 @@ import { ClientRolesService, PLAN_NOT_FOUND, PRICE_NOT_FOUND_FOR_COUNTRY } from 
 import { ClientAuthService, USER_LOOKUP_UNAVAILABLE, USER_NOT_FOUND } from '../client/client-auth.service'
 import { ConfioPlanService } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { RequestException } from '../shared/exception/request.exception'
 
@@ -35,6 +36,7 @@ describe('ConfioTrialService', () => {
   let clientAuth: { resolveBuyerContact: jest.Mock }
   let confioPlans: { resolveConfioPlanName: jest.Mock }
   let confio: { createSubscription: jest.Mock; getSubscription: jest.Mock }
+  let confioCancellation: { cancel: jest.Mock }
 
   beforeEach(async () => {
     clientPlatform = { resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }) }
@@ -46,6 +48,7 @@ describe('ConfioTrialService', () => {
       }),
     }
     confioPlans = { resolveConfioPlanName: jest.fn().mockResolvedValue(CONFIO_PLAN) }
+    confioCancellation = { cancel: jest.fn().mockResolvedValue(undefined) }
     confio = {
       createSubscription: jest.fn().mockResolvedValue(ALTA),
       getSubscription: jest.fn().mockResolvedValue(ALTA),
@@ -59,6 +62,7 @@ describe('ConfioTrialService', () => {
         { provide: ClientAuthService, useValue: clientAuth },
         { provide: ConfioPlanService, useValue: confioPlans },
         { provide: ConfioProvider, useValue: confio },
+        { provide: ConfioCancellationService, useValue: confioCancellation },
       ],
     }).compile()
 
@@ -114,6 +118,57 @@ describe('ConfioTrialService', () => {
   // A dónde vuelve el comprador después de registrar su medio de pago. Antes no se
   // mandaba nunca y se quedaba en la página de ConfioPagos — verificado con un pago
   // real el 2026-09-02.
+  // ConfioPagos admite varias suscripciones simultáneas del mismo comprador sobre el
+  // mismo plan (medido el 2026-09-03: había tres) y no tiene forma de reactivar. Si la
+  // anterior queda viva y el comprador llegó a aceptarla, cobra sin que ninguna fila
+  // nuestra lo explique.
+  describe('createForTrial — la anterior se cancela antes de crear la nueva', () => {
+    const ANTERIOR = 'stores/s/subscription-plans/p/subscriptions/vieja'
+
+    it('cancela la anterior y recién ahí crea', async () => {
+      // Mutación: no pasar `reemplazaA` al provider de cancelación — quedan dos vivas.
+      await alta({ reemplazaA: ANTERIOR })
+
+      expect(confioCancellation.cancel).toHaveBeenCalledWith(ANTERIOR, expect.any(String))
+      const cancelAt = confioCancellation.cancel.mock.invocationCallOrder[0]
+      const createAt = confio.createSubscription.mock.invocationCallOrder[0]
+      expect(cancelAt).toBeLessThan(createAt)
+    })
+
+    it('sin anterior no se cancela nada', async () => {
+      // Mutación: cancelar siempre — un alta de marca nueva llamaría a `/cancel` con
+      // un name vacío, que su API rechaza.
+      await alta()
+
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+    })
+
+    it('si la cancelación falla, el alta NO sigue', async () => {
+      // Mutación: seguir igual (try/catch alrededor del cancel) — se crea la nueva
+      // dejando viva la vieja, que es EXACTAMENTE el escenario que esto evita.
+      confioCancellation.cancel.mockRejectedValue(
+        new RequestException({ code: 'CONFIO_CANCEL_FAILED', message: 'x' }, HttpStatus.SERVICE_UNAVAILABLE),
+      )
+
+      await expect(alta({ reemplazaA: ANTERIOR })).rejects.toMatchObject({
+        code: 'CONFIO_CANCEL_FAILED',
+      })
+      expect(confio.createSubscription).not.toHaveBeenCalled()
+    })
+
+    it('se cancela lo más TARDE posible: un fallo de precio no cancela nada', async () => {
+      // Mutación: mover el cancel al principio del método — se cancelaría la
+      // suscripción de una marca cuya alta iba a fallar igual, dejándola sin nada.
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: false,
+        code: PRICE_NOT_FOUND_FOR_COUNTRY,
+      })
+
+      await expect(alta({ reemplazaA: ANTERIOR })).rejects.toBeDefined()
+      expect(confioCancellation.cancel).not.toHaveBeenCalled()
+    })
+  })
+
   describe('createForTrial — retorno del comprador', () => {
     const RETORNO_ORIGINAL = process.env.SUBSCRIPTION_RETURN_URL
 
