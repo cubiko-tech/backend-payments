@@ -845,6 +845,74 @@ describe('SubscriptionService', () => {
       )
     })
 
+    /**
+     * En ConfioPagos la cuenta ES un número de teléfono: el link queda autorizado
+     * para el que mandamos y su formulario pide ese mismo para mandar el código.
+     * Con otro, responde que no está permitido para el cobro. O sea que el número
+     * del comprador no es contacto, es la LLAVE del pago — y quien paga puede no
+     * ser el dueño del teléfono que figura en la cuenta de Dropi.
+     */
+    describe('el teléfono con el que se cobra', () => {
+      it('sin elección, manda el de la cuenta: no inventa nada', async () => {
+        await alta()
+
+        const params = confioTrial.createForTrial.mock.calls[0][0]
+        expect(Object.keys(params)).not.toContain('telefonoDeCobro')
+      })
+
+      it('[R15] con elección, manda ESE y no el de la cuenta', async () => {
+        await alta({ billingPhone: '+573001112233' })
+
+        expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+          expect.objectContaining({ telefonoDeCobro: '+573001112233' }),
+        )
+      })
+
+      it('[R15] lo guarda con la suscripción, NO en el perfil del usuario', async () => {
+        await alta({ billingPhone: '+573001112233' })
+
+        expect(subscriptionRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            metadata: expect.objectContaining({
+              confio: expect.objectContaining({ buyerPhone: '+573001112233' }),
+            }),
+          }),
+        )
+      })
+
+      it('[R15] una re-alta reusa el elegido antes, sin volver a pedirlo', async () => {
+        subscriptionRepo.findOne.mockResolvedValue({
+          id: 'sub-1',
+          brandId: 'brand-1',
+          status: SubscriptionStatus.EXPIRED,
+          trialStart: null,
+          metadata: { confio: { buyerPhone: '+573009998877' } },
+        })
+
+        await alta()
+
+        expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+          expect.objectContaining({ telefonoDeCobro: '+573009998877' }),
+        )
+      })
+
+      it('lo elegido ahora gana sobre lo guardado antes', async () => {
+        subscriptionRepo.findOne.mockResolvedValue({
+          id: 'sub-1',
+          brandId: 'brand-1',
+          status: SubscriptionStatus.EXPIRED,
+          trialStart: null,
+          metadata: { confio: { buyerPhone: '+573009998877' } },
+        })
+
+        await alta({ billingPhone: '+573001112233' })
+
+        expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+          expect.objectContaining({ telefonoDeCobro: '+573001112233' }),
+        )
+      })
+    })
+
     it('reusa la fila de la marca que ya gastó la prueba SIN pisarle `trialStart`', async () => {
       // Mutación: listar `trialStart: null` / `trialEnd: null` en el `create` del alta
       // paga → este caso se pone rojo. Con la marca borrada, `POST /subscription/trial`
