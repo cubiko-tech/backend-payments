@@ -395,17 +395,34 @@ export class SubscriptionService {
           provider: SubscriptionProvider.CONFIO,
           walletId: null,
           providerSubscriptionId: confioName,
+          // ⚠️ NO SE SELLA NADA DE LA PRUEBA HASTA QUE CONFIOPAGOS CONFIRME.
+          //
+          // Hasta el 2026-09-04 acá se escribían `trialStart`/`trialEnd` y el período
+          // con los 15 días, y el plan NO se otorgaba —correcto— pero esas fechas
+          // quedaban igual. El resultado, visto en staging con un caso real: una
+          // suscripción cancelada sin haberse pagado nunca decía «acceso hasta el 19»
+          // porque la pantalla lee esas columnas, y de paso `trialStart` la contaba
+          // como prueba CONSUMIDA, así que la marca no podía volver a intentarlo.
+          //
+          // El período se sella en la confirmación, con lo que el proveedor devuelva:
+          // la prueba empieza cuando el comprador acepta, no cuando llenó el
+          // formulario. Las dos columnas de período son NOT NULL, así que van en `now`
+          // —un período de largo cero, igual que el alta paga— y el webhook las
+          // reescribe.
           currentPeriodStart: now,
-          currentPeriodEnd: trialEnd,
-          trialStart: now,
-          trialEnd,
+          currentPeriodEnd: now,
           // Se marca INCONDICIONALMENTE: lo que afirma no es «hubo URL» sino «esta fila ya
           // tiene su suscripción recurrente en ConfioPagos», y re-emitir un checkout
           // one-shot encima sería un segundo riel de cobro. Si el `acceptanceUrl` no llegó,
           // la vía de recuperación es `getAcceptanceLink`, nunca el cron. El reuso de una
           // fila muerta lo re-marca a propósito: ciclo nuevo, link nuevo.
           initialPaymentLinkIssuedAt: now,
-          nextBillingDate: trialEnd,
+          // Tampoco se agenda cobro: la recurrencia la arranca ConfioPagos cuando el
+          // comprador acepta, y un `nextBillingDate` puesto acá despertaría a
+          // `processSubscriptionRenewals` sobre una fila que todavía no pagó nada.
+          // (De paso desaparece el efecto que el comentario de arriba describía: sin
+          // esta fecha, un alta abandonada ya no cae en `issueExternalCharge`.)
+          nextBillingDate: null,
           autoRenew: true,
           cancelledAt: null,
           cancelReason: null,
