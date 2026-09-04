@@ -1,5 +1,7 @@
 import { createLogger, format, transports } from 'winston'
 
+import { isProductionEnv } from '../env/is-production'
+
 export const logger = createLogger({
   level: 'info',
   format: format.combine(
@@ -15,7 +17,10 @@ export const logger = createLogger({
   ],
 })
 
-if (process.env.NODE_ENV !== 'production') {
+// `isProductionEnv()` y no `NODE_ENV`: esta grafía no existe en la configuración
+// del servicio (`.env.schema` declara `ENV`), así que la consola con formato para
+// humanos se agregaba también corriendo en producción.
+if (!isProductionEnv()) {
   logger.add(
     new transports.Console({
       format: format.combine(format.colorize(), format.simple()),

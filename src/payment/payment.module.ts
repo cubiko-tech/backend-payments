@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm'
 import { Payment } from './entities/payment.entity'
 import { PaymentAttempt } from './entities/paymentAttempt.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
+import { ConfioSubscriptionPlan } from '../provider/entities/confioSubscriptionPlan.entity'
 import { PaymentController } from './payment.controller'
 import { PaymentService } from './payment.service'
 import { WalletModule } from '../wallet/wallet.module'
@@ -12,11 +13,14 @@ import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ConfioPlanService } from '../provider/confio/confio-plan.service'
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Payment, PaymentAttempt], 'DBWrite'),
-    TypeOrmModule.forFeature([Payment, PaymentAttempt, ProviderConfig], 'DBRead'),
+    // `ConfioSubscriptionPlan` sólo en DBRead: nada de esta tabla se escribe
+    // desde el servicio (la siembra la hace la migración).
+    TypeOrmModule.forFeature([Payment, PaymentAttempt, ProviderConfig, ConfioSubscriptionPlan], 'DBRead'),
     WalletModule,
   ],
   controllers: [PaymentController],
@@ -28,7 +32,8 @@ import { ConfioProvider } from '../provider/confio/confio.provider'
     MercadoPagoProvider,
     DropiProvider,
     ConfioProvider,
+    ConfioPlanService,
   ],
-  exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider, ConfioProvider],
+  exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider, ConfioProvider, ConfioPlanService],
 })
 export class PaymentModule {}

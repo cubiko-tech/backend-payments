@@ -258,9 +258,9 @@ jobs:
               cp /tmp/update-containers.sh \
                 ${DEPLOY_PATH}/update-containers.sh
               chmod +x ${DEPLOY_PATH}/update-containers.sh
-              [ -f /tmp/service.env ] && \
+              if [ -f /tmp/service.env ]; then
                 cp /tmp/service.env ${DEPLOY_PATH}/.env
-              rm -f /tmp/docker-compose.image.yml \
+              fi
                 /tmp/update-containers.sh /tmp/service.env
               cd ${DEPLOY_PATH}
               set -a && source .env && set +a
@@ -305,6 +305,12 @@ jobs:
               # Blue-green swap: health check, register
               # upstream, remove old container
               bash update-containers.sh \"\${CONTAINER_SLUG}\"
+
+              # Limpieza del staging de /tmp AL FINAL. Si se borra antes
+              # del pull, un fallo posterior deja a retry_gcloud reintentando
+              # un comando que ya no encuentra los archivos: los reintentos
+              # mueren en \"cp: cannot stat\" y tapan el error real.
+              rm -f /tmp/docker-compose.image.yml \
 
               echo \"backend-payments deployed (blue-green)\"
               docker ps --filter name=\$CONTAINER_NAME'"

@@ -10,10 +10,19 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { WalletService } from './wallet.service'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 
 @ApiTags('Wallet')
 @Controller('wallet')
-@UseGuards()
+/**
+ * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
+ * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
+ * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
+ * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
+ * `@RequirePermission` por handler, así que esto no le agrega requisitos a
+ * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
+ */
+@UseGuards(ApiAuthGuard)
 export class WalletController {
   constructor(private readonly walletService: WalletService) {}
 

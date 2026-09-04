@@ -1,4 +1,4 @@
-import { CreditPermissionGuard } from './credit-permission.guard'
+import { ApiAuthGuard } from './api-auth.guard'
 
 const b64u = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url')
 const tokenWith = (payload: any) => `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u(payload)}.sig`
@@ -11,17 +11,17 @@ function ctx(headers: Record<string, string> = {}, cookies: Record<string, strin
   } as any
 }
 
-describe('CreditPermissionGuard', () => {
+describe('ApiAuthGuard', () => {
   const reflector = { get: jest.fn() } as any
   const roles = { checkPermission: jest.fn() } as any
   let fetchMock: jest.Mock
 
   const makeGuard = (verify: jest.Mock) =>
-    new CreditPermissionGuard(reflector, { verify } as any, roles)
+    new ApiAuthGuard(reflector, { verify } as any, roles)
 
   beforeEach(() => {
     jest.clearAllMocks()
-    reflector.get.mockReturnValue(undefined) // preapproval: sin @RequireCreditPermission
+    reflector.get.mockReturnValue(undefined) // preapproval: sin @RequirePermission
     process.env.SERVICE_AUTH = 'http://auth.test/auth/v1'
     process.env.ACCESS_SERVER = 'srv-secret'
     process.env.JWT_SECRET = 'global'
