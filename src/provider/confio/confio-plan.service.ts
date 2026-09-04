@@ -5,7 +5,7 @@ import { ConfioSubscriptionPlan } from '../entities/confioSubscriptionPlan.entit
 import { RequestException } from '../../shared/exception/request.exception'
 
 /**
- * Resolución `(planSlug, moneda) → resource name del plan en ConfioPagos`.
+ * Resolución `(planSlug, moneda, conPrueba) → resource name del plan en ConfioPagos`.
  *
  * Sólo lectura: la tabla `confio_subscription_plan` se siembra por migración y
  * el alta real de los planes del lado de ConfioPagos no pasa por acá. Es la
@@ -34,20 +34,37 @@ export class ConfioPlanService {
    *   ConfioPagos (`confioName` NULL). Distinto del anterior a propósito: acá el
    *   mapeo está bien y lo que falta es el alta del plan en la pasarela.
    * @throws CONFIO_PLAN_ARCHIVED    el mapeo quedó fuera de uso.
+   *
+   * @param conPrueba si el alta debe obtener el período de prueba de ConfioPagos.
+   *   **Es obligatorio a propósito**: la prueba vive en el PLAN, así que elegir
+   *   mal acá es regalar quince días que después ellos cobran. Sin valor por
+   *   defecto, un llamador que se olvide no compila, en vez de caer en silencio
+   *   al plan con prueba —que es exactamente el modo de fallo caro—.
    */
-  async resolveConfioPlanName(planSlug: string, currencyCode: string): Promise<string> {
+  async resolveConfioPlanName(
+    planSlug: string,
+    currencyCode: string,
+    conPrueba: boolean,
+  ): Promise<string> {
     const currency = (currencyCode || '').trim().toUpperCase()
 
     const mapping = await this.planReadRepo.findOne({
-      where: { planSlug, currencyCode: currency },
+      where: { planSlug, currencyCode: currency, withTrial: conPrueba },
     })
 
+    // La variante se nombra en TODOS los mensajes de error: sin ella, «no hay plan
+    // mapeado para dropi-roax/COP» manda a mirar una fila que sí existe, y el
+    // tiempo se va en no entender por qué falla algo que está sembrado.
+    const variante = conPrueba ? 'con prueba' : 'sin prueba'
+
     if (!mapping) {
-      this.logger.warn(`Sin plan de ConfioPagos mapeado para ${planSlug}/${currency}`)
+      this.logger.warn(`Sin plan de ConfioPagos mapeado para ${planSlug}/${currency} (${variante})`)
       throw new RequestException(
         {
           code: 'CONFIO_PLAN_NOT_MAPPED',
-          message: `El plan ${planSlug} no tiene plan de ConfioPagos mapeado para la moneda ${currency}`,
+          message:
+            `El plan ${planSlug} no tiene plan de ConfioPagos mapeado para la moneda ` +
+            `${currency} en su variante ${variante}`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
@@ -57,7 +74,7 @@ export class ConfioPlanService {
       throw new RequestException(
         {
           code: 'CONFIO_PLAN_ARCHIVED',
-          message: `El plan de ConfioPagos para ${planSlug}/${currency} está archivado`,
+          message: `El plan de ConfioPagos para ${planSlug}/${currency} (${variante}) está archivado`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
@@ -68,8 +85,8 @@ export class ConfioPlanService {
         {
           code: 'CONFIO_PLAN_NOT_CREATED',
           message:
-            `El plan ${planSlug}/${currency} está mapeado pero todavía no fue creado en ` +
-            `ConfioPagos: falta darlo de alta y guardar su resource name`,
+            `El plan ${planSlug}/${currency} (${variante}) está mapeado pero todavía no fue ` +
+            `creado en ConfioPagos: falta darlo de alta y guardar su resource name`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
@@ -78,11 +95,14 @@ export class ConfioPlanService {
     return mapping.confioName
   }
 
-  /** Todos los mapeos de un plan, una fila por moneda. */
+  /** Todos los mapeos de un plan: una fila por moneda y variante de prueba. */
   async findMappings(planSlug: string): Promise<ConfioSubscriptionPlan[]> {
     return this.planReadRepo.find({
       where: { planSlug },
-      order: { currencyCode: 'ASC' },
+      // `withTrial` entra en el orden porque desde que hay dos filas por moneda el
+      // orden anterior dejó de ser total, y una lista que se reordena sola entre
+      // llamadas es un dolor de cabeza para quien la lee o la compara.
+      order: { currencyCode: 'ASC', withTrial: 'DESC' },
     })
   }
 }

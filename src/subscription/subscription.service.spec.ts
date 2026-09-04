@@ -577,6 +577,19 @@ describe('SubscriptionService', () => {
       )
     })
 
+    /**
+     * R15 — mutación: poner `conPrueba: false` en `startTrial` deja a la marca sin
+     * los quince días que la pantalla le prometió, porque ConfioPagos congela el
+     * período en el PLAN y con el plan pago no hay prueba que dar.
+     */
+    it('el alta de PRUEBA pide el plan CON prueba de ConfioPagos', async () => {
+      await alta()
+
+      expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+        expect.objectContaining({ conPrueba: true }),
+      )
+    })
+
     it('una marca nueva no manda `reemplazaA`: no hay nada que reemplazar', async () => {
       subscriptionRepo.findOne.mockResolvedValue(null)
 
@@ -811,6 +824,25 @@ describe('SubscriptionService', () => {
       const escrito =
         JSON.stringify(subscriptionRepo.save.mock.calls) + JSON.stringify(eventRepo.save.mock.calls)
       expect(escrito).not.toContain(ACCEPTANCE_URL)
+    })
+
+    /**
+     * EL CORAZÓN DE ESTA ALTA, y lo que ningún otro caso cubre.
+     *
+     * ConfioPagos define el período de prueba en el PLAN, no en la suscripción: su
+     * `CreateSubscriptionRequest` no tiene campo de trial. Así que pedir el plan
+     * equivocado acá no es un detalle de configuración —es regalarle otros quince
+     * días a la marca que ya gastó los suyos, que ellos después cobran, y encima
+     * recibir `TRIALING` donde el resto del código espera `ACTIVE`.
+     *
+     * R15 — mutación: `conPrueba: true` en `startPaid` → este caso se pone rojo.
+     */
+    it('el alta PAGA pide el plan SIN prueba de ConfioPagos', async () => {
+      await alta()
+
+      expect(confioTrial.createForTrial).toHaveBeenCalledWith(
+        expect.objectContaining({ conPrueba: false }),
+      )
     })
 
     it('reusa la fila de la marca que ya gastó la prueba SIN pisarle `trialStart`', async () => {

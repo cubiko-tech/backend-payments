@@ -240,6 +240,9 @@ export class SubscriptionService {
         brandId,
         userId,
         planSlug,
+        // El alta de prueba es la que SÍ obtiene los días de ConfioPagos: va contra el
+        // plan que ellos crearon con `trialPeriodDays: 15`.
+        conPrueba: true,
         ...(existing ? { correlationId: existing.id } : {}),
         // La fila que se reusa puede tener una suscripción VIVA del otro lado: se
         // cancela antes de crear la nueva, o quedarían dos y la vieja podría cobrar.
@@ -501,6 +504,12 @@ export class SubscriptionService {
         brandId,
         userId,
         planSlug,
+        // EL PUNTO DE ESTE ENDPOINT. Va contra el plan que ellos crearon con
+        // `trialPeriodDays: 0`, porque la prueba se congela en el plan y no hay forma de
+        // pedirla —ni de renunciar a ella— al crear la suscripción. Con `true` acá, la
+        // marca que ya gastó su prueba recibiría otros quince días que después ellos
+        // cobran, y encima ConfioPagos la reportaría `TRIALING` en vez de `ACTIVE`.
+        conPrueba: false,
         // `correlationId` sólo con fila muerta que reusar, mismo criterio que el trial.
         ...(existing ? { correlationId: existing.id } : {}),
         // Y el mismo reemplazo: acá la fila reusada puede ser una `pending` con su link

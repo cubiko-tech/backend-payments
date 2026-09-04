@@ -104,7 +104,13 @@ export class ConfioTrialService {
   }
 
   /**
-   * Crea la suscripción en ConfioPagos para un alta de trial.
+   * Crea la suscripción en ConfioPagos, para el alta de prueba y para la paga.
+   *
+   * El nombre quedó del alta de prueba, que fue la primera; hoy sirve a las dos y
+   * `conPrueba` es lo que las distingue. Del lado de ConfioPagos la llamada es
+   * idéntica —su `CreateSubscriptionRequest` no tiene ningún campo de trial—: lo
+   * único que cambia es CONTRA QUÉ PLAN se crea, porque ahí es donde ellos
+   * congelan el período de prueba.
    *
    * `correlationId` es OPCIONAL a propósito y sólo lo manda quien tiene un id
    * estable entre reintentos (el alta lo pasa cuando reusa una fila muerta). Para
@@ -125,8 +131,17 @@ export class ConfioTrialService {
      * fila que ya tenía una en ConfioPagos. Se cancela antes de crear la nueva.
      */
     reemplazaA?: string
+    /**
+     * Si esta alta debe obtener el período de prueba de ConfioPagos.
+     *
+     * Obligatorio, sin default: la prueba se congela en el PLAN de ellos, así que
+     * este booleano no describe el alta —la DECIDE, eligiendo contra qué plan de
+     * la pasarela se crea—. Un default acá le devolvería la prueba a la marca que
+     * ya la gastó, en silencio y por omisión.
+     */
+    conPrueba: boolean
   }): Promise<ConfioSubscriptionResult> {
-    const { brandId, userId, planSlug, correlationId, reemplazaA } = input
+    const { brandId, userId, planSlug, correlationId, reemplazaA, conPrueba } = input
 
     // Se usa `resolveBrandCountry` y no el envoltorio `getBrandCountry` porque éste
     // colapsa los tres modos de fallo en `null` y acá cada uno mapea a un HTTP
@@ -143,7 +158,7 @@ export class ConfioTrialService {
     const currency = String(price.price.currency || '').toUpperCase()
     // Rechaza con su propio código (CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED /
     // _ARCHIVED): se propaga tal cual, ya viene con status.
-    const planName = await this.confioPlans.resolveConfioPlanName(planSlug, currency)
+    const planName = await this.confioPlans.resolveConfioPlanName(planSlug, currency, conPrueba)
 
     const contact = await this.clientAuth.resolveBuyerContact(userId)
     if (!contact.ok) throw this.buyerContactException(contact.code)

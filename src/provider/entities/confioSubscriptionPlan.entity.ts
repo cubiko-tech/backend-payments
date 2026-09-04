@@ -9,11 +9,15 @@ import {
 
 /**
  * Mapeo de nuestro plan del catálogo (`plans.slug` de backend-roles) al plan
- * recurrente equivalente del lado de ConfioPagos, **una fila por moneda**.
+ * recurrente equivalente del lado de ConfioPagos, **una fila por moneda y por
+ * variante de prueba**.
  *
- * `currencyCode` de ConfioPagos es escalar: un plan allá = una moneda. Por eso
- * `dropi-roax` necesita dos planes suyos (COP y USD) y esta tabla es la única
- * fuente de verdad de la resolución `('dropi-roax', moneda) → confioName`.
+ * `currencyCode` de ConfioPagos es escalar: un plan allá = una moneda. Y el
+ * período de prueba también se congela en el plan, así que la variante con
+ * prueba y la variante sin prueba son DOS planes distintos allá. Por eso
+ * `dropi-roax` necesita cuatro planes suyos (COP y USD × con y sin prueba) y
+ * esta tabla es la única fuente de verdad de la resolución
+ * `('dropi-roax', moneda, conPrueba) → confioName`.
  *
  * ⚠️ **Lo que se registra al crear el plan queda CONGELADO en ConfioPagos**:
  * `amountCents` y `trialPeriodDays` no se re-leen en cada cobro y no hay
@@ -25,7 +29,11 @@ import {
  * un `confioName` sembrado en dev no existe en producción.
  */
 @Entity('confio_subscription_plan')
-@Index('UQ_confio_subscription_plan_slug_currency', ['planSlug', 'currencyCode'], { unique: true })
+@Index(
+  'UQ_confio_subscription_plan_slug_currency_trial',
+  ['planSlug', 'currencyCode', 'withTrial'],
+  { unique: true },
+)
 export class ConfioSubscriptionPlan {
   @PrimaryGeneratedColumn('uuid')
   id: string
@@ -80,6 +88,23 @@ export class ConfioSubscriptionPlan {
   /** `pending` (sin crear en ConfioPagos) | `active` | `archived`. */
   @Column({ default: 'pending' })
   status: string
+
+  /**
+   * Si el plan de ConfioPagos al que apunta esta fila fue creado CON período de
+   * prueba (`trialPeriodDays > 0`) o SIN él (`trialPeriodDays: 0`).
+   *
+   * Es una dimensión de la resolución y no un dato descriptivo: **la prueba vive
+   * en el plan, no en la suscripción**. El body del alta no tiene ningún campo de
+   * trial, así que la única forma de que un alta no obtenga prueba es apuntarla a
+   * otro plan. Por eso `dropi-roax` necesita CUATRO filas —COP y USD, con y sin
+   * prueba— y el índice único es el trío, no el par.
+   *
+   * Quién pide cuál: el alta de prueba (`startTrial`) pide `true`; el alta paga
+   * (`startPaid`), que existe justamente para la marca que ya gastó su prueba,
+   * pide `false`. Ver `ConfioPlanService.resolveConfioPlanName`.
+   */
+  @Column({ default: true })
+  withTrial: boolean
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date
