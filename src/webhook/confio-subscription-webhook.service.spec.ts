@@ -769,7 +769,7 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       ['con el trialEnd ya vencido', { trialEnd: new Date('2026-01-01T00:00:00Z') }],
       ['con un trialEnd inválido', { trialEnd: new Date('no-es-fecha') }],
     ])(
-      'TRIALING %s aplica el estado pero NO otorga: no se inventa un vencimiento',
+      'TRIALING %s NO otorga: no se inventa un vencimiento',
       async (_caso, over) => {
         conSuscripcion(pendienteDeAceptacion(over))
         confio.getSubscription.mockRejectedValue(new Error('502 confio'))
@@ -777,9 +777,46 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         await despachar(cambioDeEstado('TRIALING'))
 
         expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
-        expect(suscripcionGuardada().status).toBe(SubscriptionStatus.TRIAL)
       },
     )
+
+    /**
+     * Lo que esta pareja de casos protege es la SEGUNDA OPORTUNIDAD.
+     *
+     * El barrido de repesca busca por `status: PENDING`. Si una confirmación que
+     * no pudo otorgar acceso igual moviera la fila a `trial`, la sacaría de esa
+     * red: quedaría una suscripción que ConfioPagos da por buena, sin acceso, sin
+     * reintento y sin más rastro que una línea de log. El comprador pagó y no
+     * habilitó nada.
+     */
+    it.each([
+      ['sin trialEnd', { trialEnd: null }],
+      ['con el trialEnd ya vencido', { trialEnd: new Date('2026-01-01T00:00:00Z') }],
+    ])(
+      '[R15] TRIALING %s deja la fila en `pending`, donde el barrido la alcanza',
+      async (_caso, over) => {
+        conSuscripcion(pendienteDeAceptacion(over))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PENDING)
+      },
+    )
+
+    it('[R15] la traza dice POR QUÉ no se otorgó, no sólo que no se otorgó', async () => {
+      conSuscripcion(pendienteDeAceptacion({ trialEnd: null }))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      const traza = historial()[0]
+      expect(traza).toBeDefined()
+      // El motivo tiene que ser legible desde la fila sola: qué confirmó el
+      // proveedor y por qué no alcanzó para otorgar.
+      expect(traza.reason).toContain('TRIALING')
+      expect(traza.reason).toMatch(/per[íi]odo/i)
+    })
 
     it.each([SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED])(
       'una confirmación tardía sobre una fila %s no compra el plan de nuevo',

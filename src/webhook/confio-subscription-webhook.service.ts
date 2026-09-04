@@ -668,9 +668,10 @@ export class ConfioSubscriptionWebhookService {
    * - `TRIALING` es la prueba: `periodoDePrueba`, que respeta el `trialEnd` ya
    *   sellado. Caer al mensual acá regalaría 30 días de acceso sobre una prueba
    *   de 15.
-   * Sin ningún período utilizable NO se otorga: el estado se aplica igual —lo
-   * dicta el proveedor— pero el acceso no se inventa. Queda el warn para
-   * re-despachar el evento (`POST /webhook/:id/retry`) cuando Confío conteste.
+   * Sin ningún período utilizable NO se otorga y **el estado tampoco se mueve**:
+   * el acceso no se inventa, y la fila se deja en el estado que el barrido sabe
+   * buscar para que vuelva a intentarlo. El motivo queda en la columna `reason`
+   * de la traza, no sólo en el log.
    */
   private async planearOtorgamiento(
     data: ConfioWebhookPayload['data'],
@@ -699,9 +700,31 @@ export class ConfioSubscriptionWebhookService {
     if (!periodo) {
       this.logger.warn(
         `Confio ${wire} para ${sub.id} sin período utilizable (trialEnd=${sub.trialEnd}): ` +
-          'se aplica el estado pero NO se otorga el plan en roles',
+          'NO se otorga el plan en roles y la fila se deja donde el barrido la alcance',
       )
-      return efecto
+
+      // EL ESTADO NO SE MUEVE, y es lo único que mantiene viva la segunda
+      // oportunidad. `aplicar` hace `sub.status = efecto.toStatus`, y el barrido
+      // busca por `status: PENDING` (`tasks.service.ts`): moverla a `trial`/`active`
+      // sin haber otorgado nada la sacaba de esa red para siempre. Quedaba una fila
+      // que el proveedor da por buena, sin acceso, sin reintento y sin más rastro
+      // que una línea de log —el comprador pagó y no habilitó nada—.
+      //
+      // Devolver `null` tampoco sirve: sin efecto no se escribe traza, y entonces
+      // el motivo se pierde igual.
+      //
+      // El `eventType` sigue siendo el que dicta el proveedor (`TRIAL_STARTED` para
+      // `TRIALING`) porque el enum no tiene un valor para «confirmado y no otorgado»
+      // y agregarlo es una migración de tipo; lo que identifica el hecho es `reason`,
+      // que es justamente la columna para eso.
+      return {
+        ...efecto,
+        toStatus: sub.status,
+        reason:
+          `Confio confirmó ${wire} pero no hay período utilizable ` +
+          `(trialEnd=${aFecha(sub.trialEnd)?.toISOString() ?? 'sin fecha utilizable'}): ` +
+          'no se otorgó acceso y la suscripción queda pendiente de confirmar',
+      }
     }
 
     // MISMO HECHO, YA APLICADO: sin efecto. La confirmación tiene ahora TRES vías
