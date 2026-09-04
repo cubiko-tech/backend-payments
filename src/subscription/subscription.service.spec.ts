@@ -249,7 +249,14 @@ describe('SubscriptionService', () => {
   })
 
   describe('startTrial', () => {
-    it('crea un trial de 15 días esperando la aceptación, SIN tocar roles', async () => {
+    /**
+     * Reescrito el 2026-09-04. Antes fijaba que el alta sellara los 15 días, y esa
+     * era justamente la conducta que rompía: la fila mostraba acceso hasta una
+     * fecha que nadie se había ganado, y contaba la prueba como consumida aunque el
+     * comprador nunca aceptara. Ahora el alta no sella nada de la prueba: eso lo
+     * hace la confirmación, con el período que devuelva ConfioPagos.
+     */
+    it('crea el alta esperando la aceptación, SIN sellar la prueba ni tocar roles', async () => {
       subscriptionRepo.findOne.mockResolvedValue(null)
       subscriptionRepo.create.mockImplementation((data) => data)
       subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ id: 'sub-1', ...data }))
@@ -259,29 +266,12 @@ describe('SubscriptionService', () => {
       const result = await service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' })
 
       expect(result.data.status).toBe(SubscriptionStatus.PENDING)
-      expect(result.data.trialStart).toBeInstanceOf(Date)
-      expect(result.data.trialEnd).toBeInstanceOf(Date)
-      // nextBillingDate = trialEnd para que el cron de conversión lo tome
-      expect(result.data.nextBillingDate).toEqual(result.data.trialEnd)
-      // ~15 días de trial
-      const days = Math.round(
-        (result.data.trialEnd.getTime() - result.data.trialStart.getTime()) / (24 * 3600 * 1000),
-      )
-      expect(days).toBe(15)
-
-      // EL ALTA NO REPARTE ACCESO: el plan lo otorga el webhook `TRIALING`, o sea
-      // cuando consta que el comprador aceptó (`confio-subscription-webhook.service.ts`).
+      // Las tres columnas que la pantalla lee como acceso: vacías o sin duración.
+      expect(result.data.trialStart).toBeUndefined()
+      expect(result.data.trialEnd).toBeUndefined()
+      expect(result.data.nextBillingDate).toBeNull()
+      expect(result.data.currentPeriodEnd).toEqual(result.data.currentPeriodStart)
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
-
-      // El `TRIAL_STARTED` se conserva: describe el ALTA, que sí ocurrió. Lo que
-      // cambia es a qué estado llega la fila.
-      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
-        subscriptionId: 'sub-1',
-        eventType: SubscriptionEventType.TRIAL_STARTED,
-        toPlanSlug: 'pro',
-        toStatus: SubscriptionStatus.PENDING,
-        triggeredBy: 'user-1',
-      }))
     })
 
     it('rechaza si la marca ya tiene una suscripción vigente', async () => {
@@ -412,6 +402,66 @@ describe('SubscriptionService', () => {
     })
   })
 
+  /**
+   * El caso real que lo destapó, en staging el 2026-09-04: un alta que ConfioPagos
+   * canceló sin que nadie pagara dejaba la fila diciendo «acceso hasta el 19» —la
+   * pantalla lee `trialEnd`/`currentPeriodEnd`— y con la prueba contada como
+   * consumida, así que la marca no podía volver a intentarlo. El plan en roles
+   * estaba bien: `free`. Lo que mentía eran las fechas.
+   */
+  describe('una prueba que nunca se aceptó no deja rastro de acceso', () => {
+    beforeEach(() => {
+      subscriptionRepo.findOne.mockResolvedValue(null)
+      subscriptionRepo.create.mockImplementation((data) => data)
+      subscriptionRepo.save.mockImplementation((data) => Promise.resolve({ id: 'sub-1', ...data }))
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+    })
+
+    it('[R15] el alta no escribe fin de acceso de ningún tipo', async () => {
+      const { data } = await service.startTrial({
+        brandId: 'brand-1',
+        userId: 'user-1',
+        planSlug: 'pro',
+      })
+
+      // Las tres que el front puede leer como acceso.
+      expect(data.trialEnd).toBeUndefined()
+      expect(data.nextBillingDate).toBeNull()
+      expect(data.currentPeriodEnd).toEqual(data.currentPeriodStart)
+    })
+
+    it('[R15] un alta abandonada NO consume la prueba: se puede volver a intentar', async () => {
+      // Fila terminal, como la deja el barrido cuando ConfioPagos la da por muerta,
+      // y SIN `trialStart` porque el alta ya no lo sella.
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.CANCELLED,
+        trialStart: null,
+      })
+
+      const err = await service
+        .startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' })
+        .catch((e) => e)
+
+      expect(err?.code).not.toBe('TRIAL_ALREADY_USED')
+    })
+
+    it('la prueba SÍ se cuenta como consumida cuando quedó sellada', async () => {
+      subscriptionRepo.findOne.mockResolvedValue({
+        id: 'sub-1',
+        brandId: 'brand-1',
+        status: SubscriptionStatus.EXPIRED,
+        trialStart: new Date('2026-01-01T00:00:00Z'),
+      })
+
+      await expect(
+        service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' }),
+      ).rejects.toMatchObject({ code: 'TRIAL_ALREADY_USED' })
+    })
+  })
+
   describe('startTrial — alta contra ConfioPagos', () => {
     const alta = (extra: Record<string, any> = {}) =>
       service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax', ...extra })
@@ -447,7 +497,9 @@ describe('SubscriptionService', () => {
       const [, data] = txManager.save.mock.calls.find(([entity]) => entity === Subscription)
       expect(data).toEqual(
         expect.objectContaining({
-          trialStart: expect.any(Date),
+          // `trialStart` ya NO se sella acá: lo escribe la confirmación. Lo que este
+          // caso protege es que el marcador del link se escriba en la MISMA
+          // transacción que crea la fila.
           initialPaymentLinkIssuedAt: expect.any(Date),
         }),
       )
