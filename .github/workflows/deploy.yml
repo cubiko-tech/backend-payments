@@ -261,7 +261,6 @@ jobs:
               if [ -f /tmp/service.env ]; then
                 cp /tmp/service.env ${DEPLOY_PATH}/.env
               fi
-                /tmp/update-containers.sh /tmp/service.env
               cd ${DEPLOY_PATH}
               set -a && source .env && set +a
 
@@ -311,6 +310,7 @@ jobs:
               # un comando que ya no encuentra los archivos: los reintentos
               # mueren en \"cp: cannot stat\" y tapan el error real.
               rm -f /tmp/docker-compose.image.yml \
+                /tmp/update-containers.sh /tmp/service.env
 
               echo \"backend-payments deployed (blue-green)\"
               docker ps --filter name=\$CONTAINER_NAME'"
