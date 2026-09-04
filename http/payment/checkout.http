@@ -5,6 +5,11 @@
 @WALLET_ID = 00000000-0000-0000-0000-000000000001
 @PAYMENT_ID = 00000000-0000-0000-0000-000000000001
 
+# NOTA: `POST /payment/checkout` NO es el checkout orquestado. Cae en
+# `PaymentService.createCheckout`, que guarda el `Payment` tal cual viene del body:
+# NO resuelve el precio por `brand.country`, honra el `amount` y la `currency` que
+# mande el cliente y no valida el `brandId`. El alta que resuelve precio por país es
+# `POST /checkout` — ver `http/checkout.http`.
 ### Pagar plan con wallet interno
 POST {{HOST}}/payment/checkout HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}

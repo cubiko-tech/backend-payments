@@ -5,10 +5,51 @@
 @WALLET_ID = 00000000-0000-0000-0000-000000000001
 
 ### Obtener suscripción actual de la marca
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
 GET {{HOST}}/subscription?brandId={{BRAND_ID}} HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 
+### Obtener el link de aceptación vigente
+# Re-pide el link a ConfioPagos en vez de devolver uno guardado: el `acceptanceUrl`
+# es un link PORTADOR —quien lo tenga registra una tarjeta— y por eso no se persiste.
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
+# 404 SUBSCRIPTION_NOT_FOUND: la marca no tiene suscripción.
+# 422 NO_CONFIO_SUBSCRIPTION: la fila no es de ConfioPagos (o no tiene resource
+#     name), así que no hay link que re-pedir.
+GET {{HOST}}/subscription/acceptance-link?brandId={{BRAND_ID}} HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+
 ### Crear suscripción
+# Alta GENÉRICA (no es el alta de producto: esa es `POST /subscription/trial` o el
+# checkout). El body va contra la lista blanca de `CreateSubscriptionDto` y el
+# `ValidationPipe` global corre con `forbidNonWhitelisted`, así que:
+# 400 Bad Request: el body trajo un campo que no está en la lista. En particular
+#     `id`, `trialStart`, `trialEnd`, `cancelledAt`, `accessEndsAt`, `retryCount` y
+#     `lastPaymentId` NO se aceptan: el `id` convertía el `save` en un UPDATE de la
+#     fila de otra marca, y `trialStart: null` devolvía la prueba gratuita.
+# Campos aceptados: `brandId`, `userId`, `planSlug` (obligatorios) y `status`,
+#     `provider`, `walletId`, `providerSubscriptionId`, `currentPeriodStart`,
+#     `currentPeriodEnd`, `nextBillingDate`, `autoRenew`, `metadata` (las fechas,
+#     ISO 8601). `walletId` tiene que ser un UUID con versión válida: el placeholder
+#     en ceros de arriba se rechaza con 400.
 POST {{HOST}}/subscription HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
@@ -19,6 +60,88 @@ Content-Type: application/json
   "planSlug": "pro",
   "provider": "wallet",
   "walletId": "{{WALLET_ID}}"
+}
+
+### Iniciar prueba gratuita de 15 días (una sola por marca)
+# El alta CREA la suscripción en ConfioPagos y responde
+# `{ data, acceptanceUrl, acceptanceExpireTime }`: `acceptanceUrl` es el único link
+# inicial (link PORTADOR — no se persiste ni se loguea, se re-pide por el camino
+# autenticado). El alta NO cobra: la suscripción queda en PENDING_ACCEPTANCE hasta
+# que el comprador acepta y registra su tarjeta.
+#
+# Ya NO acepta `provider` ni `walletId`: ConfioPagos es el único medio de pago.
+# 422 TRIAL_PROVIDER_NOT_SUPPORTED: el body trajo `provider` distinto de `confio`
+#     o trajo `walletId`.
+# 422 INVALID_TRIAL_PLAN: sin plan, o con el plan free.
+# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca ya tiene una suscripción vigente
+#     (también por CARRERA: dos altas simultáneas, una gana y la otra recibe 409).
+#     También es el 409 que llega MIENTRAS una baja está PENDIENTE: la baja no mueve
+#     el estado, así que hasta que el cron horario cierre la fila sigue vigente.
+# 409 TRIAL_ALREADY_USED: la marca ya consumió su prueba; solo puede volver pagando.
+#     Sobrevive a la baja y al vencimiento: recomprar por checkout tampoco la devuelve.
+# 503 BRAND_LOOKUP_UNAVAILABLE / 404 BRAND_NOT_FOUND / 422 BRAND_WITHOUT_COUNTRY:
+#     país de la marca (backend-platform).
+# 503 PLAN_NOT_FOUND / 422 PRICE_NOT_FOUND_FOR_COUNTRY: precio del plan (backend-roles).
+# 422 CONFIO_PLAN_NOT_MAPPED / CONFIO_PLAN_NOT_CREATED / CONFIO_PLAN_ARCHIVED:
+#     no hay plan de ConfioPagos para (plan, moneda).
+# 503 USER_LOOKUP_UNAVAILABLE / 422 USER_NOT_FOUND: contacto del comprador (backend-auth).
+# 422 INVALID_BUYER: los datos del comprador (email/nombre/teléfono) no cumplen lo
+#     que exige ConfioPagos; lo puede corregir el llamador. Devuelve sólo `field`:
+#     el detalle lleva PII y no se expone.
+# 503 CONFIO_PLAN_STORE_MISMATCH / CONFIO_SUBSCRIPTION_NAME_INVALID: rechazo local
+#     por configuración NUESTRA —el plan del catálogo no es del `CONFIO_STORE_ID`
+#     configurado, o el resource name guardado es inconsultable—. NO es algo que el
+#     comprador pueda arreglar: el detalle queda en el log del servicio.
+# 503 CONFIO_SUBSCRIPTION_UNAVAILABLE: ConfioPagos no respondió.
+# 503 PLAN_ASSIGNMENT_FAILED: no se pudo activar el plan en backend-roles. NO se
+#     escribe nada LOCAL —la marca no queda quemada—, pero la suscripción en
+#     ConfioPagos YA ESTÁ CREADA: el reintento deja un segundo huérfano en
+#     PENDING_ACCEPTANCE (vence solo y no cobra).
+# 503 TRIAL_START_FAILED: fallo inesperado (la escritura de la fila, el commit).
+#     Mismo residual que arriba: el alta en ConfioPagos puede haber quedado hecha.
+POST {{HOST}}/subscription/trial HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "planSlug": "dropi-roax"
+}
+
+### Alta PAGA, sin prueba (la vuelta de la marca que ya gastó su trial)
+# Crea la suscripción en ConfioPagos y devuelve su link de aceptación, igual que
+# `/trial`, pero SIN prueba: la fila nace en `pending`, no se toca el plan en
+# backend-roles y el acceso lo abre el webhook con el primer cobro confirmado.
+# Es a dónde apunta el CTA de «volver a suscribirse»: `/trial` responde 409
+# `TRIAL_ALREADY_USED` a quien ya la consumió, y `/reactivate` rechaza las filas de
+# ConfioPagos a propósito («la vuelta es un alta nueva»).
+# El body va contra la lista blanca de `StartPaidSubscriptionDto` — sólo `brandId`,
+# `userId` y `planSlug`—, así que:
+# 400 Bad Request: el body trajo cualquier otro campo. En particular `trialStart` y
+#     `trialEnd` NO se aceptan: mandarlas en `null` le devolvería la prueba gratuita
+#     a la marca que este endpoint viene justamente a cobrar.
+# 201: `{ data, acceptanceUrl, acceptanceExpireTime }`, con el link en el TOPE y
+#     nunca dentro de `data`. Es un link PORTADOR: no se persiste ni se loguea, y se
+#     re-pide con `GET /subscription/acceptance-link`.
+# 409 SUBSCRIPTION_ALREADY_EXISTS: la marca tiene servicio vigente (`trial`,
+#     `active` o `past_due`). Una fila `pending`, `cancelled` o `expired` NO bloquea:
+#     se REUSA, conservando su `trialStart`.
+# 422 INVALID_PAID_PLAN: falta el plan o vino el free.
+# 422 CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED / _ARCHIVED: el par (plan, moneda) no
+#     tiene plan en ConfioPagos.
+# 422 contacto de comprador incompleto (email/teléfono del usuario en backend-auth).
+# 503 PAID_START_FAILED: fallo inesperado (la escritura de la fila, el commit). La
+#     suscripción en ConfioPagos puede haber quedado creada: el reintento deja un
+#     huérfano en PENDING_ACCEPTANCE, que vence solo y no cobra.
+POST {{HOST}}/subscription/paid HTTP/1.1
+Authorization: Bearer {{ACCESS_TOKEN}}
+Content-Type: application/json
+
+{
+  "brandId": "{{BRAND_ID}}",
+  "userId": "{{USER_ID}}",
+  "planSlug": "dropi-roax"
 }
 
 ### Cambiar plan de suscripción
@@ -32,24 +155,114 @@ Content-Type: application/json
 }
 
 ### Cancelar suscripción
+# CAMBIO DE CONTRATO: para una fila de ConfioPagos esto CANCELA DE VERDAD allá
+# (`POST …/subscriptions/{sub}/cancel`) antes de tocar nada local, y `reason` pasó
+# a ser OBLIGATORIO porque ConfioPagos lo exige. Antes este endpoint respondía
+# siempre 200, incluso tragándose los fallos en `{ error }`.
+#
+# La regla que ordena todo: **nunca se escribe un hecho que ConfioPagos no
+# confirmó**. Su HTTP 200 es la confirmación (la respuesta viene vacía) y recién
+# ahí se escribe local, en una sola transacción.
+#
+# QUÉ ESCRIBE: esto apaga la RENOVACIÓN, no el acceso. Sella `autoRenew=false` +
+# `cancelledAt` + `cancelReason` + `accessEndsAt` (hasta cuándo dura lo ya pagado:
+# `trialEnd` si la fila está en prueba, si no el cierre del período), junto con el
+# `SubscriptionEvent` CANCELLED. El `status` NO cambia: la fila sigue en
+# `trial`/`active`/`past_due` y la marca CONSERVA su plan. Para leer «esta
+# suscripción está dada de baja» hay que mirar `cancelledAt`/`accessEndsAt`, ya no
+# `status === 'cancelled'`.
+#
+# El corte al vencer esa fecha lo hace el cron HORARIO
+# `TasksService.expireCancelledSubscriptions`: barre las filas con la renovación
+# apagada y `accessEndsAt` ya pasado, degrada la marca a `free` en backend-roles y
+# recién ahí cierra la fila en `cancelled` (y le borra `accessEndsAt`, que sólo
+# significa «baja PENDIENTE»). `trialStart`/`trialEnd` NO se tocan: la prueba
+# consumida sobrevive al cierre.
+#
+# DESHACER la baja: `POST /subscription/reactivate` mientras `accessEndsAt` no venció
+# (fila NO confío; una de ConfioPagos ya está cancelada allá y la vuelta es un alta
+# nueva). Vuelve a encender la renovación y limpia los tres sellos SIN mover el
+# estado vigente.
+#
+# Los 422 se resuelven ANTES de hablar con ConfioPagos, todos con cero escrituras
+# —incluidos los dos de `triggeredBy`, que no es cosmética: es `varchar NOT NULL`
+# en `subscription_events`, así que dejarlo pasar cancelaba de verdad allá y recién
+# después moría la escritura acá, sin reintento posible—:
+# 422 CANCEL_REASON_REQUIRED: falta el motivo (o vino en blanco).
+# 422 CANCEL_REASON_TOO_LONG: el motivo supera los 500 caracteres.
+# 422 CANCEL_TRIGGERED_BY_REQUIRED: falta indicar quién origina la baja.
+# 422 CANCEL_TRIGGERED_BY_TOO_LONG: `triggeredBy` supera los 255 (el largo de la
+#     columna que lo guarda).
+# 404 SUBSCRIPTION_NOT_FOUND: la marca no tiene suscripción —o desapareció entre
+#     la lectura y la escritura, en cuyo caso NO se re-inserta.
+# 503 CONFIO_SUBSCRIPTION_NAME_INVALID: el resource name que tenemos guardado no
+#     es cancelable (dato NUESTRO, no del comprador): no tiene la forma exacta de
+#     una suscripción. **CERO escrituras**: no se marca cancelada una suscripción
+#     que del otro lado sigue cobrando.
+# 503 CONFIO_PLAN_STORE_MISMATCH: el recurso no es del `CONFIO_STORE_ID`
+#     configurado. Configuración nuestra, también con CERO escrituras. La
+#     cancelación valida el store igual que el alta, ANTES de POSTear con nuestro
+#     token: sin eso, un `name` elegido por el llamador dirigía la baja a la
+#     suscripción de otro store (el store está compartido con backend-ads).
+# 503 CONFIO_CANCEL_UNAVAILABLE: ConfioPagos no respondió o falló. CERO escrituras
+#     — un fallo del canal no es un hecho sobre el objeto.
+# 503 SUBSCRIPTION_CANCEL_FAILED: ConfioPagos SÍ canceló y la escritura local no
+#     llegó. Reintentar es seguro y se auto-repara: su cancelación es IDEMPOTENTE
+#     (cancelar dos veces también responde 200, medido contra dev el 2026-08-27).
+#
+# REPETIR la baja es seguro y NO deja rastro de más: si la fila ya está sellada y
+# ya tiene su `SubscriptionEvent` CANCELLED, el segundo llamado responde 200 sin
+# duplicar la traza y sin pisar el motivo original (el doble click y el reintento
+# del cliente son el caso normal, no el raro). Si la traza FALTA —la fila a
+# reparar— sí se escribe.
+#
+# Una fila que NO es de ConfioPagos (wallet, stripe…) se cancela local, sin hablar
+# con ninguna pasarela, pero el `reason` sigue siendo obligatorio. Lo mismo una
+# fila marcada `confio` SIN resource name (las que deja el checkout: sólo el alta
+# de trial escribe ese dato): nunca hubo suscripción del otro lado que cancelar,
+# así que la baja es local y la traza lo dice con `confirmadoPorConfio: false`.
 POST {{HOST}}/subscription/cancel HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
 
 {
   "brandId": "{{BRAND_ID}}",
-  "reason": "Too expensive"
+  "reason": "Too expensive",
+  "triggeredBy": "{{USER_ID}}"
 }
 
 ### Reactivar suscripción
+# 422 SUBSCRIPTION_NOT_CANCELLED: sólo se reactiva lo cancelado (sin `cancelledAt`).
+# 422 SUBSCRIPTION_CLOSED: la fila YA está en un estado terminal (`cancelled` /
+#     `expired`), o sea que el acceso pagado se consumió y un cron —o el webhook— ya
+#     degradó la marca a `free`. Es el gate que MÁS importa con el corte diferido:
+#     `expireCancelledSubscriptions` cierra la fila pero DEJA puesto `cancelledAt`,
+#     así que sin este 422 esas filas pasaban el gate de arriba y volvían a `active`
+#     sin pago y sin reponer el plan. La vuelta es un alta nueva por checkout.
+# 422 CONFIO_REACTIVATE_NOT_SUPPORTED: una suscripción de ConfioPagos cancelada NO
+#     se reactiva. Este endpoint revive la fila SIN pago (sólo recibe `brandId` y
+#     `triggeredBy`), y del lado de ConfioPagos la suscripción ya quedó `CANCELED`
+#     y no vuelve a cobrar: reactivarla sería pro gratis. La vuelta es un alta
+#     nueva (`POST /subscription/trial` o el checkout), nunca una resurrección local.
 POST {{HOST}}/subscription/reactivate HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
 Content-Type: application/json
 
 {
-  "brandId": "{{BRAND_ID}}"
+  "brandId": "{{BRAND_ID}}",
+  "triggeredBy": "{{USER_ID}}"
 }
 
 ### Historial de eventos de suscripción
+# La marca NO sale del query salvo para el token de SERVIDOR. `resolveBrandId`
+# (`subscription.controller.ts`) decide con quién habla:
+#     - token `ACCESS_SERVER` / superadmin: se honra el `brandId` del query tal cual.
+#     - token de USUARIO: el query se IGNORA en silencio y se responde SU marca
+#       (`req.user.brand`), aunque el query nombre otra. No es un error: la request
+#       pasa, sólo que nunca devuelve datos de la marca pedida.
+# 400 BRAND_ID_REQUIRED: principal de servicio sin `brandId` (ausente o vacío). No
+#     hay fallback: el server token no tiene marca propia. No se toca el repositorio.
+# 403 forbidden: usuario sin marca en su token. Mismo cuerpo que usa el guard, para
+#     no distinguir "no tengo marca" de "no tengo permiso". No se toca el repositorio.
 GET {{HOST}}/subscription/history?brandId={{BRAND_ID}} HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}

@@ -11,10 +11,19 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 
 @ApiTags('Billing Profile')
 @Controller('billing-profile')
-@UseGuards()
+/**
+ * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
+ * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
+ * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
+ * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
+ * `@RequirePermission` por handler, así que esto no le agrega requisitos a
+ * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
+ */
+@UseGuards(ApiAuthGuard)
 export class BillingProfileController {
   constructor(
     private readonly billingProfileService: BillingProfileService,

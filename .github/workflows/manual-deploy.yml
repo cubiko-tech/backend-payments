@@ -262,8 +262,6 @@ jobs:
                 ${DEPLOY_PATH}/update-containers.sh
               chmod +x ${DEPLOY_PATH}/update-containers.sh
               cp /tmp/service.env ${DEPLOY_PATH}/${ENV_FILENAME}
-              rm -f /tmp/docker-compose.image.yml \
-                /tmp/update-containers.sh /tmp/service.env
               cd ${DEPLOY_PATH}
               set -a && source ${ENV_FILENAME} && set +a
 
@@ -297,6 +295,13 @@ jobs:
                 -f docker/docker-compose.image.yml \
                 -p \"\${CONTAINER_SLUG}\" up -d
               bash update-containers.sh \"\${CONTAINER_SLUG}\"
+              # Limpieza del staging de /tmp AL FINAL. Si se borra antes
+              # del pull, un fallo posterior deja a retry_gcloud reintentando
+              # un comando que ya no encuentra los archivos: los reintentos
+              # mueren en \"cp: cannot stat\" y tapan el error real.
+              rm -f /tmp/docker-compose.image.yml \
+                /tmp/update-containers.sh /tmp/service.env
+
               echo \"deployed (blue-green)\"
               docker ps --filter name=\$CONTAINER_NAME'"
 

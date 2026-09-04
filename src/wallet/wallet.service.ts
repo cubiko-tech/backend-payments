@@ -157,8 +157,18 @@ export class WalletService {
    * Debitar fondos de una wallet con bloqueo pesimista.
    * Verifica saldo suficiente antes de debitar.
    * Operación atómica: actualiza balance y crea transacción.
+   *
+   * @param expectedCurrency moneda en la que se está cobrando. Opcional: si se pasa y no
+   * coincide con la de la wallet, rechaza con `WALLET_CURRENCY_MISMATCH` (422) sin dejar
+   * movimiento. Omitirlo mantiene el comportamiento histórico (lo hace el cron de
+   * renovación, `tasks.service.ts:renewFromWallet`, que sigue sin guarda de moneda).
    */
-  async debit(walletId: string, amount: number, data: Partial<Transaction> = {}) {
+  async debit(
+    walletId: string,
+    amount: number,
+    data: Partial<Transaction> = {},
+    expectedCurrency?: string,
+  ) {
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
@@ -174,6 +184,25 @@ export class WalletService {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
           HttpStatus.NOT_FOUND,
+        )
+      }
+
+      // La guarda de moneda va ACÁ y no sólo en checkout: `assertWalletCurrency`
+      // (checkout.service.ts) lee la wallet por la réplica DBRead y FUERA de todo
+      // bloqueo, así que entre esa comprobación y este débito hay una ventana. Este
+      // punto corre sobre la fila ya tomada con `pessimistic_write` dentro de la
+      // transacción abierta, y es el último cuello de botella antes de que se mueva
+      // plata. Comparación estricta, igual que `assertWalletCurrency` y `transfer`.
+      // `credit`, `transfer` y el cron `renewFromWallet` NO llevan esta guarda a
+      // propósito: `transfer` ya compara las monedas de las dos wallets, y sumarla al
+      // cron cambiaría renovaciones que hoy pasan.
+      if (expectedCurrency && wallet.currency !== expectedCurrency) {
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: `La wallet está en ${wallet.currency} y el cobro es en ${expectedCurrency}`,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
 
