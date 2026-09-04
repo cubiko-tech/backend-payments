@@ -61,6 +61,26 @@ function telefonoDeCobro(elegido?: string, fila?: Subscription | null): string |
   return elegido || fila?.metadata?.confio?.buyerPhone || undefined
 }
 
+/**
+ * ¿Este alta trae un teléfono de cobro DISTINTO al que la fila ya tenía?
+ *
+ * Es lo que separa «me equivoqué de número» de «no terminé»: sólo el primero
+ * justifica cancelar la suscripción pendiente en ConfioPagos y crear otra.
+ *
+ * Se compara normalizando espacios porque el número llega de un formulario. NO se
+ * normaliza a E.164 acá: eso lo hace `buildConfioBuyer` más adelante y con el
+ * `callingCode` del usuario; duplicarlo daría dos criterios que pueden divergir y
+ * haría que un mismo número escrito distinto pase por «cambiado».
+ */
+function cambiaElTelefonoDeCobro(elegido?: string, fila?: Subscription | null): boolean {
+  const nuevo = (elegido || '').replace(/[\s().-]/g, '')
+  if (!nuevo) return false
+
+  const anterior = String(fila?.metadata?.confio?.buyerPhone || '').replace(/[\s().-]/g, '')
+
+  return nuevo !== anterior
+}
+
 function nombreAnterior(fila?: Subscription | null): string | undefined {
   return fila?.metadata?.confio?.name || fila?.providerSubscriptionId || undefined
 }
@@ -205,7 +225,27 @@ export class SubscriptionService {
     // recurrencias vivas para la misma marca y el link inicial huérfano.
     // Lo que corresponde es retomar la que ya existe, y el camino es
     // `GET /subscription/acceptance-link`, que devuelve el link YA emitido.
-    if (existing && existing.status === SubscriptionStatus.PENDING && existing.providerSubscriptionId) {
+    if (
+      existing &&
+      existing.status === SubscriptionStatus.PENDING &&
+      existing.providerSubscriptionId &&
+      // LA ÚNICA PUERTA que abre este guard: que el teléfono de cobro haya CAMBIADO.
+      //
+      // Retomar el link no sirve cuando el número estaba mal: ConfioPagos lo emite
+      // autorizado para el que mandamos y su formulario exige ese mismo, así que el
+      // comprador puede recuperarlo las veces que quiera y no va a poder pagar nunca
+      // —hasta que venza a los 7 días—. Ahí «retomá lo que ya tenés» es una trampa.
+      //
+      // Y por eso la condición es que sea DISTINTO, no un botón de reintentar: un
+      // reintento con el mismo número no arregla nada y sí deja otra suscripción viva
+      // del lado de ellos. Un número nuevo es la única razón por la que la segunda
+      // tiene sentido.
+      //
+      // Cuando entra, el alta sigue su curso normal y `reemplazaA` cancela la
+      // pendiente en ConfioPagos ANTES de crear la nueva, que es lo que evita las dos
+      // recurrencias vivas que este guard vino a impedir.
+      !cambiaElTelefonoDeCobro(billingPhone, existing)
+    ) {
       throw new RequestException(
         {
           code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
@@ -302,7 +342,15 @@ export class SubscriptionService {
             HttpStatus.CONFLICT,
           )
         }
-        if (current && current.status === SubscriptionStatus.PENDING && current.providerSubscriptionId) {
+        // MISMA compuerta que el guard de arriba, y por el mismo motivo: si sólo se
+        // abriera el barato, la carrera bajo el lock volvería a rechazar al que viene
+        // a corregir su número. Las dos condiciones tienen que decir lo mismo.
+        if (
+          current &&
+          current.status === SubscriptionStatus.PENDING &&
+          current.providerSubscriptionId &&
+          !cambiaElTelefonoDeCobro(billingPhone, current)
+        ) {
           throw new RequestException(
             {
               code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
