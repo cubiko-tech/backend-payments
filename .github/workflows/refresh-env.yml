@@ -44,12 +44,7 @@ jobs:
               MISSING=true
             fi
           done
-          # `if` y no `[ … ] && exit 1`: con `set -e`, ese test devuelve 1 cuando NO
-          # falta nada y mata el paso igual. El workflow sólo podía "pasar" cuando
-          # encontraba un secreto ausente, así que nunca refrescó nada.
-          if [ "$MISSING" = "true" ]; then
-            exit 1
-          fi
+          [ "$MISSING" = "true" ] && exit 1
         env:
           INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
           INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
