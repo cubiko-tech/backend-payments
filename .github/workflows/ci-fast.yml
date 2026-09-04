@@ -54,11 +54,18 @@ jobs:
         with:
           node-version: 22
 
+      # `npm ci` y no `npm install`: instala EXACTO lo del lockfile, que es lo que
+      # fija la versión del runner. Con `install`, el árbol de CI puede derivar del
+      # que se probó en local.
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
+      # `npm test` usa el runner declarado en el repo. Antes acá decía
+      # `npx jest --passWithNoTests`, que tenía dos agujeros: `npx` se bajaba un
+      # runner sin versión fijada —no estaba declarado como dependencia—, y
+      # `--passWithNoTests` dejaba el job VERDE si no encontraba un solo test.
       - name: Test
-        run: npx jest --passWithNoTests
+        run: npm test
 
   verify-files:
     name: Verify Required Files
