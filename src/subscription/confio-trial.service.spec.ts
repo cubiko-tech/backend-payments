@@ -70,7 +70,7 @@ describe('ConfioTrialService', () => {
   })
 
   const alta = (extra: Record<string, any> = {}) =>
-    service.createForTrial({ brandId: BRAND, userId: USER, planSlug: PLAN, ...extra })
+    service.createForTrial({ brandId: BRAND, userId: USER, planSlug: PLAN, conPrueba: true, ...extra })
 
   describe('createForTrial — resolución país → precio → plan → comprador', () => {
     it('resuelve la moneda por el país de la marca y pide con ella el plan de ConfioPagos', async () => {
@@ -79,8 +79,19 @@ describe('ConfioTrialService', () => {
       expect(clientPlatform.resolveBrandCountry).toHaveBeenCalledWith(BRAND)
       expect(clientRoles.resolvePriceForCountry).toHaveBeenCalledWith(PLAN, 'CO')
       // La moneda sale de la FILA de precio, no del llamador ni del país.
-      expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledWith(PLAN, 'COP')
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledWith(PLAN, 'COP', true)
       expect(result).toBe(ALTA)
+    })
+
+    /**
+     * `conPrueba` no se interpreta ni se deriva acá: viaja tal cual del alta al
+     * resolutor, porque es lo que elige CONTRA QUÉ PLAN de ConfioPagos se crea la
+     * suscripción, y allá el período de prueba está congelado en el plan.
+     */
+    it('pasa la variante SIN prueba al resolutor cuando el alta es paga', async () => {
+      await alta({ conPrueba: false })
+
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledWith(PLAN, 'COP', false)
     })
 
     it('manda el comprador NORMALIZADO: E.164 con el callingCode y el nombre único replicado', async () => {
