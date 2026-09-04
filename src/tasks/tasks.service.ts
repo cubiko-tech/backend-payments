@@ -8,6 +8,7 @@ import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
 import {
   Subscription,
   SubscriptionProvider,
@@ -425,8 +426,27 @@ export class TasksService {
         if (sub.provider === 'wallet' && sub.walletId) {
           await this.renewFromWallet(sub)
           processed++
+        } else if (esSuscripcionRecurrenteDeConfio(sub)) {
+          // ⚠️ ACÁ NO SE COBRA: la recurrencia vive en ConfioPagos y ellos ya
+          // cobraron en el aniversario. Lo nuestro es ENTERARNOS, por el mismo
+          // camino que la confirmación del alta: se les pregunta el estado y se
+          // reescriben período y `nextBillingDate` con lo que digan.
+          //
+          // Antes de esto la rama emitía un segundo link (`issueExternalCharge`)
+          // y de paso dejaba la fila en `past_due`, que es el estado con el que
+          // se retira el plan pago: a una renovación CORRECTA le cortábamos el
+          // acceso. El comentario que estaba acá —«ConfioPagos one-shot»— era del
+          // modelo anterior y nadie lo revisó cuando llegó la suscripción.
+          //
+          // Repetirlo es inocuo: `planearOtorgamiento` no hace nada si el estado
+          // y el fin de período no cambiaron, y la clave de idempotencia lleva
+          // ese fin adentro, así que una renovación entra como hecho NUEVO.
+          await this.confioWebhook.confirmarContraElProveedor(sub)
+          processed++
         } else if (sub.provider === 'confio' && sub.status === SubscriptionStatus.ACTIVE) {
-          // ConfioPagos one-shot: re-emitir link de cobro cada período.
+          // Modelo VIEJO de ConfioPagos, de pagos sueltos: sin recurso de
+          // suscripción del lado de ellos no hay recurrencia que leer, así que
+          // el cobro de cada período lo sigue emitiendo este cron.
           await this.issueExternalCharge(sub, false)
           processed++
         }
