@@ -200,6 +200,12 @@ interface EfectoConfio {
   reiniciaReintentos?: boolean
   /** `CANCELED` sella `cancelledAt`, pero sólo si venía nulo. */
   sellaCancelacion?: boolean
+  /**
+   * La confirmación de una PRUEBA escribe `trialStart`/`trialEnd`, que el alta ya
+   * no sella. Sólo cuando venían vacías: una renovación no reescribe cuándo
+   * empezó la prueba.
+   */
+  sellaPrueba?: boolean
   /** Movimiento de acceso en `backend-roles`; ausente = no se toca roles. */
   roles?: EfectoRoles
   /**
@@ -744,7 +750,21 @@ export class ConfioSubscriptionWebhookService {
 
     const roles = this.efectoRoles('reponer', sub, periodo.end)
 
-    return { ...efecto, avanzaPeriodo: true, periodo, ...(roles ? { roles } : {}) }
+    // La PRUEBA se sella acá, no en el alta. Desde el 2026-09-04 el alta deja
+    // `trialStart`/`trialEnd` vacíos a propósito: escribirlas antes de que el
+    // comprador aceptara hacía que una suscripción nunca pagada mostrara acceso y
+    // contara como prueba consumida. Se sella sólo si viene vacía —una renovación
+    // no puede reescribir cuándo empezó la prueba— y con el período que resolvió
+    // el proveedor, así que la prueba empieza cuando aceptó.
+    const sellaPrueba = toStatus === SubscriptionStatus.TRIAL && !sub.trialStart
+
+    return {
+      ...efecto,
+      avanzaPeriodo: true,
+      periodo,
+      ...(sellaPrueba ? { sellaPrueba: true } : {}),
+      ...(roles ? { roles } : {}),
+    }
   }
 
   /**
@@ -888,6 +908,11 @@ export class ConfioSubscriptionWebhookService {
       // ⚠️ DINERO: `nextBillingDate` alimenta a `processSubscriptionRenewals`
       // (`tasks.service.ts:176-200`), que renueva lo que ya cobra ConfioPagos.
       if (efecto.avanzaPeriodo) ConfioSubscriptionWebhookService.avanzarPeriodo(sub, efecto.periodo)
+      // El período de la prueba es el mismo que el del ciclo: lo dice el proveedor.
+      if (efecto.sellaPrueba && !sub.trialStart) {
+        sub.trialStart = efecto.periodo.start
+        sub.trialEnd = efecto.periodo.end
+      }
 
       await manager.save(sub)
 

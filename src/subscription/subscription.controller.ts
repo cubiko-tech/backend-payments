@@ -116,7 +116,16 @@ export class SubscriptionController {
   @ApiOperation({ summary: 'Iniciar trial gratuito de 15 días (sin método de pago)' })
   @ApiResponse({ status: 201, description: 'Trial iniciado correctamente' })
   async startTrial(
-    @Body() data: { brandId: string; userId: string; planSlug: string; provider?: any; walletId?: string },
+    @Body()
+    data: {
+      brandId: string
+      userId: string
+      planSlug: string
+      provider?: any
+      walletId?: string
+      /** Teléfono de la cuenta de ConfioPagos que va a pagar, si no es el del perfil. */
+      billingPhone?: string
+    },
   ) {
     return this.subscriptionService.startTrial(data)
   }

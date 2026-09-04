@@ -46,6 +46,41 @@ function isUniqueViolation(e: unknown): boolean {
  * otro camino. Se lee acá una sola vez para que las dos altas no puedan divergir en
  * QUÉ suscripción reemplazan.
  */
+/**
+ * Teléfono con el que se va a COBRAR: el elegido en esta alta, o el que ya quedó
+ * guardado en una anterior.
+ *
+ * Reusar el guardado es la condición 3 de `el-telefono-del-cobro-lo-elige-quien-paga`:
+ * quien ya corrigió su número una vez no tiene que volver a escribirlo cada vez
+ * que retoma el alta. `undefined` = el de la cuenta, que es el caso común.
+ *
+ * NO sale de `users`: el teléfono del perfil es un dato de la marca con otros
+ * usos, y pagar no puede cambiárselo. Por eso vive en la fila de la suscripción.
+ */
+function telefonoDeCobro(elegido?: string, fila?: Subscription | null): string | undefined {
+  return elegido || fila?.metadata?.confio?.buyerPhone || undefined
+}
+
+/**
+ * ¿Este alta trae un teléfono de cobro DISTINTO al que la fila ya tenía?
+ *
+ * Es lo que separa «me equivoqué de número» de «no terminé»: sólo el primero
+ * justifica cancelar la suscripción pendiente en ConfioPagos y crear otra.
+ *
+ * Se compara normalizando espacios porque el número llega de un formulario. NO se
+ * normaliza a E.164 acá: eso lo hace `buildConfioBuyer` más adelante y con el
+ * `callingCode` del usuario; duplicarlo daría dos criterios que pueden divergir y
+ * haría que un mismo número escrito distinto pase por «cambiado».
+ */
+function cambiaElTelefonoDeCobro(elegido?: string, fila?: Subscription | null): boolean {
+  const nuevo = (elegido || '').replace(/[\s().-]/g, '')
+  if (!nuevo) return false
+
+  const anterior = String(fila?.metadata?.confio?.buyerPhone || '').replace(/[\s().-]/g, '')
+
+  return nuevo !== anterior
+}
+
 function nombreAnterior(fila?: Subscription | null): string | undefined {
   return fila?.metadata?.confio?.name || fila?.providerSubscriptionId || undefined
 }
@@ -132,8 +167,10 @@ export class SubscriptionService {
     planSlug: string
     provider?: SubscriptionProvider
     walletId?: string
+    /** Teléfono de la cuenta de ConfioPagos que va a pagar, si no es el del perfil. */
+    billingPhone?: string
   }) {
-    const { brandId, userId, planSlug } = input
+    const { brandId, userId, planSlug, billingPhone } = input
 
     const freePlan = process.env.FREE_PLAN_SLUG || 'free'
     if (!planSlug || planSlug === freePlan) {
@@ -188,7 +225,27 @@ export class SubscriptionService {
     // recurrencias vivas para la misma marca y el link inicial huérfano.
     // Lo que corresponde es retomar la que ya existe, y el camino es
     // `GET /subscription/acceptance-link`, que devuelve el link YA emitido.
-    if (existing && existing.status === SubscriptionStatus.PENDING && existing.providerSubscriptionId) {
+    if (
+      existing &&
+      existing.status === SubscriptionStatus.PENDING &&
+      existing.providerSubscriptionId &&
+      // LA ÚNICA PUERTA que abre este guard: que el teléfono de cobro haya CAMBIADO.
+      //
+      // Retomar el link no sirve cuando el número estaba mal: ConfioPagos lo emite
+      // autorizado para el que mandamos y su formulario exige ese mismo, así que el
+      // comprador puede recuperarlo las veces que quiera y no va a poder pagar nunca
+      // —hasta que venza a los 7 días—. Ahí «retomá lo que ya tenés» es una trampa.
+      //
+      // Y por eso la condición es que sea DISTINTO, no un botón de reintentar: un
+      // reintento con el mismo número no arregla nada y sí deja otra suscripción viva
+      // del lado de ellos. Un número nuevo es la única razón por la que la segunda
+      // tiene sentido.
+      //
+      // Cuando entra, el alta sigue su curso normal y `reemplazaA` cancela la
+      // pendiente en ConfioPagos ANTES de crear la nueva, que es lo que evita las dos
+      // recurrencias vivas que este guard vino a impedir.
+      !cambiaElTelefonoDeCobro(billingPhone, existing)
+    ) {
       throw new RequestException(
         {
           code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
@@ -243,6 +300,10 @@ export class SubscriptionService {
         // El alta de prueba es la que SÍ obtiene los días de ConfioPagos: va contra el
         // plan que ellos crearon con `trialPeriodDays: 15`.
         conPrueba: true,
+        // El elegido acá, o el que ya haya quedado de un intento anterior.
+        ...(telefonoDeCobro(billingPhone, existing)
+          ? { telefonoDeCobro: telefonoDeCobro(billingPhone, existing) }
+          : {}),
         ...(existing ? { correlationId: existing.id } : {}),
         // La fila que se reusa puede tener una suscripción VIVA del otro lado: se
         // cancela antes de crear la nueva, o quedarían dos y la vieja podría cobrar.
@@ -281,7 +342,15 @@ export class SubscriptionService {
             HttpStatus.CONFLICT,
           )
         }
-        if (current && current.status === SubscriptionStatus.PENDING && current.providerSubscriptionId) {
+        // MISMA compuerta que el guard de arriba, y por el mismo motivo: si sólo se
+        // abriera el barato, la carrera bajo el lock volvería a rechazar al que viene
+        // a corregir su número. Las dos condiciones tienen que decir lo mismo.
+        if (
+          current &&
+          current.status === SubscriptionStatus.PENDING &&
+          current.providerSubscriptionId &&
+          !cambiaElTelefonoDeCobro(billingPhone, current)
+        ) {
           throw new RequestException(
             {
               code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
@@ -326,17 +395,34 @@ export class SubscriptionService {
           provider: SubscriptionProvider.CONFIO,
           walletId: null,
           providerSubscriptionId: confioName,
+          // ⚠️ NO SE SELLA NADA DE LA PRUEBA HASTA QUE CONFIOPAGOS CONFIRME.
+          //
+          // Hasta el 2026-09-04 acá se escribían `trialStart`/`trialEnd` y el período
+          // con los 15 días, y el plan NO se otorgaba —correcto— pero esas fechas
+          // quedaban igual. El resultado, visto en staging con un caso real: una
+          // suscripción cancelada sin haberse pagado nunca decía «acceso hasta el 19»
+          // porque la pantalla lee esas columnas, y de paso `trialStart` la contaba
+          // como prueba CONSUMIDA, así que la marca no podía volver a intentarlo.
+          //
+          // El período se sella en la confirmación, con lo que el proveedor devuelva:
+          // la prueba empieza cuando el comprador acepta, no cuando llenó el
+          // formulario. Las dos columnas de período son NOT NULL, así que van en `now`
+          // —un período de largo cero, igual que el alta paga— y el webhook las
+          // reescribe.
           currentPeriodStart: now,
-          currentPeriodEnd: trialEnd,
-          trialStart: now,
-          trialEnd,
+          currentPeriodEnd: now,
           // Se marca INCONDICIONALMENTE: lo que afirma no es «hubo URL» sino «esta fila ya
           // tiene su suscripción recurrente en ConfioPagos», y re-emitir un checkout
           // one-shot encima sería un segundo riel de cobro. Si el `acceptanceUrl` no llegó,
           // la vía de recuperación es `getAcceptanceLink`, nunca el cron. El reuso de una
           // fila muerta lo re-marca a propósito: ciclo nuevo, link nuevo.
           initialPaymentLinkIssuedAt: now,
-          nextBillingDate: trialEnd,
+          // Tampoco se agenda cobro: la recurrencia la arranca ConfioPagos cuando el
+          // comprador acepta, y un `nextBillingDate` puesto acá despertaría a
+          // `processSubscriptionRenewals` sobre una fila que todavía no pagó nada.
+          // (De paso desaparece el efecto que el comentario de arriba describía: sin
+          // esta fecha, un alta abandonada ya no cae en `issueExternalCharge`.)
+          nextBillingDate: null,
           autoRenew: true,
           cancelledAt: null,
           cancelReason: null,
@@ -352,6 +438,12 @@ export class SubscriptionService {
           // re-pide por el camino autenticado con `getAcceptanceLink`.
           metadata: {
             confio: {
+              // Se guarda ACÁ y no en `users`: es el número con el que se cobra
+              // esta suscripción, no el teléfono de la marca. Además es lo que
+              // deja que un reintento no vuelva a pedirlo.
+              ...(telefonoDeCobro(billingPhone, existing)
+                ? { buyerPhone: telefonoDeCobro(billingPhone, existing) }
+                : {}),
               name: confioName,
               status: confioSub.status,
               planName: confioPlanName,
@@ -466,8 +558,14 @@ export class SubscriptionService {
    *     (`confio-subscription-webhook.service.ts`), que sobre una fila `pending` —que NO
    *     es terminal— sí repone el plan.
    */
-  async startPaid(input: { brandId: string; userId: string; planSlug: string }) {
-    const { brandId, userId, planSlug } = input
+  async startPaid(input: {
+    brandId: string
+    userId: string
+    planSlug: string
+    /** Teléfono de la cuenta de ConfioPagos que va a pagar, si no es el del perfil. */
+    billingPhone?: string
+  }) {
+    const { brandId, userId, planSlug, billingPhone } = input
 
     // Mismo rechazo que el alta de prueba y por lo mismo: sin plan pago no hay nada que
     // crear en ConfioPagos. Código propio para que el llamador no lea «trial» en la
@@ -510,6 +608,9 @@ export class SubscriptionService {
         // marca que ya gastó su prueba recibiría otros quince días que después ellos
         // cobran, y encima ConfioPagos la reportaría `TRIALING` en vez de `ACTIVE`.
         conPrueba: false,
+        ...(telefonoDeCobro(billingPhone, existing)
+          ? { telefonoDeCobro: telefonoDeCobro(billingPhone, existing) }
+          : {}),
         // `correlationId` sólo con fila muerta que reusar, mismo criterio que el trial.
         ...(existing ? { correlationId: existing.id } : {}),
         // Y el mismo reemplazo: acá la fila reusada puede ser una `pending` con su link
@@ -570,6 +671,12 @@ export class SubscriptionService {
           lastPaymentId: null,
           metadata: {
             confio: {
+              // Se guarda ACÁ y no en `users`: es el número con el que se cobra
+              // esta suscripción, no el teléfono de la marca. Además es lo que
+              // deja que un reintento no vuelva a pedirlo.
+              ...(telefonoDeCobro(billingPhone, existing)
+                ? { buyerPhone: telefonoDeCobro(billingPhone, existing) }
+                : {}),
               name: confioName,
               status: confioSub.status,
               planName: confioPlanName,

@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString } from 'class-validator'
+import { IsNotEmpty, IsOptional, IsString } from 'class-validator'
 
 /**
  * Lista BLANCA del alta PAGA (`POST /subscription/paid` → `SubscriptionService.startPaid`).
@@ -33,4 +33,17 @@ export class StartPaidSubscriptionDto {
   @IsString()
   @IsNotEmpty()
   planSlug: string
+
+  /**
+   * Teléfono de la cuenta de ConfioPagos que va a pagar, cuando no es el del
+   * perfil. OPCIONAL: sin él se usa el de la cuenta, que es el caso común.
+   *
+   * No se valida el formato acá sino en `buildConfioBuyer`, que ya normaliza a
+   * E.164 usando el `callingCode` del usuario y rechaza antes de tocar la red.
+   * Duplicar la regla en el DTO daría dos criterios que pueden divergir.
+   */
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  billingPhone?: string
 }

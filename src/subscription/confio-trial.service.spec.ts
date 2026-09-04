@@ -88,6 +88,32 @@ describe('ConfioTrialService', () => {
      * resolutor, porque es lo que elige CONTRA QUÉ PLAN de ConfioPagos se crea la
      * suscripción, y allá el período de prueba está congelado en el plan.
      */
+    it('el teléfono elegido REEMPLAZA al de la cuenta, y sólo ese campo', async () => {
+      await alta({ telefonoDeCobro: '+573001112233' })
+
+      expect(confio.createSubscription).toHaveBeenCalledWith(
+        expect.objectContaining({
+          buyer: expect.objectContaining({
+            phoneNumber: '+573001112233',
+            // El email y el nombre siguen saliendo del usuario.
+            email: 'manuel@roaxai.com',
+          }),
+        }),
+      )
+    })
+
+    /**
+     * R15 — condición 4: un número mal formado se rechaza ACÁ, antes de la red.
+     * Si llegara a ConfioPagos, su `invalidPhoneNumber` nos devolvería un 400 que
+     * el usuario ve como «no se pudo crear la suscripción», sin saber qué corregir.
+     */
+    it('[R15] un teléfono elegido sin formato utilizable no llega a ConfioPagos', async () => {
+      const err = await alta({ telefonoDeCobro: 'no-es-un-telefono' }).catch((e) => e)
+
+      expect(err).toBeDefined()
+      expect(confio.createSubscription).not.toHaveBeenCalled()
+    })
+
     it('pasa la variante SIN prueba al resolutor cuando el alta es paga', async () => {
       await alta({ conPrueba: false })
 
