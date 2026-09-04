@@ -27,6 +27,36 @@ describe('ConfioProvider', () => {
     jest.restoreAllMocks()
   })
 
+  /**
+   * ConfioPagos devuelve texto plano en algunos errores. Antes el `JSON.parse`
+   * iba ANTES del chequeo de `response.ok`, así que el fallo salía como
+   * `Unexpected token 'S'…` y se llevaba puesto el status y el motivo: los logs
+   * quedaban sin nada que diagnosticar. Medido contra dev el 2026-09-04.
+   */
+  describe('respuesta que no es JSON', () => {
+    it('conserva el status y el cuerpo crudo en el error', async () => {
+      ;(global as any).fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        text: async () => 'Subscription plan is not available for this buyer',
+      })
+
+      const provider = new ConfioProvider()
+      const err = await provider
+        .createSubscription({
+          planName: 'stores/01TESTSTORE/subscription-plans/01PLAN',
+          buyer: { email: 'x@y.co', phoneNumber: '+573001234567', firstName: 'Ana', lastName: 'Gomez' },
+        })
+        .catch((e) => e)
+
+      // Las dos mitades que el parseo a ciegas destruía.
+      expect(err.message).toContain('422')
+      expect(err.message).toContain('Subscription plan is not available')
+      // Y no el error de parseo, que es lo que se veía antes.
+      expect(err.message).not.toContain('Unexpected token')
+    })
+  })
+
   describe('createCheckout', () => {
     it('POSTea a /stores/{id}/payments con amountCents=monto*100 y correlationId, y devuelve el link', async () => {
       const fetchMock = jest.fn().mockResolvedValue({
