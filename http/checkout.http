@@ -9,6 +9,20 @@
 # Flujo: pago → suscripción → factura → DIAN → roles
 # =============================================
 
+# NOTA (alta de plan): en `plan_purchase` el precio se resuelve por `brand.country`
+# contra el catálogo de backend-roles y la moneda es un dato DERIVADO de la fila de
+# precio (o de la fila negociada, en enterprise): `currency` se IGNORA y por eso no
+# aparece en estos ejemplos. El `planSlug` es OBLIGATORIO en `plan_purchase`: su
+# ausencia se rechaza con 400 INVALID_PLAN_SLUG y nunca cobra el `amount`/`currency`
+# que mande el llamador. `brandId` debe ser un UUID o la request se rechaza con
+# 400 INVALID_BRAND_ID, y si se paga con wallet hay que mandar `walletId` (400
+# MISSING_WALLET_ID), la wallet tiene que ser de esa marca (404 WALLET_NOT_FOUND) y
+# estar en la moneda resuelta (422 WALLET_CURRENCY_MISMATCH).
+#
+# El país de la marca decide además a qué proveedores se puede pagar: el gate usa
+# ESE país y no el del perfil de facturación, así que un plan en USD sólo sale por
+# un proveedor habilitado para ese país en `provider_config` (si no, 400
+# PROVIDER_NOT_AVAILABLE). Y una factura que no está en COP no se envía a la DIAN.
 ### Comprar plan Pro con wallet interna
 POST {{HOST}}/checkout HTTP/1.1
 Authorization: Bearer {{ACCESS_TOKEN}}
@@ -20,7 +34,6 @@ Content-Type: application/json
   "purpose": "plan_purchase",
   "provider": "wallet",
   "planSlug": "pro",
-  "currency": "COP",
   "walletId": "{{WALLET_ID}}"
 }
 
@@ -35,7 +48,6 @@ Content-Type: application/json
   "purpose": "plan_purchase",
   "provider": "stripe",
   "planSlug": "starter",
-  "currency": "COP",
   "successUrl": "https://app.cubiko.dev/payment/success",
   "cancelUrl": "https://app.cubiko.dev/payment/cancel"
 }
@@ -50,8 +62,7 @@ Content-Type: application/json
   "userId": "{{USER_ID}}",
   "purpose": "plan_purchase",
   "provider": "mercadopago",
-  "planSlug": "pro",
-  "currency": "COP"
+  "planSlug": "pro"
 }
 
 ### Comprar plan con Dropi
@@ -64,8 +75,7 @@ Content-Type: application/json
   "userId": "{{USER_ID}}",
   "purpose": "plan_purchase",
   "provider": "dropi",
-  "planSlug": "starter",
-  "currency": "COP"
+  "planSlug": "starter"
 }
 
 ### Recargar wallet interna con Stripe

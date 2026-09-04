@@ -6,14 +6,42 @@ import { Injectable, Logger } from '@nestjs/common'
  * consultas excesivas al servicio de roles.
  */
 
-interface PlanPrice {
-  planSlug: string
+/**
+ * Fila de precio tal como la devuelve `GET /v1/plan` de backend-roles en la
+ * relación `prices` (tabla `plan_prices`). Se guarda completa —con país e
+ * `isDefault`— porque el precio correcto depende del país de la marca, no solo
+ * de la moneda.
+ */
+export interface PlanPriceRow {
+  id: string
+  countryCode: string
   currency: string
   price: number
+  isDefault: boolean
 }
 
+/** El plan pedido no está en el catálogo de backend-roles. */
+export const PLAN_NOT_FOUND = 'PLAN_NOT_FOUND'
+
+/** El plan existe pero no tiene fila para ese país ni fila `isDefault`. */
+export const PRICE_NOT_FOUND_FOR_COUNTRY = 'PRICE_NOT_FOUND_FOR_COUNTRY'
+
+export type PriceResolutionErrorCode =
+  | typeof PLAN_NOT_FOUND
+  | typeof PRICE_NOT_FOUND_FOR_COUNTRY
+
+/**
+ * Resultado discriminado por `ok`. Los `?: never` de la rama contraria están a
+ * propósito: el tsconfig del servicio tiene `strictNullChecks: false`, y sin él
+ * TypeScript NO estrecha la unión por un discriminante booleano. Sin esos
+ * campos, un consumidor que hiciera `if (!res.ok) res.code` no compilaría.
+ */
+export type PriceResolution =
+  | { ok: true; price: PlanPriceRow; code?: never }
+  | { ok: false; code: PriceResolutionErrorCode; price?: never }
+
 interface PlanPricesCache {
-  prices: Map<string, Map<string, number>> // planSlug → currency → price
+  prices: Map<string, PlanPriceRow[]> // planSlug → filas de precio
   fetchedAt: number
 }
 
@@ -47,9 +75,90 @@ export class ClientRolesService {
 
   /**
    * Obtener todos los precios de planes como mapa: planSlug → currency → price.
-   * Usa caché con TTL de 5 minutos.
+   * Derivado de las filas cacheadas.
+   *
+   * La dimensión país se colapsa: si dos filas comparten moneda (p. ej. COP
+   * para CO y para EC) gana la última del array, exactamente como antes. Se
+   * preserva a propósito porque `checkout.service.ts:490`,
+   * `tasks.service.ts:435,537` y `metrics.service.ts:44` están fuera de alcance
+   * y consumen esta forma. La respuesta correcta por país es
+   * `resolvePriceForCountry`.
    */
   async getAllPlanPrices(): Promise<Map<string, Map<string, number>>> {
+    const rowsByPlan = await this.getPlanRows()
+    const pricesMap = new Map<string, Map<string, number>>()
+
+    for (const [planSlug, rows] of rowsByPlan) {
+      const currencyMap = new Map<string, number>()
+      for (const row of rows) {
+        currencyMap.set(row.currency, row.price)
+      }
+
+      // Plan free sin precios configurados → precio 0 (solo en esta derivación:
+      // nunca se inventan filas en el caché).
+      if (currencyMap.size === 0 && planSlug === 'free') {
+        currencyMap.set('COP', 0)
+        currencyMap.set('USD', 0)
+      }
+
+      pricesMap.set(planSlug, currencyMap)
+    }
+
+    return pricesMap
+  }
+
+  /**
+   * Resolver el precio de un plan para un país concreto.
+   *
+   * Se elige la fila cuyo `countryCode` coincide (case-insensitive); si hay más
+   * de una para ese país gana la que tenga `isDefault: true`, con independencia
+   * del orden en que backend-roles las devuelva. Si no hay fila del país, se
+   * cae a la fila `isDefault` del plan.
+   *
+   * Dos decisiones de borde deliberadas:
+   * - un `countryCode` vacío o en blanco va directo a la fila `isDefault`;
+   * - un plan SIN filas de precio responde `PRICE_NOT_FOUND_FOR_COUNTRY` en vez del
+   *   cero fabricado que sí produce `getAllPlanPrices`, para que el alta no persista
+   *   un precio inventado. Medido en dev el 2026-08-25 con `GET /v1/plan`: los
+   *   planes sin filas son `ally_dropi_pro` y `ally_dropi_free`; **`free` SÍ tiene
+   *   filas reales de 0.00** (CO/COP `isDefault` y US/USD), así que resuelve normal
+   *   y cobra 0 — no lo alcanza esta rama.
+   *
+   * La fila se devuelve por referencia desde el caché, pero viene CONGELADA
+   * (`Object.freeze` al construir el caché): la invariante "no la mutes" está
+   * impuesta, no sólo documentada.
+   */
+  async resolvePriceForCountry(planSlug: string, countryCode: string): Promise<PriceResolution> {
+    const rowsByPlan = await this.getPlanRows()
+    const rows = rowsByPlan.get(planSlug)
+    if (!rows) return { ok: false, code: PLAN_NOT_FOUND }
+
+    const wanted = (countryCode || '').trim().toUpperCase()
+
+    if (wanted) {
+      const matches = rows.filter((row) => row.countryCode.toUpperCase() === wanted)
+      const winner = matches.find((row) => row.isDefault) ?? matches[0]
+      if (winner) return { ok: true, price: winner }
+    }
+
+    // Sin fila para ese país NO se cae a la de otro. `isDefault` desempata entre
+    // filas del MISMO país (arriba), no suple a un país ausente: son dos cosas
+    // distintas y confundirlas le cobraría 19.900 COP a una marca argentina o
+    // mexicana sin que nadie se entere. Rechazar es la decisión del criterio 1
+    // de la épica 002 —«rechazar el alta cuando el plan o la moneda faltan del
+    // catálogo»—, y agregar un país es una decisión comercial, no un default.
+    return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY }
+  }
+
+  /**
+   * Filas de precio por plan, con caché en memoria de 5 minutos.
+   *
+   * DEUDA CONOCIDA: si backend-roles falla se devuelve el caché VENCIDO sin
+   * tope de antigüedad, así que un outage prolongado sirve precios
+   * arbitrariamente viejos —no hay edad máxima ni caché negativo—. El único
+   * límite hoy es un `invalidateCache()` manual.
+   */
+  private async getPlanRows(): Promise<Map<string, PlanPriceRow[]>> {
     // Si hay caché válido, retornar
     if (this.cache && (Date.now() - this.cache.fetchedAt) < this.CACHE_TTL_MS) {
       return this.cache.prices
@@ -76,9 +185,9 @@ export class ClientRolesService {
   }
 
   /**
-   * Consultar GET /v1/plan en backend-roles y extraer precios.
+   * Consultar GET /v1/plan en backend-roles y extraer las filas de precio.
    */
-  private async fetchPlanPricesFromRoles(): Promise<Map<string, Map<string, number>>> {
+  private async fetchPlanPricesFromRoles(): Promise<Map<string, PlanPriceRow[]>> {
     if (!this.rolesUrl) {
       throw new Error('SERVICE_ROLES no configurado')
     }
@@ -98,24 +207,28 @@ export class ClientRolesService {
     const body = await response.json()
     const plans = body.data || body
 
-    const pricesMap = new Map<string, Map<string, number>>()
+    const pricesMap = new Map<string, PlanPriceRow[]>()
 
     for (const plan of Array.isArray(plans) ? plans : []) {
-      const currencyMap = new Map<string, number>()
+      const rows: PlanPriceRow[] = []
 
       if (Array.isArray(plan.prices)) {
         for (const price of plan.prices) {
-          currencyMap.set(price.currency, Number(price.price))
+          // Congelada: la fila se entrega por referencia desde el caché y una
+          // mutación de un consumidor corrompería el precio para todos hasta que
+          // expire el TTL.
+          rows.push(Object.freeze({
+            id: String(price.id),
+            countryCode: String(price.countryCode ?? ''),
+            // `price` viaja como string: `plan_prices.price` es decimal en backend-roles.
+            currency: String(price.currency),
+            price: Number(price.price),
+            isDefault: !!price.isDefault,
+          }))
         }
       }
 
-      // Plan free sin precios configurados → precio 0
-      if (currencyMap.size === 0 && plan.slug === 'free') {
-        currencyMap.set('COP', 0)
-        currencyMap.set('USD', 0)
-      }
-
-      pricesMap.set(plan.slug, currencyMap)
+      pricesMap.set(plan.slug, Object.freeze(rows) as PlanPriceRow[])
     }
 
     this.logger.log(`Precios actualizados desde backend-roles: ${pricesMap.size} planes`)
@@ -145,7 +258,7 @@ export class ClientRolesService {
     }
     try {
       const url =
-        `${this.rolesUrl}/v1/effective/check/${subjectId}/` +
+        `${this.rolesUrl}/v1/effective/check/${encodeURIComponent(subjectId)}/` +
         `${encodeURIComponent(permissionSlug)}?type=${type}`
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.accessServer}` },
@@ -172,7 +285,7 @@ export class ClientRolesService {
    */
   async assignPlanToBrand(brandId: string, planSlug: string, expiresAt?: Date): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}`,
       'POST',
       expiresAt ? { expiresAt: expiresAt.toISOString() } : undefined,
       `Plan ${planSlug} asignado a marca ${brandId}`,
@@ -184,7 +297,7 @@ export class ClientRolesService {
    */
   async removePlanFromBrand(brandId: string, planSlug: string): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}`,
       'DELETE',
       undefined,
       `Plan ${planSlug} removido de marca ${brandId}`,
@@ -196,7 +309,7 @@ export class ClientRolesService {
    */
   async renewPlanForBrand(brandId: string, planSlug: string, expiresAt: Date): Promise<boolean> {
     return this.callRolesApi(
-      `/v1/brand/${brandId}/plan/slug/${planSlug}/renew`,
+      `/v1/brand/${encodeURIComponent(brandId)}/plan/slug/${encodeURIComponent(planSlug)}/renew`,
       'POST',
       { expiresAt: expiresAt.toISOString() },
       `Plan ${planSlug} renovado para marca ${brandId} hasta ${expiresAt.toISOString()}`,

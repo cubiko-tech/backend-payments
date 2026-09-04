@@ -26,8 +26,8 @@ import {
   CREDIT_ACTIVATION_REQUEST_STATUSES,
   CreditActivationRequestStatus,
 } from '../credit/credit.types'
-import { CreditPermissionGuard } from '../credit/guard/credit-permission.guard'
-import { RequireCreditPermission } from '../credit/guard/require-credit-permission.decorator'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequirePermission } from '../shared/auth/require-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 
 /**
@@ -41,7 +41,15 @@ import { UpdateActivationRequestDto } from '../credit/dto/update-activation-requ
  */
 @ApiTags('Admin')
 @Controller('admin')
-@UseGuards()
+/**
+ * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
+ * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
+ * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
+ * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
+ * `@RequirePermission` por handler, así que esto no le agrega requisitos a
+ * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
+ */
+@UseGuards(ApiAuthGuard)
 export class AdminController {
   constructor(
     @InjectRepository(Subscription, 'DBRead')
@@ -189,6 +197,16 @@ export class AdminController {
 
     sub.currentPeriodEnd = newEnd
     sub.nextBillingDate = newEnd
+    // Con una baja PENDIENTE el acceso lo gobierna `accessEndsAt`, no el período
+    // (ver la invariante en `subscription.entity.ts`): mover sólo `currentPeriodEnd`
+    // no le daría a la marca ni un día más de servicio. Se corre lo MISMO que el
+    // período, y sólo si la columna ya tenía fecha: escribirla acá afirmaría una
+    // baja que nadie pidió y dejaría la fila lista para el cron de retiro.
+    if (sub.accessEndsAt) {
+      const nuevoFinDeAcceso = new Date(sub.accessEndsAt)
+      nuevoFinDeAcceso.setDate(nuevoFinDeAcceso.getDate() + body.days)
+      sub.accessEndsAt = nuevoFinDeAcceso
+    }
     if (sub.status === SubscriptionStatus.PAST_DUE || sub.status === SubscriptionStatus.EXPIRED) {
       sub.status = SubscriptionStatus.ACTIVE
       sub.retryCount = 0
@@ -354,8 +372,8 @@ export class AdminController {
   }
 
   @Get('credit/activation-requests')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Listado paginado de solicitudes de activación de crédito' })
   @ApiResponse({ status: 200, description: 'Solicitudes de activación paginadas' })
   async activationRequests(
@@ -384,8 +402,8 @@ export class AdminController {
   }
 
   @Patch('credit/activation-requests/:id')
-  @UseGuards(CreditPermissionGuard)
-  @RequireCreditPermission('credit:runs')
+  @UseGuards(ApiAuthGuard)
+  @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Actualizar estado/notas de una solicitud de activación de crédito' })
   @ApiResponse({ status: 200, description: 'Solicitud actualizada' })
   async updateActivationRequest(

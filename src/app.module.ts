@@ -27,6 +27,7 @@ import { AdminModule } from './admin/admin.module'
 import { MetricsModule } from './metrics/metrics.module'
 import { EventBusModule } from './event-bus/event-bus.module'
 import { ClientModule } from './client/client.module'
+import { AuthModule } from './shared/auth/auth.module'
 import { CreditModule } from './credit/credit.module'
 
 @Module({
@@ -73,6 +74,7 @@ import { CreditModule } from './credit/credit.module'
     // Módulo global de clientes HTTP a otros servicios
     ClientModule,
 
+    AuthModule,
     // Módulos de negocio
     WalletModule,
     PaymentModule,

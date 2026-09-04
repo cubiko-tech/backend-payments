@@ -301,7 +301,7 @@ El objetivo es completar el sistema para que:
 - `src/provider/dropi/dropi.webhook.ts` — TODO firma (L58)
 - `src/wallet/wallet.service.ts` — Wallet con lock pessimistic
 - `src/subscription/subscription.service.ts` — Lifecycle de suscripciones
-- `src/tasks/tasks.service.ts` — 8 cron jobs
+- `src/tasks/tasks.service.ts` — 12 cron jobs (incluye `expireCancelledSubscriptions`, el retiro del plan al vencer el acceso pagado)
 - `src/event-bus/event-bus.service.ts` — Redis Streams publisher
 - `src/dian/` — Facturación electrónica (Siigo + Mock)
 - `src/invoice/invoice-pdf.service.ts` — Generación PDF
