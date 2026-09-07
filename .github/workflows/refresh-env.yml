@@ -31,6 +31,12 @@ jobs:
       name: ${{ inputs.environment }}
 
     steps:
+      # Hace falta por `deploy/refresh-env-remote.sh`, que se sube a la VM. El
+      # workflow no tenía checkout porque su versión anterior llevaba el script
+      # incrustado en el YAML — que es donde se le acumularon los bugs.
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Validate secrets
         run: |
           set -euo pipefail
@@ -44,7 +50,13 @@ jobs:
               MISSING=true
             fi
           done
-          [ "$MISSING" = "true" ] && exit 1
+          # `if`, NO `[ … ] && exit 1`. Esa forma era el ÚLTIMO comando del
+          # script: con nada faltante el test da falso, devuelve 1 y `set -e`
+          # se lleva puesto el paso entero. O sea que el job sólo podía tener
+          # éxito encontrando un secreto faltante, y nunca refrescó nada.
+          if [ "$MISSING" = "true" ]; then
+            exit 1
+          fi
         env:
           INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
           INFISICAL_TOKEN: ${{ secrets.INFISICAL_TOKEN }}
@@ -128,32 +140,37 @@ jobs:
             --tunnel-through-iap \
             --ssh-key-expire-after=1h
 
+          gcloud compute scp deploy/refresh-env-remote.sh \
+            "${GCP_INSTANCE}:/tmp/refresh-env-remote.sh" \
+            --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=1h
+
           gcloud compute ssh "$GCP_INSTANCE" \
             --zone="$GCP_ZONE" --project="$GCP_PROJECT" \
             --tunnel-through-iap \
             --ssh-key-expire-after=1h \
             --ssh-flag="-o StrictHostKeyChecking=no" \
-            --command="sudo bash -c '
-              cp /tmp/service.env ${DEPLOY_PATH}/.env
-              rm -f /tmp/service.env
-              cd ${DEPLOY_PATH}
-              REGISTRY=\$(grep ${IMAGE_VAR} .env \
-                | cut -d= -f2 | cut -d/ -f1)
-              gcloud auth configure-docker \$REGISTRY \
-                --quiet 2>/dev/null || true
-              docker compose --env-file .env \
-                -f docker/docker-compose.image.yml \
-                up -d --force-recreate
-              echo \"Redeployed with new .env\"
-              docker ps --filter name=payments'"
+            --command="sudo bash /tmp/refresh-env-remote.sh \
+              '${DEPLOY_PATH}' /tmp/service.env '${IMAGE_VAR}' \
+              && rm -f /tmp/refresh-env-remote.sh"
 
+      # SIN `continue-on-error`: un refresco que deja el servicio caído tiene que
+      # verse rojo. Con él puesto —y con el `[ -z … ] && exit 0` de abajo, que
+      # mataba el paso apenas APP_URL estaba definida— este workflow reportaba
+      # éxito pasara lo que pasara. Acepta production como input.
       - name: Health check
-        continue-on-error: true
         timeout-minutes: 3
         run: |
           set -euo pipefail
           APP_URL="${{ secrets.APP_URL }}"
-          [ -z "${APP_URL:-}" ] && exit 0
+          # Mismo bug que en Validate secrets: con APP_URL definida el test da
+          # falso, devuelve 1 y mata el paso — que además era
+          # `continue-on-error`, así que el fallo se reportaba como éxito.
+          if [ -z "${APP_URL:-}" ]; then
+            echo "::warning::APP_URL sin definir: no se puede verificar"
+            exit 0
+          fi
           sleep 30
           for i in 1 2 3; do
             curl -f -s --max-time 10 \
