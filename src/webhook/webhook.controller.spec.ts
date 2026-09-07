@@ -8,6 +8,7 @@ import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { buildConfioWebhookEventId } from '../provider/confio/confio-webhook'
 
 /**
@@ -125,7 +126,17 @@ async function construirController(entorno: EntornoDePrueba): Promise<Armado> {
       { provide: DropiProvider, useValue: {} },
       { provide: ConfioProvider, useValue: confioProvider },
     ],
-  }).compile()
+  })
+    // Los tres handlers `admin/*` declaran `@UseGuards(ApiAuthGuard)`, y Nest
+    // instancia todo guard referenciado al compilar el módulo aunque ningún caso
+    // de acá los invoque: sin esto la compilación falla pidiendo `JwtService`.
+    // Se sustituye en vez de cablear el guard real porque este spec prueba la
+    // AUTENTICACIÓN DE PROVEEDOR de los `@Post` —firma y bearer de ConfioPagos—,
+    // que no pasa por él. Que los `admin/*` exijan credencial, y que los `@Post`
+    // NO la exijan, lo fija `shared/auth/controllers-guarded.spec.ts`.
+    .overrideGuard(ApiAuthGuard)
+    .useValue({ canActivate: () => true })
+    .compile()
 
   return {
     controller: module.get<WebhookController>(WebhookController),

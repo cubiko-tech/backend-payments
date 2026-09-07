@@ -140,8 +140,23 @@ export class ConfioTrialService {
      * ya la gastó, en silencio y por omisión.
      */
     conPrueba: boolean
+    /**
+     * Teléfono con el que ConfioPagos va a COBRAR, cuando no es el de la cuenta.
+     *
+     * No es un dato de contacto: allá la cuenta ES un número, el link queda
+     * autorizado para el que mandamos y su formulario pide ese mismo para mandar
+     * el código. Con otro, responde que no está permitido para el cobro — o sea
+     * que un número ajeno no molesta, IMPIDE pagar.
+     *
+     * Ausente = el de la cuenta, que es lo correcto para la mayoría. Se valida
+     * por el mismo camino que el resto del comprador (`toE164` dentro de
+     * `buildConfioBuyer`), así que un formato inválido se rechaza acá y nunca
+     * llega a la red.
+     */
+    telefonoDeCobro?: string
   }): Promise<ConfioSubscriptionResult> {
-    const { brandId, userId, planSlug, correlationId, reemplazaA, conPrueba } = input
+    const { brandId, userId, planSlug, correlationId, reemplazaA, conPrueba, telefonoDeCobro } =
+      input
 
     // Se usa `resolveBrandCountry` y no el envoltorio `getBrandCountry` porque éste
     // colapsa los tres modos de fallo en `null` y acá cada uno mapea a un HTTP
@@ -186,7 +201,13 @@ export class ConfioTrialService {
     return this.callConfio(() => {
       // `buildConfioBuyer` rechaza con `ConfioSubscriptionInputError` ANTES de
       // tocar la red; por eso va DENTRO del mismo envoltorio que la llamada.
-      const buyer = buildConfioBuyer(contact.contact)
+      // El teléfono elegido REEMPLAZA al de la cuenta, y sólo ese campo: el email
+      // y el nombre siguen saliendo del usuario. Va por `buildConfioBuyer` igual
+      // que siempre, así que hereda la normalización a E.164 y el rechazo previo
+      // a la red.
+      const buyer = buildConfioBuyer(
+        telefonoDeCobro ? { ...contact.contact, phone: telefonoDeCobro } : contact.contact,
+      )
       const params: CreateConfioSubscriptionParams = { planName, buyer }
       // Se agrega la CLAVE sólo si hay valor: `correlationId: undefined` viajaría
       // en el body como un campo vacío y el provider lo distingue con `!== undefined`.

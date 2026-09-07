@@ -11,9 +11,11 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  UseGuards,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Request } from 'express'
+import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { WebhookService } from './webhook.service'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
@@ -28,11 +30,16 @@ import { readConfioWebhookKey } from '../provider/confio/confio-webhook-env'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 
 /**
- * Webhook Controller
+ * Webhook Controller — el ÚNICO controller del servicio sin guard de clase, y
+ * por eso el único donde hay que mirar handler por handler.
  *
- * NOTA: Estos endpoints son PÚBLICOS (sin auth guards).
- * La autenticidad se valida por firma criptográfica del proveedor.
- * En producción, también restringir acceso por IP desde el gateway/firewall.
+ * Los `@Post` de proveedor son públicos a propósito: la autenticidad se valida
+ * con la firma criptográfica o el bearer del emisor, que es lo único que un
+ * proveedor externo puede mandar. En producción conviene además restringir por
+ * IP desde el gateway/firewall.
+ *
+ * Los `admin/*` del final NO son públicos: llevan `@UseGuards(ApiAuthGuard)` uno
+ * por uno desde el 2026-09-07. Ver el comentario de esa sección.
  */
 /**
  * Lo que se pone en la línea de rechazo cuando todavía NO hubo verificación de
@@ -323,8 +330,26 @@ export class WebhookController {
   // ============================================
   // Admin — gestión de webhooks fallidos
   // ============================================
+  //
+  // AUTENTICADOS desde el 2026-09-07, y el guard va POR HANDLER, no en la clase.
+  // Este controller es el único del servicio deliberadamente exento del guard de
+  // clase, porque los `@Post` de proveedor se autentican con la firma o el bearer
+  // del emisor y no pueden exigir sesión. La exención se escribió pensando en
+  // esos cuatro handlers y se llevó puestos, sin quererlo, los tres de acá abajo:
+  // medido por el gateway el 2026-09-07, `GET admin/events` respondía 200 sin
+  // credencial en dev, staging Y PRODUCCIÓN, y `POST admin/:id/retry` no sólo
+  // respondía —ejecutaba: 201 y el `processedAt` del evento se movió—. O sea que
+  // cualquiera podía leer el índice de webhooks (los `providerEventId` traen
+  // resource names de suscripciones y pagos reales) y reprocesar cualquiera de
+  // ellos a voluntad.
+  //
+  // Subir el guard a la clase cerraría esto y apagaría los webhooks entrantes:
+  // ConfioPagos no manda cookie de sesión ni JWT nuestro. Por eso va por handler,
+  // y `controllers-guarded.spec.ts` fija las dos mitades para que nadie
+  // "arregle" una rompiendo la otra.
 
   @Get('admin/events')
+  @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Listar todos los webhooks con filtros (Admin)' })
   @ApiResponse({ status: 200, description: 'Webhooks con stats' })
   async getAllWebhooks(
@@ -336,6 +361,7 @@ export class WebhookController {
   }
 
   @Get('admin/failed')
+  @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Listar webhooks fallidos (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de webhooks fallidos' })
   async getFailedWebhooks(@Query('limit') limit?: number) {
@@ -343,6 +369,7 @@ export class WebhookController {
   }
 
   @Post('admin/:id/retry')
+  @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
   async retryWebhook(@Param('id') id: string) {

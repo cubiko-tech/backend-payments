@@ -123,7 +123,26 @@ export class ConfioProvider implements PaymentProvider {
     })
 
     const text = await response.text()
-    const body = text ? JSON.parse(text) : {}
+
+    // ConfioPagos NO siempre responde JSON: algunos errores llegan como texto
+    // plano. Parsear a ciegas ANTES de mirar `response.ok` convertía eso en un
+    // `Unexpected token 'S'…` que se comía lo único que sirve —el status y lo que
+    // ellos dijeron—, y dejaba el fallo sin diagnóstico posible desde los logs.
+    // Costó tres altas de prueba contra dev el 2026-09-04 para ni siquiera saber
+    // qué estaba rechazando.
+    // `any` y no `unknown`: es lo que `JSON.parse` ya devolvía acá, y los
+    // llamadores leen campos del cuerpo. Estrechar el tipo es otra tarea.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let body: any
+    try {
+      body = text ? JSON.parse(text) : {}
+    } catch {
+      throw new Error(
+        `ConfioPagos respondió ${response.status} con un cuerpo que no es JSON: ` +
+          `${text.slice(0, 300)}`,
+      )
+    }
+
     if (!response.ok) {
       throw new Error(`ConfioPagos error ${response.status}: ${JSON.stringify(body)}`)
     }

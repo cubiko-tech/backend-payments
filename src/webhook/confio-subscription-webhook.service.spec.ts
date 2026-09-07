@@ -764,6 +764,41 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       )
     })
 
+    /**
+     * El alta ya no sella `trialStart`/`trialEnd` —escribirlas antes de la
+     * aceptación hacía que una suscripción nunca pagada mostrara acceso—, así que
+     * el que las escribe es este camino, con el período del proveedor: la prueba
+     * empieza cuando el comprador aceptó.
+     */
+    it('[R15] TRIALING sella la prueba con el período del proveedor', async () => {
+      conSuscripcion(pendienteDeAceptacion({ trialStart: null, trialEnd: null }))
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-01-29T10:00:00Z'),
+        nextBillingTime: new Date('2026-01-29T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      const fila = suscripcionGuardada()
+      expect(fila.trialStart).toEqual(new Date('2026-01-14T10:00:00Z'))
+      expect(fila.trialEnd).toEqual(new Date('2026-01-29T10:00:00Z'))
+    })
+
+    it('[R15] no reescribe una prueba ya sellada: una renovación no la mueve', async () => {
+      const yaSellada = new Date('2026-01-01T00:00:00Z')
+      conSuscripcion(pendienteDeAceptacion({ trialStart: yaSellada }))
+      confio.getSubscription.mockResolvedValue({
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-01-29T10:00:00Z'),
+        nextBillingTime: new Date('2026-01-29T10:00:00Z'),
+      })
+
+      await despachar(cambioDeEstado('TRIALING'))
+
+      expect(suscripcionGuardada().trialStart).toEqual(yaSellada)
+    })
+
     it.each([
       ['sin trialEnd', { trialEnd: null }],
       ['con el trialEnd ya vencido', { trialEnd: new Date('2026-01-01T00:00:00Z') }],

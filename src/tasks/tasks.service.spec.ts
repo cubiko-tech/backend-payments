@@ -1048,6 +1048,78 @@ describe('TasksService — processTrialConversions', () => {
     })
   })
 
+  /**
+   * La recurrencia de una suscripción de ConfioPagos vive ALLÁ: ellos cobran en
+   * cada aniversario. Este cron sólo tiene que enterarse.
+   *
+   * Antes emitía un segundo cobro y dejaba la fila en `past_due` —el estado con
+   * el que se retira el plan pago—, o sea que a una renovación CORRECTA le
+   * cortaba el acceso a la marca. Detectado el 2026-09-04 sobre una suscripción
+   * real que renueva el 2026-10-04.
+   */
+  describe('la renovación de una suscripción recurrente de Confio no la cobramos nosotros', () => {
+    const recurrente = (over: Record<string, any> = {}) => ({
+      id: 's-recurrente',
+      brandId: 'b1',
+      userId: 'u1',
+      planSlug: 'dropi-roax',
+      provider: 'confio',
+      status: SubscriptionStatus.ACTIVE,
+      autoRenew: true,
+      providerSubscriptionId:
+        'stores/01STORE/subscription-plans/01PLAN/subscriptions/01SUB',
+      ...over,
+    })
+
+    it('[R15] no emite cobro: le pregunta el estado al proveedor', async () => {
+      subscriptionRepo.find.mockResolvedValue([recurrente()])
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({ resultado: 'otorgada' })
+
+      await service.processSubscriptionRenewals()
+
+      expect(confioWebhook.confirmarContraElProveedor).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 's-recurrente' }),
+      )
+      // Las dos mitades del daño viejo: el cobro de más…
+      expect(checkoutService.processCheckout).not.toHaveBeenCalled()
+      // …y la fila marcada como impaga.
+      const guardadas = subscriptionRepo.save.mock.calls.map((c: any[]) => c[0]?.status)
+      expect(guardadas).not.toContain(SubscriptionStatus.PAST_DUE)
+    })
+
+    it('[R15] reconoce la recurrente por el nombre VIGENTE de metadata, no sólo por la columna', async () => {
+      subscriptionRepo.find.mockResolvedValue([
+        recurrente({
+          providerSubscriptionId: null,
+          metadata: {
+            confio: { name: 'stores/01STORE/subscription-plans/01PLAN/subscriptions/01NUEVA' },
+          },
+        }),
+      ])
+      confioWebhook.confirmarContraElProveedor.mockResolvedValue({ resultado: 'otorgada' })
+
+      await service.processSubscriptionRenewals()
+
+      expect(checkoutService.processCheckout).not.toHaveBeenCalled()
+    })
+
+    /**
+     * El modelo VIEJO de ConfioPagos —pagos sueltos, sin recurso de suscripción
+     * del lado de ellos— no tiene recurrencia que leer, así que su cobro lo sigue
+     * emitiendo este cron. Distinguirlas es el punto de todo el cambio.
+     */
+    it('[R15] la de pagos sueltos SÍ sigue emitiendo su cobro', async () => {
+      subscriptionRepo.find.mockResolvedValue([
+        recurrente({ providerSubscriptionId: null, metadata: null }),
+      ])
+
+      await service.processSubscriptionRenewals()
+
+      expect(checkoutService.processCheckout).toHaveBeenCalled()
+      expect(confioWebhook.confirmarContraElProveedor).not.toHaveBeenCalled()
+    })
+  })
+
   describe('ningún barrido que emite cobro incluye `pending`', () => {
     // MUTACIÓN QUE LO PONE ROJO: agregar `SubscriptionStatus.PENDING` a cualquiera de
     // los dos criterios de estado ⇒ la fila `pending` entra al barrido que cobra.
