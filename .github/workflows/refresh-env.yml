@@ -177,4 +177,8 @@ jobs:
               "$APP_URL/health/ready" && exit 0
             sleep 10
           done
-          echo "::warning::Health check failed"
+          # `::error::` + `exit 1`, no un `echo` de aviso: el echo devuelve 0 y
+          # el paso pasaba igual con los tres intentos fallidos, así que quitar
+          # `continue-on-error` por sí solo no alcanzaba para que se viera rojo.
+          echo "::error::Health check failed after 3 attempts"
+          exit 1
