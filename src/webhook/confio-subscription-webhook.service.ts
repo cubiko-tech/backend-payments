@@ -184,6 +184,27 @@ function bajaPendiente(sub: Subscription): boolean {
 }
 
 /**
+ * La fila ya está dada de baja DE NUESTRO LADO, con o sin acceso por delante.
+ *
+ * Es deliberadamente más ancho que `bajaPendiente`, que exige que el acceso NO
+ * esté vencido: acá alcanza el sello. Los dos casos que `bajaPendiente` deja
+ * afuera son justo los que hacían falta —una baja cuyo acceso ya venció, y una
+ * baja sobre una fila `pending`, que nunca tuvo acceso que deber—, y ninguno de
+ * los dos deja de ser una baja.
+ *
+ * MEDIDO EN PRODUCCIÓN el 2026-09-08, y por eso existe. Cancelar una suscripción
+ * `pending` hizo que ConfioPagos emitiera un `billingStatusChanged` con `FAILED`
+ * 85 ms después; el evento entró por `planearCobro`, no encontró guarda —el
+ * `status` no era terminal y `bajaPendiente` daba `false` porque el período era
+ * de largo cero, o sea ya vencido— y movió la fila a `past_due`. Resultado: una
+ * baja mostrada como moroso VIVO, con `cancelledAt` puesto, 309 ms después de
+ * haberse cancelado de verdad del otro lado.
+ */
+function yaDadaDeBaja(sub: Subscription): boolean {
+  return ESTADOS_TERMINALES.includes(sub.status) || !!sub.cancelledAt
+}
+
+/**
  * Efecto YA DECIDIDO de un webhook, antes de tocar la base.
  *
  * Se calcula fuera de la transacción (incluida la consulta al proveedor, que es
@@ -342,7 +363,7 @@ export class ConfioSubscriptionWebhookService {
   private async planearCobro(
     data: ConfioWebhookPayload['data'],
     sub: Subscription,
-  ): Promise<EfectoConfio> {
+  ): Promise<EfectoConfio | null> {
     if (data?.status !== 'SUCCEEDED') {
       // El acceso pro se corta al PRIMER cobro fallido que reporte el webhook,
       // sin período de gracia (regla de negocio de la épica 002). Se retira el
@@ -361,6 +382,21 @@ export class ConfioSubscriptionWebhookService {
       // delegada eso cobraría por un segundo riel. Hoy es LATENTE (ninguna
       // suscripción confío tiene resource name) y retirarlo es de
       // `alta-crea-suscripcion-en-confiopagos`: no se toca un camino que gasta plata.
+      // Un cobro fallido sobre una fila YA dada de baja no tiene efecto: mover a
+      // `past_due` la convertiría en un moroso vivo, que es peor que no hacer
+      // nada —la fila deja de ser una baja y pasa a ser una deuda—, y el acceso
+      // en roles ya lo retiró la cancelación. Es la guarda RECÍPROCA de la que
+      // `planearCambioDeEstado` ya tiene para el caso simétrico, y sigue su mismo
+      // precedente: `null`, o sea sin evento y sin escritura.
+      if (yaDadaDeBaja(sub)) {
+        this.logger.log(
+          `Confio cobro no exitoso sobre una suscripción ya dada de baja (${sub.id}): ` +
+            `sin efecto, status=${data?.status}`,
+        )
+
+        return null
+      }
+
       this.logger.warn(`Confio cobro no exitoso para ${sub.id}: status=${data?.status}`)
       return {
         eventType: SubscriptionEventType.PAYMENT_FAILED,
