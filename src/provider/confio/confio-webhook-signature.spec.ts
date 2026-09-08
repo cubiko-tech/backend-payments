@@ -476,6 +476,100 @@ describe('verifyConfioWebhookSignature', () => {
     })
   })
 
+  describe('el cambio de estado firma el `buyer` al estilo Go', () => {
+    /**
+     * Los conjuntos y la serialización salieron de DOS payloads reales de
+     * ConfioPagos capturados el 2026-09-08 en el sandbox (un alta y una baja).
+     * Acá se reproduce su ESTRUCTURA —el objeto `buyer` y el orden de sus campos—
+     * con la clave de prueba, porque la real es un secreto y no va en un spec.
+     *
+     * Los digests siguen precalculados fuera del test, con la concatenación
+     * escrita a mano:
+     *   name + status + '{email phone nombre apellido}' + [reason] + ts + KEY
+     *
+     * La serialización se resolvió probando candidatas contra los checksums
+     * verdaderos: `String(objeto)` da `[object Object]` y `JSON.stringify` da el
+     * JSON, y ninguna de las dos coincide. La que coincide es
+     * `fmt.Sprintf("%v", struct)` de Go.
+     *
+     * Mutación: volver `formatearValor` a `String(value)` → los dos primeros
+     * casos se ponen rojos con `checksum_mismatch`.
+     */
+    const BUYER = {
+      email: 'comprador@ejemplo.com',
+      phoneNumber: '+573001112233',
+      firstName: 'Ana',
+      lastName: 'Perez',
+    }
+    const PROPS_ALTA = ['name', 'status', 'buyer']
+    const PROPS_BAJA = ['name', 'status', 'buyer', 'reason']
+    const CHECKSUM_ALTA = '77FD25F56A2B9E1B7019CED6F888308EF455DA7BF00534B8926245BD2C4FA66C'
+    const CHECKSUM_BAJA = '3BCBA6FDE1EC53D8B82DA1509DB5D5F5623D847ED5130C4B34902FC53FDF219A'
+
+    const cambioConBuyer = (over: Record<string, any> = {}): any => ({
+      event: 'subscription.subscriptionStatusChanged',
+      data: {
+        name: SUBSCRIPTION,
+        status: 'PENDING_ACCEPTANCE',
+        // `createTime` viaja en `data` y NO está declarado: no entra al digest.
+        // Los payloads reales lo traen, así que el caso lo lleva.
+        createTime: '2026-09-08T16:37:51.162Z',
+        buyer: { ...BUYER },
+        ...over,
+      },
+      timestamp: TIMESTAMP,
+      signature: { properties: [...PROPS_ALTA], checksum: CHECKSUM_ALTA },
+    })
+
+    it('el alta con [name, status, buyer] queda firmada', () => {
+      expect(verifyConfioWebhookSignature(cambioConBuyer(), KEY)).toEqual({ signed: true })
+    })
+
+    it('la baja con [name, status, buyer, reason] queda firmada', () => {
+      const payload = cambioConBuyer({ status: 'CANCELED', reason: 'baja pedida por el comprador' })
+      payload.signature = { properties: [...PROPS_BAJA], checksum: CHECKSUM_BAJA }
+
+      expect(verifyConfioWebhookSignature(payload, KEY)).toEqual({ signed: true })
+    })
+
+    // El orden de los campos del `buyer` ES el digest: Go firma los valores del
+    // struct en su orden, así que reordenarlos cambia la firma. Sin este caso,
+    // una implementación que ordenara las claves pasaría igual.
+    it('reordenar los campos del buyer invalida la firma', () => {
+      const payload = cambioConBuyer()
+      payload.data.buyer = {
+        firstName: BUYER.firstName,
+        lastName: BUYER.lastName,
+        email: BUYER.email,
+        phoneNumber: BUYER.phoneNumber,
+      }
+
+      expect(verifyConfioWebhookSignature(payload, KEY)).toMatchObject({
+        signed: false,
+        reason: 'checksum_mismatch',
+      })
+    })
+
+    // La compuerta de tipos: un `buyer` con algo anidado se serializaría como
+    // `[object Object]` adentro de las llaves y firmaría algo que no describe al
+    // payload. Se rechaza ANTES de calcular.
+    it.each([
+      ['con un valor anidado', { email: 'a@b.com', extra: { x: 1 } }],
+      ['con un valor numérico', { email: 'a@b.com', phoneNumber: 573001112233 }],
+      ['vacío', {}],
+      ['array', ['a@b.com']],
+      ['null', null],
+    ])('un buyer %s se rechaza por tipo', (_nombre, buyer) => {
+      const payload = cambioConBuyer()
+      payload.data.buyer = buyer
+
+      expect(verifyConfioWebhookSignature(payload, KEY)).toMatchObject({
+        signed: false,
+        reason: 'invalid_data_type',
+      })
+    })
+  })
+
   describe('blindaje: una entrada crafteada nunca tira TypeError', () => {
     const crafteados: [string, any][] = [
       ['payload null', null],

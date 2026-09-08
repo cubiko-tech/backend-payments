@@ -55,11 +55,14 @@ export type ConfioWebhookSignatureVerdict =
  * VIVO `confio-webhook.spec.ts:47`. Omitirla silencia entera la rama de mora:
  * todo cobro fallido daría `unexpected_properties`.
  *
- * ⚠️ El conjunto `['name','status']` de `subscription.subscriptionStatusChanged`
- * está INFERIDO de nuestro propio fixture `confio-webhook.spec.ts:63`, no del
- * contrato: `CONFIOPAGOS_SUSCRIPCIONES.md` sólo publica el payload de cobro. Si
- * Confío declarara además `updateTime`, se rechazaría TODO cambio de estado.
- * Confirmar contra tráfico real cuando el webhook esté dado de alta.
+ * ⚠️ El riesgo que esta tabla tenía anotado SE MATERIALIZÓ. El conjunto
+ * `['name','status']` de `subscription.subscriptionStatusChanged` estaba INFERIDO
+ * del fixture `confio-webhook.spec.ts:63`, no del contrato, y era optimista:
+ * Confío declara además `buyer`, y en la baja también `reason`. Con el webhook
+ * dado de alta en producción eso rechazó el 100% de los cambios de estado —o sea
+ * los eventos que OTORGAN el plan— y Confío los reintentó cada 10 minutos.
+ * Medido el 2026-09-08 leyendo los logs del contenedor, que es el único lugar
+ * donde se ve: un rechazo pasa por 401 antes de llegar a `webhook_events`.
  *
  * ⚠️ `payment.statusChanged` / `paymentAttempt.statusChanged` (link one-shot)
  * llegan hoy SIN objeto `signature` —fixture legacy `confio-webhook.spec.ts:129`—
@@ -87,11 +90,61 @@ const EXPECTED_PROPERTY_SETS: { event: string; properties: string[] }[] = [
     event: 'subscription.billingStatusChanged',
     properties: ['name', 'cycleNumber', 'amountCents', 'currencyCode', 'status', 'failedCount'],
   },
+  // Los dos conjuntos REALES del cambio de estado, capturados de tráfico de
+  // ConfioPagos el 2026-09-08 (alta y baja contra el store de sandbox, con sus
+  // checksums verificados en `confio-webhook-signature.spec.ts`). El `buyer` es
+  // lo que la inferencia no podía adivinar.
+  {
+    event: 'subscription.subscriptionStatusChanged',
+    properties: ['name', 'status', 'buyer'],
+  },
+  {
+    event: 'subscription.subscriptionStatusChanged',
+    properties: ['name', 'status', 'buyer', 'reason'],
+  },
+  // Se conserva el conjunto sin `buyer`: es el que asumía el fixture original y
+  // nunca se vio en tráfico, pero quitarlo sólo agregaría rechazos si Confío lo
+  // emitiera para alguna transición que todavía no observamos.
   {
     event: 'subscription.subscriptionStatusChanged',
     properties: ['name', 'status'],
   },
 ]
+
+/** Objeto plano cuyos valores son TODOS strings. Nada anidado, nada nulo. */
+function esObjetoDeStrings(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+
+  const valores = Object.values(value as Record<string, unknown>)
+
+  return valores.length > 0 && valores.every((v) => typeof v === 'string')
+}
+
+/**
+ * Cómo entra un valor de `data` a la concatenación del digest.
+ *
+ * Los escalares van con `String(...)`, como siempre. Un OBJETO va con el formato
+ * de `fmt.Sprintf("%v", struct)` de Go —los valores de los campos separados por
+ * un espacio, entre llaves— porque es lo que ConfioPagos firma.
+ *
+ * NO es una conjetura: se resolvió el 2026-09-08 contra dos payloads reales del
+ * sandbox, probando serializaciones candidatas hasta reproducir sus checksums.
+ * `String(objeto)` da `[object Object]` y `JSON.stringify` da el JSON; ninguna de
+ * las dos coincide. La API de ConfioPagos está escrita en Go —resource names,
+ * ULIDs, `nextPageToken`— y firma el struct con el verbo `%v`.
+ *
+ * El ORDEN de los campos es el del objeto tal como vino, que es el que Go
+ * serializó al armar el JSON. `JSON.parse` preserva ese orden para claves no
+ * numéricas, así que `Object.values` reproduce el struct original. Los dos
+ * vectores del spec fijan justamente eso.
+ */
+function formatearValor(value: unknown): string {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return `{${Object.values(value as Record<string, unknown>).join(' ')}}`
+  }
+
+  return String(value)
+}
 
 /**
  * Tipo del contrato para cada valor que entra a la concatenación.
@@ -127,6 +180,10 @@ const DATA_PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
   amountCents: (value) => typeof value === 'number' && Number.isFinite(value),
   failedCount: (value) => typeof value === 'number' && Number.isFinite(value),
   reason: (value) => value === null || typeof value === 'string',
+  // Exige que TODOS los valores sean strings, y no es cosmético: `formatearValor`
+  // serializa el objeto pegando sus valores, así que un valor anidado se
+  // convertiría a `[object Object]` y firmaría algo que no describe el payload.
+  buyer: esObjetoDeStrings,
 }
 
 /** Tope de caracteres por cada eco del emisor dentro de `detail`. */
@@ -324,7 +381,7 @@ export function verifyConfioWebhookSignature(
   //       el checksum recibido. Hexadecimal en MAYÚSCULA y sin prefijo.
   let concatenated = ''
   for (const prop of properties) {
-    concatenated += String(data[prop])
+    concatenated += formatearValor(data[prop])
   }
   concatenated += String(timestamp)
   concatenated += webhookKey
