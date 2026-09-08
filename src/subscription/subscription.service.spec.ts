@@ -1347,6 +1347,48 @@ describe('SubscriptionService', () => {
   })
 
   describe('cancel', () => {
+    // MEDIDO EN PRODUCCIÓN el 2026-09-08: la baja de una fila `pending` le selló
+    // `accessEndsAt`. La invariante del campo es «no nula ⇔ baja PENDIENTE», y una
+    // fila `pending` no tiene acceso que deber —nunca se aceptó—, así que sellarle
+    // una fecha de corte la deja marcada como baja pendiente para siempre: ningún
+    // cron la consume, porque `expireCancelledSubscriptions` sólo enumera
+    // `TRIAL`/`ACTIVE`/`PAST_DUE`.
+    //
+    // Mutación: volver el predicado a `!TERMINAL_SUBSCRIPTION_STATUSES.includes(...)`
+    // → este caso se pone rojo, porque `pending` no es terminal y vuelve a sellarse.
+    it('una baja sobre una fila `pending` NO sella fecha de corte', async () => {
+      const subscription = filaConfio({
+        status: SubscriptionStatus.PENDING,
+        trialStart: null,
+        trialEnd: null,
+      })
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      await service.cancel('brand-1', { reason: 'me arrepentí', triggeredBy: 'user-1' })
+
+      expect(subscription.accessEndsAt).toBeNull()
+      // Lo demás de la baja sí ocurre: es una cancelación real, no un no-op.
+      expect(subscription.cancelledAt).toBeInstanceOf(Date)
+      expect(subscription.autoRenew).toBe(false)
+    })
+
+    // Contra-caso, para que el predicado no se pase de angosto: una fila VIVA
+    // sigue sellando su fin de acceso como siempre.
+    it('una baja sobre una fila `trial` sí sella la fecha de corte', async () => {
+      const subscription = filaConfio()
+      subscriptionRepo.findOne.mockResolvedValue(subscription)
+      subscriptionRepo.save.mockResolvedValue(subscription)
+      eventRepo.create.mockImplementation((data) => data)
+      eventRepo.save.mockResolvedValue({ id: 'ev-1' })
+
+      await service.cancel('brand-1', { reason: 'me arrepentí', triggeredBy: 'user-1' })
+
+      expect(subscription.accessEndsAt).toBe(FIN_TRIAL)
+    })
+
     const bajaEscrita = () => ({
       filas: subscriptionRepo.save.mock.calls.length,
       eventos: eventRepo.save.mock.calls.length,
