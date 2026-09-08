@@ -203,6 +203,69 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
     return service.handle(evento(payload, providerEventId))
   }
 
+  // ------------------------------- (1 bis) el cobro fallido NO revive una baja
+  describe('un cobro fallido sobre una baja no la convierte en moroso', () => {
+    // MEDIDO EN PRODUCCIÓN el 2026-09-08. Cancelar una suscripción `pending` hizo
+    // que ConfioPagos emitiera un `billingStatusChanged` FAILED 85 ms después; el
+    // evento no encontró guarda —el status no era terminal y `bajaPendiente` daba
+    // `false` porque el período era de largo cero, o sea ya vencido— y dejó la fila
+    // en `past_due` con `cancelledAt` puesto: una baja mostrada como moroso VIVO.
+    //
+    // Mutación: quitar la guarda `yaDadaDeBaja` de `planearCobro` → los cuatro
+    // casos se ponen rojos, porque vuelve a escribirse `past_due`.
+    it('una fila `pending` recién cancelada, con el acceso ya vencido, no se mueve', async () => {
+      conSuscripcion(
+        suscripcion({
+          status: SubscriptionStatus.PENDING,
+          cancelledAt: new Date('2026-01-15T10:00:00Z'),
+          // Período de largo cero: es como nace el alta que todavía no aceptaron,
+          // así que el fin de acceso YA está vencido y `bajaPendiente` no muerde.
+          accessEndsAt: new Date('2026-01-15T09:59:59Z'),
+        }),
+      )
+
+      await despachar(cobro('FAILED'))
+
+      expect(suscripcionGuardada()).toBeUndefined()
+      expect(historial()).toHaveLength(0)
+    })
+
+    it('tampoco toca roles: el acceso ya lo retiró la cancelación', async () => {
+      conSuscripcion(
+        suscripcion({
+          status: SubscriptionStatus.PENDING,
+          cancelledAt: new Date('2026-01-15T10:00:00Z'),
+          accessEndsAt: new Date('2026-01-15T09:59:59Z'),
+        }),
+      )
+
+      await despachar(cobro('FAILED'))
+
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('una fila ya `cancelled` tampoco vuelve a `past_due`', async () => {
+      conSuscripcion(suscripcion({ status: SubscriptionStatus.CANCELLED }))
+
+      await despachar(cobro('FAILED'))
+
+      expect(suscripcionGuardada()).toBeUndefined()
+      expect(historial()).toHaveLength(0)
+    })
+
+    // La contracara, y es la que impide que la guarda se pase de ancha: una fila
+    // VIVA y sin sello de baja tiene que seguir cayendo en mora como siempre.
+    it('una suscripción viva sin baja sigue cayendo en `past_due`', async () => {
+      conSuscripcion(suscripcion({ cancelledAt: null }))
+
+      await despachar(cobro('FAILED'))
+
+      expect(suscripcionGuardada().status).toBe(SubscriptionStatus.PAST_DUE)
+      expect(roles.removePlanFromBrand).toHaveBeenCalledTimes(1)
+    })
+  })
+
   // ------------------------------------------------------- (1) cobro fallido
   describe('el cobro fallido retira el plan', () => {
     it('un cobro no exitoso retira el plan de la suscripción, no `free`', async () => {
