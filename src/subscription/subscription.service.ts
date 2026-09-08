@@ -1185,17 +1185,21 @@ export class SubscriptionService {
         // invariante prohíbe («no nula ⇔ baja PENDIENTE») y lo que haría que el cron
         // de retiro la degradara una SEGUNDA vez.
         //
-        // ⚠️ DEUDA VERIFICADA, del productor `alta-paga-sin-prueba` — y el predicado
-        // que hay que arreglar es ÉSTE. `pending` no es terminal, así que una baja
-        // sobre una fila `pending` entra por acá y le SELLA la fecha de corte; después
-        // ningún cron la consume: `expireCancelledSubscriptions` enumera
-        // `TRIAL`/`ACTIVE`/`PAST_DUE` (`tasks.service.ts`) y no la ve. La fila queda
-        // con la marca de baja PENDIENTE para siempre, violando en la práctica la
-        // invariante de acá arriba. El día que algo escriba `pending`, este guard pasa
-        // a enumerar `LIVE_SUBSCRIPTION_STATUSES` en positivo —el mismo movimiento que
-        // ya se hizo en `TasksService.reponerPlanSiSigueVigente`— en vez de negar el
-        // conjunto terminal, que desde `pending` dejó de ser su complemento.
-        if (!current.accessEndsAt && !TERMINAL_SUBSCRIPTION_STATUSES.includes(current.status)) {
+        // El predicado enumera `LIVE_SUBSCRIPTION_STATUSES` en POSITIVO. Negar el
+        // conjunto terminal era lo mismo mientras `trial|active|past_due|cancelled|
+        // expired` fuera todo el enum, pero `pending` rompió esa equivalencia: no es
+        // terminal y tampoco es vigente, así que entraba por acá y se le sellaba una
+        // fecha de corte que después ningún cron consumía —`expireCancelledSubscriptions`
+        // enumera `TRIAL`/`ACTIVE`/`PAST_DUE` (`tasks.service.ts`) y no la ve—, dejando
+        // la fila con la marca de baja PENDIENTE para siempre y violando en la práctica
+        // la invariante de acá arriba («no nula ⇔ baja PENDIENTE»).
+        //
+        // La deuda la dejó anotada `alta-paga-sin-prueba` para el día que algo
+        // escribiera `pending`. Ya lo escribe el alta de prueba, y el 2026-09-08 se vio
+        // en producción: una baja sobre una fila `pending` quedó con `accessEndsAt`
+        // sellado. Es el mismo movimiento que ya se hizo en
+        // `TasksService.reponerPlanSiSigueVigente`.
+        if (!current.accessEndsAt && LIVE_SUBSCRIPTION_STATUSES.includes(current.status)) {
           current.accessEndsAt = SubscriptionService.finDeAcceso(current)
         }
         if (!yaRegistrada) current.cancelReason = motivo
