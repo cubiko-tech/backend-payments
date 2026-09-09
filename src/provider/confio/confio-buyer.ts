@@ -25,6 +25,13 @@ import { ConfioSubscriptionInputError } from './confio-subscription-error'
  *   espacios, es `lastName`. **Con una sola palabra se REPLICA en `lastName`**:
  *   Confío sólo exige 3–64 caracteres, no un apellido real, y rechazar dejaría
  *   afuera a usuarios legítimos registrados con un solo nombre.
+ * - **Nombre ausente o inservible → se DERIVA DEL EMAIL** (`resolveNameParts`).
+ *   `name` es NULEABLE en backend-auth y hay cuentas vivas sin él, así que
+ *   rechazar el alta convertía un dato flojo del perfil en un cobro que no se
+ *   puede empezar, y que el propio comprador no tiene cómo arreglar desde el
+ *   checkout. El email ya está validado y es obligatorio, así que siempre hay de
+ *   dónde sacar algo legible: `manuel@cubiko.co` → `manuel manuel`,
+ *   `ana.perez@x.com` → `ana perez`.
  * - **Email**: no vacío y con `@`.
  *
  * Todo rechazo es un `ConfioSubscriptionInputError` con `code` y `field`, ANTES
@@ -73,18 +80,21 @@ const reject = (field: string, detail: string): never => {
 /**
  * Arma el `ConfioBuyer` a partir de lo que devuelve backend-auth.
  *
- * Valida en orden email → firstName → lastName → phoneNumber, el mismo de la
- * guarda que vivía en `ConfioProvider`, para que un buyer con dos problemas
- * siga reportando el mismo campo que antes.
+ * Valida en orden email → nombre → phoneNumber, el mismo de la guarda que vivía
+ * en `ConfioProvider`, para que un buyer con dos problemas siga reportando el
+ * mismo campo que antes. El email va PRIMERO también porque el nombre depende de
+ * él cuando hay que derivarlo.
+ *
+ * `buyer.lastName` ya no es un `field` de rechazo alcanzable: un apellido
+ * inservible se replica del nombre o se deriva del email, nunca corta el alta.
  */
 export function buildConfioBuyer(source: ConfioBuyerSource): ConfioBuyer {
   const email = assertEmail(source?.email)
-  const { firstName, lastName } = splitName(source?.name)
+  const partes = splitName(source?.name)
 
   return {
     email,
-    firstName: assertNamePart(firstName, 'firstName'),
-    lastName: assertNamePart(lastName, 'lastName'),
+    ...resolveNameParts(partes.firstName, partes.lastName, email),
     phoneNumber: toE164(source?.phone, source?.callingCode),
   }
 }
@@ -94,15 +104,22 @@ export function buildConfioBuyer(source: ConfioBuyerSource): ConfioBuyer {
  * `ConfioProvider.createSubscription` justo antes de salir a la red.
  *
  * Reusa las mismas primitivas que `buildConfioBuyer` — no hay una segunda
- * definición de E.164 ni del 3–64 en el servicio. Llama a `toE164` SIN
- * `callingCode` a propósito: en el borde no hay país que aportar, y un número
- * local suelto se rechaza en vez de que se le invente Colombia.
+ * definición de E.164 ni del 3–64 en el servicio, ni un segundo criterio para
+ * el nombre: el borde también deriva del email por `resolveNameParts`, así que
+ * un buyer armado a mano por otro camino recibe el mismo trato que el del alta.
+ *
+ * Llama a `toE164` SIN `callingCode` a propósito: en el borde no hay país que
+ * aportar, y un número local suelto se rechaza en vez de que se le invente
+ * Colombia. La asimetría con el nombre es deliberada: un teléfono equivocado
+ * IMPIDE cobrar y no hay de dónde deducir el país, mientras que el nombre sale
+ * del email que ya tenemos y sólo se imprime en el recibo.
  */
 export function assertConfioBuyer(buyer: ConfioBuyer): ConfioBuyer {
+  const email = assertEmail(buyer?.email)
+
   return {
-    email: assertEmail(buyer?.email),
-    firstName: assertNamePart((buyer?.firstName || '').trim(), 'firstName'),
-    lastName: assertNamePart((buyer?.lastName || '').trim(), 'lastName'),
+    email,
+    ...resolveNameParts((buyer?.firstName || '').trim(), (buyer?.lastName || '').trim(), email),
     phoneNumber: toE164(buyer?.phoneNumber),
   }
 }
@@ -148,15 +165,70 @@ function splitName(raw?: string): { firstName: string; lastName: string } {
   return { firstName: parts[0], lastName: parts.slice(1).join(' ') }
 }
 
-/** 3–64 caracteres, o rechazo diciendo cuánto llegó. Nunca rellena ni trunca. */
-function assertNamePart(value: string, field: 'firstName' | 'lastName'): string {
-  if (value.length < NAME_MIN || value.length > NAME_MAX) {
+/** Lo único que Confío pide de cada parte del nombre: de 3 a 64 caracteres. */
+function isNamePart(value: string): boolean {
+  return value.length >= NAME_MIN && value.length <= NAME_MAX
+}
+
+/**
+ * POLÍTICA ÚNICA de `firstName`/`lastName`, compartida por las dos entradas.
+ *
+ * 1. Si el `firstName` candidato sirve, MANDA: se conserva tal cual y el
+ *    `lastName` se conserva si sirve, o se replica del `firstName` — la misma
+ *    regla que ya regía para un nombre de una sola palabra.
+ * 2. Si NO sirve (ausente, de 1–2 caracteres, o de más de 64), el nombre entero
+ *    se deriva del email. Se descarta también el `lastName` candidato aunque
+ *    fuera válido: el comprador queda coherente —o todo del perfil, o todo del
+ *    email— y no mitad y mitad, que en el recibo de un cobro recurrente se lee
+ *    como el nombre de otra persona.
+ * 3. Si el email tampoco da una parte usable, ahí sí se RECHAZA. Sigue sin haber
+ *    relleno: no se trunca a 64 ni se completa a 3 con caracteres inventados.
+ *
+ * El límite de 64 entra por el mismo camino que el de 3 a propósito: un nombre
+ * larguísimo es tan inservible para Confío como uno vacío, y truncarlo sería
+ * exactamente el relleno silencioso que el módulo prohíbe.
+ */
+function resolveNameParts(
+  firstCandidate: string,
+  lastCandidate: string,
+  email: string,
+): { firstName: string; lastName: string } {
+  if (isNamePart(firstCandidate)) {
+    return {
+      firstName: firstCandidate,
+      lastName: isNamePart(lastCandidate) ? lastCandidate : firstCandidate,
+    }
+  }
+
+  const local = emailLocalPart(email)
+  const desdeEmail = splitName(local)
+  if (!isNamePart(desdeEmail.firstName)) {
     reject(
-      field,
-      `ConfioPagos exige de ${NAME_MIN} a ${NAME_MAX} caracteres, llegó ${value.length} ("${value}")`,
+      'firstName',
+      `ConfioPagos exige de ${NAME_MIN} a ${NAME_MAX} caracteres: el nombre ` +
+        `("${firstCandidate}") no sirve y el email "${email}" tampoco aporta uno ("${local}")`,
     )
   }
-  return value
+  return {
+    firstName: desdeEmail.firstName,
+    lastName: isNamePart(desdeEmail.lastName) ? desdeEmail.lastName : desdeEmail.firstName,
+  }
+}
+
+/**
+ * Parte legible del email, para usarla como nombre cuando el perfil no tiene.
+ *
+ * Se corta en el `@`, se descarta el sub-address (`+algo`, que es ruido de
+ * enrutamiento y no parte de la identidad) y los separadores `.`/`_`/`-` pasan a
+ * espacios para que `splitName` pueda partir `ana.perez` en nombre y apellido.
+ * No se capitaliza ni se limpia nada más: cualquier otra corrección cosmética ya
+ * sería inventarle un nombre a alguien.
+ */
+function emailLocalPart(email: string): string {
+  return email
+    .split('@')[0]
+    .split('+')[0]
+    .replace(/[._-]+/g, ' ')
 }
 
 /**

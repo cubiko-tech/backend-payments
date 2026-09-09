@@ -45,7 +45,12 @@ describe('ConfioProvider', () => {
       const err = await provider
         .createSubscription({
           planName: 'stores/01TESTSTORE/subscription-plans/01PLAN',
-          buyer: { email: 'x@y.co', phoneNumber: '+573001234567', firstName: 'Ana', lastName: 'Gomez' },
+          buyer: {
+            email: 'x@y.co',
+            phoneNumber: '+573001234567',
+            firstName: 'Ana',
+            lastName: 'Gomez',
+          },
         })
         .catch((e) => e)
 
@@ -62,7 +67,8 @@ describe('ConfioProvider', () => {
       const fetchMock = jest.fn().mockResolvedValue({
         ok: true,
         status: 201,
-        text: async () => JSON.stringify({ name: 'payments/abc123', url: 'https://pay.confio/abc' }),
+        text: async () =>
+          JSON.stringify({ name: 'payments/abc123', url: 'https://pay.confio/abc' }),
       })
       ;(global as any).fetch = fetchMock
 
@@ -78,7 +84,11 @@ describe('ConfioProvider', () => {
         metadata: { paymentId: 'pay-1', buyer: { email: 'x@y.com', phoneNumber: '3001234567' } },
       })
 
-      expect(result).toEqual({ providerPaymentId: 'payments/abc123', checkoutUrl: 'https://pay.confio/abc', status: 'pending' })
+      expect(result).toEqual({
+        providerPaymentId: 'payments/abc123',
+        checkoutUrl: 'https://pay.confio/abc',
+        status: 'pending',
+      })
       const [url, opts] = fetchMock.mock.calls[0]
       expect(url).toBe('https://api.dev.confiopagos.com/v1/stores/01TESTSTORE/payments')
       const sent = JSON.parse(opts.body)
@@ -96,7 +106,13 @@ describe('ConfioProvider', () => {
       process.env.CONFIO_ACCESS_TOKEN = ''
       const provider = new ConfioProvider()
       await expect(
-        provider.createCheckout({ amount: 1, currency: 'COP', brandId: 'b', userId: 'u', purpose: 'plan_purchase' }),
+        provider.createCheckout({
+          amount: 1,
+          currency: 'COP',
+          brandId: 'b',
+          userId: 'u',
+          purpose: 'plan_purchase',
+        }),
       ).rejects.toThrow(/no configurado/)
     })
   })
@@ -402,7 +418,9 @@ describe('ConfioProvider', () => {
 
         expect(received).toHaveLength(1)
         expect(received[0].method).toBe('POST')
-        expect(received[0].url).toBe('/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions')
+        expect(received[0].url).toBe(
+          '/v1/stores/01TESTSTORE/subscription-plans/01PLAN/subscriptions',
+        )
         expect(received[0].headers.authorization).toBe('Bearer test-token-123')
         expect(received[0].body.buyer).toEqual({
           email: 'comprador@roaxai.com',
@@ -527,22 +545,60 @@ describe('ConfioProvider', () => {
       it.each([
         [{ ...buyer(), email: '' }, 'buyer.email'],
         [{ ...buyer(), email: 'sin-arroba' }, 'buyer.email'],
-        [{ ...buyer(), firstName: 'Jo' }, 'buyer.firstName'],
-        [{ ...buyer(), lastName: '  ' }, 'buyer.lastName'],
+        [{ ...buyer(), email: 'me@x.com', firstName: '' }, 'buyer.firstName'],
         [{ ...buyer(), phoneNumber: '123' }, 'buyer.phoneNumber'],
-      ])('rechaza un buyer inválido ANTES de tocar la red (%#) nombrando el campo', async (bad, field) => {
-        const provider = new ConfioProvider()
+      ])(
+        'rechaza un buyer inválido ANTES de tocar la red (%#) nombrando el campo',
+        async (bad, field) => {
+          const provider = new ConfioProvider()
 
-        await expect(
-          provider.createSubscription({ planName: PLAN, buyer: bad as any }),
-        ).rejects.toBeInstanceOf(ConfioSubscriptionInputError)
-        // Nada salió por la red: la guarda corta antes del fetch.
-        expect(received).toHaveLength(0)
+          await expect(
+            provider.createSubscription({ planName: PLAN, buyer: bad as any }),
+          ).rejects.toBeInstanceOf(ConfioSubscriptionInputError)
+          // Nada salió por la red: la guarda corta antes del fetch.
+          expect(received).toHaveLength(0)
 
-        const err = await rechazo(provider.createSubscription({ planName: PLAN, buyer: bad as any }))
-        expect(err.code).toBe('invalid_buyer')
-        expect(err.field).toBe(field)
-      })
+          const err = await rechazo(
+            provider.createSubscription({ planName: PLAN, buyer: bad as any }),
+          )
+          expect(err.code).toBe('invalid_buyer')
+          expect(err.field).toBe(field)
+        },
+      )
+
+      /**
+       * CAMBIO DE CONTRATO: un nombre inservible ya NO corta el alta.
+       *
+       * `name` es nuleable en backend-auth y hay cuentas vivas sin él; cortar acá
+       * dejaba a esas cuentas sin poder empezar a pagar por un dato que el propio
+       * comprador no ve ni puede arreglar desde el checkout. El borde delega en
+       * `confio-buyer.ts`, que lo deriva del email —que sí es obligatorio— y la
+       * petición SALE, con el nombre derivado en el body.
+       */
+      it.each([
+        ['un firstName de menos de 3', { firstName: 'Jo' }, 'comprador', 'comprador'],
+        ['un firstName ausente', { firstName: '' }, 'comprador', 'comprador'],
+        // Con el nombre usable, el email NO entra: sólo se replica el apellido.
+        ['un lastName en blanco', { lastName: '  ' }, 'Santiago', 'Santiago'],
+      ])(
+        'con %s la petición sale igual, sin cortar el alta',
+        async (_caso, over, firstName, lastName) => {
+          replyWith(subResponse())
+
+          const provider = new ConfioProvider()
+          await provider.createSubscription({
+            planName: PLAN,
+            buyer: { ...buyer(), ...over } as any,
+          })
+
+          expect(received).toHaveLength(1)
+          expect(received[0].body.buyer).toMatchObject({
+            email: 'comprador@roaxai.com',
+            firstName,
+            lastName,
+          })
+        },
+      )
 
       /**
        * CAMBIO DE CONTRATO: antes esta guarda normalizaba un local colombiano a
