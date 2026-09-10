@@ -127,31 +127,90 @@ describe('buildConfioBuyer — nombre a firstName/lastName', () => {
     expect(buyer.lastName).toBe('Madonna')
   })
 
-  it('rechaza un nombre de menos de 3 caracteres sin rellenarlo', () => {
-    const err = rechazo(() => buildConfioBuyer(source({ name: 'Jo' })))
+  it('replica el nombre en lastName cuando el apellido queda de menos de 3', () => {
+    const buyer = buildConfioBuyer(source({ name: 'Ana Li' }))
+
+    expect(buyer.firstName).toBe('Ana')
+    expect(buyer.lastName).toBe('Ana')
+  })
+})
+
+describe('buildConfioBuyer — nombre derivado del email', () => {
+  it('deriva el nombre cuando `name` viene NULL, el caso real de la cuenta', () => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel@cubiko.co', name: undefined }))
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it.each([
+    ['vacío', ''],
+    ['en blanco', '   '],
+    ['de 1–2 caracteres', 'Jo'],
+  ])('deriva del email un nombre %s en vez de rechazar el alta', (_caso, name) => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel@cubiko.co', name }))
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it('parte el email por el punto en nombre y apellido', () => {
+    const buyer = buildConfioBuyer(source({ email: 'ana.perez@cubiko.co', name: null }))
+
+    expect(buyer.firstName).toBe('ana')
+    expect(buyer.lastName).toBe('perez')
+  })
+
+  it('trata guiones y guiones bajos como separadores', () => {
+    expect(buildConfioBuyer(source({ email: 'ana_maria-perez@x.com', name: '' }))).toMatchObject({
+      firstName: 'ana',
+      lastName: 'maria perez',
+    })
+  })
+
+  it('descarta el sub-address +algo, que no es parte de la identidad', () => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel+stg@cubiko.co', name: '' }))
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it('replica en lastName si del email sale una sola parte usable', () => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel.p@cubiko.co', name: '' }))
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it('deriva del email una parte de más de 64 caracteres, sin truncar nada', () => {
+    const buyer = buildConfioBuyer(
+      source({ email: 'manuel@cubiko.co', name: `${'A'.repeat(65)} Perez` }),
+    )
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it('NO mezcla perfil y email: con el nombre inservible, el apellido también sale del email', () => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel@cubiko.co', name: 'Jo Perez' }))
+
+    expect(buyer.firstName).toBe('manuel')
+    expect(buyer.lastName).toBe('manuel')
+  })
+
+  it('el nombre del perfil MANDA sobre el email cuando sirve', () => {
+    const buyer = buildConfioBuyer(source({ email: 'manuel@cubiko.co', name: 'Ana Perez' }))
+
+    expect(buyer.firstName).toBe('Ana')
+    expect(buyer.lastName).toBe('Perez')
+  })
+
+  it('rechaza cuando el email tampoco da una parte usable, sin rellenarla', () => {
+    const err = rechazo(() => buildConfioBuyer(source({ email: 'me@x.com', name: '' })))
 
     expect(err.code).toBe('invalid_buyer')
     expect(err.field).toBe('buyer.firstName')
-    expect(err.message).toContain('2')
-  })
-
-  it('rechaza cuando el apellido resultante queda con menos de 3 caracteres', () => {
-    const err = rechazo(() => buildConfioBuyer(source({ name: 'Ana Li' })))
-
-    expect(err.field).toBe('buyer.lastName')
-  })
-
-  it('rechaza una parte de más de 64 caracteres sin truncarla', () => {
-    const err = rechazo(() => buildConfioBuyer(source({ name: `${'A'.repeat(65)} Perez` })))
-
-    expect(err.field).toBe('buyer.firstName')
-  })
-
-  it('rechaza un nombre vacío o ausente', () => {
-    expect(rechazo(() => buildConfioBuyer(source({ name: '   ' }))).field).toBe('buyer.firstName')
-    expect(rechazo(() => buildConfioBuyer(source({ name: undefined }))).field).toBe(
-      'buyer.firstName',
-    )
+    expect(err.message).toContain('me@x.com')
   })
 })
 
@@ -194,10 +253,18 @@ describe('assertConfioBuyer — validación de borde', () => {
     expect(err.message).not.toContain('+573215786325')
   })
 
-  it('rechaza un firstName fuera de 3–64 sin tocar el resto', () => {
-    expect(rechazo(() => assertConfioBuyer({ ...buyer, firstName: 'Jo' })).field).toBe(
-      'buyer.firstName',
-    )
+  it('en el borde también deriva del email un firstName fuera de 3–64', () => {
+    expect(assertConfioBuyer({ ...buyer, firstName: 'Jo' })).toEqual({
+      ...buyer,
+      firstName: 'usuario',
+      lastName: 'usuario',
+    })
+  })
+
+  it('rechaza en el borde si ni el nombre ni el email dan una parte usable', () => {
+    const err = rechazo(() => assertConfioBuyer({ ...buyer, email: 'me@x.com', firstName: '' }))
+
+    expect(err.field).toBe('buyer.firstName')
   })
 })
 
