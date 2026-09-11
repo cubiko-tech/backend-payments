@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
+import { createHash } from 'crypto'
 import { DianProvider, DianInvoiceData, DianResponse } from './dian.interface'
 import { SiigoProvider } from './providers/siigo.provider'
 import { Invoice, InvoiceType } from '../invoice/entities/invoice.entity'
-import { InvoiceItem } from '../invoice/entities/invoiceItem.entity'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
 import { CountryBillingConfigService } from '../billing-profile/country-billing-config.service'
 import { AuditService } from '../audit/audit.service'
@@ -262,8 +262,7 @@ class MockDianProvider implements DianProvider {
   }
 
   private generateMockCufe(invoiceNumber: string): string {
-    const hash = require('crypto')
-      .createHash('sha256')
+    const hash = createHash('sha256')
       .update(`${invoiceNumber}-${Date.now()}`)
       .digest('hex')
     return hash.substring(0, 40)

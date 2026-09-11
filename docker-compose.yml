@@ -1,6 +1,11 @@
 services:
   payments:
     container_name: $CONTAINER_SLUG
+    # Tope de recursos (R13): lo que se desborde adentro muere adentro y no arrastra la
+    # máquina. Sin swap. Fijado el 2026-09-10; si una medición pide más, se sube acá.
+    mem_limit: 4g
+    memswap_limit: 4g
+    cpus: 4
     working_dir: /code
     restart: always
     build: .
