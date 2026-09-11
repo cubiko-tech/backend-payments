@@ -155,4 +155,25 @@ describe('ConfioPlanService', () => {
       expect(err.getResponse().message).toContain('con prueba')
     })
   })
+
+  describe('findAllMappings', () => {
+    /**
+     * La lectura que necesita el chequeo de precios: TODAS las filas, sin filtro
+     * de plan. Se pide el orden total —`planSlug`, moneda y variante— por el mismo
+     * motivo que `findMappings`: un log de divergencias que se reordena solo entre
+     * pasadas no se puede comparar con el de ayer.
+     */
+    it('devuelve todas las filas y las pide con un orden total', async () => {
+      const filas = [
+        row(),
+        row({ id: 'row-2', currencyCode: 'USD', amountCents: 699 }),
+      ]
+      repo.find.mockResolvedValue(filas)
+
+      await expect(service.findAllMappings()).resolves.toBe(filas)
+      expect(repo.find).toHaveBeenCalledWith({
+        order: { planSlug: 'ASC', currencyCode: 'ASC', withTrial: 'DESC' },
+      })
+    })
+  })
 })
