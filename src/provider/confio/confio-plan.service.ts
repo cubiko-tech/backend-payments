@@ -105,4 +105,22 @@ export class ConfioPlanService {
       order: { currencyCode: 'ASC', withTrial: 'DESC' },
     })
   }
+
+  /**
+   * TODOS los mapeos de la tabla, sin filtrar por plan.
+   *
+   * Existe para el chequeo de precios contra el catálogo, que necesita recorrer
+   * la tabla entera y no un plan puntual. Va acá y no inyectando el repositorio
+   * en el chequeo porque esta clase es la única puerta de lectura de
+   * `confio_subscription_plan`.
+   *
+   * El orden es TOTAL —plan, moneda y variante— por el mismo motivo que
+   * `findMappings`: una lista que se reordena sola entre pasadas hace ilegible
+   * el log que se compara con el de ayer.
+   */
+  async findAllMappings(): Promise<ConfioSubscriptionPlan[]> {
+    return this.planReadRepo.find({
+      order: { planSlug: 'ASC', currencyCode: 'ASC', withTrial: 'DESC' },
+    })
+  }
 }

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common'
+import { createHmac } from 'crypto'
 import {
   PaymentProvider,
   CreateCheckoutParams,
@@ -167,7 +168,6 @@ export class DropiProvider implements PaymentProvider {
     if (!secret) return false
 
     try {
-      const { createHmac } = require('crypto')
       const expected = createHmac('sha256', secret).update(payload).digest('hex')
       return expected === signature
     } catch {

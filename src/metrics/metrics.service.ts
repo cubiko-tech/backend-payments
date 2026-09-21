@@ -3,8 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
 import { MetricsSnapshot } from './entities/metricsSnapshot.entity'
-import { Subscription } from '../subscription/entities/subscription.entity'
-import { Payment } from '../payment/entities/payment.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 
 @Injectable()

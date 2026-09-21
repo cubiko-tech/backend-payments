@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common'
+import { createHmac } from 'crypto'
 import {
   PaymentProvider,
   CreateCheckoutParams,
@@ -228,7 +229,6 @@ export class MercadoPagoProvider implements PaymentProvider {
 
       if (!ts || !v1) return false
 
-      const { createHmac } = require('crypto')
       const manifest = `id:${JSON.parse(payload.toString()).data?.id};request-id:;ts:${ts};`
       const hmac = createHmac('sha256', secret).update(manifest).digest('hex')
 
