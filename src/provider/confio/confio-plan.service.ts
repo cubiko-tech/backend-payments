@@ -5,6 +5,14 @@ import { ConfioSubscriptionPlan } from '../entities/confioSubscriptionPlan.entit
 import { RequestException } from '../../shared/exception/request.exception'
 
 /**
+ * El mapeo de ese plan y esa moneda quedó fuera de uso: así se apaga una moneda
+ * sin borrar su configuración. Es una constante y no un literal suelto porque el
+ * alta lo compara para caer a dólares (RXDEV-13), y dos literales iguales se
+ * separan en cuanto alguien toca uno.
+ */
+export const CONFIO_PLAN_ARCHIVED = 'CONFIO_PLAN_ARCHIVED'
+
+/**
  * Resolución `(planSlug, moneda, conPrueba) → resource name del plan en ConfioPagos`.
  *
  * Sólo lectura: la tabla `confio_subscription_plan` se siembra por migración y
@@ -73,7 +81,7 @@ export class ConfioPlanService {
     if (mapping.status === 'archived') {
       throw new RequestException(
         {
-          code: 'CONFIO_PLAN_ARCHIVED',
+          code: CONFIO_PLAN_ARCHIVED,
           message: `El plan de ConfioPagos para ${planSlug}/${currency} (${variante}) está archivado`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
