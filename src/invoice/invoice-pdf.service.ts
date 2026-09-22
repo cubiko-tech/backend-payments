@@ -1,11 +1,9 @@
 import { Injectable } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
+import * as PDFDocument from 'pdfkit'
 import { Invoice } from './entities/invoice.entity'
-import { InvoiceItem } from './entities/invoiceItem.entity'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
-import { TaxConfig } from '../tax/entities/taxConfig.entity'
-import { logger } from '../shared/logger/logger'
 
 /**
  * Servicio de generación de facturas en PDF.
@@ -44,8 +42,6 @@ export class InvoicePdfService {
    * Construye el documento PDF con PDFKit.
    */
   private buildPdf(invoice: Invoice, profile: BillingProfile | null): Promise<Buffer> {
-    const PDFDocument = require('pdfkit')
-
     return new Promise((resolve, reject) => {
       const doc = new PDFDocument({
         size: 'LETTER',

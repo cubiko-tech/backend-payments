@@ -14,6 +14,7 @@ import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provide
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioPlanService } from '../provider/confio/confio-plan.service'
+import { ConfioPlanPriceCheckService } from '../provider/confio/confio-plan-price-check.service'
 
 @Module({
   imports: [
@@ -33,6 +34,9 @@ import { ConfioPlanService } from '../provider/confio/confio-plan.service'
     DropiProvider,
     ConfioProvider,
     ConfioPlanService,
+    // No va en `exports`: nadie lo llama, lo dispara el scheduler. `ClientRolesService`
+    // llega solo porque `ClientModule` es `@Global()`.
+    ConfioPlanPriceCheckService,
   ],
   exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider, ConfioProvider, ConfioPlanService],
 })
