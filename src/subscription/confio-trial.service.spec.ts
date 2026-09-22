@@ -4,7 +4,7 @@ import { ConfioTrialService } from './confio-trial.service'
 import { ClientPlatformService, BRAND_LOOKUP_UNAVAILABLE, BRAND_NOT_FOUND, BRAND_WITHOUT_COUNTRY } from '../client/client-platform.service'
 import { ClientRolesService, PLAN_NOT_FOUND, PRICE_NOT_FOUND_FOR_COUNTRY } from '../client/client-roles.service'
 import { ClientAuthService, USER_LOOKUP_UNAVAILABLE, USER_NOT_FOUND } from '../client/client-auth.service'
-import { ConfioPlanService } from '../provider/confio/confio-plan.service'
+import { ConfioPlanService, CONFIO_PLAN_ARCHIVED } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
@@ -18,6 +18,12 @@ const CONFIO_SUB = `${CONFIO_PLAN}/subscriptions/sub-1`
 
 /** Fila de precio tal cual la sirve `ClientRolesService` (congelada en su caché). */
 const PRICE_CO = { id: 'p-1', countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
+
+/** La fila en dólares: la que cobra todo país sin precio propio (RXDEV-13). */
+const PRICE_USD = { id: 'p-2', countryCode: 'CO', currency: 'USD', price: 19.99, isDefault: false }
+
+/** El plan de ConfioPagos en dólares, distinto del de pesos para poder afirmar cuál se usó. */
+const CONFIO_PLAN_USD = 'stores/store-1/subscription-plans/plan-usd'
 
 /** Respuesta del alta: `PENDING_ACCEPTANCE` + link portador, sin período abierto. */
 const ALTA = {
@@ -71,6 +77,87 @@ describe('ConfioTrialService', () => {
 
   const alta = (extra: Record<string, any> = {}) =>
     service.createForTrial({ brandId: BRAND, userId: USER, planSlug: PLAN, conPrueba: true, ...extra })
+
+  describe('RXDEV-13 — moneda apagada y rastro del alta', () => {
+    /** El mapeo archivado es cómo se apaga una moneda sin borrar su configuración. */
+    const archivado = (moneda: string) =>
+      new RequestException(
+        {
+          code: CONFIO_PLAN_ARCHIVED,
+          message: `El plan de ConfioPagos para ${PLAN}/${moneda} (con prueba) está archivado`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+
+    it('con la pasarela en pesos apagada, el alta se cobra en dólares', async () => {
+      confioPlans.resolveConfioPlanName
+        .mockRejectedValueOnce(archivado('COP'))
+        .mockResolvedValueOnce(CONFIO_PLAN_USD)
+
+      const result = await alta()
+
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenNthCalledWith(1, PLAN, 'COP', true)
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenNthCalledWith(2, PLAN, 'USD', true)
+      expect(confio.createSubscription).toHaveBeenCalledWith(
+        expect.objectContaining({ planName: CONFIO_PLAN_USD }),
+      )
+      expect(result.providerSubscriptionId).toBe(CONFIO_SUB)
+    })
+
+    /**
+     * Ausencia: con los dólares apagados no queda a dónde caer, así que el alta
+     * corta con su código en vez de reintentar sobre la misma moneda.
+     */
+    it('si la moneda resuelta YA es dólares y está apagada, corta con CONFIO_PLAN_ARCHIVED', async () => {
+      clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: true, price: PRICE_USD })
+      confioPlans.resolveConfioPlanName.mockRejectedValue(archivado('USD'))
+
+      await expect(alta()).rejects.toMatchObject({ code: CONFIO_PLAN_ARCHIVED })
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * Ausencia: la caída la dispara la moneda APAGADA, no cualquier fallo del
+     * mapeo. Un plan sin mapear en pesos no se cobra en dólares por las dudas.
+     */
+    it('un mapeo inexistente no dispara la caída a dólares', async () => {
+      confioPlans.resolveConfioPlanName.mockRejectedValue(
+        new RequestException({ code: 'CONFIO_PLAN_NOT_MAPPED', message: 'sin mapeo' }, HttpStatus.UNPROCESSABLE_ENTITY),
+      )
+
+      await expect(alta()).rejects.toMatchObject({ code: 'CONFIO_PLAN_NOT_MAPPED' })
+      expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledTimes(1)
+    })
+
+    /**
+     * `subscriptions` no guarda la moneda, así que sin esta línea no hay forma de
+     * comprobar en staging con qué moneda se cobró un alta: es la evidencia de
+     * CA1 a CA3 de RXDEV-12.
+     */
+    it('deja en el log la moneda y el plan de ConfioPagos elegidos', async () => {
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
+
+      await alta()
+
+      const linea = log.mock.calls.map(([msg]) => String(msg)).find((msg) => msg.includes('COP'))
+      expect(linea).toBeDefined()
+      expect(linea).toContain(CONFIO_PLAN)
+      expect(linea).toContain(BRAND)
+    })
+
+    it('el log registra la moneda REALMENTE usada cuando hubo caída a dólares', async () => {
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
+      confioPlans.resolveConfioPlanName
+        .mockRejectedValueOnce(archivado('COP'))
+        .mockResolvedValueOnce(CONFIO_PLAN_USD)
+
+      await alta()
+
+      const linea = log.mock.calls.map(([msg]) => String(msg)).find((msg) => msg.includes(CONFIO_PLAN_USD))
+      expect(linea).toBeDefined()
+      expect(linea).toContain('USD')
+    })
+  })
 
   describe('createForTrial — resolución país → precio → plan → comprador', () => {
     it('resuelve la moneda por el país de la marca y pide con ella el plan de ConfioPagos', async () => {

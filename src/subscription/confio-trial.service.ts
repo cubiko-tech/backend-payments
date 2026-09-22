@@ -8,6 +8,7 @@ import {
 } from '../client/client-platform.service'
 import {
   ClientRolesService,
+  FALLBACK_CURRENCY,
   PLAN_NOT_FOUND,
   PRICE_NOT_FOUND_FOR_COUNTRY,
   PriceResolutionErrorCode,
@@ -17,7 +18,7 @@ import {
   ClientAuthService,
   USER_LOOKUP_UNAVAILABLE,
 } from '../client/client-auth.service'
-import { ConfioPlanService } from '../provider/confio/confio-plan.service'
+import { ConfioPlanService, CONFIO_PLAN_ARCHIVED } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
@@ -170,10 +171,19 @@ export class ConfioTrialService {
     // La moneda es un dato DERIVADO de la fila de precio, nunca un parámetro del
     // llamador: el plan de ConfioPagos se elige por (plan, moneda) y con la moneda
     // equivocada se cobraría 19.900 COP a una marca que paga en dólares.
-    const currency = String(price.price.currency || '').toUpperCase()
-    // Rechaza con su propio código (CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED /
-    // _ARCHIVED): se propaga tal cual, ya viene con status.
-    const planName = await this.confioPlans.resolveConfioPlanName(planSlug, currency, conPrueba)
+    const resuelto = await this.resolvePlanConCaidaAUsd(
+      planSlug,
+      String(price.price.currency || '').toUpperCase(),
+      conPrueba,
+    )
+    const { planName, currency } = resuelto
+
+    // `subscriptions` NO guarda la moneda, así que ésta es la única forma de saber
+    // después con cuál se cobró un alta: sin ella, comprobar el cobro por país exige
+    // pedirle a ConfioPagos la suscripción una por una.
+    this.logger.log(
+      `Alta de ${brandId} en ${planSlug}: moneda ${currency}, plan de ConfioPagos ${planName}`,
+    )
 
     const contact = await this.clientAuth.resolveBuyerContact(userId)
     if (!contact.ok) throw this.buyerContactException(contact.code)
@@ -339,6 +349,50 @@ export class ConfioTrialService {
    * `PLAN_NOT_FOUND` y contestar "ese plan no existe" disfrazaría una caída de
    * backend como un error definitivo del cliente.
    */
+  /**
+   * El plan de ConfioPagos para esa moneda, cayendo a DÓLARES si la moneda quedó
+   * apagada.
+   *
+   * Apagar una moneda es archivar su mapeo (`status = 'archived'`), no borrarlo:
+   * con los pesos apagados todos pagan en dólares y al reactivarlos Colombia
+   * vuelve a pesos, sin haber perdido una fila. La caída la dispara SÓLO ese
+   * código: un mapeo inexistente o un plan todavía sin crear del lado de ellos son
+   * huecos de configuración, y cobrarlos en otra moneda taparía el hueco en vez de
+   * mostrarlo.
+   *
+   * No reintenta cuando la moneda apagada ya era dólares: no hay a dónde caer, y
+   * repetir la misma consulta daría el mismo error una vuelta más tarde.
+   *
+   * Devuelve la moneda REALMENTE usada, que es la que se registra: si el log dijera
+   * la moneda pedida en vez de ésta, mentiría justo en el caso que existe para
+   * comprobar.
+   */
+  private async resolvePlanConCaidaAUsd(
+    planSlug: string,
+    currency: string,
+    conPrueba: boolean,
+  ): Promise<{ planName: string; currency: string }> {
+    try {
+      // Rechaza con su propio código (CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED /
+      // _ARCHIVED): se propaga tal cual, ya viene con status.
+      const planName = await this.confioPlans.resolveConfioPlanName(planSlug, currency, conPrueba)
+      return { planName, currency }
+    } catch (error) {
+      const apagada = error instanceof RequestException && error.code === CONFIO_PLAN_ARCHIVED
+      if (!apagada || currency === FALLBACK_CURRENCY) throw error
+
+      this.logger.warn(
+        `Pasarela de ${planSlug}/${currency} apagada: el alta se cobra en ${FALLBACK_CURRENCY}`,
+      )
+      const planName = await this.confioPlans.resolveConfioPlanName(
+        planSlug,
+        FALLBACK_CURRENCY,
+        conPrueba,
+      )
+      return { planName, currency: FALLBACK_CURRENCY }
+    }
+  }
+
   private planPricingException(
     planSlug: string,
     code: BrandCountryErrorCode | PriceResolutionErrorCode,

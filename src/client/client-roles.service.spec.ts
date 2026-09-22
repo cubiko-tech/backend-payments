@@ -135,11 +135,11 @@ describe('ClientRolesService', () => {
       expect(result.code).toBe(PLAN_NOT_FOUND)
     })
 
-    it('devuelve PRICE_NOT_FOUND_FOR_COUNTRY —código DISTINTO— si el plan existe pero no hay fila del país ni default', async () => {
+    it('devuelve PRICE_NOT_FOUND_FOR_COUNTRY —código DISTINTO— si no hay fila del país ni en dólares', async () => {
       global.fetch = mockPlans([
         {
           slug: 'dropi-roax',
-          prices: [priceRow({ id: 'p-us', countryCode: 'US', currency: 'USD', price: '6.99', isDefault: false })],
+          prices: [priceRow({ id: 'p-co', countryCode: 'CO', currency: 'COP', price: '19900.00', isDefault: true })],
         },
       ]) as unknown as typeof fetch
 
@@ -150,12 +150,12 @@ describe('ClientRolesService', () => {
     })
 
     /**
-     * `isDefault` desempata entre filas del MISMO país; NO suple a un país
-     * ausente. Caer a la fila de otro país le cobraría 19.900 COP a una marca
-     * mexicana sin que nadie se entere, y el criterio 1 de la épica 002 pide lo
-     * contrario: rechazar cuando el precio falta del catálogo.
+     * El país sin fila propia cae a la fila en DÓLARES, nunca a la de otro país
+     * en su moneda: caer a la fila colombiana le cobraría 19.900 COP a una marca
+     * mexicana sin que nadie se entere. `isDefault` sigue desempatando entre
+     * filas del MISMO país y no suple a un país ausente.
      */
-    it('rechaza cuando el país pedido no tiene fila, sin caer a la de otro país', async () => {
+    it('cae a la fila en dólares cuando el país no tiene fila, y NO a la de otro país', async () => {
       global.fetch = mockPlans([
         {
           slug: 'dropi-roax',
@@ -167,8 +167,43 @@ describe('ClientRolesService', () => {
       ]) as unknown as typeof fetch
 
       const result = await service.resolvePriceForCountry('dropi-roax', 'MX')
-      expect(result.ok).toBe(false)
-      expect(result.code).toBe(PRICE_NOT_FOUND_FOR_COUNTRY)
+      expect(result.ok).toBe(true)
+      expect(result.price.currency).toBe('USD')
+      expect(result.price.id).toBe('p-us')
+      expect(result.price.id).not.toBe('p-co')
+    })
+
+    /**
+     * Entre varias filas en dólares gana la `isDefault`, por el mismo motivo que
+     * entre dos filas del mismo país: el ganador no puede depender del orden en
+     * que backend-roles las devuelva.
+     */
+    it('entre varias filas en dólares gana la isDefault', async () => {
+      global.fetch = mockPlans([
+        {
+          slug: 'dropi-roax',
+          prices: [
+            priceRow({ id: 'p-usd-otra', countryCode: 'US', currency: 'USD', price: '29.99', isDefault: false }),
+            priceRow({ id: 'p-usd-default', countryCode: 'CO', currency: 'USD', price: '19.99', isDefault: true }),
+          ],
+        },
+      ]) as unknown as typeof fetch
+
+      const result = await service.resolvePriceForCountry('dropi-roax', 'EC')
+      expect(result.ok).toBe(true)
+      expect(result.price.id).toBe('p-usd-default')
+    })
+
+    /**
+     * La caída a dólares NO le gana a la fila propia del país: Colombia con su
+     * fila en pesos sigue cobrando en pesos. Es la regresión CA2 de RXDEV-12.
+     */
+    it('el país CON fila propia la conserva y no cae a dólares', async () => {
+      global.fetch = mockPlans([dropiRoaxPlan()]) as unknown as typeof fetch
+
+      const result = await service.resolvePriceForCountry('dropi-roax', 'CO')
+      expect(result.ok).toBe(true)
+      expect(result.price.currency).toBe('COP')
     })
 
     /**
