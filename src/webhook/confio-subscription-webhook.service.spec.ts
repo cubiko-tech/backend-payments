@@ -3,7 +3,11 @@ import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { getQueueToken } from '@nestjs/bullmq'
 
-import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import {
+  ConfioSubscriptionWebhookService,
+  CONFIO_SUBSCRIPTION_STATUS_MAP,
+  CONFIO_ESTADOS_QUE_OTORGAN,
+} from './confio-subscription-webhook.service'
 import { WebhookService } from './webhook.service'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment } from '../payment/entities/payment.entity'
@@ -12,7 +16,10 @@ import {
   SubscriptionProvider,
   SubscriptionStatus,
 } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ClientRolesService } from '../client/client-roles.service'
 
@@ -996,6 +1003,193 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         planSlug: PLAN_SLUG,
         expiresAt: '2026-01-29T10:00:00.000Z',
       })
+    })
+
+    /**
+     * (9) EL HISTORIAL NOMBRA SI SE OTORGÓ O NO, no el estado del proveedor.
+     *
+     * Medido el 2026-09-04 sobre el primer alta paga real en dev: la traza quedó
+     * `created → pending → reactivated` y nadie había reactivado nada —esa
+     * suscripción se confirmaba por PRIMERA vez—; y la confirmación que NO otorga
+     * quedaba escrita como `trial_started`, el evento de una prueba que empieza,
+     * con el motivo real escondido en la columna `reason`.
+     *
+     * La causa es una sola: el `eventType` de la confirmación lo dictaba
+     * `CONFIO_TIPO_DE_EVENTO`, o sea el estado que reporta ConfioPagos, cuando lo
+     * que el historial tiene que decir es el HECHO —se otorgó el plan, o no—.
+     */
+    describe('[R15] el historial nombra si se otorgó, no el estado del proveedor', () => {
+      /**
+       * Los diez valores que el enum YA tenía, escritos a mano a propósito y NO
+       * derivados de `SubscriptionEventType`: hay filas guardadas con cada uno, y
+       * si alguien renombra, borra o resignifica uno para hacer lugar al par nuevo,
+       * esta lista deja de reflejar la base y los casos de abajo lo cantan.
+       */
+      const VALORES_PREVIOS: string[] = [
+        'created',
+        'plan_changed',
+        'renewed',
+        'cancelled',
+        'expired',
+        'reactivated',
+        'payment_failed',
+        'payment_succeeded',
+        'trial_started',
+        'trial_ended',
+      ]
+
+      /** Período que responde el proveedor cuando la confirmación SÍ puede otorgar. */
+      const PERIODO_REMOTO = {
+        currentPeriodStart: new Date('2026-01-14T10:00:00Z'),
+        currentPeriodEnd: new Date('2026-02-02T10:00:00Z'),
+        nextBillingTime: new Date('2026-02-02T10:00:00Z'),
+      }
+
+      it('el enum conserva sus diez valores con el mismo significado', () => {
+        // Candado de la condición 1: el par nuevo se AGREGA. Ningún valor previo
+        // se renombra ni desaparece, porque el historial ya escrito se sigue
+        // leyendo como se escribió.
+        expect(Object.values(SubscriptionEventType)).toEqual(
+          expect.arrayContaining(VALORES_PREVIOS),
+        )
+        expect(SubscriptionEventType.REACTIVATED).toBe('reactivated')
+        expect(SubscriptionEventType.TRIAL_STARTED).toBe('trial_started')
+      })
+
+      it.each(['TRIALING', 'ACTIVE'])(
+        'la confirmación %s que otorga escribe el evento de OTORGADA',
+        async (wire) => {
+          conSuscripcion(pendienteDeAceptacion())
+          confio.getSubscription.mockResolvedValue(PERIODO_REMOTO)
+
+          await despachar(cambioDeEstado(wire))
+
+          const traza = historial()[0]
+          // Otorgó de verdad: sin esto el caso podría pasar por la rama equivocada.
+          expect(roles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+          expect(traza.eventType).toBe(SubscriptionEventType.CONFIRMATION_GRANTED)
+          // Mutación (1): reusar `reactivated` —o cualquier valor ya existente—
+          // para la confirmación que otorga → rojo.
+          expect(VALORES_PREVIOS).not.toContain(traza.eventType)
+        },
+      )
+
+      it('la confirmación sin período utilizable escribe el evento de NO OTORGADA', async () => {
+        conSuscripcion(pendienteDeAceptacion({ trialEnd: null }))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        const traza = historial()[0]
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(traza.eventType).toBe(SubscriptionEventType.CONFIRMATION_NOT_GRANTED)
+        expect(VALORES_PREVIOS).not.toContain(traza.eventType)
+        // El `reason` sigue llevando el POR QUÉ donde ya lo llevaba: el evento
+        // nombra el QUÉ, y eso no le quita trabajo a la columna.
+        expect(traza.reason).toContain('TRIALING')
+        expect(traza.reason).toMatch(/per[íi]odo/i)
+        // Y el nombre EXACTO del evento de Confío se sigue guardando.
+        expect(traza.metadata.event).toBe('subscription.subscriptionStatusChanged')
+      })
+
+      it('la confirmación sobre una fila muerta escribe el evento de NO OTORGADA', async () => {
+        conSuscripcion(pendienteDeAceptacion({ status: SubscriptionStatus.CANCELLED }))
+        confio.getSubscription.mockResolvedValue(PERIODO_REMOTO)
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(historial()[0].eventType).toBe(SubscriptionEventType.CONFIRMATION_NOT_GRANTED)
+      })
+
+      it('la confirmación sobre una baja pendiente escribe el evento de NO OTORGADA', async () => {
+        conSuscripcion(
+          pendienteDeAceptacion({
+            status: SubscriptionStatus.TRIAL,
+            cancelledAt: new Date('2026-01-10T00:00:00Z'),
+            accessEndsAt: new Date('2026-01-29T10:00:00Z'),
+          }),
+        )
+        confio.getSubscription.mockResolvedValue(PERIODO_REMOTO)
+
+        await despachar(cambioDeEstado('TRIALING'))
+
+        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+        expect(historial()[0].eventType).toBe(SubscriptionEventType.CONFIRMATION_NOT_GRANTED)
+      })
+
+      it('la que otorga y la que no NO escriben el mismo evento', async () => {
+        // Mutación (2): escribir el mismo evento en las dos ramas → rojo. Es el
+        // caso que impide «arreglar» esto agregando UN valor y usándolo en las dos.
+        conSuscripcion(pendienteDeAceptacion())
+        confio.getSubscription.mockResolvedValue(PERIODO_REMOTO)
+        await despachar(cambioDeEstado('TRIALING'))
+        const otorgada = historial()[0].eventType
+
+        manager.save.mockClear()
+        conSuscripcion(pendienteDeAceptacion({ trialEnd: null }))
+        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+        await despachar(cambioDeEstado('TRIALING'), 'ev-sin-periodo')
+        const noOtorgada = historial()[0].eventType
+
+        expect(otorgada).toBeDefined()
+        expect(noOtorgada).toBeDefined()
+        expect(otorgada).not.toBe(noOtorgada)
+      })
+
+      it('la confirmación ACTIVA escribe el mismo evento que el webhook', async () => {
+        // Las tres vías pasan por `planearOtorgamiento`, así que el hecho se nombra
+        // igual venga de donde venga: preguntar no es un hecho distinto de que nos
+        // avisen.
+        const sub = conSuscripcion(pendienteDeAceptacion())
+        confio.getSubscription.mockResolvedValue({ ...PERIODO_REMOTO, status: 'TRIALING' })
+
+        await service.confirmarContraElProveedor(sub)
+
+        expect(historial()[0].eventType).toBe(SubscriptionEventType.CONFIRMATION_GRANTED)
+      })
+
+      it.each([
+        ['PAST_DUE', SubscriptionEventType.PAYMENT_FAILED],
+        ['SUSPENDED', SubscriptionEventType.PAYMENT_FAILED],
+        ['CANCELED', SubscriptionEventType.CANCELLED],
+        ['EXPIRED', SubscriptionEventType.EXPIRED],
+      ])(
+        'el cambio de estado a %s sigue escribiendo el evento que dicta el proveedor',
+        async (wire, esperado) => {
+          // Lo que cambia es la CONFIRMACIÓN, no el resto del mapa: mora, cancelado
+          // y expirado siguen nombrándose por el estado que reporta ConfioPagos.
+          conSuscripcion(suscripcion())
+
+          await despachar(cambioDeEstado(wire as string))
+
+          expect(historial()[0].eventType).toBe(esperado)
+        },
+      )
+
+      // La lista de arriba fija QUÉ evento escribe cada estado, y es fija a propósito: si uno
+      // cambiara de evento, tiene que doler. Pero por eso mismo no cuida el otro borde — agregar
+      // un séptimo estado al mapa sin agregarlo al de eventos la deja verde igual.
+      //
+      // Éste sí lo cuida, porque DERIVA los casos de las dos constantes exportadas en vez de
+      // enumerarlos. `CONFIO_TIPO_DE_EVENTO` es `Partial`, así que a un estado sin entrada le
+      // corresponde `undefined` y el compilador no lo ve —el repo no corre con `strictNullChecks`—,
+      // dejando la fila de historial sin evento. Todo estado mapeado que NO otorgue llega a esa
+      // lectura, así que todos tienen que nombrar el suyo.
+      const LLEGAN_AL_EVENTO = (
+        Object.keys(CONFIO_SUBSCRIPTION_STATUS_MAP) as (keyof typeof CONFIO_SUBSCRIPTION_STATUS_MAP)[]
+      ).filter((estado) => !CONFIO_ESTADOS_QUE_OTORGAN.includes(estado))
+
+      it.each(LLEGAN_AL_EVENTO)(
+        '%s está mapeado y no otorga, así que su fila de historial nombra un evento',
+        async (wire) => {
+          conSuscripcion(suscripcion())
+
+          await despachar(cambioDeEstado(wire as string))
+
+          expect(historial()[0].eventType).toBeDefined()
+        },
+      )
     })
   })
 

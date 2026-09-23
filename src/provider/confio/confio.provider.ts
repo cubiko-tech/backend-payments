@@ -132,7 +132,6 @@ export class ConfioProvider implements PaymentProvider {
     // qué estaba rechazando.
     // `any` y no `unknown`: es lo que `JSON.parse` ya devolvía acá, y los
     // llamadores leen campos del cuerpo. Estrechar el tipo es otra tarea.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let body: any
     try {
       body = text ? JSON.parse(text) : {}

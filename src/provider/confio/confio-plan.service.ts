@@ -5,6 +5,14 @@ import { ConfioSubscriptionPlan } from '../entities/confioSubscriptionPlan.entit
 import { RequestException } from '../../shared/exception/request.exception'
 
 /**
+ * El mapeo de ese plan y esa moneda quedó fuera de uso: así se apaga una moneda
+ * sin borrar su configuración. Es una constante y no un literal suelto porque el
+ * alta lo compara para caer a dólares (RXDEV-13), y dos literales iguales se
+ * separan en cuanto alguien toca uno.
+ */
+export const CONFIO_PLAN_ARCHIVED = 'CONFIO_PLAN_ARCHIVED'
+
+/**
  * Resolución `(planSlug, moneda, conPrueba) → resource name del plan en ConfioPagos`.
  *
  * Sólo lectura: la tabla `confio_subscription_plan` se siembra por migración y
@@ -73,7 +81,7 @@ export class ConfioPlanService {
     if (mapping.status === 'archived') {
       throw new RequestException(
         {
-          code: 'CONFIO_PLAN_ARCHIVED',
+          code: CONFIO_PLAN_ARCHIVED,
           message: `El plan de ConfioPagos para ${planSlug}/${currency} (${variante}) está archivado`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
@@ -103,6 +111,24 @@ export class ConfioPlanService {
       // orden anterior dejó de ser total, y una lista que se reordena sola entre
       // llamadas es un dolor de cabeza para quien la lee o la compara.
       order: { currencyCode: 'ASC', withTrial: 'DESC' },
+    })
+  }
+
+  /**
+   * TODOS los mapeos de la tabla, sin filtrar por plan.
+   *
+   * Existe para el chequeo de precios contra el catálogo, que necesita recorrer
+   * la tabla entera y no un plan puntual. Va acá y no inyectando el repositorio
+   * en el chequeo porque esta clase es la única puerta de lectura de
+   * `confio_subscription_plan`.
+   *
+   * El orden es TOTAL —plan, moneda y variante— por el mismo motivo que
+   * `findMappings`: una lista que se reordena sola entre pasadas hace ilegible
+   * el log que se compara con el de ayer.
+   */
+  async findAllMappings(): Promise<ConfioSubscriptionPlan[]> {
+    return this.planReadRepo.find({
+      order: { planSlug: 'ASC', currencyCode: 'ASC', withTrial: 'DESC' },
     })
   }
 }

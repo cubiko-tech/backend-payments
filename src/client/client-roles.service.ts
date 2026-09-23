@@ -23,8 +23,28 @@ export interface PlanPriceRow {
 /** El plan pedido no está en el catálogo de backend-roles. */
 export const PLAN_NOT_FOUND = 'PLAN_NOT_FOUND'
 
-/** El plan existe pero no tiene fila para ese país ni fila `isDefault`. */
+/** El plan existe pero no tiene fila para ese país ni fila en dólares. */
 export const PRICE_NOT_FOUND_FOR_COUNTRY = 'PRICE_NOT_FOUND_FOR_COUNTRY'
+
+/**
+ * Moneda de quien no tiene precio propio: la que cobra todo país sin fila y la
+ * que queda cuando se apaga una pasarela (RXDEV-13).
+ */
+export const FALLBACK_CURRENCY = 'USD'
+
+/**
+ * La fila en dólares del plan, o `undefined` si el catálogo no declara ninguna.
+ *
+ * Entre varias gana la `isDefault` por el mismo motivo que entre dos filas del
+ * mismo país: el ganador no puede depender del orden en que backend-roles las
+ * devuelva. Vive fuera de la clase porque la usan dos entradas —la resolución
+ * por país y la caída de moneda del alta— y la definición de «la fila en
+ * dólares» tiene que ser una sola.
+ */
+const findUsdRow = (rows: PlanPriceRow[]): PlanPriceRow | undefined => {
+  const usd = rows.filter((row) => String(row.currency || '').toUpperCase() === FALLBACK_CURRENCY)
+  return usd.find((row) => row.isDefault) ?? usd[0]
+}
 
 export type PriceResolutionErrorCode =
   | typeof PLAN_NOT_FOUND
@@ -112,11 +132,12 @@ export class ClientRolesService {
    *
    * Se elige la fila cuyo `countryCode` coincide (case-insensitive); si hay más
    * de una para ese país gana la que tenga `isDefault: true`, con independencia
-   * del orden en que backend-roles las devuelva. Si no hay fila del país, se
-   * cae a la fila `isDefault` del plan.
+   * del orden en que backend-roles las devuelva. Si no hay fila del país, se cae
+   * a la fila en DÓLARES del plan (RXDEV-13): vender fuera de Colombia no puede
+   * depender de que alguien cargue antes una fila por país.
    *
    * Dos decisiones de borde deliberadas:
-   * - un `countryCode` vacío o en blanco va directo a la fila `isDefault`;
+   * - un `countryCode` vacío o en blanco va directo a la fila en dólares;
    * - un plan SIN filas de precio responde `PRICE_NOT_FOUND_FOR_COUNTRY` en vez del
    *   cero fabricado que sí produce `getAllPlanPrices`, para que el alta no persista
    *   un precio inventado. Medido en dev el 2026-08-25 con `GET /v1/plan`: los
@@ -141,12 +162,15 @@ export class ClientRolesService {
       if (winner) return { ok: true, price: winner }
     }
 
-    // Sin fila para ese país NO se cae a la de otro. `isDefault` desempata entre
-    // filas del MISMO país (arriba), no suple a un país ausente: son dos cosas
-    // distintas y confundirlas le cobraría 19.900 COP a una marca argentina o
-    // mexicana sin que nadie se entere. Rechazar es la decisión del criterio 1
-    // de la épica 002 —«rechazar el alta cuando el plan o la moneda faltan del
-    // catálogo»—, y agregar un país es una decisión comercial, no un default.
+    // Sin fila propia se cae a DÓLARES, nunca a la fila de otro país en su moneda:
+    // `isDefault` desempata entre filas del MISMO país (arriba) y no suple a un país
+    // ausente, porque confundirlas le cobraría 19.900 COP a una marca argentina o
+    // mexicana sin que nadie se entere. Dólares es la moneda de quien no tiene precio
+    // propio, así que caer ahí no inventa un precio: usa el que el catálogo declara
+    // para ese caso. Sin fila en dólares tampoco, se rechaza como antes.
+    const usd = findUsdRow(rows)
+    if (usd) return { ok: true, price: usd }
+
     return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY }
   }
 

@@ -89,15 +89,20 @@ export const CONFIO_ESTADOS_QUE_OTORGAN: ConfioSubscriptionStatus[] = ['TRIALING
 export const CONFIO_ESTADOS_MUERTOS: ConfioSubscriptionStatus[] = ['CANCELED', 'EXPIRED']
 
 /**
- * `subscription_events.eventType` es un enum de Postgres con exactamente diez
- * valores y NO tiene un `status_changed` genérico; agregarle uno exige una
- * migración, que está fuera del alcance de esta tarea. Se mapea al miembro más
- * cercano y el nombre EXACTO del evento de Confío queda en `metadata.event`,
- * que es lo que `trazabilidad-de-movimientos` va a leer.
+ * `subscription_events.eventType` es un enum de Postgres y NO tiene un
+ * `status_changed` genérico, así que cada estado que reporta ConfioPagos se mapea
+ * al miembro más cercano; el nombre EXACTO del evento de Confío queda igual en
+ * `metadata.event`, que es lo que `trazabilidad-de-movimientos` va a leer.
+ *
+ * OJO CON EL ALCANCE: este mapa cubre los estados que sólo pueden significar UNA
+ * cosa —mora, cancelado, expirado—. `TRIALING` y `ACTIVE` NO están, y su ausencia
+ * es deliberada: son los dos estados de la CONFIRMACIÓN, donde el hecho no lo
+ * dicta el proveedor sino si se otorgó el plan o no, y eso lo decide
+ * `planearOtorgamiento` con el par `CONFIRMATION_GRANTED`/`CONFIRMATION_NOT_GRANTED`.
+ * Volver a meterlos acá es reintroducir el defecto que dejaba el alta confirmada
+ * por primera vez escrita como `reactivated`.
  */
 const CONFIO_TIPO_DE_EVENTO: { [K in ConfioSubscriptionStatus]?: SubscriptionEventType } = {
-  TRIALING: SubscriptionEventType.TRIAL_STARTED,
-  ACTIVE: SubscriptionEventType.REACTIVATED,
   PAST_DUE: SubscriptionEventType.PAYMENT_FAILED,
   SUSPENDED: SubscriptionEventType.PAYMENT_FAILED,
   CANCELED: SubscriptionEventType.CANCELLED,
@@ -714,6 +719,15 @@ export class ConfioSubscriptionWebhookService {
    * el acceso no se inventa, y la fila se deja en el estado que el barrido sabe
    * buscar para que vuelva a intentarlo. El motivo queda en la columna `reason`
    * de la traza, no sólo en el log.
+   *
+   * Y ES ACÁ DONDE SE NOMBRA EL HECHO. Las tres vías de la confirmación —webhook,
+   * confirmación activa del front y barrido de repesca— pasan por esta función, y
+   * su `eventType` sale de la única pregunta que el historial tiene que responder:
+   * `CONFIRMATION_GRANTED` si la marca terminó con acceso, `CONFIRMATION_NOT_GRANTED`
+   * en las dos salidas que no otorgan (fila muerta o baja pendiente, y sin período
+   * utilizable). NO sale de `CONFIO_TIPO_DE_EVENTO`: el estado del proveedor es el
+   * mismo `TRIALING` en las tres salidas, así que dictar el evento desde ahí
+   * escribía lo mismo para hechos opuestos.
    */
   private async planearOtorgamiento(
     data: ConfioWebhookPayload['data'],
@@ -722,7 +736,15 @@ export class ConfioSubscriptionWebhookService {
     toStatus: SubscriptionStatus,
     yaLeida?: ConfioSubscriptionResult,
   ): Promise<EfectoConfio | null> {
-    const efecto: EfectoConfio = { eventType: CONFIO_TIPO_DE_EVENTO[wire], toStatus }
+    // EL EVENTO LO DICTA EL RESULTADO, NO EL ESTADO DEL PROVEEDOR. Esta función
+    // tiene tres salidas y sólo una otorga, así que el valor de NO OTORGADA es el
+    // piso: las dos salidas que no otorgan lo heredan sin decir nada, y la que
+    // otorga lo pisa. Darle a cada una un `eventType` propio volvería a permitir
+    // que las dos ramas escriban lo mismo por descuido.
+    const efecto: EfectoConfio = {
+      eventType: SubscriptionEventType.CONFIRMATION_NOT_GRANTED,
+      toStatus,
+    }
 
     // Misma guarda de resurrección que `planearCobro`, y por el mismo motivo: una
     // confirmación tardía sobre algo que del lado NUESTRO ya está muerto —o con
@@ -755,10 +777,12 @@ export class ConfioSubscriptionWebhookService {
       // Devolver `null` tampoco sirve: sin efecto no se escribe traza, y entonces
       // el motivo se pierde igual.
       //
-      // El `eventType` sigue siendo el que dicta el proveedor (`TRIAL_STARTED` para
-      // `TRIALING`) porque el enum no tiene un valor para «confirmado y no otorgado»
-      // y agregarlo es una migración de tipo; lo que identifica el hecho es `reason`,
-      // que es justamente la columna para eso.
+      // El `eventType` heredado es `CONFIRMATION_NOT_GRANTED`, que es exactamente
+      // lo que pasó: el proveedor confirmó y NO se otorgó. Antes acá se escribía
+      // `TRIAL_STARTED` —el evento de una prueba que empieza— porque el enum no
+      // tenía valor para esto. `reason` sigue existiendo y sigue siendo obligatorio:
+      // el evento dice el QUÉ y la columna el POR QUÉ, que es lo único que
+      // distingue «sin período» de «fila muerta».
       return {
         ...efecto,
         toStatus: sub.status,
@@ -794,8 +818,12 @@ export class ConfioSubscriptionWebhookService {
     // el proveedor, así que la prueba empieza cuando aceptó.
     const sellaPrueba = toStatus === SubscriptionStatus.TRIAL && !sub.trialStart
 
+    // ÚNICO lugar del servicio que escribe `CONFIRMATION_GRANTED`, y esa unicidad
+    // es lo que sostiene la regla: el evento de otorgada no se puede escribir sin
+    // haber resuelto período y efecto de roles.
     return {
       ...efecto,
+      eventType: SubscriptionEventType.CONFIRMATION_GRANTED,
       avanzaPeriodo: true,
       periodo,
       ...(sellaPrueba ? { sellaPrueba: true } : {}),
