@@ -21,6 +21,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gitleaks:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITLEAKS_VERSION: '8.24.3'
+      GITLEAKS_SHA256: '9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Gitleaks
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d /tmp/gitleaks-install.XXXXXX)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tarball="${tmp_dir}/gitleaks.tar.gz"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download"
+          url="${base_url}/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          wget -qO "$tarball" "$url"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$tmp_dir" gitleaks
+          chmod 0755 "${tmp_dir}/gitleaks"
+          target_dir="${GITLEAKS_INSTALL_DIR:-/usr/local/bin}"
+          if [ -w "$target_dir" ]; then
+            cp "${tmp_dir}/gitleaks" "${target_dir}/gitleaks"
+          else
+            sudo cp "${tmp_dir}/gitleaks" "${target_dir}/gitleaks"
+          fi
+          "${target_dir}/gitleaks" version
+
+      - name: Scan secrets
+        run: gitleaks git --log-opts="--full-history HEAD" --redact -v
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -45,6 +81,9 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: '8.24.3'
+      GITLEAKS_SHA256: '9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -53,6 +92,26 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install Gitleaks
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d /tmp/gitleaks-install.XXXXXX)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          tarball="${tmp_dir}/gitleaks.tar.gz"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download"
+          url="${base_url}/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          wget -qO "$tarball" "$url"
+          printf '%s  %s\n' "$GITLEAKS_SHA256" "$tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$tmp_dir" gitleaks
+          chmod 0755 "${tmp_dir}/gitleaks"
+          target_dir="${GITLEAKS_INSTALL_DIR:-/usr/local/bin}"
+          if [ -w "$target_dir" ]; then
+            cp "${tmp_dir}/gitleaks" "${target_dir}/gitleaks"
+          else
+            sudo cp "${tmp_dir}/gitleaks" "${target_dir}/gitleaks"
+          fi
+          "${target_dir}/gitleaks" version
 
       # `npm ci` y no `npm install`: instala EXACTO lo del lockfile, que es lo que
       # fija la versión del runner. Con `install`, el árbol de CI puede derivar del
