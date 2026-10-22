@@ -1,6 +1,6 @@
-// Red when scripts/commit-msg.sh drops the Refs check, the wip/ exception, or RXDEV-<n>/PAYL-<n> on line/payments.
+// Red when scripts/commit-msg.sh drops the Refs check, the wip/ exception, RXDEV-<n>/PAYL-<n> on line/payments, or rebase head-name detection.
 import { spawnSync } from 'child_process'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, resolve } from 'path'
 
@@ -18,16 +18,34 @@ describe('scripts/commit-msg.sh hook', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
-  function runHook(message: string, branch = 'feat/RXDEV-1-x') {
+  function runHook(
+    message: string,
+    branch = 'feat/RXDEV-1-x',
+    rebase?: { dir: 'rebase-merge' | 'rebase-apply'; headName: string },
+  ) {
     // Stub git: the service container lacks git and cases must exercise branch rules without switching HEAD (R17).
+    const gitDir = join(tempDir, '.git')
+    rmSync(gitDir, { recursive: true, force: true })
+    mkdirSync(gitDir, { recursive: true })
+    if (rebase) {
+      const rebaseDir = join(gitDir, rebase.dir)
+      mkdirSync(rebaseDir, { recursive: true })
+      writeFileSync(join(rebaseDir, 'head-name'), `${rebase.headName}\n`)
+    }
+
     const gitBin = join(tempDir, 'git')
     const escapedBranch = branch.replace(/'/g, "'\\''")
+    const escapedGitDir = gitDir.replace(/'/g, "'\\''")
     writeFileSync(
       gitBin,
       [
         '#!/usr/bin/env bash',
         'if [[ "$*" == "rev-parse --abbrev-ref HEAD" ]]; then',
         `  printf '%s\\n' '${escapedBranch}'`,
+        '  exit 0',
+        'fi',
+        'if [[ "$*" == "rev-parse --git-dir" ]]; then',
+        `  printf '%s\\n' '${escapedGitDir}'`,
         '  exit 0',
         'fi',
         'exit 1',
@@ -84,6 +102,43 @@ describe('scripts/commit-msg.sh hook', () => {
     const res = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'feat/RXDEV-1-x')
     expect(res.status).toBe(1)
     expect(res.output).toContain('Refs:')
+  })
+
+  it('accepts Refs: PAYL-<n> with detached HEAD during a rebase of line/payments', () => {
+    const rebaseMerge = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
+      dir: 'rebase-merge',
+      headName: 'refs/heads/line/payments',
+    })
+    expect(rebaseMerge.status).toBe(0)
+
+    const rebaseApply = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
+      dir: 'rebase-apply',
+      headName: 'refs/heads/line/payments',
+    })
+    expect(rebaseApply.status).toBe(0)
+  })
+
+  it('rejects Refs: PAYL-<n> with detached HEAD outside a rebase or when rebasing another branch', () => {
+    const detachedOutsideRebase = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD')
+    expect(detachedOutsideRebase.status).toBe(1)
+    expect(detachedOutsideRebase.output).toContain('Refs:')
+
+    const rxdevDetachedOutsideRebase = runHook('feat(wallet): add x\n\nRefs: RXDEV-1\n', 'HEAD')
+    expect(rxdevDetachedOutsideRebase.status).toBe(0)
+
+    const rebaseMergeOther = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
+      dir: 'rebase-merge',
+      headName: 'refs/heads/feat/RXDEV-1-x',
+    })
+    expect(rebaseMergeOther.status).toBe(1)
+    expect(rebaseMergeOther.output).toContain('Refs:')
+
+    const rebaseApplyOther = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
+      dir: 'rebase-apply',
+      headName: 'refs/heads/feat/RXDEV-1-x',
+    })
+    expect(rebaseApplyOther.status).toBe(1)
+    expect(rebaseApplyOther.output).toContain('Refs:')
   })
 
   it('accepts a commit message without Refs: on a wip/ branch', () => {

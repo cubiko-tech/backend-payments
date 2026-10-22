@@ -12,6 +12,20 @@ fi
 body=$(sed -E '/^# -+ >8/,$d; /^#/d' "$msgfile")
 first_line=$(printf '%s\n' "$body" | head -n1)
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+if [[ $branch == "HEAD" ]]; then
+	git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+	git_dir="${git_dir:-.git}"
+	for head_name_file in "$git_dir/rebase-merge/head-name" "$git_dir/rebase-apply/head-name"; do
+		if [[ -f $head_name_file ]]; then
+			rebase_branch=$(tr -d '\r\n' <"$head_name_file")
+			rebase_branch="${rebase_branch#refs/heads/}"
+			if [[ -n $rebase_branch ]]; then
+				branch="$rebase_branch"
+				break
+			fi
+		fi
+	done
+fi
 errors=()
 
 merge_branch_re="Merge (branch|remote-tracking branch|tag) '[^']+'( into .+)?"
