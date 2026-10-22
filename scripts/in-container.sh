@@ -10,6 +10,11 @@ if (($# == 0)); then
 fi
 
 if ! command -v docker >/dev/null 2>&1 && [[ -f /.dockerenv ]]; then
+	for gl_dir in "$PWD"/node_modules/.cache/gitleaks/v*; do
+		if [[ -d $gl_dir ]]; then
+			PATH="$gl_dir:$PATH"
+		fi
+	done
 	export PATH="$PWD/node_modules/.bin:$PATH"
 	exec "$@"
 fi
@@ -37,10 +42,53 @@ if command -v git >/dev/null 2>&1 &&
 	ctx_dir=$(mktemp -d "$caller_dir/.roax-git-ctx.XXXXXX")
 	git -C "$caller_dir" rev-parse --abbrev-ref HEAD \
 		>"$ctx_dir/branch" 2>/dev/null || true
+	git -C "$caller_dir" config --get remote.origin.url \
+		>"$ctx_dir/remote-url" 2>/dev/null || true
 	git -C "$caller_dir" diff --cached --name-only --diff-filter=ACMR \
 		>"$ctx_dir/staged-files.txt" 2>/dev/null || true
 	git -C "$caller_dir" diff -U0 --no-ext-diff --staged . \
 		>"$ctx_dir/staged-diff.patch" 2>/dev/null || true
+	git -C "$caller_dir" log -p -U0 --full-history HEAD \
+		>"$ctx_dir/git-log-head.patch" 2>/dev/null || true
+	git -C "$caller_dir" log -p -U0 --full-history --all \
+		>"$ctx_dir/git-log-all.patch" 2>/dev/null || true
+	git -C "$caller_dir" log -p -U0 -n 1 HEAD \
+		>"$ctx_dir/git-log-1.patch" 2>/dev/null || true
+	custom_log_opts=""
+	prev_is_log_opts=0
+	for arg in "$@"; do
+		if ((prev_is_log_opts)); then
+			custom_log_opts="$arg"
+			prev_is_log_opts=0
+			break
+		fi
+		case "$arg" in
+			--log-opts=*)
+				custom_log_opts="${arg#--log-opts=}"
+				break
+				;;
+			--log-opts)
+				prev_is_log_opts=1
+				;;
+			*--log-opts=*)
+				custom_log_opts=$(
+					printf '%s\n' "$arg" |
+						sed -n 's/.*--log-opts=\("[^"]*"\|'\''[^'\'']*'\''\|[^[:space:]]*\).*/\1/p' |
+						head -n1
+				)
+				custom_log_opts="${custom_log_opts#\"}"
+				custom_log_opts="${custom_log_opts%\"}"
+				custom_log_opts="${custom_log_opts#\'}"
+				custom_log_opts="${custom_log_opts%\'}"
+				break
+				;;
+		esac
+	done
+	if [[ -n $custom_log_opts ]]; then
+		read -r -a log_opt_arr <<<"$custom_log_opts"
+		git -C "$caller_dir" log -p -U0 "${log_opt_arr[@]}" \
+			>"$ctx_dir/git-log-custom.patch" 2>/dev/null || true
+	fi
 	mkdir -p "$ctx_dir/blobs"
 	while IFS= read -r rel_file; do
 		[[ -n $rel_file ]] || continue
@@ -61,6 +109,11 @@ fi
 
 inner_cmd='
 cd "$1" && shift
+for gl_dir in "$PWD"/node_modules/.cache/gitleaks/v*; do
+  if [ -d "$gl_dir" ]; then
+    PATH="$gl_dir:$PATH"
+  fi
+done
 PATH="$PWD/node_modules/.bin:$PATH"
 export PATH
 shim_dir=""
@@ -72,8 +125,20 @@ if [ -n "${ROAX_GIT_CTX_DIR:-}" ] && [ -d "$PWD/$ROAX_GIT_CTX_DIR" ]; then
 #!/usr/bin/env bash
 ctx_dir="$(cd "$(dirname "$0")/ctx" && pwd -P)"
 case "$*" in
+  *"rev-parse --is-inside-work-tree"*)
+    printf '\''true\n'\''
+    exit 0
+    ;;
   *"rev-parse --abbrev-ref HEAD"*)
     cat "$ctx_dir/branch"
+    exit 0
+    ;;
+  *"ls-remote --quiet --get-url"*|*"config --get remote.origin.url"*)
+    if [ -s "$ctx_dir/remote-url" ]; then
+      cat "$ctx_dir/remote-url"
+    else
+      printf '\''https://github.com/cubiko-tech/backend-payments.git\n'\''
+    fi
     exit 0
     ;;
   *"diff --cached --name-only"*|*"diff --staged --name-only"*)
@@ -82,6 +147,24 @@ case "$*" in
     ;;
   *"diff -U0 --no-ext-diff --staged"*)
     cat "$ctx_dir/staged-diff.patch"
+    exit 0
+    ;;
+  *"log -p -U0"*)
+    if [ -f "$ctx_dir/git-log-custom.patch" ]; then
+      cat "$ctx_dir/git-log-custom.patch"
+      exit 0
+    fi
+    case "$*" in
+      *" -1"*|*" -n 1"*|*" -n1"*|*"HEAD~1..HEAD"*|*"HEAD^..HEAD"*)
+        [ -f "$ctx_dir/git-log-1.patch" ] && cat "$ctx_dir/git-log-1.patch"
+        exit 0
+        ;;
+      *"--all"*)
+        [ -f "$ctx_dir/git-log-all.patch" ] && cat "$ctx_dir/git-log-all.patch"
+        exit 0
+        ;;
+    esac
+    [ -f "$ctx_dir/git-log-head.patch" ] && cat "$ctx_dir/git-log-head.patch"
     exit 0
     ;;
   show\ :*|*" show :"*)
