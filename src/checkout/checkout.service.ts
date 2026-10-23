@@ -290,6 +290,7 @@ export class CheckoutService implements OnModuleInit {
             req.purpose === 'plan_purchase' ? `Pago plan ${req.planSlug}` : 'Pago de servicio',
           referenceType: 'payment',
           referenceId: payment.id,
+          idempotencyKey: `payment:${payment.id}:debit`,
         },
         req.purpose === 'plan_purchase' ? currency : undefined,
       )
@@ -505,6 +506,7 @@ export class CheckoutService implements OnModuleInit {
         description: `Recarga via ${payment.provider}`,
         referenceType: 'payment',
         referenceId: payment.id,
+        idempotencyKey: `payment:${payment.id}:credit`,
       })
     }
 

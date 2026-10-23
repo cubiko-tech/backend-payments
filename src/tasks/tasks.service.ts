@@ -15,7 +15,10 @@ import {
   SubscriptionStatus,
   LIVE_SUBSCRIPTION_STATUSES,
 } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { WalletService } from '../wallet/wallet.service'
@@ -175,7 +178,12 @@ export class TasksService {
 
   /** Proveedores externos que cobran con link de pago (no wallet interna). */
   private isExternalProvider(provider: string): boolean {
-    return provider === 'confio' || provider === 'stripe' || provider === 'mercadopago' || provider === 'dropi'
+    return (
+      provider === 'confio' ||
+      provider === 'stripe' ||
+      provider === 'mercadopago' ||
+      provider === 'dropi'
+    )
   }
 
   /**
@@ -231,7 +239,10 @@ export class TasksService {
         },
       })
 
-      logger.log('info', `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`)
+      logger.log(
+        'info',
+        `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`,
+      )
     } catch (error) {
       logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
       // Marcar past_due igual para que el ciclo de expiración avance.
@@ -338,7 +349,10 @@ export class TasksService {
     // siguiente, y dos pasadas sobre las mismas filas duplican el tráfico contra
     // ConfioPagos sin ganar nada.
     if (this.repescaEnCurso) {
-      logger.log('info', '[CRON] confirmarAltasPendientes: la pasada anterior sigue en curso, se saltea')
+      logger.log(
+        'info',
+        '[CRON] confirmarAltasPendientes: la pasada anterior sigue en curso, se saltea',
+      )
       return
     }
     this.repescaEnCurso = true
@@ -459,7 +473,10 @@ export class TasksService {
     }
 
     if (processed > 0 || dueSubscriptions.length > 0) {
-      logger.log('info', `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`)
+      logger.log(
+        'info',
+        `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`,
+      )
     }
   }
 
@@ -530,17 +547,25 @@ export class TasksService {
     for (const p of pending) {
       if (!p.providerPaymentId) continue
       try {
-        const real = await this.providerFactory.getProvider('confio').getPaymentStatus(p.providerPaymentId)
+        const real = await this.providerFactory
+          .getProvider('confio')
+          .getPaymentStatus(p.providerPaymentId)
         if (real.status === 'completed') {
           await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
           completed++
         }
       } catch (error) {
-        logger.log('warn', `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`)
+        logger.log(
+          'warn',
+          `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`,
+        )
       }
     }
 
-    logger.log('info', `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`)
+    logger.log(
+      'info',
+      `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`,
+    )
   }
 
   // =============================================================
@@ -615,7 +640,10 @@ export class TasksService {
         { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
       if (!vencida.affected) {
-        logger.log('info', `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`)
+        logger.log(
+          'info',
+          `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
+        )
         continue
       }
 
@@ -700,7 +728,11 @@ export class TasksService {
     const vencidas = await this.subscriptionRepo.find({
       where: [
         { status: In([SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE]), ...bajaVencida },
-        { status: SubscriptionStatus.PAST_DUE, retryCount: LessThan(this.MAX_RETRY), ...bajaVencida },
+        {
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: LessThan(this.MAX_RETRY),
+          ...bajaVencida,
+        },
       ],
       order: { accessEndsAt: 'ASC' },
       take: 200,
@@ -793,7 +825,10 @@ export class TasksService {
       // `sendExpirationWarnings`, que le cedió el hito de 0 días.
       await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
 
-      logger.log('info', `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`)
+      logger.log(
+        'info',
+        `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`,
+      )
       cerradas++
     }
 
@@ -828,14 +863,17 @@ export class TasksService {
 
     for (const wallet of wallets) {
       // Sumar todas las transacciones completadas
-      const result = await this.dataSource.query(`
+      const result = await this.dataSource.query(
+        `
         SELECT
           COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END), 0) -
           COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS calculated,
           COUNT(*) AS count
         FROM transactions
         WHERE "walletId" = $1 AND status = 'completed'
-      `, [wallet.id])
+      `,
+        [wallet.id],
+      )
 
       const calculatedBalance = parseFloat(result[0]?.calculated || '0')
       const transactionCount = parseInt(result[0]?.count || '0')
@@ -855,13 +893,15 @@ export class TasksService {
 
       if (!isConsistent) {
         inconsistent++
-        logger.log('error',
+        logger.log(
+          'error',
           `[CRON] DESCUADRE en wallet ${wallet.id}: balance=${currentBalance}, calculado=${calculatedBalance}, diff=${currentBalance - calculatedBalance}`,
         )
       }
     }
 
-    logger.log('info',
+    logger.log(
+      'info',
       `[CRON] reconcileWalletBalances: ${wallets.length} wallets verificadas, ${inconsistent} inconsistentes`,
     )
   }
@@ -888,21 +928,29 @@ export class TasksService {
       const dropiProvider = this.providerFactory.getDropiProvider()
       const allPrices = await this.clientRoles.getAllPlanPrices()
 
-      const charges = dropiSubscriptions.map((sub) => ({
-        userId: sub.userId,
-        brandId: sub.brandId,
-        amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
-        currency: 'COP',
-        description: `Suscripción plan ${sub.planSlug}`,
-        referenceId: sub.id,
-      })).filter((c) => c.amount > 0)
+      const charges = dropiSubscriptions
+        .map((sub) => ({
+          userId: sub.userId,
+          brandId: sub.brandId,
+          amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
+          currency: 'COP',
+          description: `Suscripción plan ${sub.planSlug}`,
+          referenceId: sub.id,
+        }))
+        .filter((c) => c.amount > 0)
 
       if (charges.length > 0) {
         await dropiProvider.batchCharge(charges)
-        logger.log('info', `[CRON] processDropiBatchCharges: ${charges.length} cobros enviados a Dropi`)
+        logger.log(
+          'info',
+          `[CRON] processDropiBatchCharges: ${charges.length} cobros enviados a Dropi`,
+        )
       }
     } catch (error) {
-      logger.log('error', `[CRON] processDropiBatchCharges: error enviando cobros a Dropi: ${error.message}`)
+      logger.log(
+        'error',
+        `[CRON] processDropiBatchCharges: error enviando cobros a Dropi: ${error.message}`,
+      )
     }
   }
 
@@ -1003,7 +1051,10 @@ export class TasksService {
       }
 
       if (subscriptions.length > 0) {
-        logger.log('info', `[CRON] sendExpirationWarnings: ${subscriptions.length} avisos enviados (${days} días)`)
+        logger.log(
+          'info',
+          `[CRON] sendExpirationWarnings: ${subscriptions.length} avisos enviados (${days} días)`,
+        )
       }
     }
   }
@@ -1021,7 +1072,7 @@ export class TasksService {
    * Renovar suscripción cobrando de wallet interna.
    */
   private async renewFromWallet(sub: Subscription) {
-    const amount = await this.clientRoles.getPlanPrice(sub.planSlug, 'COP') || 0
+    const amount = (await this.clientRoles.getPlanPrice(sub.planSlug, 'COP')) || 0
 
     if (amount === 0) {
       // Plan gratuito, solo renovar periodo
@@ -1030,12 +1081,19 @@ export class TasksService {
     }
 
     // Debitar wallet
+    const billingCycleKey =
+      sub.nextBillingDate instanceof Date
+        ? sub.nextBillingDate.toISOString()
+        : sub.nextBillingDate
+          ? String(sub.nextBillingDate)
+          : 'current'
     await this.walletService.debit(sub.walletId, amount, {
       brandId: sub.brandId,
       category: 'plan_payment',
       description: `Renovación plan ${sub.planSlug}`,
       referenceType: 'subscription',
       referenceId: sub.id,
+      idempotencyKey: `subscription:${sub.id}:${billingCycleKey}`,
     })
 
     // Renovar periodo
@@ -1268,6 +1326,9 @@ export class TasksService {
     const message = dunningMessages[sub.retryCount] || 'Tu pago no pudo ser procesado.'
 
     await this.eventBus.notifyPaymentFailed(sub.brandId, sub.id, message)
-    logger.log('info', `[DUNNING] Notificación enviada a marca ${sub.brandId}: intento ${sub.retryCount}/${this.MAX_RETRY}`)
+    logger.log(
+      'info',
+      `[DUNNING] Notificación enviada a marca ${sub.brandId}: intento ${sub.retryCount}/${this.MAX_RETRY}`,
+    )
   }
 }

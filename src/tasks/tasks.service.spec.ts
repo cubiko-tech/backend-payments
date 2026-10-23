@@ -49,7 +49,11 @@ describe('TasksService — processTrialConversions', () => {
       publishNotification: jest.fn().mockResolvedValue(null),
     }
     checkoutService = {
-      processCheckout: jest.fn().mockResolvedValue({ paymentId: 'pay-1', status: 'pending', checkoutUrl: 'https://pay.confio/abc' }),
+      processCheckout: jest.fn().mockResolvedValue({
+        paymentId: 'pay-1',
+        status: 'pending',
+        checkoutUrl: 'https://pay.confio/abc',
+      }),
       completeExternalPayment: jest.fn().mockResolvedValue(undefined),
     }
     confioWebhook = {
@@ -77,7 +81,14 @@ describe('TasksService — processTrialConversions', () => {
 
   it('degrada a free un trial vencido sin método de pago', async () => {
     subscriptionRepo.find.mockResolvedValue([
-      { id: 's1', brandId: 'b1', planSlug: 'pro', provider: 'wallet', walletId: null, status: SubscriptionStatus.TRIAL },
+      {
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: null,
+        status: SubscriptionStatus.TRIAL,
+      },
     ])
 
     await service.processTrialConversions()
@@ -146,14 +157,30 @@ describe('TasksService — processTrialConversions', () => {
   it('cobra de wallet y activa un trial vencido con método de pago', async () => {
     clientRoles.getPlanPrice.mockResolvedValue(50000)
     subscriptionRepo.find.mockResolvedValue([
-      { id: 's1', brandId: 'b1', planSlug: 'pro', provider: 'wallet', walletId: 'w1', status: SubscriptionStatus.TRIAL, retryCount: 0 },
+      {
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w1',
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+      },
     ])
 
     await service.processTrialConversions()
 
     // 3 argumentos exactos: el cron NO pasa `expectedCurrency`. La aserción se rompe el
     // día que alguien cablee la guarda de moneda dentro de `renewFromWallet`.
-    expect(walletService.debit).toHaveBeenCalledWith('w1', 50000, expect.any(Object))
+    expect(walletService.debit).toHaveBeenCalledWith(
+      'w1',
+      50000,
+      expect.objectContaining({
+        referenceType: 'subscription',
+        referenceId: 's1',
+        idempotencyKey: 'subscription:s1:current',
+      }),
+    )
     expect(subscriptionRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
     )
@@ -165,7 +192,15 @@ describe('TasksService — processTrialConversions', () => {
     clientRoles.getPlanPrice.mockResolvedValue(50000)
     walletService.debit.mockRejectedValue(new Error('saldo insuficiente'))
     subscriptionRepo.find.mockResolvedValue([
-      { id: 's1', brandId: 'b1', planSlug: 'pro', provider: 'wallet', walletId: 'w1', status: SubscriptionStatus.TRIAL, retryCount: 0 },
+      {
+        id: 's1',
+        brandId: 'b1',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w1',
+        status: SubscriptionStatus.TRIAL,
+        retryCount: 0,
+      },
     ])
 
     await service.processTrialConversions()
@@ -400,13 +435,14 @@ describe('TasksService — processTrialConversions', () => {
       expect(eventBus.publishSubscriptionExpired).not.toHaveBeenCalled()
     })
 
-
     // La invariante de `accessEndsAt` es «no nula ⇔ baja PENDIENTE»: una fila
     // terminal no tiene baja pendiente. Este cron se queda además con las filas de
     // la intersección (baja sellada + mora agotada), que si no dejarían colgada la
     // fecha de corte de una baja que ya se consumó.
     it('la fila vencida no conserva fecha de corte', async () => {
-      subscriptionRepo.find.mockResolvedValue([enMora({ accessEndsAt: new Date('2026-08-27T10:00:00.000Z') })])
+      subscriptionRepo.find.mockResolvedValue([
+        enMora({ accessEndsAt: new Date('2026-08-27T10:00:00.000Z') }),
+      ])
 
       await service.expireSubscriptions()
 
@@ -432,7 +468,6 @@ describe('TasksService — processTrialConversions', () => {
       )
     })
   })
-
 
   /**
    * `retiro-de-plan-al-vencer-el-periodo` (épica 002, criterio 3).
@@ -786,7 +821,12 @@ describe('TasksService — processTrialConversions', () => {
   describe('reconcileExternalPayments', () => {
     it('completa un pago confio pendiente cuyo estado real es completed', async () => {
       paymentRepo.find.mockResolvedValue([
-        { id: 'pay-9', provider: 'confio', status: 'pending', providerPaymentId: 'stores/x/payments/y' },
+        {
+          id: 'pay-9',
+          provider: 'confio',
+          status: 'pending',
+          providerPaymentId: 'stores/x/payments/y',
+        },
       ])
       providerFactory.getProvider.mockReturnValue({
         getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
@@ -794,12 +834,19 @@ describe('TasksService — processTrialConversions', () => {
 
       await service.reconcileExternalPayments()
 
-      expect(checkoutService.completeExternalPayment).toHaveBeenCalledWith('pay-9', { source: 'cron-reconcile' })
+      expect(checkoutService.completeExternalPayment).toHaveBeenCalledWith('pay-9', {
+        source: 'cron-reconcile',
+      })
     })
 
     it('NO completa si el estado real sigue pending', async () => {
       paymentRepo.find.mockResolvedValue([
-        { id: 'pay-9', provider: 'confio', status: 'pending', providerPaymentId: 'stores/x/payments/y' },
+        {
+          id: 'pay-9',
+          provider: 'confio',
+          status: 'pending',
+          providerPaymentId: 'stores/x/payments/y',
+        },
       ])
       providerFactory.getProvider.mockReturnValue({
         getPaymentStatus: jest.fn().mockResolvedValue({ status: 'pending' }),
@@ -877,7 +924,13 @@ describe('TasksService — processTrialConversions', () => {
   // pantalla también consigue su plan.
   describe('confirmarAltasPendientes', () => {
     function fila(over: Record<string, any> = {}) {
-      return { id: 's-pend', brandId: 'b1', planSlug: 'dropi-roax', status: SubscriptionStatus.PENDING, ...over }
+      return {
+        id: 's-pend',
+        brandId: 'b1',
+        planSlug: 'dropi-roax',
+        status: SubscriptionStatus.PENDING,
+        ...over,
+      }
     }
 
     it('barre SÓLO altas esperando confirmación, de confío y con suscripción del otro lado', async () => {
@@ -910,7 +963,13 @@ describe('TasksService — processTrialConversions', () => {
       it('la franja de la primera hora entra en TODAS las pasadas', () => {
         // Mutación: darle al primer tramo una cadencia mayor que el período del cron
         // ⇒ el alta que se está pagando AHORA deja de consultarse cada pasada.
-        for (const [h, m] of [[10, 0], [10, 5], [10, 10], [10, 35], [11, 55]]) {
+        for (const [h, m] of [
+          [10, 0],
+          [10, 5],
+          [10, 10],
+          [10, 35],
+          [11, 55],
+        ]) {
           expect(franjasDeRepesca(enMinuto(h, m), VENTANA).length).toBeGreaterThan(0)
         }
       })
@@ -1066,8 +1125,7 @@ describe('TasksService — processTrialConversions', () => {
       provider: 'confio',
       status: SubscriptionStatus.ACTIVE,
       autoRenew: true,
-      providerSubscriptionId:
-        'stores/01STORE/subscription-plans/01PLAN/subscriptions/01SUB',
+      providerSubscriptionId: 'stores/01STORE/subscription-plans/01PLAN/subscriptions/01SUB',
       ...over,
     })
 

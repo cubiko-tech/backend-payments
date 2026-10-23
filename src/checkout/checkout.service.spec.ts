@@ -765,7 +765,15 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
       await service.processCheckout(altaConWallet())
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 6.99, expect.any(Object), 'USD')
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        6.99,
+        expect.objectContaining({
+          referenceType: 'payment',
+          idempotencyKey: expect.stringMatching(/^payment:.+:debit$/),
+        }),
+        'USD',
+      )
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
 
@@ -1079,6 +1087,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           category: 'recharge',
           referenceType: 'payment',
           referenceId: createdPayment.id,
+          idempotencyKey: `payment:${createdPayment.id}:credit`,
         }),
       )
       expect(invoiceService.create).toHaveBeenCalledWith(

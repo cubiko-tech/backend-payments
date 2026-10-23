@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
-import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
 
@@ -91,7 +95,13 @@ export class WalletService {
    * Acreditar fondos a una wallet con bloqueo pesimista.
    * Operación atómica: actualiza balance y crea transacción.
    */
-  async credit(walletId: string, amount: number, data: Partial<Transaction> = {}) {
+  async credit(
+    walletId: string,
+    amount: number,
+    data: Partial<Transaction> | string = {},
+    idempotencyKey?: string,
+  ) {
+    const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
@@ -118,8 +128,9 @@ export class WalletService {
         )
       }
 
+      const numericAmount = Number(amount)
       const balanceBefore = Number(wallet.balance)
-      const balanceAfter = balanceBefore + Number(amount)
+      const balanceAfter = balanceBefore + numericAmount
 
       // Actualizar balance
       wallet.balance = balanceAfter
@@ -130,20 +141,26 @@ export class WalletService {
         walletId,
         brandId: wallet.brandId,
         type: TransactionType.CREDIT,
-        amount,
+        amount: numericAmount,
         balanceBefore,
         balanceAfter,
         status: TransactionStatus.COMPLETED,
-        ...data,
+        ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`)
+      this.logger.log(
+        `Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
+      )
       return { data: { wallet, transaction: savedTransaction } }
     } catch (error) {
       await queryRunner.rollbackTransaction()
+      if (resolvedKey && this.isUniqueConstraintViolation(error)) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+        if (existing) return { data: existing }
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en crédito a wallet ${walletId}: ${error.message}`)
       return { error: error.message }
@@ -165,9 +182,11 @@ export class WalletService {
   async debit(
     walletId: string,
     amount: number,
-    data: Partial<Transaction> = {},
+    data: Partial<Transaction> | string = {},
     expectedCurrency?: string,
+    idempotencyKey?: string,
   ) {
+    const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
@@ -219,11 +238,19 @@ export class WalletService {
         )
       }
 
+      const numericAmount = Number(amount)
       const balanceBefore = Number(wallet.balance)
-      const balanceAfter = balanceBefore - Number(amount)
+      const balanceAfter = balanceBefore - numericAmount
 
       // Verificar saldo suficiente
       if (balanceAfter < 0) {
+        if (resolvedKey) {
+          const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+          if (existing) {
+            await queryRunner.rollbackTransaction()
+            return { data: existing }
+          }
+        }
         throw new RequestException(
           { code: 'INSUFFICIENT_BALANCE', message: 'Saldo insuficiente' },
           HttpStatus.UNPROCESSABLE_ENTITY,
@@ -239,25 +266,74 @@ export class WalletService {
         walletId,
         brandId: wallet.brandId,
         type: TransactionType.DEBIT,
-        amount,
+        amount: numericAmount,
         balanceBefore,
         balanceAfter,
         status: TransactionStatus.COMPLETED,
-        ...data,
+        ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Débito de ${amount} de wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`)
+      this.logger.log(
+        `Débito de ${amount} de wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
+      )
       return { data: { wallet, transaction: savedTransaction } }
     } catch (error) {
       await queryRunner.rollbackTransaction()
+      if (resolvedKey && this.isUniqueConstraintViolation(error)) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+        if (existing) return { data: existing }
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en débito de wallet ${walletId}: ${error.message}`)
       return { error: error.message }
     } finally {
       await queryRunner.release()
+    }
+  }
+
+  private normalizeMovementData(
+    data: Partial<Transaction> | string = {},
+    idempotencyKey?: string,
+  ): { txData: Partial<Transaction>; resolvedKey?: string } {
+    const txData: Partial<Transaction> =
+      typeof data === 'string' ? { idempotencyKey: data } : { ...data }
+    const resolvedKey = idempotencyKey ?? txData.idempotencyKey
+    if (resolvedKey !== undefined) {
+      txData.idempotencyKey = resolvedKey
+    }
+    return { txData, resolvedKey }
+  }
+
+  private isUniqueConstraintViolation(error: any): boolean {
+    return error?.code === '23505' || error?.driverError?.code === '23505'
+  }
+
+  private async findExistingMovement(
+    queryRunner: { manager: { findOne: DataSource['manager']['findOne'] } },
+    walletId: string,
+    idempotencyKey: string,
+  ) {
+    const existingTransaction = await queryRunner.manager.findOne(Transaction, {
+      where: { idempotencyKey },
+    })
+    if (!existingTransaction) return null
+
+    const currentWallet = await queryRunner.manager.findOne(Wallet, {
+      where: { id: existingTransaction.walletId || walletId },
+    })
+    if (currentWallet) {
+      currentWallet.balance = Number(currentWallet.balance)
+    }
+    existingTransaction.amount = Number(existingTransaction.amount)
+    existingTransaction.balanceBefore = Number(existingTransaction.balanceBefore)
+    existingTransaction.balanceAfter = Number(existingTransaction.balanceAfter)
+
+    return {
+      wallet: currentWallet,
+      transaction: existingTransaction,
     }
   }
 
@@ -302,7 +378,10 @@ export class WalletService {
   /**
    * Obtener transacciones de una wallet con paginación
    */
-  async getTransactions(walletId: string, filters: { page?: number; limit?: number; type?: string } = {}) {
+  async getTransactions(
+    walletId: string,
+    filters: { page?: number; limit?: number; type?: string } = {},
+  ) {
     try {
       const { page = 1, limit = 20, type } = filters
       const skip = (page - 1) * limit
@@ -392,7 +471,10 @@ export class WalletService {
     }
     if (Number(wallet.balance) !== 0) {
       throw new RequestException(
-        { code: 'WALLET_HAS_BALANCE', message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.' },
+        {
+          code: 'WALLET_HAS_BALANCE',
+          message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.',
+        },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
     }
@@ -440,9 +522,8 @@ export class WalletService {
 
     try {
       // Lock en orden determinista para evitar deadlocks
-      const [firstId, secondId] = fromWalletId < toWalletId
-        ? [fromWalletId, toWalletId]
-        : [toWalletId, fromWalletId]
+      const [firstId, secondId] =
+        fromWalletId < toWalletId ? [fromWalletId, toWalletId] : [toWalletId, fromWalletId]
 
       const first = await queryRunner.manager.findOne(Wallet, {
         where: { id: firstId },
@@ -543,7 +624,9 @@ export class WalletService {
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Transferencia de ${amount} ${fromWallet.currency}: wallet ${fromWalletId} → ${toWalletId}`)
+      this.logger.log(
+        `Transferencia de ${amount} ${fromWallet.currency}: wallet ${fromWalletId} → ${toWalletId}`,
+      )
       return {
         data: {
           fromWallet: { id: fromWalletId, balanceAfter: fromBalanceAfter },
