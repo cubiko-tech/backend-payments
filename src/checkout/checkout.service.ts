@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, Not } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -451,12 +451,23 @@ export class CheckoutService implements OnModuleInit {
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment || payment.status === PaymentStatus.COMPLETED) return
 
+    const paidAt = new Date()
+    const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
+    const claimed = await this.paymentRepo.update(
+      { id: paymentId, status: Not(PaymentStatus.COMPLETED) },
+      {
+        status: PaymentStatus.COMPLETED,
+        paidAt,
+        ...(providerData ? { metadata } : {}),
+      },
+    )
+    if (!claimed.affected) return
+
     payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = new Date()
+    payment.paidAt = paidAt
     if (providerData) {
-      payment.metadata = { ...payment.metadata, providerData }
+      payment.metadata = metadata
     }
-    await this.paymentRepo.save(payment)
 
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
