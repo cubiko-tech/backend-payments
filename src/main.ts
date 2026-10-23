@@ -7,7 +7,12 @@ import { ValidationPipe, RequestMethod } from '@nestjs/common'
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger'
 import { logger } from './shared/logger/logger'
 
-async function bootstrap() {
+export async function bootstrap() {
+  const jwtSecret = process.env.JWT_SECRET?.trim()
+  if (!jwtSecret) {
+    throw new Error('Missing required environment variable: JWT_SECRET')
+  }
+
   const app = await NestFactory.create(AppModule, {
     // NO `cors: true` acá: registraría un CORS por defecto con `origin:'*'` que
     // contesta el preflight OPTIONS antes del `app.enableCors` de abajo. Con
@@ -27,7 +32,7 @@ async function bootstrap() {
 
   app.use(helmet())
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
-  app.use(cookieParser(process.env.JWT_SECRET || 'secret'))
+  app.use(cookieParser(jwtSecret))
 
   app.enableCors({
     origin: (origin, callback) => {
@@ -65,4 +70,6 @@ async function bootstrap() {
   logger.log('info', 'backend-payments running on port 80')
 }
 
-bootstrap()
+if (require.main === module) {
+  void bootstrap()
+}
