@@ -46,14 +46,12 @@ describe('isProductionEnv — sus tres consumidores', () => {
       expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(false)
     })
 
-    // Fuera de producción el comportamiento no cambia: sin token se sigue
-    // aceptando para no romper el desarrollo local.
-    it('con ENV=development y sin token, la acepta como hasta ahora', () => {
+    it('rejects the webhook signature in development when no token is configured', () => {
       process.env.ENV = 'development'
 
       const provider = new ConfioProvider()
 
-      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(true)
+      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(false)
     })
 
     it.each(['GO_ENV', 'NODE_ENV'])(

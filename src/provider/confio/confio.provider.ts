@@ -87,9 +87,7 @@ export class ConfioProvider implements PaymentProvider {
   constructor() {
     this.baseUrl =
       process.env.CONFIO_API_BASE_URL ||
-      (isProductionEnv()
-        ? 'https://api.confiopagos.com/v1'
-        : 'https://api.dev.confiopagos.com/v1')
+      (isProductionEnv() ? 'https://api.confiopagos.com/v1' : 'https://api.dev.confiopagos.com/v1')
 
     const storeId = process.env.CONFIO_STORE_ID
     const token = process.env.CONFIO_ACCESS_TOKEN
@@ -106,7 +104,9 @@ export class ConfioProvider implements PaymentProvider {
 
   private ensureConfigured() {
     if (!this.storeId || !this.accessToken) {
-      throw new Error('ConfioPagos no configurado. Configure CONFIO_STORE_ID y CONFIO_ACCESS_TOKEN en .env')
+      throw new Error(
+        'ConfioPagos no configurado. Configure CONFIO_STORE_ID y CONFIO_ACCESS_TOKEN en .env',
+      )
     }
   }
 
@@ -114,9 +114,9 @@ export class ConfioProvider implements PaymentProvider {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
+        'Authorization': `Bearer ${this.accessToken}`,
         'Content-Type': 'application/json',
-        Accept: 'application/json',
+        'Accept': 'application/json',
         ...options.headers,
       },
       signal: AbortSignal.timeout(30000),
@@ -549,14 +549,8 @@ export class ConfioProvider implements PaymentProvider {
    */
   validateWebhookSignature(_payload: Buffer, signature: string): boolean {
     if (!this.accessToken) {
-      // Sin token configurado: solo permitir fuera de producción.
-      const isProd = isProductionEnv()
-      if (isProd) {
-        logger.log('error', 'ConfioProvider: access token no configurado en producción — webhook rechazado')
-        return false
-      }
-      logger.log('warn', 'ConfioProvider: access token no configurado, validación de webhook omitida (solo dev)')
-      return true
+      logger.log('error', 'ConfioProvider: access token not configured — webhook rejected')
+      return false
     }
 
     const received = Buffer.from(signature || '')
