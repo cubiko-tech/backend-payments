@@ -73,7 +73,7 @@ describe('MetricsService — criterios de estado', () => {
   })
 })
 
-describe('Admin Metrics — validación de rango y parametrización SQL (PAYL-9)', () => {
+describe('Admin Metrics - range validation and SQL parameterization (PAYL-9)', () => {
   let app: INestApplication
   let query: jest.Mock
   let createQueryBuilder: jest.Mock
@@ -114,7 +114,7 @@ describe('Admin Metrics — validación de rango y parametrización SQL (PAYL-9)
     await app.close()
   })
 
-  it('rechaza con 400 sin consultar la base cuando days o months no es entero o intenta inyección SQL', async () => {
+  it('rejects with 400 without querying the database when days or months is not an integer or attempts SQL injection', async () => {
     const inyeccion = await request(app.getHttpServer())
       .get('/admin/metrics/churn')
       .query({ months: "1 months'; DROP TABLE x; --" })
@@ -137,7 +137,7 @@ describe('Admin Metrics — validación de rango y parametrización SQL (PAYL-9)
     expect(createQueryBuilder).not.toHaveBeenCalled()
   })
 
-  it('rechaza con 400 sin consultar la base cuando days o months está fuera de rango (ej. 9999 o 0)', async () => {
+  it('rejects with 400 without querying the database when days or months is out of range (e.g. 9999 or 0)', async () => {
     for (const [ruta, param] of [
       ['/admin/metrics/revenue', { days: '9999' }],
       ['/admin/metrics/arpu', { days: '9999' }],
@@ -155,7 +155,7 @@ describe('Admin Metrics — validación de rango y parametrización SQL (PAYL-9)
     expect(createQueryBuilder).not.toHaveBeenCalled()
   })
 
-  it('pasa days y months como parámetro SQL sin interpolar el valor en las cinco consultas', async () => {
+  it('passes days and months as a SQL parameter without interpolating the value across all five queries', async () => {
     const rev = await request(app.getHttpServer())
       .get('/admin/metrics/revenue')
       .query({ days: '17' })
@@ -189,7 +189,7 @@ describe('Admin Metrics — validación de rango y parametrización SQL (PAYL-9)
     expect(query).toHaveBeenLastCalledWith(expect.any(String), [3])
   })
 
-  it('usa el default de hoy cuando no se envía days ni months (CA5)', async () => {
+  it('uses the current default when neither days nor months is provided (CA5)', async () => {
     const churn = await request(app.getHttpServer()).get('/admin/metrics/churn')
     expect(churn.status).toBe(200)
     expect(churn.body).toEqual({ data: { months: 6, monthly: [] } })
