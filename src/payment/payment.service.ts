@@ -64,7 +64,10 @@ export class PaymentService {
   /**
    * Listar pagos de una marca con paginación
    */
-  async getPaymentsByBrand(brandId: string, filters: { page?: number; limit?: number; status?: string } = {}) {
+  async getPaymentsByBrand(
+    brandId: string,
+    filters: { page?: number; limit?: number; status?: string } = {},
+  ) {
     try {
       const { page = 1, limit = 20, status } = filters
       const skip = (page - 1) * limit

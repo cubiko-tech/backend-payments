@@ -122,7 +122,10 @@ describe('ClientPlatformService — país de la marca', () => {
       expect(result.code).toBe(BRAND_LOOKUP_UNAVAILABLE)
       expect(result.code).not.toBe(BRAND_NOT_FOUND)
 
-      global.fetch = mockStatus(404, { message: 'Not Found', statusCode: 404 }) as unknown as typeof fetch
+      global.fetch = mockStatus(404, {
+        message: 'Not Found',
+        statusCode: 404,
+      }) as unknown as typeof fetch
       await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
     })
 
@@ -149,20 +152,25 @@ describe('ClientPlatformService — país de la marca', () => {
       ['undefined', undefined],
       ['vacío', ''],
       ['en blanco', '   '],
-    ])('la marca existe y no trae país (%s) → BRAND_WITHOUT_COUNTRY y null', async (_caso, country) => {
-      global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
+    ])(
+      'la marca existe y no trae país (%s) → BRAND_WITHOUT_COUNTRY y null',
+      async (_caso, country) => {
+        global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
 
-      const result = await service.resolveBrandCountry(BRAND_ID)
-      expect(result.ok).toBe(false)
-      expect(result.code).toBe(BRAND_WITHOUT_COUNTRY)
-      expect(result.code).not.toBe(BRAND_NOT_FOUND)
+        const result = await service.resolveBrandCountry(BRAND_ID)
+        expect(result.ok).toBe(false)
+        expect(result.code).toBe(BRAND_WITHOUT_COUNTRY)
+        expect(result.code).not.toBe(BRAND_NOT_FOUND)
 
-      global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
-      await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
-    })
+        global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
+        await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
+      },
+    )
 
     it('un fetch que rechaza (red caída) es transitorio y no propaga la excepción', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
 
       const result = await service.resolveBrandCountry(BRAND_ID)
       expect(result.ok).toBe(false)
@@ -216,8 +224,14 @@ describe('ClientPlatformService — país de la marca', () => {
       const fetchMock = mockOk(brandBody())
       global.fetch = fetchMock as unknown as typeof fetch
 
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
     })
@@ -245,7 +259,10 @@ describe('ClientPlatformService — país de la marca', () => {
       jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000)
       global.fetch = mockStatus(500, { statusCode: 500 }) as unknown as typeof fetch
 
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
     })
 
     /**

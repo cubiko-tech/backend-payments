@@ -21,7 +21,10 @@ import { ConfioPlanPriceCheckService } from '../provider/confio/confio-plan-pric
     TypeOrmModule.forFeature([Payment, PaymentAttempt], 'DBWrite'),
     // `ConfioSubscriptionPlan` sólo en DBRead: nada de esta tabla se escribe
     // desde el servicio (la siembra la hace la migración).
-    TypeOrmModule.forFeature([Payment, PaymentAttempt, ProviderConfig, ConfioSubscriptionPlan], 'DBRead'),
+    TypeOrmModule.forFeature(
+      [Payment, PaymentAttempt, ProviderConfig, ConfioSubscriptionPlan],
+      'DBRead',
+    ),
     WalletModule,
   ],
   controllers: [PaymentController],
@@ -38,6 +41,15 @@ import { ConfioPlanPriceCheckService } from '../provider/confio/confio-plan-pric
     // llega solo porque `ClientModule` es `@Global()`.
     ConfioPlanPriceCheckService,
   ],
-  exports: [PaymentService, ProviderFactory, ProviderConfigService, StripeProvider, MercadoPagoProvider, DropiProvider, ConfioProvider, ConfioPlanService],
+  exports: [
+    PaymentService,
+    ProviderFactory,
+    ProviderConfigService,
+    StripeProvider,
+    MercadoPagoProvider,
+    DropiProvider,
+    ConfioProvider,
+    ConfioPlanService,
+  ],
 })
 export class PaymentModule {}

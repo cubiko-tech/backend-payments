@@ -15,7 +15,9 @@ describe('CheckoutController', () => {
       providers: [
         {
           provide: CheckoutService,
-          useValue: { processCheckout: jest.fn().mockResolvedValue({ paymentId: 'p-1', status: 'completed' }) },
+          useValue: {
+            processCheckout: jest.fn().mockResolvedValue({ paymentId: 'p-1', status: 'completed' }),
+          },
         },
         { provide: ProviderConfigService, useValue: { getAvailableProviders: jest.fn() } },
       ],

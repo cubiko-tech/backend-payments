@@ -69,7 +69,10 @@ export class RefundService {
   /**
    * Listar reembolsos de una marca
    */
-  async findByBrand(brandId: string, filters: { page?: number; limit?: number; status?: string } = {}) {
+  async findByBrand(
+    brandId: string,
+    filters: { page?: number; limit?: number; status?: string } = {},
+  ) {
     try {
       const { page = 1, limit = 20, status } = filters
       const skip = (page - 1) * limit

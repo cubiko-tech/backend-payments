@@ -1,12 +1,4 @@
-import {
-  Controller,
-  Get,
-  Param,
-  Query,
-  Res,
-  UseGuards,
-  ParseUUIDPipe,
-} from '@nestjs/common'
+import { Controller, Get, Param, Query, Res, UseGuards, ParseUUIDPipe } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Response } from 'express'
 import { InvoiceService } from './invoice.service'
@@ -50,10 +42,7 @@ export class InvoiceController {
   @Get(':id/pdf')
   @ApiOperation({ summary: 'Descargar factura en PDF' })
   @ApiResponse({ status: 200, description: 'PDF de factura' })
-  async downloadPdf(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Res() res: Response,
-  ) {
+  async downloadPdf(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const pdfBuffer = await this.invoicePdfService.generatePdf(id)
 
     res.set({

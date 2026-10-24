@@ -51,10 +51,7 @@ const createDatabaseIfNotExists = async () => {
   try {
     await client.connect()
 
-    const result = await client.query(
-      `SELECT 1 FROM pg_database WHERE datname = $1`,
-      [dbName],
-    )
+    const result = await client.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [dbName])
 
     if (result.rowCount === 0) {
       await client.query(`CREATE DATABASE "${dbName}"`)

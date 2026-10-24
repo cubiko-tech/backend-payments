@@ -1,11 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { InjectDataSource } from '@nestjs/typeorm'
 import { DataSource } from 'typeorm'
-import {
-  HealthCheckService,
-  TypeOrmHealthIndicator,
-  HealthCheckResult,
-} from '@nestjs/terminus'
+import { HealthCheckService, TypeOrmHealthIndicator, HealthCheckResult } from '@nestjs/terminus'
 
 @Injectable()
 export class HealthService {
@@ -40,12 +36,13 @@ export class HealthService {
    * Check de liveness de la aplicación
    */
   private getAppLivenessCheck() {
-    return async () => ({
-      app: {
-        status: 'up',
-        message: 'Service is alive',
-      },
-    }) as any
+    return async () =>
+      ({
+        app: {
+          status: 'up',
+          message: 'Service is alive',
+        },
+      }) as any
   }
 
   /**
@@ -66,9 +63,6 @@ export class HealthService {
    * Health check completo (liveness + readiness)
    */
   async checkHealth(): Promise<HealthCheckResult> {
-    return this.health.check([
-      ...this.getDatabaseChecks(),
-      this.getAppLivenessCheck(),
-    ])
+    return this.health.check([...this.getDatabaseChecks(), this.getAppLivenessCheck()])
   }
 }

@@ -3,7 +3,10 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, Repository, SelectQueryBuilder } from 'typeorm'
 
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import {
   ConfioSubscriptionResult,
@@ -48,7 +51,9 @@ import { downgradeBrandToFree } from '../client/plan-downgrade.util'
  * llamado): `webhook.service.spec.ts` →
  * `it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])('%s no cambia el estado ni escribe')`.
  */
-export const CONFIO_SUBSCRIPTION_STATUS_MAP: { [K in ConfioSubscriptionStatus]?: SubscriptionStatus } = {
+export const CONFIO_SUBSCRIPTION_STATUS_MAP: {
+  [K in ConfioSubscriptionStatus]?: SubscriptionStatus
+} = {
   TRIALING: SubscriptionStatus.TRIAL,
   ACTIVE: SubscriptionStatus.ACTIVE,
   PAST_DUE: SubscriptionStatus.PAST_DUE,
@@ -58,7 +63,10 @@ export const CONFIO_SUBSCRIPTION_STATUS_MAP: { [K in ConfioSubscriptionStatus]?:
 }
 
 /** Estados del alta: se loguean y NO tocan el estado local. */
-export const CONFIO_ESTADOS_SIN_EFECTO: ConfioSubscriptionStatusWire[] = ['PENDING_ACCEPTANCE', 'PROCESSING']
+export const CONFIO_ESTADOS_SIN_EFECTO: ConfioSubscriptionStatusWire[] = [
+  'PENDING_ACCEPTANCE',
+  'PROCESSING',
+]
 
 /**
  * Los dos estados con los que ConfioPagos reporta una suscripción YA ACEPTADA y
@@ -141,8 +149,7 @@ export const CONFIRMACION_ACTIVA = 'subscription.confirmacionActiva'
  * «un fallo del canal nunca se convierte en un hecho sobre el objeto» prohíbe.
  */
 export interface ResultadoDeConfirmacion {
-  resultado:
-    /** Se aplicó: la fila quedó viva y el plan asignado en roles. */
+  resultado: /** Se aplicó: la fila quedó viva y el plan asignado en roles. */
     | 'otorgada'
     /** El comprador todavía no completó el pago. Es el caso NORMAL, no un error. */
     | 'sin_confirmar'
@@ -325,9 +332,10 @@ export class ConfioSubscriptionWebhookService {
       return
     }
 
-    const efecto = payload.event === 'subscription.billingStatusChanged'
-      ? await this.planearCobro(data, sub)
-      : await this.planearCambioDeEstado(data, sub)
+    const efecto =
+      payload.event === 'subscription.billingStatusChanged'
+        ? await this.planearCobro(data, sub)
+        : await this.planearCambioDeEstado(data, sub)
     if (!efecto) return
 
     if (efecto.roles) {
@@ -348,7 +356,9 @@ export class ConfioSubscriptionWebhookService {
    * Se lee contra la escritura y no contra la réplica por el mismo argumento ya
    * escrito en `webhook.service.ts:55`: el lag de la réplica no entra acá.
    */
-  private async resolverSuscripcion(data: ConfioWebhookPayload['data']): Promise<Subscription | null> {
+  private async resolverSuscripcion(
+    data: ConfioWebhookPayload['data'],
+  ): Promise<Subscription | null> {
     if (data?.name) {
       const porNombre = await this.subscriptionRepository.findOne({
         where: { providerSubscriptionId: data.name },
@@ -514,11 +524,12 @@ export class ConfioSubscriptionWebhookService {
   ): Promise<void> {
     const traza = `brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId} event=${providerEventId}`
 
-    const ok = roles.accion === 'degradar'
-      ? await downgradeBrandToFree(this.clientRoles, roles.brandId, roles.planSlug)
-      : roles.accion === 'retirar'
-        ? await this.clientRoles.removePlanFromBrand(roles.brandId, roles.planSlug)
-        : await this.clientRoles.assignPlanToBrand(roles.brandId, roles.planSlug, roles.expiresAt)
+    const ok =
+      roles.accion === 'degradar'
+        ? await downgradeBrandToFree(this.clientRoles, roles.brandId, roles.planSlug)
+        : roles.accion === 'retirar'
+          ? await this.clientRoles.removePlanFromBrand(roles.brandId, roles.planSlug)
+          : await this.clientRoles.assignPlanToBrand(roles.brandId, roles.planSlug, roles.expiresAt)
 
     if (!ok) {
       throw new Error(`No se pudo ${roles.accion} el plan en backend-roles: ${traza}`)
@@ -617,7 +628,9 @@ export class ConfioSubscriptionWebhookService {
     // FUNCIÓN heredada del prototipo —truthy, o sea que pasa el guard de abajo— y
     // terminaría asignada a `sub.status`, que es un enum de Postgres.
     const mapeado = Object.prototype.hasOwnProperty.call(CONFIO_SUBSCRIPTION_STATUS_MAP, wire)
-    const toStatus = mapeado ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus] : undefined
+    const toStatus = mapeado
+      ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
+      : undefined
     if (!toStatus) {
       this.logger.warn(`Confio estado no mapeado: ${wire} (${data?.name})`)
       return null
@@ -884,7 +897,9 @@ export class ConfioSubscriptionWebhookService {
         { event: CONFIRMACION_ACTIVA, data },
         `${resourceName}:confirmacion:${wire}`,
       )
-      this.logger.log(`Confio dio por muerta el alta ${sub.id} (${wire}): se cierra y deja de repescarse`)
+      this.logger.log(
+        `Confio dio por muerta el alta ${sub.id} (${wire}): se cierra y deja de repescarse`,
+      )
 
       return { resultado: 'cerrada', estadoRemoto: wire }
     }
@@ -948,7 +963,9 @@ export class ConfioSubscriptionWebhookService {
         providerEventId,
       )
       if (marcador) {
-        this.logger.log(`Confio efecto ya aplicado (bajo lock) para ${providerEventId}, no se repite`)
+        this.logger.log(
+          `Confio efecto ya aplicado (bajo lock) para ${providerEventId}, no se repite`,
+        )
         return
       }
 

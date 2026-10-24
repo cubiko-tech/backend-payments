@@ -17,10 +17,7 @@ describe('ConfioCancellationService', () => {
     confio = { cancelSubscription: jest.fn().mockResolvedValue(undefined) }
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        ConfioCancellationService,
-        { provide: ConfioProvider, useValue: confio },
-      ],
+      providers: [ConfioCancellationService, { provide: ConfioProvider, useValue: confio }],
     }).compile()
 
     service = module.get(ConfioCancellationService)

@@ -87,8 +87,7 @@ export class ClientPlatformService {
       return false
     }
     try {
-      const url =
-        `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(brandId)}`
+      const url = `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(brandId)}`
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.accessServer}` },
         signal: AbortSignal.timeout(10000),
@@ -98,7 +97,7 @@ export class ClientPlatformService {
         return false
       }
       const body = await response.json()
-      const rows: BrandMember[] = Array.isArray(body) ? body : body?.data ?? []
+      const rows: BrandMember[] = Array.isArray(body) ? body : (body?.data ?? [])
       const membership = rows.find(
         (r) => (typeof r.user === 'object' ? r.user?.id : r.user) === userId,
       )

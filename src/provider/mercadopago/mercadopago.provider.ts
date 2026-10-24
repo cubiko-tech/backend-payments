@@ -66,11 +66,12 @@ export class MercadoPagoProvider implements PaymentProvider {
       body: JSON.stringify({
         items: [
           {
-            title: params.purpose === 'plan_purchase'
-              ? `Plan ${params.purposeId || ''}`
-              : params.purpose === 'wallet_recharge'
-                ? 'Recarga de wallet'
-                : 'Pago de servicio',
+            title:
+              params.purpose === 'plan_purchase'
+                ? `Plan ${params.purposeId || ''}`
+                : params.purpose === 'wallet_recharge'
+                  ? 'Recarga de wallet'
+                  : 'Pago de servicio',
             quantity: 1,
             unit_price: params.amount,
             currency_id: params.currency.toUpperCase(),
@@ -175,12 +176,14 @@ export class MercadoPagoProvider implements PaymentProvider {
         back_url: `https://${process.env.DOMAIN}/subscription/success`,
         external_reference: `${params.brandId}:${params.planSlug}`,
         payer_email: params.metadata?.email || '',
-        ...(params.trialDays ? {
-          free_trial: {
-            frequency: params.trialDays,
-            frequency_type: 'days',
-          },
-        } : {}),
+        ...(params.trialDays
+          ? {
+              free_trial: {
+                frequency: params.trialDays,
+                frequency_type: 'days',
+              },
+            }
+          : {}),
       }),
     })
 

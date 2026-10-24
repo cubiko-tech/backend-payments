@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-  ParseUUIDPipe,
-} from '@nestjs/common'
+import { Controller, Get, Post, Body, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { WalletService } from './wallet.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
@@ -82,12 +73,15 @@ export class WalletController {
   @Post('transfer')
   @ApiOperation({ summary: 'Transferir fondos entre wallets (misma marca y moneda)' })
   @ApiResponse({ status: 200, description: 'Transferencia realizada' })
-  async transfer(@Body() data: {
-    fromWalletId: string
-    toWalletId: string
-    amount: number
-    description?: string
-  }) {
+  async transfer(
+    @Body()
+    data: {
+      fromWalletId: string
+      toWalletId: string
+      amount: number
+      description?: string
+    },
+  ) {
     return this.walletService.transfer(data)
   }
 

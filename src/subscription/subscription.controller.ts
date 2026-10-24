@@ -62,7 +62,10 @@ export class SubscriptionController {
   @Get()
   @ApiOperation({ summary: 'Obtener suscripción actual de una marca' })
   @ApiResponse({ status: 200, description: 'Suscripción obtenida correctamente' })
-  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+  })
   @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
   async getCurrent(@Query('brandId') brandId: string, @Req() req: any) {
     return this.subscriptionService.getCurrent(this.resolveBrandId(brandId, req))
@@ -80,7 +83,10 @@ export class SubscriptionController {
   @Get('acceptance-link')
   @ApiOperation({ summary: 'Obtener el link de aceptación vigente de una marca' })
   @ApiResponse({ status: 200, description: 'Link de aceptación obtenido' })
-  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+  })
   @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   async getAcceptanceLink(@Query('brandId') brandId: string, @Req() req: any) {
@@ -138,13 +144,22 @@ export class SubscriptionController {
    */
   @Post('paid')
   @ApiOperation({ summary: 'Alta de suscripción paga (sin prueba) contra ConfioPagos' })
-  @ApiResponse({ status: 201, description: 'Suscripción creada en `pending` con su link de aceptación' })
-  @ApiResponse({ status: 409, description: 'SUBSCRIPTION_ALREADY_EXISTS (la marca ya tiene servicio vigente)' })
+  @ApiResponse({
+    status: 201,
+    description: 'Suscripción creada en `pending` con su link de aceptación',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'SUBSCRIPTION_ALREADY_EXISTS (la marca ya tiene servicio vigente)',
+  })
   @ApiResponse({
     status: 422,
     description: 'INVALID_PAID_PLAN, CONFIO_PLAN_NOT_MAPPED, o contacto de comprador incompleto',
   })
-  @ApiResponse({ status: 503, description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)' })
+  @ApiResponse({
+    status: 503,
+    description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)',
+  })
   async startPaid(@Body() data: StartPaidSubscriptionDto) {
     return this.subscriptionService.startPaid(data)
   }
@@ -187,8 +202,14 @@ export class SubscriptionController {
    */
   @Post('confirm')
   @ApiOperation({ summary: 'Confirmar la suscripción contra ConfioPagos, sin esperar el webhook' })
-  @ApiResponse({ status: 201, description: 'Estado consultado; `confirmed` dice si ya quedó activa' })
-  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({
+    status: 201,
+    description: 'Estado consultado; `confirmed` dice si ya quedó activa',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+  })
   @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   @ApiResponse({ status: 422, description: 'NO_CONFIO_SUBSCRIPTION' })
@@ -200,7 +221,10 @@ export class SubscriptionController {
   @Get('history')
   @ApiOperation({ summary: 'Historial de eventos de suscripción' })
   @ApiResponse({ status: 200, description: 'Historial obtenido correctamente' })
-  @ApiResponse({ status: 400, description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)' })
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+  })
   @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
   async getHistory(@Query('brandId') brandId: string, @Req() req: any) {
     return this.subscriptionService.getHistory(this.resolveBrandId(brandId, req))
@@ -230,7 +254,8 @@ export class SubscriptionController {
   @ApiResponse({ status: 201, description: 'Precio enterprise guardado' })
   async upsertEnterprisePricing(
     @Param('brandId') brandId: string,
-    @Body() data: {
+    @Body()
+    data: {
       monthlyPrice: number
       currency?: string
       negotiatedBy?: string
@@ -285,7 +310,10 @@ export class SubscriptionController {
     if (req?.user?.isSuperAdmin) {
       if (!brandId) {
         throw new RequestException(
-          { code: 'BRAND_ID_REQUIRED', message: 'brandId es obligatorio para un principal de servicio' },
+          {
+            code: 'BRAND_ID_REQUIRED',
+            message: 'brandId es obligatorio para un principal de servicio',
+          },
           HttpStatus.BAD_REQUEST,
         )
       }

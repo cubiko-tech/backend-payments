@@ -125,7 +125,8 @@ export class ConfioCancellationService {
         return new RequestException(
           {
             code: 'CONFIO_PLAN_STORE_MISMATCH',
-            message: 'La integración con ConfioPagos está mal configurada, reintentá en unos minutos',
+            message:
+              'La integración con ConfioPagos está mal configurada, reintentá en unos minutos',
           },
           HttpStatus.SERVICE_UNAVAILABLE,
         )
@@ -134,7 +135,8 @@ export class ConfioCancellationService {
         return new RequestException(
           {
             code: 'CONFIO_SUBSCRIPTION_NAME_INVALID',
-            message: 'La suscripción guardada no es cancelable en ConfioPagos, reintentá en unos minutos',
+            message:
+              'La suscripción guardada no es cancelable en ConfioPagos, reintentá en unos minutos',
           },
           HttpStatus.SERVICE_UNAVAILABLE,
         )

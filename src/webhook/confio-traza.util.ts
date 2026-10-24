@@ -1,7 +1,10 @@
 import { DeepPartial } from 'typeorm'
 
 import { Subscription } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 
 /**

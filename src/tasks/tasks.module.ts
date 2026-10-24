@@ -18,7 +18,16 @@ import { WebhookModule } from '../webhook/webhook.module'
 @Module({
   imports: [
     TypeOrmModule.forFeature(
-      [Wallet, WalletBalanceSnapshot, Transaction, Payment, PaymentAttempt, Subscription, SubscriptionEvent, WebhookEvent],
+      [
+        Wallet,
+        WalletBalanceSnapshot,
+        Transaction,
+        Payment,
+        PaymentAttempt,
+        Subscription,
+        SubscriptionEvent,
+        WebhookEvent,
+      ],
       'DBWrite',
     ),
     TypeOrmModule.forFeature(

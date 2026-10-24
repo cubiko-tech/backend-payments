@@ -45,11 +45,12 @@ export class StripeProvider implements PaymentProvider {
             currency: params.currency.toLowerCase(),
             unit_amount: Math.round(params.amount * 100),
             product_data: {
-              name: params.purpose === 'plan_purchase'
-                ? `Plan ${params.purposeId || ''}`
-                : params.purpose === 'wallet_recharge'
-                  ? 'Recarga de wallet'
-                  : 'Pago de servicio',
+              name:
+                params.purpose === 'plan_purchase'
+                  ? `Plan ${params.purposeId || ''}`
+                  : params.purpose === 'wallet_recharge'
+                    ? 'Recarga de wallet'
+                    : 'Pago de servicio',
             },
           },
           quantity: 1,
@@ -61,7 +62,9 @@ export class StripeProvider implements PaymentProvider {
         purpose: params.purpose,
         purposeId: params.purposeId || '',
       },
-      success_url: params.successUrl || `https://${process.env.DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      success_url:
+        params.successUrl ||
+        `https://${process.env.DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: params.cancelUrl || `https://${process.env.DOMAIN}/payment/cancel`,
     })
 

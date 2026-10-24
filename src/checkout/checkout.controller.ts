@@ -32,23 +32,28 @@ export class CheckoutController {
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)' })
+  @ApiOperation({
+    summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)',
+  })
   @ApiResponse({ status: 201, description: 'Checkout procesado' })
   @ApiResponse({
     status: 400,
-    description: 'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG '
-      + '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID '
-      + '(pago con wallet sin walletId)',
+    description:
+      'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
+      '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
+      '(pago con wallet sin walletId)',
   })
   @ApiResponse({
     status: 404,
-    description: 'BRAND_NOT_FOUND (platform no conoce la marca) o WALLET_NOT_FOUND '
-      + '(la wallet no existe o no es de esa marca)',
+    description:
+      'BRAND_NOT_FOUND (platform no conoce la marca) o WALLET_NOT_FOUND ' +
+      '(la wallet no existe o no es de esa marca)',
   })
   @ApiResponse({
     status: 422,
-    description: 'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o '
-      + 'WALLET_CURRENCY_MISMATCH: no se puede determinar o cobrar el precio',
+    description:
+      'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o ' +
+      'WALLET_CURRENCY_MISMATCH: no se puede determinar o cobrar el precio',
   })
   @ApiResponse({
     status: 503,
@@ -72,7 +77,9 @@ export class CheckoutController {
   }
 
   @Get('return')
-  @ApiOperation({ summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)' })
+  @ApiOperation({
+    summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)',
+  })
   @ApiResponse({ status: 200, description: 'Estado reconciliado del pago' })
   async paymentReturn(
     @Query('paymentId') paymentId?: string,

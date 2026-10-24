@@ -1,4 +1,12 @@
-import { Column, Entity, ManyToOne, JoinColumn, Index, PrimaryGeneratedColumn, CreateDateColumn } from 'typeorm'
+import {
+  Column,
+  Entity,
+  ManyToOne,
+  JoinColumn,
+  Index,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+} from 'typeorm'
 import { Subscription } from './subscription.entity'
 
 /**
@@ -19,10 +27,16 @@ import { Subscription } from './subscription.entity'
  * Postgres (`ALTER TYPE ... ADD VALUE`), con el literal IDÉNTICO.
  */
 export enum SubscriptionEventType {
-  CREATED = 'created', PLAN_CHANGED = 'plan_changed', RENEWED = 'renewed',
-  CANCELLED = 'cancelled', EXPIRED = 'expired', REACTIVATED = 'reactivated',
-  PAYMENT_FAILED = 'payment_failed', PAYMENT_SUCCEEDED = 'payment_succeeded',
-  TRIAL_STARTED = 'trial_started', TRIAL_ENDED = 'trial_ended',
+  CREATED = 'created',
+  PLAN_CHANGED = 'plan_changed',
+  RENEWED = 'renewed',
+  CANCELLED = 'cancelled',
+  EXPIRED = 'expired',
+  REACTIVATED = 'reactivated',
+  PAYMENT_FAILED = 'payment_failed',
+  PAYMENT_SUCCEEDED = 'payment_succeeded',
+  TRIAL_STARTED = 'trial_started',
+  TRIAL_ENDED = 'trial_ended',
   CONFIRMATION_GRANTED = 'confirmation_granted',
   CONFIRMATION_NOT_GRANTED = 'confirmation_not_granted',
 }

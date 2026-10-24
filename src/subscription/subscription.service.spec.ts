@@ -1,7 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { SubscriptionService } from './subscription.service'
-import { Subscription, SubscriptionStatus, SubscriptionProvider } from './entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionStatus,
+  SubscriptionProvider,
+} from './entities/subscription.entity'
 import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -91,7 +95,11 @@ describe('SubscriptionService', () => {
   let subscriptionReadRepo: ReturnType<typeof createMockRepo>
   let eventRepo: ReturnType<typeof createMockRepo>
   let eventReadRepo: ReturnType<typeof createMockRepo>
-  let clientRoles: { assignPlanToBrand: jest.Mock; removePlanFromBrand: jest.Mock; renewPlanForBrand: jest.Mock }
+  let clientRoles: {
+    assignPlanToBrand: jest.Mock
+    removePlanFromBrand: jest.Mock
+    renewPlanForBrand: jest.Mock
+  }
   let confioTrial: { createForTrial: jest.Mock; fetchAcceptance: jest.Mock }
   let confioCancellation: { cancel: jest.Mock }
   let confioWebhook: { confirmarContraElProveedor: jest.Mock }
@@ -126,9 +134,9 @@ describe('SubscriptionService', () => {
       if (typeof fn === 'function') (fn as jest.Mock).mockReset()
     })
     mockQueryRunner.manager.findOne.mockReset()
-    mockQueryRunner.manager.save.mockReset().mockImplementation((entity, data) =>
-      Promise.resolve({ id: 'mock-id', ...data }),
-    )
+    mockQueryRunner.manager.save
+      .mockReset()
+      .mockImplementation((entity, data) => Promise.resolve({ id: 'mock-id', ...data }))
     mockQueryRunner.manager.create.mockReset().mockImplementation((entity, data) => data)
 
     const module: TestingModule = await Test.createTestingModule({
@@ -237,13 +245,15 @@ describe('SubscriptionService', () => {
       expect(subscriptionRepo.save).toHaveBeenCalledWith(data)
 
       // Verifica que se registró el evento
-      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
-        subscriptionId: 'sub-1',
-        eventType: SubscriptionEventType.CREATED,
-        toPlanSlug: 'pro',
-        toStatus: SubscriptionStatus.TRIAL,
-        triggeredBy: 'user-1',
-      }))
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-1',
+          eventType: SubscriptionEventType.CREATED,
+          toPlanSlug: 'pro',
+          toStatus: SubscriptionStatus.TRIAL,
+          triggeredBy: 'user-1',
+        }),
+      )
       expect(eventRepo.save).toHaveBeenCalled()
     })
   })
@@ -263,7 +273,11 @@ describe('SubscriptionService', () => {
       eventRepo.create.mockImplementation((data) => data)
       eventRepo.save.mockResolvedValue({ id: 'ev-1' })
 
-      const result = await service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'pro' })
+      const result = await service.startTrial({
+        brandId: 'brand-1',
+        userId: 'user-1',
+        planSlug: 'pro',
+      })
 
       expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       // Las tres columnas que la pantalla lee como acceso: vacías o sin duración.
@@ -355,22 +369,26 @@ describe('SubscriptionService', () => {
       // `accessEndsAt: null` va en la MISMA lista de residuos del ciclo anterior: el
       // ciclo nuevo no tiene baja pendiente, y la invariante de la columna es que sólo
       // es no nula mientras la haya.
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(expect.objectContaining({
-        id: 'sub-1',
-        status: SubscriptionStatus.PENDING,
-        cancelledAt: null,
-        cancelReason: null,
-        accessEndsAt: null,
-        retryCount: 0,
-        lastPaymentId: null,
-      }))
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-1',
+          status: SubscriptionStatus.PENDING,
+          cancelledAt: null,
+          cancelReason: null,
+          accessEndsAt: null,
+          retryCount: 0,
+          lastPaymentId: null,
+        }),
+      )
       expect(result.data.status).toBe(SubscriptionStatus.PENDING)
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
-      expect(eventRepo.create).toHaveBeenCalledWith(expect.objectContaining({
-        eventType: SubscriptionEventType.TRIAL_STARTED,
-        fromStatus: SubscriptionStatus.CANCELLED,
-        toStatus: SubscriptionStatus.PENDING,
-      }))
+      expect(eventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: SubscriptionEventType.TRIAL_STARTED,
+          fromStatus: SubscriptionStatus.CANCELLED,
+          toStatus: SubscriptionStatus.PENDING,
+        }),
+      )
     })
 
     it('permite la prueba sobre una suscripción vencida que nunca la usó', async () => {
@@ -592,7 +610,9 @@ describe('SubscriptionService', () => {
       describe('cuando el comprador se equivocó de número', () => {
         const pendienteCon = (tel: string) => ({
           ...esperandoAceptacion,
-          metadata: { confio: { name: esperandoAceptacion.providerSubscriptionId, buyerPhone: tel } },
+          metadata: {
+            confio: { name: esperandoAceptacion.providerSubscriptionId, buyerPhone: tel },
+          },
         })
 
         it('[R15] con un teléfono DISTINTO deja de responder `SUBSCRIPTION_PENDING_ACCEPTANCE`', async () => {
@@ -654,7 +674,6 @@ describe('SubscriptionService', () => {
             code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
           })
         })
-
       })
 
       it('la carrera también la corta bajo el lock, después de hablar con ConfioPagos', async () => {
@@ -681,7 +700,9 @@ describe('SubscriptionService', () => {
       await alta()
 
       expect(confioTrial.createForTrial).toHaveBeenCalledWith(
-        expect.objectContaining({ reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vieja' }),
+        expect.objectContaining({
+          reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vieja',
+        }),
       )
     })
 
@@ -700,7 +721,9 @@ describe('SubscriptionService', () => {
       await alta()
 
       expect(confioTrial.createForTrial).toHaveBeenCalledWith(
-        expect.objectContaining({ reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vigente' }),
+        expect.objectContaining({
+          reemplazaA: 'stores/s/subscription-plans/p/subscriptions/vigente',
+        }),
       )
     })
 
@@ -806,7 +829,9 @@ describe('SubscriptionService', () => {
 
     it('carrera sobre marca nueva: el 23505 del índice único es un 409, no un 500', async () => {
       subscriptionRepo.save.mockRejectedValue(
-        Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' }),
+        Object.assign(new Error('duplicate key value violates unique constraint'), {
+          code: '23505',
+        }),
       )
 
       await expect(alta()).rejects.toMatchObject({ code: 'SUBSCRIPTION_ALREADY_EXISTS' })
@@ -881,13 +906,18 @@ describe('SubscriptionService', () => {
     })
 
     it('un `name` sin `/subscriptions/` guarda `planName: null`, no el recurso entero', async () => {
-      confioTrial.createForTrial.mockResolvedValue({ ...ALTA_CONFIO, providerSubscriptionId: 'raro-sin-separador' })
+      confioTrial.createForTrial.mockResolvedValue({
+        ...ALTA_CONFIO,
+        providerSubscriptionId: 'raro-sin-separador',
+      })
 
       await alta()
 
       expect(subscriptionRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({
-          metadata: expect.objectContaining({ confio: expect.objectContaining({ planName: null }) }),
+          metadata: expect.objectContaining({
+            confio: expect.objectContaining({ planName: null }),
+          }),
         }),
       )
     })
@@ -1081,7 +1111,9 @@ describe('SubscriptionService', () => {
       // en producción quedaría una suscripción huérfana en el store por cada rechazo.
       subscriptionRepo.findOne.mockResolvedValue(filaConfio({ status: SubscriptionStatus.ACTIVE }))
 
-      await expect(alta()).rejects.toMatchObject({ response: { code: 'SUBSCRIPTION_ALREADY_EXISTS' } })
+      await expect(alta()).rejects.toMatchObject({
+        response: { code: 'SUBSCRIPTION_ALREADY_EXISTS' },
+      })
       expect(confioTrial.createForTrial).not.toHaveBeenCalled()
       expect(subscriptionRepo.save).not.toHaveBeenCalled()
     })
@@ -1237,8 +1269,16 @@ describe('SubscriptionService', () => {
         estadoRemoto: 'TRIALING',
       })
       subscriptionRepo.findOne
-        .mockResolvedValueOnce({ id: 'sub-1', brandId: 'brand-1', status: SubscriptionStatus.PENDING })
-        .mockResolvedValueOnce({ id: 'sub-1', brandId: 'brand-1', status: SubscriptionStatus.TRIAL })
+        .mockResolvedValueOnce({
+          id: 'sub-1',
+          brandId: 'brand-1',
+          status: SubscriptionStatus.PENDING,
+        })
+        .mockResolvedValueOnce({
+          id: 'sub-1',
+          brandId: 'brand-1',
+          status: SubscriptionStatus.TRIAL,
+        })
 
       const res = await service.confirm('brand-1')
 
@@ -1417,7 +1457,10 @@ describe('SubscriptionService', () => {
       })
 
       // El `name` sale de metadata.confio, igual que en getAcceptanceLink.
-      expect(confioCancellation.cancel).toHaveBeenCalledWith(CONFIO_NAME, 'Ya no necesito el servicio')
+      expect(confioCancellation.cancel).toHaveBeenCalledWith(
+        CONFIO_NAME,
+        'Ya no necesito el servicio',
+      )
       // El ORDEN es la invariante: nada se escribe antes de que Confío confirme.
       expect(orden[0]).toBe('confio')
       expect(orden).toContain('save')
@@ -1566,27 +1609,27 @@ describe('SubscriptionService', () => {
      * confirmó. Los dos rechazos de la pasarela propagan su `RequestException` y
      * dejan CERO escrituras — ni fila, ni evento, ni baja en roles.
      */
-    it.each([
-      ['CONFIO_SUBSCRIPTION_NAME_INVALID'],
-      ['CONFIO_CANCEL_UNAVAILABLE'],
-    ])('%s propaga tal cual y no escribe NADA', async (code) => {
-      const subscription = filaConfio()
-      subscriptionRepo.findOne.mockResolvedValue(subscription)
-      confioCancellation.cancel.mockRejectedValue(
-        new RequestException({ code, message: 'no se pudo' }, 503),
-      )
+    it.each([['CONFIO_SUBSCRIPTION_NAME_INVALID'], ['CONFIO_CANCEL_UNAVAILABLE']])(
+      '%s propaga tal cual y no escribe NADA',
+      async (code) => {
+        const subscription = filaConfio()
+        subscriptionRepo.findOne.mockResolvedValue(subscription)
+        confioCancellation.cancel.mockRejectedValue(
+          new RequestException({ code, message: 'no se pudo' }, 503),
+        )
 
-      const error = await service
-        .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
-        .catch((e) => e)
+        const error = await service
+          .cancel('brand-1', { reason: 'baja voluntaria', triggeredBy: 'user-1' })
+          .catch((e) => e)
 
-      expect(error).toBeInstanceOf(RequestException)
-      expect(error.code).toBe(code)
-      expect(error.getStatus()).toBe(503)
-      expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
-      expect(subscription.accessEndsAt).toBeNull()
-      expect(subscription.autoRenew).toBe(true)
-    })
+        expect(error).toBeInstanceOf(RequestException)
+        expect(error.code).toBe(code)
+        expect(error.getStatus()).toBe(503)
+        expect(bajaEscrita()).toEqual({ filas: 0, eventos: 0, roles: 0 })
+        expect(subscription.accessEndsAt).toBeNull()
+        expect(subscription.autoRenew).toBe(true)
+      },
+    )
 
     /**
      * RESTRICCIÓN 5: camino de reparación. Una fila ya terminal (sin la traza) se
@@ -1825,7 +1868,10 @@ describe('SubscriptionService', () => {
      */
     it('un name corrupto (no string) va a la pasarela y termina en 503 sin escribir nada', async () => {
       subscriptionRepo.findOne.mockResolvedValue(
-        filaConfio({ metadata: { confio: { name: { roto: true } } }, providerSubscriptionId: null }),
+        filaConfio({
+          metadata: { confio: { name: { roto: true } } },
+          providerSubscriptionId: null,
+        }),
       )
       confioCancellation.cancel.mockRejectedValue(
         new RequestException({ code: 'CONFIO_SUBSCRIPTION_NAME_INVALID', message: 'no' }, 503),
