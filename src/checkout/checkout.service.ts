@@ -190,7 +190,7 @@ export class CheckoutService implements OnModuleInit {
     // wallet por construcción; ahora la moneda es un dato DERIVADO del país de la marca,
     // así que hay que compararla contra la wallet ANTES de persistir y debitar. Acotado
     // a `plan_purchase`: es el único camino cuya moneda dejó de ser la del llamador.
-    if (req.provider === 'wallet' && req.purpose === 'plan_purchase') {
+    if (req.provider === 'wallet' || req.walletId) {
       await this.assertWalletCurrency(req, currency)
     }
 
@@ -292,7 +292,7 @@ export class CheckoutService implements OnModuleInit {
           referenceId: payment.id,
           idempotencyKey: `payment:${payment.id}:debit`,
         },
-        req.purpose === 'plan_purchase' ? currency : undefined,
+        currency,
       )
     } catch (error) {
       // Saldo insuficiente u otro error
@@ -911,11 +911,18 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    if (wallet.currency !== currency) {
+    if (
+      wallet.currency?.toUpperCase() === 'TKN' ||
+      currency?.toUpperCase() === 'TKN' ||
+      wallet.currency !== currency
+    ) {
       throw new RequestException(
         {
           code: 'WALLET_CURRENCY_MISMATCH',
-          message: `La wallet está en ${wallet.currency} y el cobro es en ${currency}`,
+          message:
+            wallet.currency?.toUpperCase() === 'TKN' || currency?.toUpperCase() === 'TKN'
+              ? 'Token wallets (TKN) cannot be used in checkout'
+              : `La wallet está en ${wallet.currency} y el cobro es en ${currency}`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )

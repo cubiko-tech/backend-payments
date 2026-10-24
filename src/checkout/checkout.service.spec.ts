@@ -806,13 +806,31 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(walletService.debit).not.toHaveBeenCalled()
     })
 
-    /**
-     * La guarda es del alta de plan: es el único camino cuya moneda dejó de ser la
-     * del llamador. Un `service_payment` sigue cobrando lo que pide el llamador y no
-     * gana un 422 que antes no existía.
-     */
-    it('service_payment con wallet en otra moneda sigue pasando (guarda acotada al alta)', async () => {
-      walletService.findById.mockResolvedValue(walletEn('COP'))
+    it('rejects a service_payment with a USD wallet and a COP price with 422 without debiting the wallet', async () => {
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      expect.assertions(4)
+      try {
+        await service.processCheckout({
+          brandId: BRAND_ID,
+          userId: 'u-1',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: 'w-1',
+          amount: 50000,
+          currency: 'COP',
+        })
+      } catch (error) {
+        expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(walletService.debit).not.toHaveBeenCalled()
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('passes the resolved currency to walletService.debit on a matching service_payment', async () => {
+      walletService.findById.mockResolvedValue(walletEn('USD'))
 
       await service.processCheckout({
         brandId: BRAND_ID,
@@ -824,7 +842,69 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         currency: 'USD',
       })
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 50, expect.any(Object), undefined)
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        50,
+        expect.objectContaining({
+          category: 'service_payment',
+          referenceType: 'payment',
+        }),
+        'USD',
+      )
+    })
+
+    it.each(['plan_purchase', 'service_payment', 'wallet_recharge'] as const)(
+      'rejects a TKN wallet with 422 on %s without debiting the wallet',
+      async (purpose) => {
+        walletService.findById.mockResolvedValue(walletEn('TKN'))
+
+        expect.assertions(4)
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose,
+            provider: 'wallet',
+            planSlug: purpose === 'plan_purchase' ? 'dropi-roax' : undefined,
+            walletId: 'w-1',
+            amount: 100,
+            currency: 'TKN',
+          })
+        } catch (error) {
+          expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+        }
+
+        expect(walletService.debit).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+      },
+    )
+
+    it('debits the wallet, creates the invoice, and assigns the plan on a plan_purchase in the wallet currency', async () => {
+      marcaUS()
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      await service.processCheckout(altaConWallet())
+
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        6.99,
+        expect.objectContaining({
+          category: 'plan_payment',
+          referenceType: 'payment',
+          idempotencyKey: expect.stringMatching(/^payment:.+:debit$/),
+        }),
+        'USD',
+      )
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          subtotal: 6.99,
+          total: 6.99,
+          currency: 'USD',
+        }),
+      )
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
   })
 
