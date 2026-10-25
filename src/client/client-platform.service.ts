@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common'
 
 /** Roles de marca que pueden ver el crédito: dueño, admin y financiero. */
-const ALLOWED_BRAND_ROLES = ['superuser', 'admin', 'financial']
+export const ALLOWED_BRAND_ROLES = ['superuser', 'admin', 'financial']
 
 interface BrandMember {
   user?: string | { id?: string }
@@ -82,12 +82,16 @@ export class ClientPlatformService {
    * ante error de red/servicio devuelve false.
    */
   async canViewBrandCredit(userId: string, brandId: string): Promise<boolean> {
+    const normalizedBrandId = typeof brandId === 'string' ? brandId.trim() : ''
+    if (!userId || !normalizedBrandId) {
+      return false
+    }
     if (!this.platformUrl) {
       this.logger.warn('SERVICE_PLATFORM no configurado — acceso denegado (fail-closed)')
       return false
     }
     try {
-      const url = `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(brandId)}`
+      const url = `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(normalizedBrandId)}`
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.accessServer}` },
         signal: AbortSignal.timeout(10000),

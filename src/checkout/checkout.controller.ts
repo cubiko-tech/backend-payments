@@ -1,8 +1,10 @@
-import { Controller, Get, Post, Body, Query, UseGuards } from '@nestjs/common'
+import { Controller, Get, Post, Body, Query, Req, UseGuards, HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { CheckoutService, CheckoutRequest } from './checkout.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { RequestException } from '../shared/exception/request.exception'
 
 /**
  * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
@@ -16,11 +18,6 @@ import { ProviderConfigService } from '../provider/provider-config.service'
  * `ACCESS_SERVER` para server-to-server y el fallback a
  * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
  * firmados con un `clientSecret` que rota y que payments no puede guardar).
- *
- * Es autenticación SOLA: ningún handler de acá declara `@RequirePermission`, así
- * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
- * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
- * si hacen falta, son una decisión aparte.
  */
 @ApiTags('Checkout')
 @Controller('checkout')
@@ -29,6 +26,7 @@ export class CheckoutController {
   constructor(
     private readonly checkoutService: CheckoutService,
     private readonly providerConfigService: ProviderConfigService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Post()
@@ -42,6 +40,10 @@ export class CheckoutController {
       'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
       '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
       '(pago con wallet sin walletId)',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'forbidden: caller user session is not a member of the brand with a paying role',
   })
   @ApiResponse({
     status: 404,
@@ -59,7 +61,13 @@ export class CheckoutController {
     status: 503,
     description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
   })
-  async processCheckout(@Body() body: CheckoutRequest) {
+  async processCheckout(@Body() body: CheckoutRequest, @Req() req?: any) {
+    if (req?.user?.id !== 'server') {
+      const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, body?.brandId)
+      if (!allowed) {
+        throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+      }
+    }
     // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
     // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
     // global no tiene metatype contra el cual recortar y NO descarta claves
