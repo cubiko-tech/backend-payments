@@ -20,6 +20,7 @@ import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { TaxService } from '../tax/tax.service'
+import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { CheckoutController } from './checkout.controller'
@@ -104,8 +105,16 @@ describe('POST /checkout brand membership gate', () => {
   let guard: ApiAuthGuard
   let jwtService: JwtService
   let fetchMock: jest.Mock
-  let brandBWallet: { id: string; brandId: string; currency: string; balance: number }
+  let brandBWallet: {
+    id: string
+    brandId: string
+    currency: string
+    balance: number
+    status?: WalletStatus
+  }
   let walletService: { debit: jest.Mock; credit: jest.Mock; findById: jest.Mock }
+  let paymentRepo: ReturnType<typeof createMockRepo>
+  let invoiceService: { create: jest.Mock }
 
   const createMockRepo = () => ({
     find: jest.fn().mockResolvedValue([]),
@@ -182,6 +191,11 @@ describe('POST /checkout brand membership gate', () => {
       findById: jest.fn(async () => ({ data: brandBWallet })),
     }
 
+    paymentRepo = createMockRepo()
+    invoiceService = {
+      create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),
+    }
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [CheckoutController],
       providers: [
@@ -189,7 +203,7 @@ describe('POST /checkout brand membership gate', () => {
         JwtService,
         ClientPlatformService,
         CheckoutService,
-        { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: createMockRepo() },
+        { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: paymentRepo },
         { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
@@ -198,9 +212,7 @@ describe('POST /checkout brand membership gate', () => {
         { provide: WalletService, useValue: walletService },
         {
           provide: InvoiceService,
-          useValue: {
-            create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),
-          },
+          useValue: invoiceService,
         },
         { provide: SubscriptionService, useValue: {} },
         { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(null) } },
@@ -396,5 +408,113 @@ describe('POST /checkout brand membership gate', () => {
     expect(response.status).toBe(403)
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE)
     expect(walletService.debit).not.toHaveBeenCalled()
+  })
+
+  describe('service_payment amount validation', () => {
+    let mockQueryRunner: {
+      connect: jest.Mock
+      startTransaction: jest.Mock
+      commitTransaction: jest.Mock
+      rollbackTransaction: jest.Mock
+      release: jest.Mock
+      manager: {
+        findOne: jest.Mock
+        create: jest.Mock
+        save: jest.Mock
+      }
+    }
+
+    beforeEach(() => {
+      mockPlatformResponses([{ userId: 'user-owner-b', roleName: 'superuser' }])
+
+      brandBWallet = {
+        id: WALLET_B_ID,
+        brandId: BRAND_B_ID,
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+
+      mockQueryRunner = {
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager: {
+          findOne: jest.fn().mockResolvedValue(brandBWallet),
+          create: jest.fn((_entity, data) => data),
+          save: jest.fn((_entity, data) => Promise.resolve(data)),
+        },
+      }
+
+      const realWalletService = new WalletService(
+        createMockRepo() as any,
+        { findOne: jest.fn(() => Promise.resolve(brandBWallet)) } as any,
+        createMockRepo() as any,
+        createMockRepo() as any,
+        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+      )
+
+      walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
+      walletService.debit.mockImplementation((...args: Parameters<WalletService['debit']>) =>
+        realWalletService.debit(...args),
+      )
+    })
+
+    it.each([
+      ['negative (-50000)', -50000],
+      ['zero (0)', 0],
+      ['non-numeric ("abc")', 'abc' as unknown as number],
+    ])(
+      'responds 400 on POST /checkout service_payment with a %s amount without creating payment, transaction, or invoice and keeps wallet balance at 1000',
+      async (_label, invalidAmount) => {
+        const response = await postCheckout(
+          { cookies: signUserCookies('user-owner-b') },
+          {
+            brandId: BRAND_B_ID,
+            userId: 'user-owner-b',
+            purpose: 'service_payment',
+            provider: 'wallet',
+            walletId: WALLET_B_ID,
+            amount: invalidAmount,
+            currency: 'COP',
+          },
+        )
+
+        expect(response.status).toBe(400)
+        expect(brandBWallet.balance).toBe(1000)
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+        expect(invoiceService.create).not.toHaveBeenCalled()
+      },
+    )
+
+    it('charges a positive service_payment amount (100) from a 1000 COP wallet as today', async () => {
+      const response = await postCheckout(
+        { cookies: signUserCookies('user-owner-b') },
+        {
+          brandId: BRAND_B_ID,
+          userId: 'user-owner-b',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: WALLET_B_ID,
+          amount: 100,
+          currency: 'COP',
+        },
+      )
+
+      expect(response.status).toBe(201)
+      expect(brandBWallet.balance).toBe(900)
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 100, currency: 'COP', purpose: 'service_payment' }),
+      )
+      expect(paymentRepo.save).toHaveBeenCalled()
+      expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+    })
   })
 })

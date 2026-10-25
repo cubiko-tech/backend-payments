@@ -578,6 +578,77 @@ describe('WalletService', () => {
     })
   })
 
+  describe('debit — positive finite amount guard', () => {
+    let copWallet: {
+      id: string
+      brandId: string
+      currency: string
+      balance: number
+      status: WalletStatus
+    }
+
+    beforeEach(() => {
+      copWallet = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(copWallet)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+    })
+
+    it('rejects a negative amount before opening a transaction and does not increase the wallet balance', async () => {
+      let thrownError: unknown
+      try {
+        await service.debit('w-cop', -50000, { brandId: 'brand-a' }, 'COP')
+      } catch (error) {
+        thrownError = error
+      }
+
+      expect(copWallet.balance).toBe(1000)
+      expect(thrownError).toBeInstanceOf(RequestException)
+      expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+      expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['zero', 0],
+      ['NaN', Number.NaN],
+      ['non-numeric string', 'abc' as unknown as number],
+    ])(
+      'rejects a %s amount before opening a transaction and leaves the wallet balance at 1000',
+      async (_label, invalidAmount) => {
+        let thrownError: unknown
+        try {
+          await service.debit('w-cop', invalidAmount, { brandId: 'brand-a' }, 'COP')
+        } catch (error) {
+          thrownError = error
+        }
+
+        expect(copWallet.balance).toBe(1000)
+        expect(thrownError).toBeInstanceOf(RequestException)
+        expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      },
+    )
+
+    it('debits a positive amount (100) from a 1000 COP wallet as today', async () => {
+      const result = await service.debit('w-cop', 100, { brandId: 'brand-a' }, 'COP')
+
+      expect(copWallet.balance).toBe(900)
+      expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(result.data?.wallet.balance).toBe(900)
+      expect(result.data?.transaction.amount).toBe(100)
+    })
+  })
+
   describe('getTransactions', () => {
     it('retorna transacciones de una wallet con paginación', async () => {
       const transactions = [

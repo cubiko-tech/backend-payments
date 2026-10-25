@@ -193,6 +193,13 @@ export class WalletService {
       )
     }
 
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()

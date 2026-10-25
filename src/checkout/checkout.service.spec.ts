@@ -1438,5 +1438,76 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(invoiceService.create).not.toHaveBeenCalled()
       expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
     })
+
+    it.each([
+      ['negative', -50000],
+      ['zero', 0],
+      ['non-numeric', 'abc' as unknown as number],
+    ])(
+      'rejects a service_payment with a %s amount with 400 before creating a payment, transaction, or invoice',
+      async (_label, invalidAmount) => {
+        const activeWallet = {
+          id: 'w-1',
+          brandId: BRAND_ID,
+          currency: 'COP',
+          balance: 1000,
+          status: WalletStatus.ACTIVE,
+        }
+        mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+
+        let thrownError: unknown
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose: 'service_payment',
+            provider: 'wallet',
+            walletId: 'w-1',
+            amount: invalidAmount,
+            currency: 'COP',
+          })
+        } catch (error) {
+          thrownError = error
+        }
+
+        expect(activeWallet.balance).toBe(1000)
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+        expect(invoiceService.create).not.toHaveBeenCalled()
+        expect(thrownError).toBeInstanceOf(RequestException)
+        expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      },
+    )
+
+    it('charges a positive service_payment amount (100) from a 1000 COP wallet as today', async () => {
+      const activeWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+
+      const result = await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-1',
+        amount: 100,
+        currency: 'COP',
+      })
+
+      expect(result.status).toBe('completed')
+      expect(activeWallet.balance).toBe(900)
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 100, currency: 'COP', purpose: 'service_payment' }),
+      )
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+    })
   })
 })

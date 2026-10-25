@@ -676,8 +676,15 @@ export class CheckoutService implements OnModuleInit {
       return { amount: resolved.amount, currency: resolved.currency, country: resolved.country }
     }
 
-    if (!req.amount || !req.currency) {
+    if (!req.currency) {
       throw new RequestException({ code: 'MISSING_AMOUNT', message: 'Monto y moneda requeridos' })
+    }
+
+    if (typeof req.amount !== 'number' || !Number.isFinite(req.amount) || req.amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
     }
 
     return { amount: req.amount, currency: req.currency }
