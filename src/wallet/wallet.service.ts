@@ -205,6 +205,14 @@ export class WalletService {
         lock: { mode: 'pessimistic_write' },
       })
 
+      if (resolvedKey) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey, wallet)
+        if (existing) {
+          await queryRunner.rollbackTransaction()
+          return { data: existing }
+        }
+      }
+
       if (!wallet) {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
@@ -341,15 +349,17 @@ export class WalletService {
     queryRunner: { manager: { findOne: DataSource['manager']['findOne'] } },
     walletId: string,
     idempotencyKey: string,
+    fallbackWallet?: Wallet | null,
   ) {
     const existingTransaction = await queryRunner.manager.findOne(Transaction, {
       where: { idempotencyKey },
     })
-    if (!existingTransaction) return null
+    if (!existingTransaction || existingTransaction.idempotencyKey !== idempotencyKey) return null
 
-    const currentWallet = await queryRunner.manager.findOne(Wallet, {
-      where: { id: existingTransaction.walletId || walletId },
-    })
+    const currentWallet =
+      (await queryRunner.manager.findOne(Wallet, {
+        where: { id: existingTransaction.walletId || walletId },
+      })) ?? fallbackWallet
     if (currentWallet) {
       currentWallet.balance = Number(currentWallet.balance)
     }

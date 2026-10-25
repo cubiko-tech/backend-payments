@@ -5,6 +5,7 @@ import { SubscriptionStatus } from '../subscription/entities/subscription.entity
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
+import { Transaction } from '../transaction/entities/transaction.entity'
 
 const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -1556,6 +1557,198 @@ describe('TasksService — processTrialConversions', () => {
       )
       expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+    })
+
+    it('debits the billing cycle only once and activates the subscription when backend-roles fails on the first attempt and succeeds on the retry', async () => {
+      const walletCOP = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      const savedTransactions: any[] = []
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any, opts: any) => {
+        if (entity === Transaction) {
+          return (
+            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
+            null
+          )
+        }
+        return walletCOP
+      })
+      mockQueryRunner.manager.save.mockImplementation(async (entity: any, data: any) => {
+        if (entity === Transaction) {
+          const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
+          savedTransactions.push(saved)
+          return saved
+        }
+        return data
+      })
+
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      clientRoles.renewPlanForBrand
+        .mockRejectedValueOnce(new Error('backend-roles unavailable'))
+        .mockResolvedValueOnce(true)
+
+      const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
+      const sub: any = {
+        id: 'sub-roles-down',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+        currentPeriodEnd: originalBillingDate,
+        nextBillingDate: originalBillingDate,
+        updatedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+      await serviceWithRealWallet.retryFailedPayments()
+
+      expect(savedTransactions).toHaveLength(1)
+      expect(walletCOP.balance).toBe(150000)
+      expect(savedTransactions[0].idempotencyKey).toBe(
+        'subscription:sub-roles-down:2026-08-01T00:00:00.000Z',
+      )
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate.getTime()).toBeGreaterThan(originalBillingDate.getTime())
+      expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledTimes(1)
+    })
+
+    it('completes the renewal on retry without moving the balance when the wallet is frozen after the initial debit', async () => {
+      const walletCOP = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      const savedTransactions: any[] = []
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any, opts: any) => {
+        if (entity === Transaction) {
+          return (
+            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
+            null
+          )
+        }
+        return walletCOP
+      })
+      mockQueryRunner.manager.save.mockImplementation(async (entity: any, data: any) => {
+        if (entity === Transaction) {
+          const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
+          savedTransactions.push(saved)
+          return saved
+        }
+        return data
+      })
+
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      clientRoles.renewPlanForBrand
+        .mockRejectedValueOnce(new Error('backend-roles unavailable'))
+        .mockResolvedValueOnce(true)
+
+      const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
+      const sub: any = {
+        id: 'sub-frozen-after-debit',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+        currentPeriodEnd: originalBillingDate,
+        nextBillingDate: originalBillingDate,
+        updatedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(walletCOP.balance).toBe(150000)
+      expect(savedTransactions).toHaveLength(1)
+
+      walletCOP.status = WalletStatus.FROZEN
+
+      await serviceWithRealWallet.retryFailedPayments()
+
+      expect(walletCOP.balance).toBe(150000)
+      expect(savedTransactions).toHaveLength(1)
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledTimes(1)
+    })
+
+    it('debits once and extends the period when backend-roles is up during a normal renewal', async () => {
+      const walletCOP = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      const savedTransactions: any[] = []
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any, opts: any) => {
+        if (entity === Transaction) {
+          return (
+            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
+            null
+          )
+        }
+        return walletCOP
+      })
+      mockQueryRunner.manager.save.mockImplementation(async (entity: any, data: any) => {
+        if (entity === Transaction) {
+          const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
+          savedTransactions.push(saved)
+          return saved
+        }
+        return data
+      })
+
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      clientRoles.renewPlanForBrand.mockResolvedValueOnce(true)
+
+      const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
+      const sub: any = {
+        id: 'sub-roles-up',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+        currentPeriodEnd: originalBillingDate,
+        nextBillingDate: originalBillingDate,
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(walletCOP.balance).toBe(150000)
+      expect(savedTransactions).toHaveLength(1)
+      expect(savedTransactions[0].idempotencyKey).toBe(
+        'subscription:sub-roles-up:2026-08-01T00:00:00.000Z',
+      )
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate.getTime()).toBeGreaterThan(originalBillingDate.getTime())
+      expect(clientRoles.renewPlanForBrand).toHaveBeenCalledWith(
+        'brand-a',
+        'pro',
+        sub.currentPeriodEnd,
+      )
+      expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledTimes(1)
     })
   })
 })

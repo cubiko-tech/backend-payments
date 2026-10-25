@@ -371,6 +371,103 @@ describe('WalletService', () => {
         }),
       })
     })
+
+    it('returns the original debit movement without moving the balance when the wallet is frozen afterwards', async () => {
+      const originalTx = {
+        id: 'tx-frozen-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const frozenWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.FROZEN,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return frozenWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(frozenWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data).toEqual({
+        wallet: expect.objectContaining({
+          id: 'w1',
+          balance: 150000,
+          status: WalletStatus.FROZEN,
+        }),
+        transaction: expect.objectContaining({
+          id: 'tx-frozen-retry',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+          amount: 50000,
+          balanceBefore: 200000,
+          balanceAfter: 150000,
+        }),
+      })
+    })
+
+    it('returns the original debit movement without moving the balance when the wallet is closed afterwards', async () => {
+      const originalTx = {
+        id: 'tx-closed-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const closedWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.CLOSED,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return closedWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(closedWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data?.transaction.id).toBe('tx-closed-retry')
+    })
   })
 
   describe('debit — walletId and brand ownership guard (C3)', () => {

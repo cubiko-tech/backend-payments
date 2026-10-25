@@ -1335,6 +1335,15 @@ export class TasksService {
     const newPeriodEnd = new Date()
     newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
+    const renewed = await this.clientRoles.renewPlanForBrand(
+      sub.brandId,
+      sub.planSlug,
+      newPeriodEnd,
+    )
+    if (renewed === false) {
+      throw new Error(`Could not renew plan ${sub.planSlug} in backend-roles`)
+    }
+
     sub.currentPeriodStart = newPeriodStart
     sub.currentPeriodEnd = newPeriodEnd
     sub.nextBillingDate = newPeriodEnd
@@ -1342,9 +1351,6 @@ export class TasksService {
     sub.retryCount = 0
 
     await this.subscriptionRepo.save(sub)
-
-    // Renovar expiresAt del plan en backend-roles
-    await this.clientRoles.renewPlanForBrand(sub.brandId, sub.planSlug, newPeriodEnd)
   }
 
   /**
