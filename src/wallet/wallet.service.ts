@@ -352,6 +352,40 @@ export class WalletService {
     return error?.code === '23505' || error?.driverError?.code === '23505'
   }
 
+  async findDebitByIdempotencyKey(
+    walletId: string,
+    idempotencyKey: string,
+  ): Promise<Transaction | null> {
+    if (!idempotencyKey) return null
+
+    const readMatch = await this.transactionReadRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (readMatch && readMatch.idempotencyKey === idempotencyKey) {
+      return readMatch
+    }
+
+    const writeMatch = await this.transactionRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (writeMatch && writeMatch.idempotencyKey === idempotencyKey) {
+      return writeMatch
+    }
+
+    if (typeof this.dataSource?.createQueryRunner === 'function') {
+      const queryRunner = this.dataSource.createQueryRunner()
+      await queryRunner.connect()
+      try {
+        const existing = await this.findExistingMovement(queryRunner, walletId, idempotencyKey)
+        return existing?.transaction ?? null
+      } finally {
+        await queryRunner.release()
+      }
+    }
+
+    return null
+  }
+
   private async findExistingMovement(
     queryRunner: { manager: { findOne: DataSource['manager']['findOne'] } },
     walletId: string,

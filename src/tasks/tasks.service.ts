@@ -1083,51 +1083,59 @@ export class TasksService {
       )
     }
 
-    const currency = await this.resolveWalletCurrency(sub.walletId)
-    const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
-
-    if (amount === null || amount === undefined) {
-      throw new RequestException(
-        {
-          code: 'WALLET_CURRENCY_MISMATCH',
-          message: `Plan '${sub.planSlug}' has no price in wallet currency ${currency}`,
-        },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      )
-    }
-
-    if (amount === 0) {
-      // Plan gratuito, solo renovar periodo
-      return this.extendSubscriptionPeriod(sub)
-    }
-
-    // Debitar wallet
     const billingCycleKey =
       sub.nextBillingDate instanceof Date
         ? sub.nextBillingDate.toISOString()
         : sub.nextBillingDate
           ? String(sub.nextBillingDate)
           : 'current'
-    const debitResult = await this.walletService.debit(
-      sub.walletId,
-      amount,
-      {
-        brandId: sub.brandId,
-        category: 'plan_payment',
-        description: `Renovación plan ${sub.planSlug}`,
-        referenceType: 'subscription',
-        referenceId: sub.id,
-        idempotencyKey: `subscription:${sub.id}:${billingCycleKey}`,
-      },
-      currency,
-    )
-    if (
-      debitResult &&
-      typeof debitResult === 'object' &&
-      'error' in debitResult &&
-      (debitResult as any).error
-    ) {
-      throw new Error((debitResult as any).error)
+    const idempotencyKey = `subscription:${sub.id}:${billingCycleKey}`
+
+    if (!(await this.hasCycleDebit(sub.walletId, idempotencyKey))) {
+      const currency = await this.resolveWalletCurrency(sub.walletId)
+      const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
+
+      if (amount === null || amount === undefined) {
+        if (
+          typeof this.clientRoles.hasCachedPrices === 'function' &&
+          !this.clientRoles.hasCachedPrices()
+        ) {
+          return false
+        }
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: `Plan '${sub.planSlug}' has no price in wallet currency ${currency}`,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+
+      if (amount === 0) {
+        return this.extendSubscriptionPeriod(sub)
+      }
+
+      const debitResult = await this.walletService.debit(
+        sub.walletId,
+        amount,
+        {
+          brandId: sub.brandId,
+          category: 'plan_payment',
+          description: `Renovación plan ${sub.planSlug}`,
+          referenceType: 'subscription',
+          referenceId: sub.id,
+          idempotencyKey,
+        },
+        currency,
+      )
+      if (
+        debitResult &&
+        typeof debitResult === 'object' &&
+        'error' in debitResult &&
+        (debitResult as any).error
+      ) {
+        throw new Error((debitResult as any).error)
+      }
     }
 
     // Renovar periodo
@@ -1156,6 +1164,18 @@ export class TasksService {
     })
 
     return true
+  }
+
+  private async hasCycleDebit(walletId: string, idempotencyKey: string): Promise<boolean> {
+    if (typeof this.walletService?.findDebitByIdempotencyKey === 'function') {
+      const existing = await this.walletService.findDebitByIdempotencyKey(walletId, idempotencyKey)
+      if (existing) return true
+    }
+
+    const existingFromReadRepo = await this.transactionReadRepo?.findOne({
+      where: { idempotencyKey },
+    })
+    return Boolean(existingFromReadRepo && existingFromReadRepo.idempotencyKey === idempotencyKey)
   }
 
   private async resolveWalletCurrency(walletId: string): Promise<string> {

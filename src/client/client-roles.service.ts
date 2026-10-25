@@ -91,6 +91,10 @@ export class ClientRolesService {
     return price !== undefined ? price : null
   }
 
+  hasCachedPrices(): boolean {
+    return this.cache !== null
+  }
+
   /**
    * Obtener todos los precios de planes como mapa: planSlug → currency → price.
    * Derivado de las filas cacheadas.
