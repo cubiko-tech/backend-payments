@@ -266,21 +266,7 @@ export class CheckoutService implements OnModuleInit {
     )
 
     try {
-      // Debitar wallet (atómico con pessimistic lock).
-      //
-      // La moneda viaja como 4º argumento SÓLO en el alta de plan, el mismo alcance que
-      // `assertWalletCurrency`: es el único camino cuya moneda dejó de ser la del llamador
-      // (sale del país de la marca). Un `service_payment` sigue cobrando lo que pide el
-      // llamador y no gana un 422 que antes no existía. Es defensa en profundidad: el
-      // pre-chequeo devuelve el 422 barato antes de persistir la fila de `payments`, y
-      // `debit` vuelve a comparar sobre la fila ya bloqueada.
-      //
-      // DEUDA CONOCIDA (de otra tarea, no se toca acá): el `catch` de abajo reetiqueta
-      // TODO fallo de wallet como `INSUFFICIENT_BALANCE` 400, así que si este respaldo
-      // llegara a dispararse desde checkout saldría bajo el código equivocado. Destaparlo
-      // también cambiaría el status de `WALLET_FROZEN`/`WALLET_CLOSED`/`INSUFFICIENT_BALANCE`,
-      // que son previos a esta tarea y visibles para los clientes.
-      await this.walletService.debit(
+      const debitResult = await this.walletService.debit(
         req.walletId,
         totalAmount,
         {
@@ -294,8 +280,15 @@ export class CheckoutService implements OnModuleInit {
         },
         currency,
       )
+      if (
+        debitResult &&
+        typeof debitResult === 'object' &&
+        'error' in debitResult &&
+        (debitResult as any).error
+      ) {
+        throw new Error((debitResult as any).error)
+      }
     } catch (error) {
-      // Saldo insuficiente u otro error
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
       await this.paymentRepo.save(payment)
@@ -312,10 +305,17 @@ export class CheckoutService implements OnModuleInit {
         }),
       )
 
-      throw new RequestException({
-        code: 'INSUFFICIENT_BALANCE',
-        message: error.message,
-      })
+      if (error instanceof RequestException) {
+        throw error
+      }
+
+      throw new RequestException(
+        {
+          code: 'WALLET_DEBIT_FAILED',
+          message: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      )
     }
 
     // Marcar pago como completado

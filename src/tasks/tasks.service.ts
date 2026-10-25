@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
@@ -28,6 +28,7 @@ import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
 import { CheckoutService } from '../checkout/checkout.service'
+import { RequestException } from '../shared/exception/request.exception'
 import { logger } from '../shared/logger/logger'
 
 /**
@@ -293,7 +294,7 @@ export class TasksService {
           converted++
         } catch (error) {
           logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
-          await this.handleRenewalFailure(sub)
+          await this.handleRenewalFailure(sub, error.message)
         }
         continue
       }
@@ -468,7 +469,7 @@ export class TasksService {
         // Dropi se maneja en processDropiBatchCharges
       } catch (error) {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
-        await this.handleRenewalFailure(sub)
+        await this.handleRenewalFailure(sub, error.message)
       }
     }
 
@@ -516,7 +517,7 @@ export class TasksService {
         }
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
-        await this.handleRenewalFailure(sub)
+        await this.handleRenewalFailure(sub, error.message)
       }
     }
 
@@ -1072,7 +1073,25 @@ export class TasksService {
    * Renovar suscripción cobrando de wallet interna.
    */
   private async renewFromWallet(sub: Subscription) {
-    const amount = (await this.clientRoles.getPlanPrice(sub.planSlug, 'COP')) || 0
+    if (typeof sub.walletId !== 'string' || !sub.walletId.trim()) {
+      throw new RequestException(
+        { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    const currency = await this.resolveWalletCurrency(sub.walletId)
+    const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
+
+    if (amount === null || amount === undefined) {
+      throw new RequestException(
+        {
+          code: 'WALLET_CURRENCY_MISMATCH',
+          message: `Plan '${sub.planSlug}' has no price in wallet currency ${currency}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
 
     if (amount === 0) {
       // Plan gratuito, solo renovar periodo
@@ -1087,14 +1106,27 @@ export class TasksService {
         : sub.nextBillingDate
           ? String(sub.nextBillingDate)
           : 'current'
-    await this.walletService.debit(sub.walletId, amount, {
-      brandId: sub.brandId,
-      category: 'plan_payment',
-      description: `Renovación plan ${sub.planSlug}`,
-      referenceType: 'subscription',
-      referenceId: sub.id,
-      idempotencyKey: `subscription:${sub.id}:${billingCycleKey}`,
-    })
+    const debitResult = await this.walletService.debit(
+      sub.walletId,
+      amount,
+      {
+        brandId: sub.brandId,
+        category: 'plan_payment',
+        description: `Renovación plan ${sub.planSlug}`,
+        referenceType: 'subscription',
+        referenceId: sub.id,
+        idempotencyKey: `subscription:${sub.id}:${billingCycleKey}`,
+      },
+      currency,
+    )
+    if (
+      debitResult &&
+      typeof debitResult === 'object' &&
+      'error' in debitResult &&
+      (debitResult as any).error
+    ) {
+      throw new Error((debitResult as any).error)
+    }
 
     // Renovar periodo
     await this.extendSubscriptionPeriod(sub)
@@ -1118,6 +1150,24 @@ export class TasksService {
       subscriptionId: sub.id,
       planSlug: sub.planSlug,
     })
+  }
+
+  private async resolveWalletCurrency(walletId: string): Promise<string> {
+    const readWallet = await this.walletReadRepo?.findOne({ where: { id: walletId } })
+    if (readWallet?.currency) {
+      return readWallet.currency
+    }
+    if (typeof this.walletService?.findById === 'function') {
+      try {
+        const found = await this.walletService.findById(walletId)
+        if (found && 'data' in found && found.data?.currency) {
+          return found.data.currency
+        }
+      } catch {
+        return 'COP'
+      }
+    }
+    return 'COP'
   }
 
   /**
@@ -1300,19 +1350,21 @@ export class TasksService {
   /**
    * Manejar fallo de renovación: incrementar retry, marcar past_due.
    */
-  private async handleRenewalFailure(sub: Subscription) {
+  private async handleRenewalFailure(sub: Subscription, failureReason?: string) {
+    const previousStatus = sub.status
     sub.retryCount = (sub.retryCount || 0) + 1
     sub.status = SubscriptionStatus.PAST_DUE
     await this.subscriptionRepo.save(sub)
 
+    const baseReason = `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`
     await this.subscriptionEventRepo.save(
       this.subscriptionEventRepo.create({
         subscriptionId: sub.id,
         eventType: SubscriptionEventType.PAYMENT_FAILED,
-        fromStatus: sub.status,
+        fromStatus: previousStatus,
         toStatus: SubscriptionStatus.PAST_DUE,
         triggeredBy: 'system',
-        reason: `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`,
+        reason: failureReason ? `${baseReason}: ${failureReason}` : baseReason,
       }),
     )
 

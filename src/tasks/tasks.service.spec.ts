@@ -172,8 +172,6 @@ describe('TasksService — processTrialConversions', () => {
 
     await service.processTrialConversions()
 
-    // 3 argumentos exactos: el cron NO pasa `expectedCurrency`. La aserción se rompe el
-    // día que alguien cablee la guarda de moneda dentro de `renewFromWallet`.
     expect(walletService.debit).toHaveBeenCalledWith(
       'w1',
       50000,
@@ -182,6 +180,7 @@ describe('TasksService — processTrialConversions', () => {
         referenceId: 's1',
         idempotencyKey: 'subscription:s1:current',
       }),
+      'COP',
     )
     expect(subscriptionRepo.save).toHaveBeenCalledWith(
       expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
@@ -1219,6 +1218,7 @@ describe('TasksService — processTrialConversions', () => {
 
   describe('processSubscriptionRenewals — wallet ownership and null walletId guard (C3)', () => {
     let mockQueryRunner: any
+    let walletReadRepoForRenewal: ReturnType<typeof mockRepo>
     let realWalletService: WalletService
     let serviceWithRealWallet: TasksService
 
@@ -1236,16 +1236,21 @@ describe('TasksService — processTrialConversions', () => {
         },
       }
 
+      walletReadRepoForRenewal = {
+        ...mockRepo(),
+        findOne: jest.fn((opts) => mockQueryRunner.manager.findOne(null, opts)),
+      }
+
       realWalletService = new WalletService(
         mockRepo() as any,
-        mockRepo() as any,
+        walletReadRepoForRenewal as any,
         mockRepo() as any,
         mockRepo() as any,
         { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
       )
 
       serviceWithRealWallet = new TasksService(
-        mockRepo() as any,
+        walletReadRepoForRenewal as any,
         mockRepo() as any,
         mockRepo() as any,
         paymentRepo as any,
@@ -1392,6 +1397,165 @@ describe('TasksService — processTrialConversions', () => {
           planSlug: 'pro',
         }),
       )
+    })
+
+    it('does not debit and marks the renewal as failed with the currency reason when the wallet is in USD and the plan only has a price in COP', async () => {
+      const walletUSD = {
+        id: 'w-usd',
+        brandId: 'brand-a',
+        currency: 'USD',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletUSD)
+      clientRoles.getPlanPrice.mockImplementation(async (_slug: string, currency?: string) =>
+        currency === 'COP' ? 50000 : null,
+      )
+      const originalPeriodEnd = new Date('2026-08-01T00:00:00.000Z')
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-usd-wallet',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-usd',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+          currentPeriodEnd: originalPeriodEnd,
+          nextBillingDate: originalPeriodEnd,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(walletUSD.balance).toBe(200000)
+      expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('pro', 'USD')
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-usd-wallet',
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: 1,
+          currentPeriodEnd: originalPeriodEnd,
+        }),
+      )
+      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-usd-wallet',
+          eventType: SubscriptionEventType.PAYMENT_FAILED,
+          fromStatus: SubscriptionStatus.ACTIVE,
+          toStatus: SubscriptionStatus.PAST_DUE,
+          reason: expect.stringMatching(/currency.*USD|USD/i),
+        }),
+      )
+      expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+    })
+
+    it('rejects a renewal when the locked wallet currency mismatches the expected currency at debit time without debiting the USD wallet', async () => {
+      const staleReadWallet = {
+        id: 'w-usd',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      const lockedUsdWallet = {
+        id: 'w-usd',
+        brandId: 'brand-a',
+        currency: 'USD',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      walletReadRepoForRenewal.findOne.mockResolvedValueOnce(staleReadWallet)
+      mockQueryRunner.manager.findOne.mockResolvedValue(lockedUsdWallet)
+      clientRoles.getPlanPrice.mockImplementation(async (_slug: string, currency?: string) =>
+        currency === 'COP' ? 50000 : null,
+      )
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-locked-usd',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-usd',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(lockedUsdWallet.balance).toBe(200000)
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-locked-usd',
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: 1,
+        }),
+      )
+      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-locked-usd',
+          eventType: SubscriptionEventType.PAYMENT_FAILED,
+          toStatus: SubscriptionStatus.PAST_DUE,
+          reason: expect.stringMatching(/USD.*COP|COP/i),
+        }),
+      )
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+    })
+
+    it('does not extend the subscription period or complete the renewal when the debit fails due to a cut connection', async () => {
+      const walletCOP = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletCOP)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      const originalPeriodEnd = new Date('2026-08-01T00:00:00.000Z')
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-cut-conn',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-cop',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+          currentPeriodEnd: originalPeriodEnd,
+          nextBillingDate: originalPeriodEnd,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-cut-conn',
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: 1,
+          currentPeriodEnd: originalPeriodEnd,
+          nextBillingDate: originalPeriodEnd,
+        }),
+      )
+      expect(subscriptionRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
+      )
+      expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
     })
   })
 })

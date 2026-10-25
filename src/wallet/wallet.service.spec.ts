@@ -457,6 +457,28 @@ describe('WalletService', () => {
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
     })
+
+    it('rethrows unexpected database errors on debit after rolling back the transaction', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+
+      await expect(service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      )
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.release).toHaveBeenCalled()
+    })
   })
 
   describe('getTransactions', () => {

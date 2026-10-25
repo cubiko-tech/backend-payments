@@ -314,7 +314,7 @@ export class WalletService {
       }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en débito de wallet ${walletId}: ${error.message}`)
-      return { error: error.message }
+      throw error
     } finally {
       await queryRunner.release()
     }

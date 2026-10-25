@@ -10,6 +10,7 @@ import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.en
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
 
 import { WalletService } from '../wallet/wallet.service'
+import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { AuditService } from '../audit/audit.service'
@@ -1275,6 +1276,167 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           ],
         }),
       )
+    })
+  })
+
+  describe('wallet debit error propagation and failure handling', () => {
+    let mockQueryRunner: {
+      connect: jest.Mock
+      startTransaction: jest.Mock
+      commitTransaction: jest.Mock
+      rollbackTransaction: jest.Mock
+      release: jest.Mock
+      manager: {
+        findOne: jest.Mock
+        create: jest.Mock
+        save: jest.Mock
+      }
+    }
+    let realWalletService: WalletService
+
+    beforeEach(() => {
+      mockQueryRunner = {
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager: {
+          findOne: jest.fn(),
+          create: jest.fn((_entity, data) => data),
+          save: jest.fn((_entity, data) => Promise.resolve(data)),
+        },
+      }
+
+      const walletReadRepo = {
+        findOne: jest.fn((opts) => mockQueryRunner.manager.findOne(Wallet, opts)),
+      }
+
+      realWalletService = new WalletService(
+        createMockRepo() as any,
+        walletReadRepo as any,
+        createMockRepo() as any,
+        createMockRepo() as any,
+        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+      )
+
+      walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
+      walletService.debit.mockImplementation((...args: Parameters<WalletService['debit']>) =>
+        realWalletService.debit(...args),
+      )
+    })
+
+    it('rejects a checkout with a frozen wallet with WALLET_FROZEN instead of INSUFFICIENT_BALANCE', async () => {
+      const frozenWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.FROZEN,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(frozenWallet)
+
+      expect.assertions(6)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('WALLET_FROZEN')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'failed' }),
+      )
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rejects a checkout with a closed wallet with WALLET_CLOSED instead of INSUFFICIENT_BALANCE', async () => {
+      const closedWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.CLOSED,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(closedWallet)
+
+      expect.assertions(5)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('WALLET_CLOSED')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rejects a checkout with insufficient balance with INSUFFICIENT_BALANCE', async () => {
+      const lowBalanceWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === Wallet ? lowBalanceWallet : null),
+      )
+
+      expect.assertions(5)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('INSUFFICIENT_BALANCE')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('does not complete the payment or extend the subscription period when the debit fails due to a cut connection', async () => {
+      const activeWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+
+      await expect(service.processCheckout(altaConWallet())).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      )
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(paymentRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: 'failed',
+          failureReason: 'Connection terminated unexpectedly',
+        }),
+      )
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
     })
   })
 })
