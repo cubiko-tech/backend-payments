@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { WalletService } from './wallet.service'
-import { Wallet } from './entities/wallet.entity'
+import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
   Transaction,
   TransactionType,
@@ -370,6 +370,92 @@ describe('WalletService', () => {
           balanceAfter: 120,
         }),
       })
+    })
+  })
+
+  describe('debit — walletId and brand ownership guard (C3)', () => {
+    it('rejects a null or empty walletId before querying the database and does not debit another wallet', async () => {
+      const otherWallet = {
+        id: 'w-other',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
+
+      await expect(service.debit(null as any, 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+      await expect(service.debit('   ', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(otherWallet.balance).toBe(200)
+    })
+
+    it('rejects a charge from brand A against brand B wallet and leaves brand B wallet unchanged', async () => {
+      const walletBrandB = {
+        id: 'w-brand-b',
+        brandId: 'brand-b',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandB)
+
+      expect.assertions(6)
+      try {
+        await service.debit('w-brand-b', 80, { brandId: 'brand-a' })
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.NOT_FOUND)
+      }
+
+      expect(walletBrandB.balance).toBe(200)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+    })
+
+    it('debits normally when the wallet belongs to the paying brand', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+
+      const result = await service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')
+
+      expect(walletBrandA.balance).toBe(120)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).not.toHaveBeenCalled()
+      expect(result.data?.wallet.balance).toBe(120)
+    })
+
+    it('rejects debiting a TKN wallet even when expectedCurrency is omitted', async () => {
+      const tknWallet = {
+        id: 'w-tkn',
+        brandId: 'brand-a',
+        currency: 'TKN',
+        balance: 500,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(tknWallet)
+
+      await expect(service.debit('w-tkn', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(tknWallet.balance).toBe(500)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
     })
   })
 

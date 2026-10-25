@@ -186,6 +186,13 @@ export class WalletService {
     expectedCurrency?: string,
     idempotencyKey?: string,
   ) {
+    if (typeof walletId !== 'string' || !walletId.trim()) {
+      throw new RequestException(
+        { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
@@ -202,6 +209,25 @@ export class WalletService {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
           HttpStatus.NOT_FOUND,
+        )
+      }
+
+      if ('brandId' in txData && (!txData.brandId || wallet.brandId !== txData.brandId)) {
+        throw new RequestException(
+          { code: 'WALLET_NOT_FOUND', message: 'Wallet does not belong to the paying brand' },
+          HttpStatus.NOT_FOUND,
+        )
+      }
+
+      const walletCurrency = wallet.currency?.toUpperCase()
+      const requestedCurrency = expectedCurrency?.toUpperCase()
+      if (walletCurrency === 'TKN' || requestedCurrency === 'TKN') {
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: 'Token wallets cannot be debited for monetary charges',
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
 

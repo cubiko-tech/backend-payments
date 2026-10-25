@@ -3,6 +3,8 @@ import { In } from 'typeorm'
 import { TasksService, franjasDeRepesca } from './tasks.service'
 import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import { WalletService } from '../wallet/wallet.service'
+import { WalletStatus } from '../wallet/entities/wallet.entity'
 
 const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -1212,6 +1214,184 @@ describe('TasksService — processTrialConversions', () => {
       await service.processSubscriptionRenewals()
 
       expect(checkoutService.processCheckout).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('processSubscriptionRenewals — wallet ownership and null walletId guard (C3)', () => {
+    let mockQueryRunner: any
+    let realWalletService: WalletService
+    let serviceWithRealWallet: TasksService
+
+    beforeEach(() => {
+      mockQueryRunner = {
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager: {
+          findOne: jest.fn(),
+          create: jest.fn((_entity, data) => data),
+          save: jest.fn((_entity, data) => Promise.resolve(data)),
+        },
+      }
+
+      realWalletService = new WalletService(
+        mockRepo() as any,
+        mockRepo() as any,
+        mockRepo() as any,
+        mockRepo() as any,
+        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+      )
+
+      serviceWithRealWallet = new TasksService(
+        mockRepo() as any,
+        mockRepo() as any,
+        mockRepo() as any,
+        paymentRepo as any,
+        subscriptionRepo as any,
+        subscriptionEventRepo as any,
+        mockRepo() as any,
+        {} as any,
+        realWalletService,
+        {} as any,
+        providerFactory as any,
+        eventBus as any,
+        clientRoles as any,
+        checkoutService as any,
+        confioWebhook as any,
+      )
+    })
+
+    it('does not debit any wallet and marks the renewal as failed when walletId is null', async () => {
+      const otherWallet = {
+        id: 'w-other',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-null-wallet',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: null,
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(otherWallet.balance).toBe(200000)
+      expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-null-wallet',
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: 1,
+        }),
+      )
+      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-null-wallet',
+          eventType: SubscriptionEventType.PAYMENT_FAILED,
+          toStatus: SubscriptionStatus.PAST_DUE,
+        }),
+      )
+      expect(eventBus.notifyPaymentFailed).toHaveBeenCalledWith(
+        'brand-a',
+        'sub-null-wallet',
+        expect.any(String),
+      )
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+    })
+
+    it('rejects a renewal from brand A when the wallet belongs to brand B and leaves brand B wallet unchanged', async () => {
+      const walletBrandB = {
+        id: 'w-brand-b',
+        brandId: 'brand-b',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandB)
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-wrong-brand',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-brand-b',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(walletBrandB.balance).toBe(200000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-wrong-brand',
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: 1,
+        }),
+      )
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+    })
+
+    it('debits the brand own wallet and renews the subscription as today', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      subscriptionRepo.find.mockResolvedValue([
+        {
+          id: 'sub-own-wallet',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-brand-a',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+        },
+      ])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(walletBrandA.balance).toBe(150000)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(subscriptionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'sub-own-wallet',
+          status: SubscriptionStatus.ACTIVE,
+          retryCount: 0,
+        }),
+      )
+      expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: 'brand-a',
+          subscriptionId: 'sub-own-wallet',
+          planSlug: 'pro',
+        }),
+      )
     })
   })
 })

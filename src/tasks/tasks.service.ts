@@ -437,7 +437,7 @@ export class TasksService {
     let processed = 0
     for (const sub of dueSubscriptions) {
       try {
-        if (sub.provider === 'wallet' && sub.walletId) {
+        if (sub.provider === 'wallet') {
           await this.renewFromWallet(sub)
           processed++
         } else if (esSuscripcionRecurrenteDeConfio(sub)) {
@@ -506,7 +506,7 @@ export class TasksService {
       if (new Date() < nextRetry) continue
 
       try {
-        if (sub.provider === 'wallet' && sub.walletId) {
+        if (sub.provider === 'wallet') {
           await this.renewFromWallet(sub)
           retried++
         } else if (sub.provider === 'confio') {

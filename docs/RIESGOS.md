@@ -42,14 +42,14 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El cobro y el crédito de wallet no tienen llave de idempotencia (C2)
 
-- **Dónde**: `src/wallet/wallet.service.ts:98-170` (`credit`) y `:182-295` (`debit`); columna
+- **Dónde**: `src/wallet/wallet.service.ts:98-170` (`credit`) y `:182-321` (`debit`); columna
   `idempotencyKey` en `src/transaction/entities/transaction.entity.ts:33`
 - **Qué lo dispara**: un reintento del mismo cobro o crédito con la misma `idempotencyKey`.
 - **Qué rompe**: sin restricción única en base de datos, un reintento volvería a sumar o restar el saldo
   y dejaría dos filas en `transactions` para el mismo hecho.
 - **Estado**: mitigado (criterio C2, release 002) — `transactions.idempotencyKey` tiene índice
   `unique: true` (`src/transaction/entities/transaction.entity.ts:33`) y tanto `credit`
-  (`src/wallet/wallet.service.ts:160-163`) como `debit` (`:247-253`, `:285-288`) devuelven el movimiento
+  (`src/wallet/wallet.service.ts:160-163`) como `debit` (`:273-279`, `:311-314`) devuelven el movimiento
   existente sin volver a tocar el saldo.
 
 ## Un pago de servicio puede debitar una wallet de otra moneda o de tokens (C3)
@@ -69,14 +69,20 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## `WalletService.debit` no exige `walletId` ni pertenencia de la wallet a la marca (C3)
 
-- **Dónde**: `src/wallet/wallet.service.ts:182-206` (`debit`)
+- **Dónde**: `src/wallet/wallet.service.ts:182-232` (`debit`) y `src/tasks/tasks.service.ts:440`, `:509`
 - **Qué lo dispara**: una llamada directa a `walletService.debit` (por ejemplo desde `renewFromWallet` en
   `src/tasks/tasks.service.ts:1090` o desde un consumidor interno) con `walletId` vacío/`undefined`, con
   una wallet de otra `brandId` o con una wallet en `TKN`.
 - **Qué rompe**: TypeORM ignora condiciones `undefined` en `findOne({ where: { id: walletId } })` y
-  bloquea la primera wallet de la tabla; además, `debit` no comprueba que `wallet.brandId` coincida con
-  la marca del movimiento ni rechaza wallets `TKN` por sí mismo.
-- **Estado**: abierto (criterio C3, lo cierra LOC-5).
+  bloquea la primera wallet de la tabla; además, sin validar `wallet.brandId` ni moneda `TKN`, `debit`
+  podría descontar saldo de una wallet ajena o de tokens, y una renovación con `walletId: null` quedaba
+  omitida en vez de marcarse fallida.
+- **Estado**: mitigado (criterio C3, LOC-5) — `debit` exige `walletId` no vacío antes de abrir la
+  transacción o consultar la base (`src/wallet/wallet.service.ts:189-194`), verifica que la wallet
+  bloqueada pertenezca a `txData.brandId` cuando se informa la marca (`:215-220`), rechaza wallets o
+  cobros en `TKN` (`:222-232`), y `processSubscriptionRenewals` / `retryFailedPayments` encaminan toda
+  suscripción `provider === 'wallet'` a `renewFromWallet` (`src/tasks/tasks.service.ts:440`, `:509`) para
+  que un `walletId` nulo falle sin debitar ninguna wallet.
 
 ## La renovación por wallet pide precio fijo en COP, omite la moneda en `debit` y `processWalletPayment` oculta fallos del débito (C3)
 
