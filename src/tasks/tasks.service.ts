@@ -290,8 +290,9 @@ export class TasksService {
           continue
         }
         try {
-          await this.renewFromWallet(sub)
-          converted++
+          if (await this.renewFromWallet(sub)) {
+            converted++
+          }
         } catch (error) {
           logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
           await this.handleRenewalFailure(sub, error.message)
@@ -439,8 +440,9 @@ export class TasksService {
     for (const sub of dueSubscriptions) {
       try {
         if (sub.provider === 'wallet') {
-          await this.renewFromWallet(sub)
-          processed++
+          if (await this.renewFromWallet(sub)) {
+            processed++
+          }
         } else if (esSuscripcionRecurrenteDeConfio(sub)) {
           // ⚠️ ACÁ NO SE COBRA: la recurrencia vive en ConfioPagos y ellos ya
           // cobraron en el aniversario. Lo nuestro es ENTERARNOS, por el mismo
@@ -508,8 +510,9 @@ export class TasksService {
 
       try {
         if (sub.provider === 'wallet') {
-          await this.renewFromWallet(sub)
-          retried++
+          if (await this.renewFromWallet(sub)) {
+            retried++
+          }
         } else if (sub.provider === 'confio') {
           // ConfioPagos: re-emitir el link de cobro (cuenta como reintento).
           await this.issueExternalCharge(sub, true)
@@ -1072,7 +1075,7 @@ export class TasksService {
   /**
    * Renovar suscripción cobrando de wallet interna.
    */
-  private async renewFromWallet(sub: Subscription) {
+  private async renewFromWallet(sub: Subscription): Promise<boolean> {
     if (typeof sub.walletId !== 'string' || !sub.walletId.trim()) {
       throw new RequestException(
         { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
@@ -1095,8 +1098,7 @@ export class TasksService {
 
     if (amount === 0) {
       // Plan gratuito, solo renovar periodo
-      await this.extendSubscriptionPeriod(sub)
-      return
+      return this.extendSubscriptionPeriod(sub)
     }
 
     // Debitar wallet
@@ -1129,7 +1131,9 @@ export class TasksService {
     }
 
     // Renovar periodo
-    await this.extendSubscriptionPeriod(sub)
+    if (!(await this.extendSubscriptionPeriod(sub))) {
+      return false
+    }
 
     // Registrar evento
     await this.subscriptionEventRepo.save(
@@ -1150,6 +1154,8 @@ export class TasksService {
       subscriptionId: sub.id,
       planSlug: sub.planSlug,
     })
+
+    return true
   }
 
   private async resolveWalletCurrency(walletId: string): Promise<string> {
@@ -1330,7 +1336,7 @@ export class TasksService {
   /**
    * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
-  private async extendSubscriptionPeriod(sub: Subscription) {
+  private async extendSubscriptionPeriod(sub: Subscription): Promise<boolean> {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
     newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
@@ -1340,8 +1346,8 @@ export class TasksService {
       sub.planSlug,
       newPeriodEnd,
     )
-    if (renewed === false) {
-      throw new Error(`Could not renew plan ${sub.planSlug} in backend-roles`)
+    if (!renewed) {
+      return false
     }
 
     sub.currentPeriodStart = newPeriodStart
@@ -1351,6 +1357,7 @@ export class TasksService {
     sub.retryCount = 0
 
     await this.subscriptionRepo.save(sub)
+    return true
   }
 
   /**

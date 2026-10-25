@@ -1559,12 +1559,12 @@ describe('TasksService — processTrialConversions', () => {
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
     })
 
-    it('debits the billing cycle only once and activates the subscription when backend-roles fails on the first attempt and succeeds on the retry', async () => {
+    const setupRealWalletPersistence = (initialBalance = 200000) => {
       const walletCOP = {
         id: 'w-cop',
         brandId: 'brand-a',
         currency: 'COP',
-        balance: 200000,
+        balance: initialBalance,
         status: WalletStatus.ACTIVE,
       }
       const savedTransactions: any[] = []
@@ -1587,9 +1587,17 @@ describe('TasksService — processTrialConversions', () => {
         return data
       })
 
+      return { walletCOP, savedTransactions }
+    }
+
+    it('debits the billing cycle only once without marking past_due or degrading when backend-roles returns false across multiple passes and activates when it recovers', async () => {
+      const { walletCOP, savedTransactions } = setupRealWalletPersistence()
+
       clientRoles.getPlanPrice.mockResolvedValue(50000)
       clientRoles.renewPlanForBrand
-        .mockRejectedValueOnce(new Error('backend-roles unavailable'))
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(false)
         .mockResolvedValueOnce(true)
 
       const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
@@ -1604,12 +1612,24 @@ describe('TasksService — processTrialConversions', () => {
         retryCount: 0,
         currentPeriodEnd: originalBillingDate,
         nextBillingDate: originalBillingDate,
-        updatedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
       }
       subscriptionRepo.find.mockResolvedValue([sub])
 
       await serviceWithRealWallet.processSubscriptionRenewals()
-      await serviceWithRealWallet.retryFailedPayments()
+      await serviceWithRealWallet.processSubscriptionRenewals()
+      await serviceWithRealWallet.processSubscriptionRenewals()
+      await serviceWithRealWallet.expireSubscriptions()
+
+      expect(savedTransactions).toHaveLength(1)
+      expect(walletCOP.balance).toBe(150000)
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate).toBe(originalBillingDate)
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
 
       expect(savedTransactions).toHaveLength(1)
       expect(walletCOP.balance).toBe(150000)
@@ -1619,41 +1639,49 @@ describe('TasksService — processTrialConversions', () => {
       expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
       expect(sub.retryCount).toBe(0)
       expect(sub.nextBillingDate.getTime()).toBeGreaterThan(originalBillingDate.getTime())
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
       expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledTimes(1)
     })
 
-    it('completes the renewal on retry without moving the balance when the wallet is frozen after the initial debit', async () => {
-      const walletCOP = {
-        id: 'w-cop',
-        brandId: 'brand-a',
-        currency: 'COP',
-        balance: 200000,
-        status: WalletStatus.ACTIVE,
-      }
-      const savedTransactions: any[] = []
+    it('keeps a zero-price subscription active without dunning when backend-roles returns false and extends the period when it recovers', async () => {
+      clientRoles.getPlanPrice.mockResolvedValue(0)
+      clientRoles.renewPlanForBrand.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
 
-      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any, opts: any) => {
-        if (entity === Transaction) {
-          return (
-            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
-            null
-          )
-        }
-        return walletCOP
-      })
-      mockQueryRunner.manager.save.mockImplementation(async (entity: any, data: any) => {
-        if (entity === Transaction) {
-          const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
-          savedTransactions.push(saved)
-          return saved
-        }
-        return data
-      })
+      const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
+      const sub: any = {
+        id: 'sub-free-roles-down',
+        brandId: 'brand-a',
+        planSlug: 'free',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+        currentPeriodEnd: originalBillingDate,
+        nextBillingDate: originalBillingDate,
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate).toBe(originalBillingDate)
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+
+      await serviceWithRealWallet.processSubscriptionRenewals()
+
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate.getTime()).toBeGreaterThan(originalBillingDate.getTime())
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+    })
+
+    it('completes the renewal on retry without moving the balance when the wallet is frozen after the initial debit', async () => {
+      const { walletCOP, savedTransactions } = setupRealWalletPersistence()
 
       clientRoles.getPlanPrice.mockResolvedValue(50000)
-      clientRoles.renewPlanForBrand
-        .mockRejectedValueOnce(new Error('backend-roles unavailable'))
-        .mockResolvedValueOnce(true)
+      clientRoles.renewPlanForBrand.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
 
       const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
       const sub: any = {
@@ -1667,7 +1695,6 @@ describe('TasksService — processTrialConversions', () => {
         retryCount: 0,
         currentPeriodEnd: originalBillingDate,
         nextBillingDate: originalBillingDate,
-        updatedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
       }
       subscriptionRepo.find.mockResolvedValue([sub])
 
@@ -1678,42 +1705,18 @@ describe('TasksService — processTrialConversions', () => {
 
       walletCOP.status = WalletStatus.FROZEN
 
-      await serviceWithRealWallet.retryFailedPayments()
+      await serviceWithRealWallet.processSubscriptionRenewals()
 
       expect(walletCOP.balance).toBe(150000)
       expect(savedTransactions).toHaveLength(1)
       expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
       expect(sub.retryCount).toBe(0)
+      expect(sub.nextBillingDate.getTime()).toBeGreaterThan(originalBillingDate.getTime())
       expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledTimes(1)
     })
 
     it('debits once and extends the period when backend-roles is up during a normal renewal', async () => {
-      const walletCOP = {
-        id: 'w-cop',
-        brandId: 'brand-a',
-        currency: 'COP',
-        balance: 200000,
-        status: WalletStatus.ACTIVE,
-      }
-      const savedTransactions: any[] = []
-
-      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any, opts: any) => {
-        if (entity === Transaction) {
-          return (
-            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
-            null
-          )
-        }
-        return walletCOP
-      })
-      mockQueryRunner.manager.save.mockImplementation(async (entity: any, data: any) => {
-        if (entity === Transaction) {
-          const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
-          savedTransactions.push(saved)
-          return saved
-        }
-        return data
-      })
+      const { walletCOP, savedTransactions } = setupRealWalletPersistence()
 
       clientRoles.getPlanPrice.mockResolvedValue(50000)
       clientRoles.renewPlanForBrand.mockResolvedValueOnce(true)
