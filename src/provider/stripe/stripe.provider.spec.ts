@@ -55,9 +55,7 @@ describe('StripeProvider', () => {
       delete process.env.STRIPE_SECRET_KEY
       const provider = new StripeProvider()
 
-      expect(() => (provider as any).ensureConfigured()).toThrow(
-        'Stripe no configurado',
-      )
+      expect(() => (provider as any).ensureConfigured()).toThrow('Stripe no configurado')
     })
 
     it('no lanza error cuando está configurado', () => {
@@ -73,10 +71,7 @@ describe('StripeProvider', () => {
       delete process.env.STRIPE_SECRET_KEY
       const provider = new StripeProvider()
 
-      const result = provider.validateWebhookSignature(
-        Buffer.from('payload'),
-        'sig_test',
-      )
+      const result = provider.validateWebhookSignature(Buffer.from('payload'), 'sig_test')
       expect(result).toBe(false)
     })
 
@@ -85,10 +80,7 @@ describe('StripeProvider', () => {
       delete process.env.STRIPE_WEBHOOK_SECRET
 
       const provider = new StripeProvider()
-      const result = provider.validateWebhookSignature(
-        Buffer.from('payload'),
-        'sig_test',
-      )
+      const result = provider.validateWebhookSignature(Buffer.from('payload'), 'sig_test')
       expect(result).toBe(false)
     })
   })

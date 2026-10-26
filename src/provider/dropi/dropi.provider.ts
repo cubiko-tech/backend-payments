@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { createHmac } from 'crypto'
+import { createHmac, timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
   CreateCheckoutParams,
@@ -77,11 +77,12 @@ export class DropiProvider implements PaymentProvider {
         brandId: params.brandId,
         amount: params.amount,
         currency: params.currency,
-        description: params.purpose === 'plan_purchase'
-          ? `Pago plan ${params.purposeId || ''}`
-          : params.purpose === 'wallet_recharge'
-            ? 'Recarga de wallet Cubiko'
-            : 'Pago de servicio Cubiko',
+        description:
+          params.purpose === 'plan_purchase'
+            ? `Pago plan ${params.purposeId || ''}`
+            : params.purpose === 'wallet_recharge'
+              ? 'Recarga de wallet Cubiko'
+              : 'Pago de servicio Cubiko',
         referenceId: params.metadata?.referenceId || `${params.brandId}:${Date.now()}`,
         callbackUrl: `https://${process.env.SERVER}/webhook/dropi`,
       }),
@@ -165,14 +166,13 @@ export class DropiProvider implements PaymentProvider {
 
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
     const secret = process.env.DROPI_WEBHOOK_SECRET
-    if (!secret) return false
+    if (!secret || typeof signature !== 'string') return false
 
-    try {
-      const expected = createHmac('sha256', secret).update(payload).digest('hex')
-      return expected === signature
-    } catch {
-      return false
-    }
+    const expected = Buffer.from(createHmac('sha256', secret).update(payload).digest('hex'), 'utf8')
+    const received = Buffer.from(signature, 'utf8')
+    if (received.length !== expected.length) return false
+
+    return timingSafeEqual(received, expected)
   }
 
   // ===========================================
@@ -183,14 +183,16 @@ export class DropiProvider implements PaymentProvider {
    * Enviar cobros masivos a Dropi.
    * Usado por el cron processDropiBatchCharges.
    */
-  async batchCharge(charges: Array<{
-    userId: string
-    brandId: string
-    amount: number
-    currency: string
-    description: string
-    referenceId: string
-  }>): Promise<Array<{ chargeId: string; status: string }>> {
+  async batchCharge(
+    charges: Array<{
+      userId: string
+      brandId: string
+      amount: number
+      currency: string
+      description: string
+      referenceId: string
+    }>,
+  ): Promise<Array<{ chargeId: string; status: string }>> {
     this.ensureConfigured()
 
     const result = await this.dropiFetch('/charges/batch', {
@@ -204,7 +206,9 @@ export class DropiProvider implements PaymentProvider {
   /**
    * Consultar estado de múltiples cobros.
    */
-  async batchStatus(chargeIds: string[]): Promise<Array<{ chargeId: string; status: string; paidAt?: string }>> {
+  async batchStatus(
+    chargeIds: string[],
+  ): Promise<Array<{ chargeId: string; status: string; paidAt?: string }>> {
     this.ensureConfigured()
 
     const result = await this.dropiFetch('/charges/status', {

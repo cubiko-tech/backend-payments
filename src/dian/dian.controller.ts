@@ -1,11 +1,4 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Param,
-  UseGuards,
-  ParseUUIDPipe,
-} from '@nestjs/common'
+import { Controller, Post, Get, Param, UseGuards, ParseUUIDPipe } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { DianService } from './dian.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'

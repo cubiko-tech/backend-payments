@@ -26,11 +26,25 @@ import { ClientModule } from '../client/client.module'
 @Module({
   imports: [
     TypeOrmModule.forFeature(
-      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck, CreditActivationRequest],
+      [
+        CreditScore,
+        ScoreScaleConfig,
+        ScoreRun,
+        CreditProfile,
+        BureauCheck,
+        CreditActivationRequest,
+      ],
       'DBWrite',
     ),
     TypeOrmModule.forFeature(
-      [CreditScore, ScoreScaleConfig, ScoreRun, CreditProfile, BureauCheck, CreditActivationRequest],
+      [
+        CreditScore,
+        ScoreScaleConfig,
+        ScoreRun,
+        CreditProfile,
+        BureauCheck,
+        CreditActivationRequest,
+      ],
       'DBRead',
     ),
     BullModule.registerQueue({ name: CREDIT_RUN_QUEUE }),
@@ -46,11 +60,6 @@ import { ClientModule } from '../client/client.module'
     CreditRunProcessor,
     BureauService,
   ],
-  exports: [
-    CreditService,
-    ScaleConfigService,
-    CreditRunService,
-    BureauService,
-  ],
+  exports: [CreditService, ScaleConfigService, CreditRunService, BureauService],
 })
 export class CreditModule {}

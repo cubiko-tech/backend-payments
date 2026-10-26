@@ -3,10 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 
 import { RequestException } from '../shared/exception/request.exception'
-import {
-  ScoreScaleConfig,
-  ScaleConfigStatus,
-} from './entities/scoreScaleConfig.entity'
+import { ScoreScaleConfig, ScaleConfigStatus } from './entities/scoreScaleConfig.entity'
 import { ScaleConfig } from './domain/scale-config.types'
 import { SCALE_CONFIG_V1 } from './domain/scale-config.v1'
 
@@ -18,7 +15,7 @@ import { SCALE_CONFIG_V1 } from './domain/scale-config.v1'
 @Injectable()
 export class ScaleConfigService {
   private readonly logger = new Logger(ScaleConfigService.name)
-  private cached: { config: ScaleConfig, version: number, expiry: number } | null = null
+  private cached: { config: ScaleConfig; version: number; expiry: number } | null = null
   private readonly CACHE_TTL = 5 * 60 * 1000
 
   constructor(
@@ -30,7 +27,7 @@ export class ScaleConfigService {
    * Devuelve la config de escala activa. Si no existe ninguna, siembra la v1
    * (valores del diseño) y la activa — así el primer cálculo no falla.
    */
-  async getActiveConfig(): Promise<{ config: ScaleConfig, version: number }> {
+  async getActiveConfig(): Promise<{ config: ScaleConfig; version: number }> {
     if (this.cached && this.cached.expiry > Date.now()) {
       return { config: this.cached.config, version: this.cached.version }
     }
@@ -188,8 +185,7 @@ export class ScaleConfigService {
 export function validateScaleConfig(config: ScaleConfig): string[] {
   const errors: string[] = []
 
-  const weightSum =
-    config.weights.investment + config.weights.roas + config.weights.sales
+  const weightSum = config.weights.investment + config.weights.roas + config.weights.sales
   if (Math.abs(weightSum - 1) > 1e-9) {
     errors.push(`los pesos suman ${weightSum}, deben sumar 1.0`)
   }

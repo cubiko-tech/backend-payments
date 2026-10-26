@@ -1,7 +1,12 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common'
+import { Controller, Get, Query, UseGuards, UsePipes, ValidationPipe } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { MetricsService } from './metrics.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import {
+  MetricsDaysQueryDto,
+  MetricsHistoryQueryDto,
+  MetricsMonthsQueryDto,
+} from './dto/metrics-query.dto'
 
 @ApiTags('Admin Metrics')
 @Controller('admin/metrics')
@@ -14,6 +19,7 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
  */
 @UseGuards(ApiAuthGuard)
+@UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
 export class MetricsController {
   constructor(private readonly metricsService: MetricsService) {}
 
@@ -27,15 +33,15 @@ export class MetricsController {
   @Get('revenue')
   @ApiOperation({ summary: 'Ingresos por período' })
   @ApiResponse({ status: 200, description: 'Revenue breakdown por día, proveedor y propósito' })
-  async getRevenue(@Query('days') days?: number) {
-    return this.metricsService.getRevenue(days || 30)
+  async getRevenue(@Query() query: MetricsDaysQueryDto = {}) {
+    return this.metricsService.getRevenue(query.days ?? 30)
   }
 
   @Get('churn')
   @ApiOperation({ summary: 'Tasa de cancelación/expiración por mes' })
   @ApiResponse({ status: 200, description: 'Churn rate mensual' })
-  async getChurn(@Query('months') months?: number) {
-    return this.metricsService.getChurn(months || 6)
+  async getChurn(@Query() query: MetricsMonthsQueryDto = {}) {
+    return this.metricsService.getChurn(query.months ?? 6)
   }
 
   @Get('ltv')
@@ -48,8 +54,8 @@ export class MetricsController {
   @Get('arpu')
   @ApiOperation({ summary: 'Average Revenue Per User' })
   @ApiResponse({ status: 200, description: 'ARPU del período' })
-  async getARPU(@Query('days') days?: number) {
-    return this.metricsService.getARPU(days || 30)
+  async getARPU(@Query() query: MetricsDaysQueryDto = {}) {
+    return this.metricsService.getARPU(query.days ?? 30)
   }
 
   @Get('conversion')
@@ -69,17 +75,14 @@ export class MetricsController {
   @Get('retention')
   @ApiOperation({ summary: 'Retención por cohorte mensual' })
   @ApiResponse({ status: 200, description: 'Datos de retención por cohorte' })
-  async getRetention(@Query('months') months?: number) {
-    return this.metricsService.getRetention(months || 6)
+  async getRetention(@Query() query: MetricsMonthsQueryDto = {}) {
+    return this.metricsService.getRetention(query.months ?? 6)
   }
 
   @Get('history')
   @ApiOperation({ summary: 'Snapshots históricos de métricas' })
   @ApiResponse({ status: 200, description: 'Snapshots diarios' })
-  async getHistory(
-    @Query('type') type?: string,
-    @Query('days') days?: number,
-  ) {
-    return this.metricsService.getSnapshots(type || 'daily_summary', days || 30)
+  async getHistory(@Query() query: MetricsHistoryQueryDto = {}) {
+    return this.metricsService.getSnapshots(query.type || 'daily_summary', query.days ?? 30)
   }
 }

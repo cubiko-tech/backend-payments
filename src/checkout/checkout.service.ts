@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, Not } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -11,10 +11,22 @@ import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
 
-import { Payment, PaymentStatus, PaymentProvider, PaymentPurpose } from '../payment/entities/payment.entity'
+import {
+  Payment,
+  PaymentStatus,
+  PaymentProvider,
+  PaymentPurpose,
+} from '../payment/entities/payment.entity'
 import { PaymentAttempt, AttemptStatus } from '../payment/entities/paymentAttempt.entity'
-import { Subscription, SubscriptionStatus, SubscriptionProvider } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  Subscription,
+  SubscriptionStatus,
+  SubscriptionProvider,
+} from '../subscription/entities/subscription.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { InvoiceStatus } from '../invoice/entities/invoice.entity'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
@@ -96,9 +108,9 @@ interface ResolvedPricing {
 export interface CheckoutResult {
   paymentId: string
   status: string
-  checkoutUrl?: string      // Solo si provider es Stripe/MP
-  subscriptionId?: string   // Solo si purpose es plan_purchase
-  invoiceId?: string        // Solo si el pago fue inmediato
+  checkoutUrl?: string // Only when provider is Stripe/MP
+  subscriptionId?: string // Only when purpose is plan_purchase
+  invoiceId?: string // Only when payment was immediate
 }
 
 @Injectable()
@@ -178,7 +190,7 @@ export class CheckoutService implements OnModuleInit {
     // wallet por construcción; ahora la moneda es un dato DERIVADO del país de la marca,
     // así que hay que compararla contra la wallet ANTES de persistir y debitar. Acotado
     // a `plan_purchase`: es el único camino cuya moneda dejó de ser la del llamador.
-    if (req.provider === 'wallet' && req.purpose === 'plan_purchase') {
+    if (req.provider === 'wallet' || req.walletId) {
       await this.assertWalletCurrency(req, currency)
     }
 
@@ -195,9 +207,8 @@ export class CheckoutService implements OnModuleInit {
     // nuevo sobre un endpoint de plata.
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
     const tax = await this.taxService.getTaxForCountry(taxCountry)
-    const taxAmount = tax.taxRate > 0 && !tax.isInclusive
-      ? Math.round(amount * tax.taxRate * 100) / 100
-      : 0
+    const taxAmount =
+      tax.taxRate > 0 && !tax.isInclusive ? Math.round(amount * tax.taxRate * 100) / 100 : 0
     const totalAmount = amount + taxAmount
 
     // 2. Crear registro de pago
@@ -243,59 +254,68 @@ export class CheckoutService implements OnModuleInit {
     const totalAmount = subtotal + taxAmount
 
     // Registrar intento
-    await this.attemptRepo.save(this.attemptRepo.create({
-      paymentId: payment.id,
-      attemptNumber: 1,
-      provider: 'wallet',
-      status: AttemptStatus.SUCCESS,
-      amount: totalAmount,
-      attemptedAt: new Date(),
-    }))
+    await this.attemptRepo.save(
+      this.attemptRepo.create({
+        paymentId: payment.id,
+        attemptNumber: 1,
+        provider: 'wallet',
+        status: AttemptStatus.SUCCESS,
+        amount: totalAmount,
+        attemptedAt: new Date(),
+      }),
+    )
 
     try {
-      // Debitar wallet (atómico con pessimistic lock).
-      //
-      // La moneda viaja como 4º argumento SÓLO en el alta de plan, el mismo alcance que
-      // `assertWalletCurrency`: es el único camino cuya moneda dejó de ser la del llamador
-      // (sale del país de la marca). Un `service_payment` sigue cobrando lo que pide el
-      // llamador y no gana un 422 que antes no existía. Es defensa en profundidad: el
-      // pre-chequeo devuelve el 422 barato antes de persistir la fila de `payments`, y
-      // `debit` vuelve a comparar sobre la fila ya bloqueada.
-      //
-      // DEUDA CONOCIDA (de otra tarea, no se toca acá): el `catch` de abajo reetiqueta
-      // TODO fallo de wallet como `INSUFFICIENT_BALANCE` 400, así que si este respaldo
-      // llegara a dispararse desde checkout saldría bajo el código equivocado. Destaparlo
-      // también cambiaría el status de `WALLET_FROZEN`/`WALLET_CLOSED`/`INSUFFICIENT_BALANCE`,
-      // que son previos a esta tarea y visibles para los clientes.
-      await this.walletService.debit(req.walletId, totalAmount, {
-        brandId: req.brandId,
-        category: req.purpose === 'plan_purchase' ? 'plan_payment' : 'service_payment',
-        description: req.purpose === 'plan_purchase'
-          ? `Pago plan ${req.planSlug}`
-          : 'Pago de servicio',
-        referenceType: 'payment',
-        referenceId: payment.id,
-      }, req.purpose === 'plan_purchase' ? currency : undefined)
+      const debitResult = await this.walletService.debit(
+        req.walletId,
+        totalAmount,
+        {
+          brandId: req.brandId,
+          category: req.purpose === 'plan_purchase' ? 'plan_payment' : 'service_payment',
+          description:
+            req.purpose === 'plan_purchase' ? `Pago plan ${req.planSlug}` : 'Pago de servicio',
+          referenceType: 'payment',
+          referenceId: payment.id,
+          idempotencyKey: `payment:${payment.id}:debit`,
+        },
+        currency,
+      )
+      if (
+        debitResult &&
+        typeof debitResult === 'object' &&
+        'error' in debitResult &&
+        (debitResult as any).error
+      ) {
+        throw new Error((debitResult as any).error)
+      }
     } catch (error) {
-      // Saldo insuficiente u otro error
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
       await this.paymentRepo.save(payment)
 
-      await this.attemptRepo.save(this.attemptRepo.create({
-        paymentId: payment.id,
-        attemptNumber: 1,
-        provider: 'wallet',
-        status: AttemptStatus.FAILED,
-        amount: totalAmount,
-        providerResponseMessage: error.message,
-        attemptedAt: new Date(),
-      }))
+      await this.attemptRepo.save(
+        this.attemptRepo.create({
+          paymentId: payment.id,
+          attemptNumber: 1,
+          provider: 'wallet',
+          status: AttemptStatus.FAILED,
+          amount: totalAmount,
+          providerResponseMessage: error.message,
+          attemptedAt: new Date(),
+        }),
+      )
 
-      throw new RequestException({
-        code: 'INSUFFICIENT_BALANCE',
-        message: error.message,
-      })
+      if (error instanceof RequestException) {
+        throw error
+      }
+
+      throw new RequestException(
+        {
+          code: 'WALLET_DEBIT_FAILED',
+          message: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      )
     }
 
     // Marcar pago como completado
@@ -345,12 +365,19 @@ export class CheckoutService implements OnModuleInit {
     })
 
     // Notificar al usuario
-    this.eventBus.notifyPaymentSuccess(req.brandId, payment.id, String(subtotal + taxAmount), currency)
+    this.eventBus.notifyPaymentSuccess(
+      req.brandId,
+      payment.id,
+      String(subtotal + taxAmount),
+      currency,
+    )
     if (invoice) {
       this.eventBus.notifyInvoiceReady(req.brandId, invoice.id, invoice.invoiceNumber)
     }
 
-    this.log.log(`Checkout completado: payment=${payment.id} brand=${req.brandId} plan=${req.planSlug}`)
+    this.log.log(
+      `Checkout completado: payment=${payment.id} brand=${req.brandId} plan=${req.planSlug}`,
+    )
     return result
   }
 
@@ -380,19 +407,23 @@ export class CheckoutService implements OnModuleInit {
       // Actualizar pago con datos del provider
       payment.providerPaymentId = checkout.providerPaymentId
       payment.checkoutUrl = checkout.checkoutUrl
-      payment.expiresAt = new Date(Date.now() + parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24') * 3600000)
+      payment.expiresAt = new Date(
+        Date.now() + parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24') * 3600000,
+      )
       await this.paymentRepo.save(payment)
 
       // Registrar intento
-      await this.attemptRepo.save(this.attemptRepo.create({
-        paymentId: payment.id,
-        attemptNumber: 1,
-        provider: req.provider,
-        status: AttemptStatus.SUCCESS,
-        amount: totalAmount,
-        attemptedAt: new Date(),
-        metadata: { providerPaymentId: checkout.providerPaymentId },
-      }))
+      await this.attemptRepo.save(
+        this.attemptRepo.create({
+          paymentId: payment.id,
+          attemptNumber: 1,
+          provider: req.provider,
+          status: AttemptStatus.SUCCESS,
+          amount: totalAmount,
+          attemptedAt: new Date(),
+          metadata: { providerPaymentId: checkout.providerPaymentId },
+        }),
+      )
 
       this.log.log(`Checkout externo creado: payment=${payment.id} provider=${req.provider}`)
 
@@ -421,12 +452,23 @@ export class CheckoutService implements OnModuleInit {
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment || payment.status === PaymentStatus.COMPLETED) return
 
+    const paidAt = new Date()
+    const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
+    const claimed = await this.paymentRepo.update(
+      { id: paymentId, status: Not(PaymentStatus.COMPLETED) },
+      {
+        status: PaymentStatus.COMPLETED,
+        paidAt,
+        ...(providerData ? { metadata } : {}),
+      },
+    )
+    if (!claimed.affected) return
+
     payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = new Date()
+    payment.paidAt = paidAt
     if (providerData) {
-      payment.metadata = { ...payment.metadata, providerData }
+      payment.metadata = metadata
     }
-    await this.paymentRepo.save(payment)
 
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
@@ -434,9 +476,10 @@ export class CheckoutService implements OnModuleInit {
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
     const tax = await this.taxService.getTaxForCountry(country)
     const totalAmount = parseFloat(String(payment.amount))
-    const taxAmount = tax.taxRate > 0 && !tax.isInclusive
-      ? Math.round(totalAmount * tax.taxRate / (1 + tax.taxRate) * 100) / 100
-      : 0
+    const taxAmount =
+      tax.taxRate > 0 && !tax.isInclusive
+        ? Math.round(((totalAmount * tax.taxRate) / (1 + tax.taxRate)) * 100) / 100
+        : 0
     const subtotal = totalAmount - taxAmount
 
     // Si es compra de plan → crear/renovar suscripción
@@ -457,12 +500,13 @@ export class CheckoutService implements OnModuleInit {
 
     // Si es recarga de wallet → acreditar
     if (payment.purpose === PaymentPurpose.WALLET_RECHARGE && payment.walletId) {
-      await this.walletService.credit(payment.walletId, totalAmount, {
+      await this.walletService.credit(payment.walletId, subtotal, {
         brandId: payment.brandId,
         category: 'recharge',
         description: `Recarga via ${payment.provider}`,
         referenceType: 'payment',
         referenceId: payment.id,
+        idempotencyKey: `payment:${payment.id}:credit`,
       })
     }
 
@@ -504,7 +548,12 @@ export class CheckoutService implements OnModuleInit {
     })
 
     // Notificar al usuario
-    this.eventBus.notifyPaymentSuccess(payment.brandId, payment.id, String(payment.amount), payment.currency)
+    this.eventBus.notifyPaymentSuccess(
+      payment.brandId,
+      payment.id,
+      String(payment.amount),
+      payment.currency,
+    )
     if (invoice) {
       this.eventBus.notifyInvoiceReady(payment.brandId, invoice.id, invoice.invoiceNumber)
     }
@@ -522,10 +571,7 @@ export class CheckoutService implements OnModuleInit {
   async reconcilePayment(paymentId: string): Promise<{ status: string; planSlug?: string }> {
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment) {
-      throw new RequestException(
-        { code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' },
-        404,
-      )
+      throw new RequestException({ code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' }, 404)
     }
 
     if (payment.status === PaymentStatus.COMPLETED) {
@@ -543,13 +589,18 @@ export class CheckoutService implements OnModuleInit {
       const real = await provider.getPaymentStatus(payment.providerPaymentId)
 
       if (real.status === 'completed') {
-        await this.completeExternalPayment(paymentId, { source: 'reconcile', providerStatus: real.metadata })
+        await this.completeExternalPayment(paymentId, {
+          source: 'reconcile',
+          providerStatus: real.metadata,
+        })
         return { status: 'completed', planSlug: payment.purposeId || undefined }
       }
 
       return { status: real.status }
     } catch (error) {
-      this.log.warn(`reconcilePayment: error consultando ${payment.provider} para ${paymentId}: ${error.message}`)
+      this.log.warn(
+        `reconcilePayment: error consultando ${payment.provider} para ${paymentId}: ${error.message}`,
+      )
       return { status: payment.status }
     }
   }
@@ -617,7 +668,7 @@ export class CheckoutService implements OnModuleInit {
         // backend-roles) es invisible en los logs del servicio.
         this.log.warn(
           `Alta rechazada: brand=${req.brandId} plan=${req.planSlug} ` +
-          `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
+            `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
         )
         throw this.planPricingException(req.planSlug, resolved.code)
       }
@@ -625,8 +676,15 @@ export class CheckoutService implements OnModuleInit {
       return { amount: resolved.amount, currency: resolved.currency, country: resolved.country }
     }
 
-    if (!req.amount || !req.currency) {
+    if (!req.currency) {
       throw new RequestException({ code: 'MISSING_AMOUNT', message: 'Monto y moneda requeridos' })
+    }
+
+    if (typeof req.amount !== 'number' || !Number.isFinite(req.amount) || req.amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
     }
 
     return { amount: req.amount, currency: req.currency }
@@ -636,10 +694,7 @@ export class CheckoutService implements OnModuleInit {
    * Precio del plan por el camino LEGACY (moneda pedida por el llamador).
    * Conserva tal cual el comportamiento anterior; hoy sólo lo usa la renovación.
    */
-  private async legacyPlanPrice(
-    planSlug: string,
-    currency: string,
-  ): Promise<ResolvedPricing> {
+  private async legacyPlanPrice(planSlug: string, currency: string): Promise<ResolvedPricing> {
     const price = await this.clientRoles.getPlanPrice(planSlug, currency)
     if (price === null) {
       throw new RequestException({
@@ -670,7 +725,10 @@ export class CheckoutService implements OnModuleInit {
    * colaboradores devuelven resultado discriminado y no lanzan, así que no hay
    * `catch` que pueda tragarse un error de otra naturaleza.
    */
-  private async renewalPlanPrice(req: CheckoutRequest, legacyCurrency: string): Promise<ResolvedPricing> {
+  private async renewalPlanPrice(
+    req: CheckoutRequest,
+    legacyCurrency: string,
+  ): Promise<ResolvedPricing> {
     if (this.isUsableBrandId(req.brandId)) {
       const resolved = await this.resolvePlanPricingByCountry(req.brandId.trim(), req.planSlug)
       if (resolved.ok) {
@@ -678,12 +736,12 @@ export class CheckoutService implements OnModuleInit {
       }
       this.log.error(
         `Renovación fuera del catálogo por país: brand=${req.brandId} plan=${req.planSlug} ` +
-        `country=${resolved.country || 'desconocido'} code=${resolved.code} → precio legacy ${legacyCurrency}`,
+          `country=${resolved.country || 'desconocido'} code=${resolved.code} → precio legacy ${legacyCurrency}`,
       )
     } else {
       this.log.error(
         `Renovación con brandId no consultable: brand=${req.brandId} plan=${req.planSlug} ` +
-        `→ precio legacy ${legacyCurrency}`,
+          `→ precio legacy ${legacyCurrency}`,
       )
     }
 
@@ -737,7 +795,7 @@ export class CheckoutService implements OnModuleInit {
     if (missing || !Number.isFinite(amount) || amount < 0 || !/^[A-Z]{3}$/.test(currency)) {
       this.log.error(
         `Fila de precio inválida para plan=${planSlug} country=${brand.country}: ` +
-        `price=${String(raw)} currency=${String(price.price.currency)}`,
+          `price=${String(raw)} currency=${String(price.price.currency)}`,
       )
       return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY, country: brand.country }
     }
@@ -860,11 +918,18 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    if (wallet.currency !== currency) {
+    if (
+      wallet.currency?.toUpperCase() === 'TKN' ||
+      currency?.toUpperCase() === 'TKN' ||
+      wallet.currency !== currency
+    ) {
       throw new RequestException(
         {
           code: 'WALLET_CURRENCY_MISMATCH',
-          message: `La wallet está en ${wallet.currency} y el cobro es en ${currency}`,
+          message:
+            wallet.currency?.toUpperCase() === 'TKN' || currency?.toUpperCase() === 'TKN'
+              ? 'Token wallets (TKN) cannot be used in checkout'
+              : `La wallet está en ${wallet.currency} y el cobro es en ${currency}`,
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
@@ -969,23 +1034,27 @@ export class CheckoutService implements OnModuleInit {
       await this.subscriptionRepo.save(subscription)
 
       // Registrar evento
-      const eventType = fromPlan !== req.planSlug
-        ? SubscriptionEventType.PLAN_CHANGED
-        : SubscriptionEventType.RENEWED
+      const eventType =
+        fromPlan !== req.planSlug
+          ? SubscriptionEventType.PLAN_CHANGED
+          : SubscriptionEventType.RENEWED
 
-      await this.subscriptionEventRepo.save(this.subscriptionEventRepo.create({
-        subscriptionId: subscription.id,
-        eventType,
-        fromPlanSlug: fromPlan,
-        toPlanSlug: req.planSlug,
-        fromStatus,
-        toStatus: SubscriptionStatus.ACTIVE,
-        triggeredBy: req.userId,
-        paymentId: payment.id,
-        reason: eventType === SubscriptionEventType.PLAN_CHANGED
-          ? `Cambio de plan ${fromPlan} → ${req.planSlug}`
-          : 'Renovación por pago',
-      }))
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: subscription.id,
+          eventType,
+          fromPlanSlug: fromPlan,
+          toPlanSlug: req.planSlug,
+          fromStatus,
+          toStatus: SubscriptionStatus.ACTIVE,
+          triggeredBy: req.userId,
+          paymentId: payment.id,
+          reason:
+            eventType === SubscriptionEventType.PLAN_CHANGED
+              ? `Cambio de plan ${fromPlan} → ${req.planSlug}`
+              : 'Renovación por pago',
+        }),
+      )
     } else {
       // Crear nueva
       subscription = this.subscriptionRepo.create({
@@ -1003,14 +1072,16 @@ export class CheckoutService implements OnModuleInit {
       })
       await this.subscriptionRepo.save(subscription)
 
-      await this.subscriptionEventRepo.save(this.subscriptionEventRepo.create({
-        subscriptionId: subscription.id,
-        eventType: SubscriptionEventType.CREATED,
-        toPlanSlug: req.planSlug,
-        toStatus: SubscriptionStatus.ACTIVE,
-        triggeredBy: req.userId,
-        paymentId: payment.id,
-      }))
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: subscription.id,
+          eventType: SubscriptionEventType.CREATED,
+          toPlanSlug: req.planSlug,
+          toStatus: SubscriptionStatus.ACTIVE,
+          triggeredBy: req.userId,
+          paymentId: payment.id,
+        }),
+      )
     }
 
     return subscription
@@ -1106,7 +1177,7 @@ export class CheckoutService implements OnModuleInit {
     if (currency && currency.toUpperCase() !== 'COP') {
       this.log.warn(
         `Factura ${invoiceId} emitida en ${currency}: no se envía a la DIAN ` +
-        '(facturación electrónica colombiana)',
+          '(facturación electrónica colombiana)',
       )
       return
     }

@@ -96,6 +96,30 @@ if command -v git >/dev/null 2>&1 &&
 		git -C "$caller_dir" show ":$rel_file" \
 			>"$ctx_dir/blobs/$rel_file" 2>/dev/null || true
 	done <"$ctx_dir/staged-files.txt"
+	is_pre_push=0
+	for arg in "$@"; do
+		if [[ $arg == *pre-push* ]]; then
+			is_pre_push=1
+			break
+		fi
+	done
+	if ((is_pre_push)); then
+		cat >"$ctx_dir/pre-push-stdin"
+		mkdir -p "$ctx_dir/commits"
+		while read -r lref lsha _rref _rsha || [[ -n ${lref:-} ]]; do
+			lsha=${lsha%$'\r'}
+			lref=${lref%$'\r'}
+			if [[ -z ${lref:-} || $lref == "(delete)" || -z ${lsha:-} || $lsha =~ ^0+$ ]]; then
+				continue
+			fi
+			if [[ ! -f "$ctx_dir/commits/$lsha.tar" ]]; then
+				if ! git -C "$caller_dir" archive --format=tar "$lsha" </dev/null \
+					>"$ctx_dir/commits/$lsha.tar" 2>/dev/null || [[ ! -s "$ctx_dir/commits/$lsha.tar" ]]; then
+					rm -f "$ctx_dir/commits/$lsha.tar"
+				fi
+			fi
+		done <"$ctx_dir/pre-push-stdin"
+	fi
 	env_args+=(-e "ROAX_GIT_CTX_DIR=$(basename "$ctx_dir")")
 fi
 
@@ -181,6 +205,16 @@ case "$*" in
       esac
     done
     ;;
+  *"archive --format=tar "*|*"archive "*)
+    for arg in "$@"; do
+      last_arg="$arg"
+    done
+    if [ -n "${last_arg:-}" ] && [ -f "$ctx_dir/commits/$last_arg.tar" ]; then
+      cat "$ctx_dir/commits/$last_arg.tar"
+      exit 0
+    fi
+    exit 1
+    ;;
 esac
 exit 1
 GITSHIM
@@ -191,12 +225,20 @@ GITSHIM
 fi
 if [ -n "$shim_dir" ] && [ -f "$shim_dir/ctx/inline-script.sh" ]; then
   shift 2
-  bash "$shim_dir/ctx/inline-script.sh" "$@"
+  if [ -f "$shim_dir/ctx/pre-push-stdin" ]; then
+    bash "$shim_dir/ctx/inline-script.sh" "$@" < "$shim_dir/ctx/pre-push-stdin"
+  else
+    bash "$shim_dir/ctx/inline-script.sh" "$@"
+  fi
   rc=$?
   rm -rf "$shim_dir"
   exit "$rc"
 fi
-"$@"
+if [ -n "$shim_dir" ] && [ -f "$shim_dir/ctx/pre-push-stdin" ]; then
+  "$@" < "$shim_dir/ctx/pre-push-stdin"
+else
+  "$@"
+fi
 rc=$?
 [ -n "$shim_dir" ] && rm -rf "$shim_dir"
 exit "$rc"

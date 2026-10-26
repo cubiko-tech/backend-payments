@@ -37,7 +37,10 @@ export class ApiAuthGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request & { user?: GuardUser }>()
     const user = await this.resolveUser(req)
     if (!user) {
-      throw new RequestException({ error: 'unauthorized', code: 'unauthorized' }, HttpStatus.UNAUTHORIZED)
+      throw new RequestException(
+        { error: 'unauthorized', code: 'unauthorized' },
+        HttpStatus.UNAUTHORIZED,
+      )
     }
     req.user = user
 
@@ -93,7 +96,7 @@ export class ApiAuthGuard implements CanActivate {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ client }),
         signal: AbortSignal.timeout(10000),

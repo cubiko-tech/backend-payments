@@ -1,1 +1,1 @@
-bash scripts/in-container.sh bash scripts/pre-push.sh
+bash scripts/in-container.sh bash scripts/pre-push.sh "$@"

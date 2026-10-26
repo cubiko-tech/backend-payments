@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
@@ -15,7 +15,10 @@ import {
   SubscriptionStatus,
   LIVE_SUBSCRIPTION_STATUSES,
 } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { WalletService } from '../wallet/wallet.service'
@@ -25,6 +28,7 @@ import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
 import { CheckoutService } from '../checkout/checkout.service'
+import { RequestException } from '../shared/exception/request.exception'
 import { logger } from '../shared/logger/logger'
 
 /**
@@ -175,7 +179,12 @@ export class TasksService {
 
   /** Proveedores externos que cobran con link de pago (no wallet interna). */
   private isExternalProvider(provider: string): boolean {
-    return provider === 'confio' || provider === 'stripe' || provider === 'mercadopago' || provider === 'dropi'
+    return (
+      provider === 'confio' ||
+      provider === 'stripe' ||
+      provider === 'mercadopago' ||
+      provider === 'dropi'
+    )
   }
 
   /**
@@ -231,7 +240,10 @@ export class TasksService {
         },
       })
 
-      logger.log('info', `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`)
+      logger.log(
+        'info',
+        `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`,
+      )
     } catch (error) {
       logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
       // Marcar past_due igual para que el ciclo de expiración avance.
@@ -278,11 +290,12 @@ export class TasksService {
           continue
         }
         try {
-          await this.renewFromWallet(sub)
-          converted++
+          if (await this.renewFromWallet(sub)) {
+            converted++
+          }
         } catch (error) {
           logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
-          await this.handleRenewalFailure(sub)
+          await this.handleRenewalFailure(sub, error.message)
         }
         continue
       }
@@ -338,7 +351,10 @@ export class TasksService {
     // siguiente, y dos pasadas sobre las mismas filas duplican el tráfico contra
     // ConfioPagos sin ganar nada.
     if (this.repescaEnCurso) {
-      logger.log('info', '[CRON] confirmarAltasPendientes: la pasada anterior sigue en curso, se saltea')
+      logger.log(
+        'info',
+        '[CRON] confirmarAltasPendientes: la pasada anterior sigue en curso, se saltea',
+      )
       return
     }
     this.repescaEnCurso = true
@@ -423,9 +439,10 @@ export class TasksService {
     let processed = 0
     for (const sub of dueSubscriptions) {
       try {
-        if (sub.provider === 'wallet' && sub.walletId) {
-          await this.renewFromWallet(sub)
-          processed++
+        if (sub.provider === 'wallet') {
+          if (await this.renewFromWallet(sub)) {
+            processed++
+          }
         } else if (esSuscripcionRecurrenteDeConfio(sub)) {
           // ⚠️ ACÁ NO SE COBRA: la recurrencia vive en ConfioPagos y ellos ya
           // cobraron en el aniversario. Lo nuestro es ENTERARNOS, por el mismo
@@ -454,12 +471,15 @@ export class TasksService {
         // Dropi se maneja en processDropiBatchCharges
       } catch (error) {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
-        await this.handleRenewalFailure(sub)
+        await this.handleRenewalFailure(sub, error.message)
       }
     }
 
     if (processed > 0 || dueSubscriptions.length > 0) {
-      logger.log('info', `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`)
+      logger.log(
+        'info',
+        `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`,
+      )
     }
   }
 
@@ -489,9 +509,10 @@ export class TasksService {
       if (new Date() < nextRetry) continue
 
       try {
-        if (sub.provider === 'wallet' && sub.walletId) {
-          await this.renewFromWallet(sub)
-          retried++
+        if (sub.provider === 'wallet') {
+          if (await this.renewFromWallet(sub)) {
+            retried++
+          }
         } else if (sub.provider === 'confio') {
           // ConfioPagos: re-emitir el link de cobro (cuenta como reintento).
           await this.issueExternalCharge(sub, true)
@@ -499,7 +520,7 @@ export class TasksService {
         }
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
-        await this.handleRenewalFailure(sub)
+        await this.handleRenewalFailure(sub, error.message)
       }
     }
 
@@ -530,17 +551,25 @@ export class TasksService {
     for (const p of pending) {
       if (!p.providerPaymentId) continue
       try {
-        const real = await this.providerFactory.getProvider('confio').getPaymentStatus(p.providerPaymentId)
+        const real = await this.providerFactory
+          .getProvider('confio')
+          .getPaymentStatus(p.providerPaymentId)
         if (real.status === 'completed') {
           await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
           completed++
         }
       } catch (error) {
-        logger.log('warn', `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`)
+        logger.log(
+          'warn',
+          `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`,
+        )
       }
     }
 
-    logger.log('info', `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`)
+    logger.log(
+      'info',
+      `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`,
+    )
   }
 
   // =============================================================
@@ -615,7 +644,10 @@ export class TasksService {
         { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
       )
       if (!vencida.affected) {
-        logger.log('info', `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`)
+        logger.log(
+          'info',
+          `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
+        )
         continue
       }
 
@@ -700,7 +732,11 @@ export class TasksService {
     const vencidas = await this.subscriptionRepo.find({
       where: [
         { status: In([SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE]), ...bajaVencida },
-        { status: SubscriptionStatus.PAST_DUE, retryCount: LessThan(this.MAX_RETRY), ...bajaVencida },
+        {
+          status: SubscriptionStatus.PAST_DUE,
+          retryCount: LessThan(this.MAX_RETRY),
+          ...bajaVencida,
+        },
       ],
       order: { accessEndsAt: 'ASC' },
       take: 200,
@@ -793,7 +829,10 @@ export class TasksService {
       // `sendExpirationWarnings`, que le cedió el hito de 0 días.
       await this.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
 
-      logger.log('info', `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`)
+      logger.log(
+        'info',
+        `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`,
+      )
       cerradas++
     }
 
@@ -828,14 +867,17 @@ export class TasksService {
 
     for (const wallet of wallets) {
       // Sumar todas las transacciones completadas
-      const result = await this.dataSource.query(`
+      const result = await this.dataSource.query(
+        `
         SELECT
           COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END), 0) -
           COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS calculated,
           COUNT(*) AS count
         FROM transactions
         WHERE "walletId" = $1 AND status = 'completed'
-      `, [wallet.id])
+      `,
+        [wallet.id],
+      )
 
       const calculatedBalance = parseFloat(result[0]?.calculated || '0')
       const transactionCount = parseInt(result[0]?.count || '0')
@@ -855,13 +897,15 @@ export class TasksService {
 
       if (!isConsistent) {
         inconsistent++
-        logger.log('error',
+        logger.log(
+          'error',
           `[CRON] DESCUADRE en wallet ${wallet.id}: balance=${currentBalance}, calculado=${calculatedBalance}, diff=${currentBalance - calculatedBalance}`,
         )
       }
     }
 
-    logger.log('info',
+    logger.log(
+      'info',
       `[CRON] reconcileWalletBalances: ${wallets.length} wallets verificadas, ${inconsistent} inconsistentes`,
     )
   }
@@ -888,21 +932,29 @@ export class TasksService {
       const dropiProvider = this.providerFactory.getDropiProvider()
       const allPrices = await this.clientRoles.getAllPlanPrices()
 
-      const charges = dropiSubscriptions.map((sub) => ({
-        userId: sub.userId,
-        brandId: sub.brandId,
-        amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
-        currency: 'COP',
-        description: `Suscripción plan ${sub.planSlug}`,
-        referenceId: sub.id,
-      })).filter((c) => c.amount > 0)
+      const charges = dropiSubscriptions
+        .map((sub) => ({
+          userId: sub.userId,
+          brandId: sub.brandId,
+          amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
+          currency: 'COP',
+          description: `Suscripción plan ${sub.planSlug}`,
+          referenceId: sub.id,
+        }))
+        .filter((c) => c.amount > 0)
 
       if (charges.length > 0) {
         await dropiProvider.batchCharge(charges)
-        logger.log('info', `[CRON] processDropiBatchCharges: ${charges.length} cobros enviados a Dropi`)
+        logger.log(
+          'info',
+          `[CRON] processDropiBatchCharges: ${charges.length} cobros enviados a Dropi`,
+        )
       }
     } catch (error) {
-      logger.log('error', `[CRON] processDropiBatchCharges: error enviando cobros a Dropi: ${error.message}`)
+      logger.log(
+        'error',
+        `[CRON] processDropiBatchCharges: error enviando cobros a Dropi: ${error.message}`,
+      )
     }
   }
 
@@ -1003,7 +1055,10 @@ export class TasksService {
       }
 
       if (subscriptions.length > 0) {
-        logger.log('info', `[CRON] sendExpirationWarnings: ${subscriptions.length} avisos enviados (${days} días)`)
+        logger.log(
+          'info',
+          `[CRON] sendExpirationWarnings: ${subscriptions.length} avisos enviados (${days} días)`,
+        )
       }
     }
   }
@@ -1020,26 +1075,73 @@ export class TasksService {
   /**
    * Renovar suscripción cobrando de wallet interna.
    */
-  private async renewFromWallet(sub: Subscription) {
-    const amount = await this.clientRoles.getPlanPrice(sub.planSlug, 'COP') || 0
-
-    if (amount === 0) {
-      // Plan gratuito, solo renovar periodo
-      await this.extendSubscriptionPeriod(sub)
-      return
+  private async renewFromWallet(sub: Subscription): Promise<boolean> {
+    if (typeof sub.walletId !== 'string' || !sub.walletId.trim()) {
+      throw new RequestException(
+        { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
+        HttpStatus.BAD_REQUEST,
+      )
     }
 
-    // Debitar wallet
-    await this.walletService.debit(sub.walletId, amount, {
-      brandId: sub.brandId,
-      category: 'plan_payment',
-      description: `Renovación plan ${sub.planSlug}`,
-      referenceType: 'subscription',
-      referenceId: sub.id,
-    })
+    const billingCycleKey =
+      sub.nextBillingDate instanceof Date
+        ? sub.nextBillingDate.toISOString()
+        : sub.nextBillingDate
+          ? String(sub.nextBillingDate)
+          : 'current'
+    const idempotencyKey = `subscription:${sub.id}:${billingCycleKey}`
+
+    if (!(await this.hasCycleDebit(sub.walletId, idempotencyKey))) {
+      const currency = await this.resolveWalletCurrency(sub.walletId)
+      const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
+
+      if (amount === null || amount === undefined) {
+        if (
+          typeof this.clientRoles.hasCachedPrices === 'function' &&
+          !this.clientRoles.hasCachedPrices()
+        ) {
+          return false
+        }
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: `Plan '${sub.planSlug}' has no price in wallet currency ${currency}`,
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+
+      if (amount === 0) {
+        return this.extendSubscriptionPeriod(sub)
+      }
+
+      const debitResult = await this.walletService.debit(
+        sub.walletId,
+        amount,
+        {
+          brandId: sub.brandId,
+          category: 'plan_payment',
+          description: `Renovación plan ${sub.planSlug}`,
+          referenceType: 'subscription',
+          referenceId: sub.id,
+          idempotencyKey,
+        },
+        currency,
+      )
+      if (
+        debitResult &&
+        typeof debitResult === 'object' &&
+        'error' in debitResult &&
+        (debitResult as any).error
+      ) {
+        throw new Error((debitResult as any).error)
+      }
+    }
 
     // Renovar periodo
-    await this.extendSubscriptionPeriod(sub)
+    if (!(await this.extendSubscriptionPeriod(sub))) {
+      return false
+    }
 
     // Registrar evento
     await this.subscriptionEventRepo.save(
@@ -1060,6 +1162,38 @@ export class TasksService {
       subscriptionId: sub.id,
       planSlug: sub.planSlug,
     })
+
+    return true
+  }
+
+  private async hasCycleDebit(walletId: string, idempotencyKey: string): Promise<boolean> {
+    if (typeof this.walletService?.findDebitByIdempotencyKey === 'function') {
+      const existing = await this.walletService.findDebitByIdempotencyKey(walletId, idempotencyKey)
+      if (existing) return true
+    }
+
+    const existingFromReadRepo = await this.transactionReadRepo?.findOne({
+      where: { idempotencyKey },
+    })
+    return Boolean(existingFromReadRepo && existingFromReadRepo.idempotencyKey === idempotencyKey)
+  }
+
+  private async resolveWalletCurrency(walletId: string): Promise<string> {
+    const readWallet = await this.walletReadRepo?.findOne({ where: { id: walletId } })
+    if (readWallet?.currency) {
+      return readWallet.currency
+    }
+    if (typeof this.walletService?.findById === 'function') {
+      try {
+        const found = await this.walletService.findById(walletId)
+        if (found && 'data' in found && found.data?.currency) {
+          return found.data.currency
+        }
+      } catch {
+        return 'COP'
+      }
+    }
+    return 'COP'
   }
 
   /**
@@ -1222,10 +1356,19 @@ export class TasksService {
   /**
    * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
-  private async extendSubscriptionPeriod(sub: Subscription) {
+  private async extendSubscriptionPeriod(sub: Subscription): Promise<boolean> {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
     newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
+
+    const renewed = await this.clientRoles.renewPlanForBrand(
+      sub.brandId,
+      sub.planSlug,
+      newPeriodEnd,
+    )
+    if (!renewed) {
+      return false
+    }
 
     sub.currentPeriodStart = newPeriodStart
     sub.currentPeriodEnd = newPeriodEnd
@@ -1234,27 +1377,27 @@ export class TasksService {
     sub.retryCount = 0
 
     await this.subscriptionRepo.save(sub)
-
-    // Renovar expiresAt del plan en backend-roles
-    await this.clientRoles.renewPlanForBrand(sub.brandId, sub.planSlug, newPeriodEnd)
+    return true
   }
 
   /**
    * Manejar fallo de renovación: incrementar retry, marcar past_due.
    */
-  private async handleRenewalFailure(sub: Subscription) {
+  private async handleRenewalFailure(sub: Subscription, failureReason?: string) {
+    const previousStatus = sub.status
     sub.retryCount = (sub.retryCount || 0) + 1
     sub.status = SubscriptionStatus.PAST_DUE
     await this.subscriptionRepo.save(sub)
 
+    const baseReason = `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`
     await this.subscriptionEventRepo.save(
       this.subscriptionEventRepo.create({
         subscriptionId: sub.id,
         eventType: SubscriptionEventType.PAYMENT_FAILED,
-        fromStatus: sub.status,
+        fromStatus: previousStatus,
         toStatus: SubscriptionStatus.PAST_DUE,
         triggeredBy: 'system',
-        reason: `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`,
+        reason: failureReason ? `${baseReason}: ${failureReason}` : baseReason,
       }),
     )
 
@@ -1268,6 +1411,9 @@ export class TasksService {
     const message = dunningMessages[sub.retryCount] || 'Tu pago no pudo ser procesado.'
 
     await this.eventBus.notifyPaymentFailed(sub.brandId, sub.id, message)
-    logger.log('info', `[DUNNING] Notificación enviada a marca ${sub.brandId}: intento ${sub.retryCount}/${this.MAX_RETRY}`)
+    logger.log(
+      'info',
+      `[DUNNING] Notificación enviada a marca ${sub.brandId}: intento ${sub.retryCount}/${this.MAX_RETRY}`,
+    )
   }
 }

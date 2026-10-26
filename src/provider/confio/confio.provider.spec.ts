@@ -894,6 +894,28 @@ describe('ConfioProvider', () => {
       expect(provider.validateWebhookSignature(Buffer.from('{}'), 'test-token-123')).toBe(true)
       expect(provider.validateWebhookSignature(Buffer.from('{}'), 'wrong')).toBe(false)
     })
+
+    it('rejects webhook signature when access token is not configured in development', () => {
+      delete process.env.CONFIO_ACCESS_TOKEN
+      delete process.env.ENV
+      delete process.env.GO_ENV
+      process.env.NODE_ENV = 'development'
+
+      const provider = new ConfioProvider()
+
+      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'test-token-123')).toBe(false)
+    })
+
+    it('rejects webhook signature when access token is not configured in production', () => {
+      delete process.env.CONFIO_ACCESS_TOKEN
+      delete process.env.ENV
+      delete process.env.GO_ENV
+      process.env.NODE_ENV = 'production'
+
+      const provider = new ConfioProvider()
+
+      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'test-token-123')).toBe(false)
+    })
   })
 
   describe('normalizeColombianPhone', () => {

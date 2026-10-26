@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Patch,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-} from '@nestjs/common'
+import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
@@ -92,7 +83,9 @@ export class BillingProfileController {
     @Query('perPage') perPage?: number,
   ) {
     return this.legalDocumentService.findAll({
-      status, country, documentType,
+      status,
+      country,
+      documentType,
       page: Number(page) || 1,
       perPage: Number(perPage) || 20,
     })
@@ -108,10 +101,7 @@ export class BillingProfileController {
   @Post('admin/documents/:id/verify')
   @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento verificado' })
-  async verifyDocument(
-    @Param('id') id: string,
-    @Body() data: { verifiedBy: string },
-  ) {
+  async verifyDocument(@Param('id') id: string, @Body() data: { verifiedBy: string }) {
     return this.legalDocumentService.verify(id, data.verifiedBy)
   }
 

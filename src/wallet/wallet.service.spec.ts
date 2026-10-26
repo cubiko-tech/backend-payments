@@ -1,8 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { WalletService } from './wallet.service'
-import { Wallet } from './entities/wallet.entity'
-import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
+import { Wallet, WalletStatus } from './entities/wallet.entity'
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
 
@@ -48,9 +52,9 @@ describe('WalletService', () => {
       if (typeof fn === 'function') (fn as jest.Mock).mockReset()
     })
     mockQueryRunner.manager.findOne.mockReset()
-    mockQueryRunner.manager.save.mockReset().mockImplementation((entity, data) =>
-      Promise.resolve({ id: 'mock-id', ...data }),
-    )
+    mockQueryRunner.manager.save
+      .mockReset()
+      .mockImplementation((entity, data) => Promise.resolve({ id: 'mock-id', ...data }))
     mockQueryRunner.manager.create.mockReset().mockImplementation((entity, data) => data)
 
     const module: TestingModule = await Test.createTestingModule({
@@ -126,7 +130,13 @@ describe('WalletService', () => {
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
       mockQueryRunner.manager.save
         .mockResolvedValueOnce(wallet) // save wallet
-        .mockResolvedValueOnce({ id: 'tx1', walletId: 'w1', amount: 50, balanceBefore: 100, balanceAfter: 150 }) // save transaction
+        .mockResolvedValueOnce({
+          id: 'tx1',
+          walletId: 'w1',
+          amount: 50,
+          balanceBefore: 100,
+          balanceAfter: 150,
+        }) // save transaction
 
       const result = await service.credit('w1', 50)
 
@@ -143,15 +153,18 @@ describe('WalletService', () => {
       expect(wallet.balance).toBe(150)
 
       // Verifica que se creó la transacción con los valores correctos
-      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(Transaction, expect.objectContaining({
-        walletId: 'w1',
-        brandId: 'brand-1',
-        type: TransactionType.CREDIT,
-        amount: 50,
-        balanceBefore: 100,
-        balanceAfter: 150,
-        status: TransactionStatus.COMPLETED,
-      }))
+      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(
+        Transaction,
+        expect.objectContaining({
+          walletId: 'w1',
+          brandId: 'brand-1',
+          type: TransactionType.CREDIT,
+          amount: 50,
+          balanceBefore: 100,
+          balanceAfter: 150,
+          status: TransactionStatus.COMPLETED,
+        }),
+      )
 
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.release).toHaveBeenCalled()
@@ -173,18 +186,27 @@ describe('WalletService', () => {
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
       mockQueryRunner.manager.save
         .mockResolvedValueOnce(wallet) // save wallet
-        .mockResolvedValueOnce({ id: 'tx1', walletId: 'w1', amount: 80, balanceBefore: 200, balanceAfter: 120 })
+        .mockResolvedValueOnce({
+          id: 'tx1',
+          walletId: 'w1',
+          amount: 80,
+          balanceBefore: 200,
+          balanceAfter: 120,
+        })
 
       const result = await service.debit('w1', 80)
 
       expect(wallet.balance).toBe(120)
-      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(Transaction, expect.objectContaining({
-        type: TransactionType.DEBIT,
-        amount: 80,
-        balanceBefore: 200,
-        balanceAfter: 120,
-        status: TransactionStatus.COMPLETED,
-      }))
+      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(
+        Transaction,
+        expect.objectContaining({
+          type: TransactionType.DEBIT,
+          amount: 80,
+          balanceBefore: 200,
+          balanceAfter: 120,
+          status: TransactionStatus.COMPLETED,
+        }),
+      )
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
       expect(result.data).toBeDefined()
     })
@@ -244,12 +266,15 @@ describe('WalletService', () => {
 
       const result = await service.debit('w1', 80, {}, 'COP')
 
-      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(Transaction, expect.objectContaining({
-        type: TransactionType.DEBIT,
-        amount: 80,
-        balanceBefore: 200,
-        balanceAfter: 120,
-      }))
+      expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(
+        Transaction,
+        expect.objectContaining({
+          type: TransactionType.DEBIT,
+          amount: 80,
+          balanceBefore: 200,
+          balanceAfter: 120,
+        }),
+      )
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
       expect(result.data).toBeDefined()
     })
@@ -263,6 +288,364 @@ describe('WalletService', () => {
       expect(result.data).toBeDefined()
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.rollbackTransaction).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('idempotent movements', () => {
+    it('returns the original credit movement when the unique constraint rejects a repeated key', async () => {
+      const originalTx = {
+        id: 'tx-k1',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.CREDIT,
+        amount: '50.00',
+        balanceBefore: '100.00',
+        balanceAfter: '150.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'k1',
+      }
+      const persistedWallet = { id: 'w1', brandId: 'brand-1', balance: '150.00' }
+
+      mockQueryRunner.manager.findOne
+        .mockResolvedValueOnce({ ...persistedWallet })
+        .mockResolvedValueOnce(originalTx)
+        .mockResolvedValueOnce(persistedWallet)
+
+      mockQueryRunner.manager.save
+        .mockResolvedValueOnce(persistedWallet)
+        .mockRejectedValueOnce(Object.assign(new Error('duplicate key value'), { code: '23505' }))
+
+      const result = await service.credit('w1', 50, { idempotencyKey: 'k1' })
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data).toEqual({
+        wallet: expect.objectContaining({ id: 'w1', balance: 150 }),
+        transaction: expect.objectContaining({
+          id: 'tx-k1',
+          idempotencyKey: 'k1',
+          amount: 50,
+          balanceBefore: 100,
+          balanceAfter: 150,
+        }),
+      })
+    })
+
+    it('returns the original debit movement when the unique constraint rejects a repeated key', async () => {
+      const originalTx = {
+        id: 'tx-k2',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '80.00',
+        balanceBefore: '200.00',
+        balanceAfter: '120.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'k2',
+      }
+      const persistedWallet = { id: 'w1', brandId: 'brand-1', balance: '120.00' }
+
+      mockQueryRunner.manager.findOne
+        .mockResolvedValueOnce({ ...persistedWallet })
+        .mockResolvedValueOnce(originalTx)
+        .mockResolvedValueOnce(persistedWallet)
+
+      mockQueryRunner.manager.save
+        .mockResolvedValueOnce(persistedWallet)
+        .mockRejectedValueOnce(
+          Object.assign(new Error('duplicate key value'), { driverError: { code: '23505' } }),
+        )
+
+      const result = await service.debit('w1', 80, { idempotencyKey: 'k2' })
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data).toEqual({
+        wallet: expect.objectContaining({ id: 'w1', balance: 120 }),
+        transaction: expect.objectContaining({
+          id: 'tx-k2',
+          idempotencyKey: 'k2',
+          amount: 80,
+          balanceBefore: 200,
+          balanceAfter: 120,
+        }),
+      })
+    })
+
+    it('returns the original debit movement without moving the balance when the wallet is frozen afterwards', async () => {
+      const originalTx = {
+        id: 'tx-frozen-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const frozenWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.FROZEN,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return frozenWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(frozenWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data).toEqual({
+        wallet: expect.objectContaining({
+          id: 'w1',
+          balance: 150000,
+          status: WalletStatus.FROZEN,
+        }),
+        transaction: expect.objectContaining({
+          id: 'tx-frozen-retry',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+          amount: 50000,
+          balanceBefore: 200000,
+          balanceAfter: 150000,
+        }),
+      })
+    })
+
+    it('returns the original debit movement without moving the balance when the wallet is closed afterwards', async () => {
+      const originalTx = {
+        id: 'tx-closed-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const closedWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.CLOSED,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return closedWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(closedWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data?.transaction.id).toBe('tx-closed-retry')
+    })
+  })
+
+  describe('debit — walletId and brand ownership guard (C3)', () => {
+    it('rejects a null or empty walletId before querying the database and does not debit another wallet', async () => {
+      const otherWallet = {
+        id: 'w-other',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
+
+      await expect(service.debit(null as any, 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+      await expect(service.debit('   ', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(otherWallet.balance).toBe(200)
+    })
+
+    it('rejects a charge from brand A against brand B wallet and leaves brand B wallet unchanged', async () => {
+      const walletBrandB = {
+        id: 'w-brand-b',
+        brandId: 'brand-b',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandB)
+
+      expect.assertions(6)
+      try {
+        await service.debit('w-brand-b', 80, { brandId: 'brand-a' })
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.NOT_FOUND)
+      }
+
+      expect(walletBrandB.balance).toBe(200)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+    })
+
+    it('debits normally when the wallet belongs to the paying brand', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+
+      const result = await service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')
+
+      expect(walletBrandA.balance).toBe(120)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).not.toHaveBeenCalled()
+      expect(result.data?.wallet.balance).toBe(120)
+    })
+
+    it('rejects debiting a TKN wallet even when expectedCurrency is omitted', async () => {
+      const tknWallet = {
+        id: 'w-tkn',
+        brandId: 'brand-a',
+        currency: 'TKN',
+        balance: 500,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(tknWallet)
+
+      await expect(service.debit('w-tkn', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(tknWallet.balance).toBe(500)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+    })
+
+    it('rethrows unexpected database errors on debit after rolling back the transaction', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+
+      await expect(service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      )
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.release).toHaveBeenCalled()
+    })
+  })
+
+  describe('debit — positive finite amount guard', () => {
+    let copWallet: {
+      id: string
+      brandId: string
+      currency: string
+      balance: number
+      status: WalletStatus
+    }
+
+    beforeEach(() => {
+      copWallet = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(copWallet)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+    })
+
+    it('rejects a negative amount before opening a transaction and does not increase the wallet balance', async () => {
+      let thrownError: unknown
+      try {
+        await service.debit('w-cop', -50000, { brandId: 'brand-a' }, 'COP')
+      } catch (error) {
+        thrownError = error
+      }
+
+      expect(copWallet.balance).toBe(1000)
+      expect(thrownError).toBeInstanceOf(RequestException)
+      expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+      expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['zero', 0],
+      ['NaN', Number.NaN],
+      ['non-numeric string', 'abc' as unknown as number],
+    ])(
+      'rejects a %s amount before opening a transaction and leaves the wallet balance at 1000',
+      async (_label, invalidAmount) => {
+        let thrownError: unknown
+        try {
+          await service.debit('w-cop', invalidAmount, { brandId: 'brand-a' }, 'COP')
+        } catch (error) {
+          thrownError = error
+        }
+
+        expect(copWallet.balance).toBe(1000)
+        expect(thrownError).toBeInstanceOf(RequestException)
+        expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      },
+    )
+
+    it('debits a positive amount (100) from a 1000 COP wallet as today', async () => {
+      const result = await service.debit('w-cop', 100, { brandId: 'brand-a' }, 'COP')
+
+      expect(copWallet.balance).toBe(900)
+      expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(result.data?.wallet.balance).toBe(900)
+      expect(result.data?.transaction.amount).toBe(100)
     })
   })
 

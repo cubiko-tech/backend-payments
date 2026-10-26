@@ -408,8 +408,8 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       const buscador = () => ({
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
-        getOne: jest.fn(async () =>
-          historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
+        getOne: jest.fn(
+          async () => historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
         ),
       })
       eventRepo.createQueryBuilder.mockImplementation(buscador)
@@ -873,17 +873,14 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       ['sin trialEnd', { trialEnd: null }],
       ['con el trialEnd ya vencido', { trialEnd: new Date('2026-01-01T00:00:00Z') }],
       ['con un trialEnd inválido', { trialEnd: new Date('no-es-fecha') }],
-    ])(
-      'TRIALING %s NO otorga: no se inventa un vencimiento',
-      async (_caso, over) => {
-        conSuscripcion(pendienteDeAceptacion(over))
-        confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+    ])('TRIALING %s NO otorga: no se inventa un vencimiento', async (_caso, over) => {
+      conSuscripcion(pendienteDeAceptacion(over))
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
 
-        await despachar(cambioDeEstado('TRIALING'))
+      await despachar(cambioDeEstado('TRIALING'))
 
-        expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
-      },
-    )
+      expect(roles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
 
     /**
      * Lo que esta pareja de casos protege es la SEGUNDA OPORTUNIDAD.
@@ -1177,7 +1174,9 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       // dejando la fila de historial sin evento. Todo estado mapeado que NO otorgue llega a esa
       // lectura, así que todos tienen que nombrar el suyo.
       const LLEGAN_AL_EVENTO = (
-        Object.keys(CONFIO_SUBSCRIPTION_STATUS_MAP) as (keyof typeof CONFIO_SUBSCRIPTION_STATUS_MAP)[]
+        Object.keys(
+          CONFIO_SUBSCRIPTION_STATUS_MAP,
+        ) as (keyof typeof CONFIO_SUBSCRIPTION_STATUS_MAP)[]
       ).filter((estado) => !CONFIO_ESTADOS_QUE_OTORGAN.includes(estado))
 
       it.each(LLEGAN_AL_EVENTO)(
@@ -1280,7 +1279,11 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
     it('sin suscripción en el proveedor no se inventa una consulta', async () => {
       const res = await service.confirmarContraElProveedor(
         conSuscripcion(
-          suscripcion({ status: SubscriptionStatus.PENDING, providerSubscriptionId: '', metadata: null }),
+          suscripcion({
+            status: SubscriptionStatus.PENDING,
+            providerSubscriptionId: '',
+            metadata: null,
+          }),
         ),
       )
 
@@ -1290,19 +1293,19 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
 
     // Lo que corta el sondeo infinito: un alta que ConfioPagos ya dio por muerta se
     // cierra, sale de `pending` y el barrido deja de consultarla.
-    it.each([['CANCELED', SubscriptionStatus.CANCELLED], ['EXPIRED', SubscriptionStatus.EXPIRED]])(
-      'con %s el alta que esperaba se CIERRA y deja de repescarse',
-      async (wire, esperado) => {
-        // Mutación: no aplicar los terminales — la fila se queda en `pending` y se la
-        // vuelve a consultar cada pasada hasta que vence la ventana.
-        confio.getSubscription.mockResolvedValue({ ...REMOTA, status: wire })
+    it.each([
+      ['CANCELED', SubscriptionStatus.CANCELLED],
+      ['EXPIRED', SubscriptionStatus.EXPIRED],
+    ])('con %s el alta que esperaba se CIERRA y deja de repescarse', async (wire, esperado) => {
+      // Mutation: skip terminal statuses so the row stays pending and is
+      // polled again on every sweep until the window expires.
+      confio.getSubscription.mockResolvedValue({ ...REMOTA, status: wire })
 
-        const res = await service.confirmarContraElProveedor(esperando())
+      const res = await service.confirmarContraElProveedor(esperando())
 
-        expect(res.resultado).toBe('cerrada')
-        expect(suscripcionGuardada().status).toBe(esperado)
-      },
-    )
+      expect(res.resultado).toBe('cerrada')
+      expect(suscripcionGuardada().status).toBe(esperado)
+    })
 
     it('al cerrarla NO toca roles: una fila que esperaba nunca tuvo plan que retirar', async () => {
       // Mutación: degradar en roles al cerrar — una llamada al servicio de acceso por
@@ -1624,8 +1627,8 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       const buscador = () => ({
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
-        getOne: jest.fn(async () =>
-          historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
+        getOne: jest.fn(
+          async () => historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
         ),
       })
       eventRepo.createQueryBuilder.mockImplementation(buscador)
@@ -1679,7 +1682,10 @@ describe('WebhookService — roles caído marca el webhook para reintento', () =
           provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
           useValue: { createQueryBuilder: jest.fn(() => qb(null)) },
         },
-        { provide: getDataSourceToken('DBWrite'), useValue: { transaction: jest.fn((cb: any) => cb(manager)) } },
+        {
+          provide: getDataSourceToken('DBWrite'),
+          useValue: { transaction: jest.fn((cb: any) => cb(manager)) },
+        },
         { provide: ConfioProvider, useValue: { getSubscription: jest.fn() } },
         {
           provide: ClientRolesService,

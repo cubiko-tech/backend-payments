@@ -202,9 +202,7 @@ export class AuthMiddleware implements NestMiddleware {
         const body = await meResponse.json()
         if (body.error) return null
 
-        const userData = body.data
-          ? Array.isArray(body.data) ? body.data[0] : body.data
-          : body
+        const userData = body.data ? (Array.isArray(body.data) ? body.data[0] : body.data) : body
 
         if (userData?.id || userData?.email) {
           return {
@@ -234,9 +232,7 @@ export class AuthMiddleware implements NestMiddleware {
       const parts = token.split('.')
       if (parts.length !== 3) return null
 
-      const payload = JSON.parse(
-        Buffer.from(parts[1], 'base64url').toString('utf8'),
-      )
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
 
       const id = payload.id || payload.user
       const email = payload.email

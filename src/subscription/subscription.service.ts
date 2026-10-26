@@ -189,7 +189,8 @@ export class SubscriptionService {
       throw new RequestException(
         {
           code: 'TRIAL_PROVIDER_NOT_SUPPORTED',
-          message: 'El alta de la prueba se crea en ConfioPagos: no admite otro medio de pago ni wallet',
+          message:
+            'El alta de la prueba se crea en ConfioPagos: no admite otro medio de pago ni wallet',
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
@@ -276,7 +277,8 @@ export class SubscriptionService {
       throw new RequestException(
         {
           code: 'TRIAL_ALREADY_USED',
-          message: 'La marca ya usó su prueba gratuita; para volver a suscribirse hay que pagar el plan',
+          message:
+            'La marca ya usó su prueba gratuita; para volver a suscribirse hay que pagar el plan',
         },
         HttpStatus.CONFLICT,
       )
@@ -338,7 +340,10 @@ export class SubscriptionService {
         // ya inició la prueba, se rechaza en vez de pisarle el ciclo.
         if (current && LIVE_SUBSCRIPTION_STATUSES.includes(current.status)) {
           throw new RequestException(
-            { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+            {
+              code: 'SUBSCRIPTION_ALREADY_EXISTS',
+              message: 'La marca ya tiene una suscripción vigente',
+            },
             HttpStatus.CONFLICT,
           )
         }
@@ -354,7 +359,8 @@ export class SubscriptionService {
           throw new RequestException(
             {
               code: 'SUBSCRIPTION_PENDING_ACCEPTANCE',
-              message: 'El alta ya está creada y espera que completes el registro del medio de pago',
+              message:
+                'El alta ya está creada y espera que completes el registro del medio de pago',
             },
             HttpStatus.CONFLICT,
           )
@@ -363,7 +369,8 @@ export class SubscriptionService {
           throw new RequestException(
             {
               code: 'TRIAL_ALREADY_USED',
-              message: 'La marca ya usó su prueba gratuita; para volver a suscribirse hay que pagar el plan',
+              message:
+                'La marca ya usó su prueba gratuita; para volver a suscribirse hay que pagar el plan',
             },
             HttpStatus.CONFLICT,
           )
@@ -514,7 +521,10 @@ export class SubscriptionService {
       // perdedor recibe un 409, no un 500.
       if (isUniqueViolation(error)) {
         throw new RequestException(
-          { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+          {
+            code: 'SUBSCRIPTION_ALREADY_EXISTS',
+            message: 'La marca ya tiene una suscripción vigente',
+          },
           HttpStatus.CONFLICT,
         )
       }
@@ -535,7 +545,6 @@ export class SubscriptionService {
       )
     }
   }
-
 
   /**
    * ALTA PAGA, sin prueba: la vuelta de la marca que ya consumió su trial.
@@ -584,7 +593,10 @@ export class SubscriptionService {
 
     if (existing && LIVE_SUBSCRIPTION_STATUSES.includes(existing.status)) {
       throw new RequestException(
-        { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+        {
+          code: 'SUBSCRIPTION_ALREADY_EXISTS',
+          message: 'La marca ya tiene una suscripción vigente',
+        },
         HttpStatus.CONFLICT,
       )
     }
@@ -632,7 +644,10 @@ export class SubscriptionService {
         // esta escritura pasó una llamada HTTP.
         if (current && LIVE_SUBSCRIPTION_STATUSES.includes(current.status)) {
           throw new RequestException(
-            { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+            {
+              code: 'SUBSCRIPTION_ALREADY_EXISTS',
+              message: 'La marca ya tiene una suscripción vigente',
+            },
             HttpStatus.CONFLICT,
           )
         }
@@ -723,7 +738,10 @@ export class SubscriptionService {
       // perdedor recibe 409 y no 500.
       if (isUniqueViolation(error)) {
         throw new RequestException(
-          { code: 'SUBSCRIPTION_ALREADY_EXISTS', message: 'La marca ya tiene una suscripción vigente' },
+          {
+            code: 'SUBSCRIPTION_ALREADY_EXISTS',
+            message: 'La marca ya tiene una suscripción vigente',
+          },
           HttpStatus.CONFLICT,
         )
       }
@@ -732,7 +750,10 @@ export class SubscriptionService {
       // Mismo criterio que el alta de prueba: NUNCA un 200 sin `acceptanceUrl`, que un
       // front que lee `res.acceptanceUrl` no puede distinguir de un éxito.
       throw new RequestException(
-        { code: 'PAID_START_FAILED', message: 'No se pudo crear la suscripción, reintentá en unos minutos' },
+        {
+          code: 'PAID_START_FAILED',
+          message: 'No se pudo crear la suscripción, reintentá en unos minutos',
+        },
         HttpStatus.SERVICE_UNAVAILABLE,
       )
     }
@@ -821,9 +842,8 @@ export class SubscriptionService {
       )
     }
 
-    const { resultado, estadoRemoto } = await this.confioWebhook.confirmarContraElProveedor(
-      subscription,
-    )
+    const { resultado, estadoRemoto } =
+      await this.confioWebhook.confirmarContraElProveedor(subscription)
 
     if (resultado === 'proveedor_no_disponible') {
       throw new RequestException(
@@ -1314,7 +1334,10 @@ export class SubscriptionService {
 
       if (!subscription.cancelledAt) {
         throw new RequestException(
-          { code: 'SUBSCRIPTION_NOT_CANCELLED', message: 'Solo se pueden reactivar suscripciones canceladas' },
+          {
+            code: 'SUBSCRIPTION_NOT_CANCELLED',
+            message: 'Solo se pueden reactivar suscripciones canceladas',
+          },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }

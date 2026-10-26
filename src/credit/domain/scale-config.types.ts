@@ -29,7 +29,7 @@ export interface TierConfig {
 export interface ScaleConfig {
   version: number
   baseCurrency: string
-  weights: { investment: number, roas: number, sales: number }
+  weights: { investment: number; roas: number; sales: number }
   scales: {
     investment: ScaleBracket[]
     roas: ScaleBracket[]
@@ -40,7 +40,7 @@ export interface ScaleConfig {
    * Subscore ROAS mínimo para alcanzar cada nivel alto (techo por eficiencia).
    * Ej. { growthSeller: 65, proMarketer: 80, elite: 92 }.
    */
-  tierRoasCaps: { growthSeller: number, proMarketer: number, elite: number }
+  tierRoasCaps: { growthSeller: number; proMarketer: number; elite: number }
   tiers: TierConfig[]
 }
 
@@ -59,7 +59,7 @@ export interface ScoreInput {
 export type ScoreStatus = 'scored' | 'vetoed_roas'
 
 export interface ScoreResult {
-  subscores: { investment: number, roas: number, sales: number }
+  subscores: { investment: number; roas: number; sales: number }
   roasValue: number
   total: number
   /** Nivel por puntos (antes del techo por ROAS). */

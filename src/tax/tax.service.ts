@@ -16,13 +16,20 @@ export class TaxService {
    * Obtener configuración de impuestos por país.
    * Uso interno — no expone controller.
    */
-  async getTaxForCountry(country: string): Promise<{ taxName: string; taxRate: number; isInclusive: boolean }> {
+  async getTaxForCountry(
+    country: string,
+  ): Promise<{ taxName: string; taxRate: number; isInclusive: boolean }> {
     try {
       // `trim()` además de `toUpperCase()`: el país llega de tres fuentes distintas
       // (precio del catálogo, perfil de facturación, metadata del pago) y un ' CO' con
       // espacio no matchea la fila y caería al 0% en silencio.
       const config = await this.taxConfigReadRepository.findOne({
-        where: { country: String(country || '').trim().toUpperCase(), isActive: true },
+        where: {
+          country: String(country || '')
+            .trim()
+            .toUpperCase(),
+          isActive: true,
+        },
       })
 
       if (!config) {

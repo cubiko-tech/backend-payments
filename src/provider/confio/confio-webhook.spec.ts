@@ -9,7 +9,11 @@ import { ConfioWebhookPayload } from './confio.types'
 const SUBSCRIPTION =
   'stores/01KZBY100Z3HD2X997XE0DN8PW/subscription-plans/01M0Z020DYMXKKDHHR4HAX916R/subscriptions/01M0Z0AAAA'
 
-function cobroExitoso(cycleNumber: number, payment: string, timestamp = 1768384800): ConfioWebhookPayload {
+function cobroExitoso(
+  cycleNumber: number,
+  payment: string,
+  timestamp = 1768384800,
+): ConfioWebhookPayload {
   return {
     event: 'subscription.billingStatusChanged',
     data: {
@@ -67,8 +71,12 @@ function cambioDeEstado(status: string, updateTime: string): ConfioWebhookPayloa
 describe('buildConfioWebhookEventId', () => {
   describe('subscription.billingStatusChanged', () => {
     it('distingue dos cobros exitosos de ciclos distintos', () => {
-      const ciclo3 = buildConfioWebhookEventId(cobroExitoso(3, 'organizations/o/stores/s/payments/p3'))
-      const ciclo4 = buildConfioWebhookEventId(cobroExitoso(4, 'organizations/o/stores/s/payments/p4'))
+      const ciclo3 = buildConfioWebhookEventId(
+        cobroExitoso(3, 'organizations/o/stores/s/payments/p3'),
+      )
+      const ciclo4 = buildConfioWebhookEventId(
+        cobroExitoso(4, 'organizations/o/stores/s/payments/p4'),
+      )
 
       expect(ciclo3).not.toEqual(ciclo4)
     })
@@ -87,7 +95,9 @@ describe('buildConfioWebhookEventId', () => {
 
     it('distingue el fallo del éxito dentro del mismo ciclo', () => {
       const fallido = buildConfioWebhookEventId(cobroFallido(3, 1))
-      const exitoso = buildConfioWebhookEventId(cobroExitoso(3, 'organizations/o/stores/s/payments/p3'))
+      const exitoso = buildConfioWebhookEventId(
+        cobroExitoso(3, 'organizations/o/stores/s/payments/p3'),
+      )
 
       expect(fallido).not.toEqual(exitoso)
     })

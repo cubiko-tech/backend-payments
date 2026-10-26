@@ -1,4 +1,4 @@
-// Red when scripts/commit-msg.sh drops the Refs check, the wip/ exception, RXDEV-<n>/PAYL-<n> on line/payments, or rebase head-name detection.
+// Red when scripts/commit-msg.sh drops the Refs check, the wip/ exception, Jira keys outside develop/staging/main, or rebase head-name detection.
 import { spawnSync } from 'child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -77,68 +77,102 @@ describe('scripts/commit-msg.sh hook', () => {
     expect(content).toContain('bash scripts/commit-msg.sh "$1"')
   })
 
-  it('rejects a commit message without Refs: on a feature branch', () => {
-    const res = runHook('feat(wallet): add x\n', 'feat/RXDEV-1-x')
-    expect(res.status).toBe(1)
-    expect(res.output).toContain('Refs:')
+  it('rejects a commit message without Refs: outside wip/ branches', () => {
+    for (const branch of ['feat/RXDEV-1-x', 'line/manuel-payments', 'develop', 'staging', 'main']) {
+      const res = runHook('feat(wallet): add x\n', branch)
+      expect(res.status).toBe(1)
+      expect(res.output).toContain('Refs:')
+    }
   })
 
-  it('accepts a commit message with Refs: RXDEV-<n> on a feature branch', () => {
-    const res = runHook('feat(wallet): add x\n\nRefs: RXDEV-1\n', 'feat/RXDEV-1-x')
-    expect(res.status).toBe(0)
+  it('accepts a commit message with Refs: RXDEV-<n> on develop, staging, main, and feature branches', () => {
+    for (const branch of [
+      'feat/RXDEV-1-x',
+      'line/manuel-payments',
+      'line/payments',
+      'develop',
+      'staging',
+      'main',
+    ]) {
+      const res = runHook('feat(wallet): add x\n\nRefs: RXDEV-1\n', branch)
+      expect(res.status).toBe(0)
+    }
   })
 
-  it('accepts a commit message with Refs: PAYL-<n> on line/payments', () => {
-    const res = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'line/payments')
-    expect(res.status).toBe(0)
+  it('accepts Refs: LOC-1 and any Jira-shaped key outside develop, staging, and main', () => {
+    for (const branch of [
+      'line/manuel-payments',
+      'line/payments',
+      'integration/manuel',
+      'feat/LOC-1-hook',
+      'feat/RXDEV-1-x',
+      'cualquier-nombre',
+    ]) {
+      const res = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', branch)
+      expect(res.status).toBe(0)
+    }
+
+    for (const key of ['LOC-1', 'ABC-4', 'A_1-99', 'RXDEV-108']) {
+      const res = runHook(`feat(wallet): add x\n\nRefs: ${key}\n`, 'line/manuel-payments')
+      expect(res.status).toBe(0)
+    }
+
+    for (const invalidKey of ['loc-1', 'A-1', 'LOC-', '123-45']) {
+      const res = runHook(`feat(wallet): add x\n\nRefs: ${invalidKey}\n`, 'line/manuel-payments')
+      expect(res.status).toBe(1)
+      expect(res.output).toContain('Refs:')
+    }
   })
 
-  it('accepts a commit message with Refs: RXDEV-<n> on line/payments', () => {
-    const res = runHook('feat(wallet): add x\n\nRefs: RXDEV-1\n', 'line/payments')
-    expect(res.status).toBe(0)
+  it('rejects Refs: LOC-1 and non-RXDEV Refs: keys on develop, staging, and main', () => {
+    for (const branch of ['develop', 'staging', 'main']) {
+      for (const key of ['LOC-1', 'ABC-4', 'A_1-99']) {
+        const res = runHook(`feat(wallet): add x\n\nRefs: ${key}\n`, branch)
+        expect(res.status).toBe(1)
+        expect(res.output).toContain('Refs:')
+      }
+    }
   })
 
-  it('rejects Refs: PAYL-<n> outside line/payments', () => {
-    const res = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'feat/RXDEV-1-x')
-    expect(res.status).toBe(1)
-    expect(res.output).toContain('Refs:')
+  it('accepts Refs: LOC-1 with detached HEAD during a rebase of line/payments or line/manuel-payments', () => {
+    for (const headName of ['refs/heads/line/payments', 'refs/heads/line/manuel-payments']) {
+      const rebaseMerge = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', 'HEAD', {
+        dir: 'rebase-merge',
+        headName,
+      })
+      expect(rebaseMerge.status).toBe(0)
+
+      const rebaseApply = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', 'HEAD', {
+        dir: 'rebase-apply',
+        headName,
+      })
+      expect(rebaseApply.status).toBe(0)
+    }
   })
 
-  it('accepts Refs: PAYL-<n> with detached HEAD during a rebase of line/payments', () => {
-    const rebaseMerge = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
-      dir: 'rebase-merge',
-      headName: 'refs/heads/line/payments',
-    })
-    expect(rebaseMerge.status).toBe(0)
-
-    const rebaseApply = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
-      dir: 'rebase-apply',
-      headName: 'refs/heads/line/payments',
-    })
-    expect(rebaseApply.status).toBe(0)
-  })
-
-  it('rejects Refs: PAYL-<n> with detached HEAD outside a rebase or when rebasing another branch', () => {
-    const detachedOutsideRebase = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD')
+  it('rejects Refs: LOC-1 with detached HEAD outside a rebase or when rebasing develop, staging, or main', () => {
+    const detachedOutsideRebase = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', 'HEAD')
     expect(detachedOutsideRebase.status).toBe(1)
     expect(detachedOutsideRebase.output).toContain('Refs:')
 
     const rxdevDetachedOutsideRebase = runHook('feat(wallet): add x\n\nRefs: RXDEV-1\n', 'HEAD')
     expect(rxdevDetachedOutsideRebase.status).toBe(0)
 
-    const rebaseMergeOther = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
-      dir: 'rebase-merge',
-      headName: 'refs/heads/feat/RXDEV-1-x',
-    })
-    expect(rebaseMergeOther.status).toBe(1)
-    expect(rebaseMergeOther.output).toContain('Refs:')
+    for (const headName of ['refs/heads/develop', 'refs/heads/staging', 'refs/heads/main']) {
+      const rebaseMergeProtected = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', 'HEAD', {
+        dir: 'rebase-merge',
+        headName,
+      })
+      expect(rebaseMergeProtected.status).toBe(1)
+      expect(rebaseMergeProtected.output).toContain('Refs:')
 
-    const rebaseApplyOther = runHook('feat(wallet): add x\n\nRefs: PAYL-1\n', 'HEAD', {
-      dir: 'rebase-apply',
-      headName: 'refs/heads/feat/RXDEV-1-x',
-    })
-    expect(rebaseApplyOther.status).toBe(1)
-    expect(rebaseApplyOther.output).toContain('Refs:')
+      const rebaseApplyProtected = runHook('feat(wallet): add x\n\nRefs: LOC-1\n', 'HEAD', {
+        dir: 'rebase-apply',
+        headName,
+      })
+      expect(rebaseApplyProtected.status).toBe(1)
+      expect(rebaseApplyProtected.output).toContain('Refs:')
+    }
   })
 
   it('accepts a commit message without Refs: on a wip/ branch', () => {
@@ -209,7 +243,7 @@ describe('scripts/commit-msg.sh hook', () => {
 
   it('accepts prose containing "generated with" when it is not an AI signature', () => {
     const res = runHook(
-      'build(db): add migration\n\nMigration generated with typeorm.\n\nRefs: PAYL-1\n',
+      'build(db): add migration\n\nMigration generated with typeorm.\n\nRefs: LOC-1\n',
       'line/payments',
     )
     expect(res.status).toBe(0)

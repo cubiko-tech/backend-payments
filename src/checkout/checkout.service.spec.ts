@@ -10,6 +10,7 @@ import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.en
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
 
 import { WalletService } from '../wallet/wallet.service'
+import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { AuditService } from '../audit/audit.service'
@@ -17,7 +18,11 @@ import { TaxService } from '../tax/tax.service'
 import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
-import { ClientRolesService, PLAN_NOT_FOUND, PRICE_NOT_FOUND_FOR_COUNTRY } from '../client/client-roles.service'
+import {
+  ClientRolesService,
+  PLAN_NOT_FOUND,
+  PRICE_NOT_FOUND_FOR_COUNTRY,
+} from '../client/client-roles.service'
 import {
   ClientPlatformService,
   BRAND_LOOKUP_UNAVAILABLE,
@@ -68,10 +73,15 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
   let paymentRepo: ReturnType<typeof createMockRepo>
   /** Se nombra para poder sembrar la fila que el checkout REUSA y ver qué guarda encima. */
   let subscriptionRepo: ReturnType<typeof createMockRepo>
-  let clientRoles: { getPlanPrice: jest.Mock; resolvePriceForCountry: jest.Mock; assignPlanToBrand: jest.Mock }
+  let clientRoles: {
+    getPlanPrice: jest.Mock
+    resolvePriceForCountry: jest.Mock
+    assignPlanToBrand: jest.Mock
+  }
   let clientPlatform: { resolveBrandCountry: jest.Mock; getBrandCountry: jest.Mock }
   let enterprisePricing: { getForBrand: jest.Mock }
-  let walletService: { debit: jest.Mock; findById: jest.Mock }
+  let walletService: { debit: jest.Mock; credit: jest.Mock; findById: jest.Mock }
+  let invoiceService: { create: jest.Mock }
   let providerFactory: { getProvider: jest.Mock }
   let providerConfig: { isProviderAvailable: jest.Mock }
   let taxService: { getTaxForCountry: jest.Mock }
@@ -82,13 +92,16 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
    * La wallet que `checkout` lee antes de debitar. Trae `brandId`: desde que la
    * guarda también verifica pertenencia, una wallet sin dueño es una wallet ajena.
    */
-  const walletEn = (currency: string, brandId: string = BRAND_ID) =>
-    ({ data: { id: 'w-1', brandId, currency } })
+  const walletEn = (currency: string, brandId: string = BRAND_ID) => ({
+    data: { id: 'w-1', brandId, currency },
+  })
 
   beforeEach(async () => {
     paymentRepo = createMockRepo()
     subscriptionRepo = createMockRepo()
-    createCheckout = jest.fn().mockResolvedValue({ providerPaymentId: 'ext-1', checkoutUrl: 'https://pay/1' })
+    createCheckout = jest
+      .fn()
+      .mockResolvedValue({ providerPaymentId: 'ext-1', checkoutUrl: 'https://pay/1' })
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -106,6 +119,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           // casos en otra moneda tienen que declarar su wallet explícitamente.
           useValue: {
             debit: jest.fn().mockResolvedValue(null),
+            credit: jest.fn().mockResolvedValue(null),
             findById: jest.fn().mockResolvedValue(walletEn('COP')),
           },
         },
@@ -124,7 +138,9 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           // así que con cualquier otra tasa las aserciones de 19900/6.99 estarían
           // midiendo el mock de impuestos y no el precio resuelto.
           useValue: {
-            getTaxForCountry: jest.fn().mockResolvedValue({ taxName: 'N/A', taxRate: 0, isInclusive: false }),
+            getTaxForCountry: jest
+              .fn()
+              .mockResolvedValue({ taxName: 'N/A', taxRate: 0, isInclusive: false }),
           },
         },
         {
@@ -134,7 +150,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
             sendInvoice: jest.fn().mockResolvedValue({ success: true }),
           },
         },
-        { provide: ProviderFactory, useValue: { getProvider: jest.fn(() => ({ createCheckout })) } },
+        {
+          provide: ProviderFactory,
+          useValue: { getProvider: jest.fn(() => ({ createCheckout })) },
+        },
         {
           provide: EventBusService,
           useValue: {
@@ -158,8 +177,14 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
             getBrandCountry: jest.fn().mockResolvedValue('CO'),
           },
         },
-        { provide: EnterprisePricingService, useValue: { getForBrand: jest.fn().mockResolvedValue(null) } },
-        { provide: ProviderConfigService, useValue: { isProviderAvailable: jest.fn().mockResolvedValue(true) } },
+        {
+          provide: EnterprisePricingService,
+          useValue: { getForBrand: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: ProviderConfigService,
+          useValue: { isProviderAvailable: jest.fn().mockResolvedValue(true) },
+        },
         { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
       ],
     }).compile()
@@ -169,6 +194,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     clientPlatform = module.get(ClientPlatformService)
     enterprisePricing = module.get(EnterprisePricingService)
     walletService = module.get(WalletService)
+    invoiceService = module.get(InvoiceService)
     providerFactory = module.get(ProviderFactory)
     providerConfig = module.get(ProviderConfigService)
     taxService = module.get(TaxService)
@@ -207,7 +233,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-us', countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
+        price: priceRow({
+          id: 'price-us',
+          countryCode: 'US',
+          currency: 'USD',
+          price: 6.99,
+          isDefault: false,
+        }),
       })
 
       await service.processCheckout(altaConWallet())
@@ -223,7 +255,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-us', countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
+        price: priceRow({
+          id: 'price-us',
+          countryCode: 'US',
+          currency: 'USD',
+          price: 6.99,
+          isDefault: false,
+        }),
       })
 
       await service.processCheckout(altaConWallet({ currency: 'COP' }))
@@ -245,7 +283,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'CO' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-free-co', countryCode: 'CO', currency: 'COP', price: 0, isDefault: true }),
+        price: priceRow({
+          id: 'price-free-co',
+          countryCode: 'CO',
+          currency: 'COP',
+          price: 0,
+          isDefault: true,
+        }),
       })
 
       await service.processCheckout(altaConWallet({ planSlug: 'free' }))
@@ -278,27 +322,30 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       ['no numérico', 'no-es-un-precio'],
       ['ausente', null],
       ['negativo', -1],
-    ])('fila de precio malformada (%s) → 422, no cobra NaN ni regala el plan', async (_caso, price) => {
-      clientRoles.resolvePriceForCountry.mockResolvedValue({
-        ok: true,
-        price: priceRow({ price: price as unknown as number }),
-      })
+    ])(
+      'fila de precio malformada (%s) → 422, no cobra NaN ni regala el plan',
+      async (_caso, price) => {
+        clientRoles.resolvePriceForCountry.mockResolvedValue({
+          ok: true,
+          price: priceRow({ price: price as unknown as number }),
+        })
 
-      await expect(
-        service.processCheckout(altaConWallet()),
-      ).rejects.toMatchObject({ code: PRICE_NOT_FOUND_FOR_COUNTRY })
+        await expect(service.processCheckout(altaConWallet())).rejects.toMatchObject({
+          code: PRICE_NOT_FOUND_FOR_COUNTRY,
+        })
 
-      expect(paymentRepo.save).not.toHaveBeenCalled()
-      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
-    })
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+      },
+    )
 
     it.each([
       ['con salto de línea', 'dropi-roax\nfake-log-line'],
       ['con path traversal', '../../admin'],
     ])('planSlug %s → 400 INVALID_PLAN_SLUG sin consultar nada', async (_caso, planSlug) => {
-      await expect(
-        service.processCheckout(altaConWallet({ planSlug })),
-      ).rejects.toMatchObject({ code: 'INVALID_PLAN_SLUG' })
+      await expect(service.processCheckout(altaConWallet({ planSlug }))).rejects.toMatchObject({
+        code: 'INVALID_PLAN_SLUG',
+      })
 
       expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
       expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
@@ -319,7 +366,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     }
 
     it('no se pudo preguntar a platform → 503 BRAND_LOOKUP_UNAVAILABLE', async () => {
-      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code: BRAND_LOOKUP_UNAVAILABLE })
+      clientPlatform.resolveBrandCountry.mockResolvedValue({
+        ok: false,
+        code: BRAND_LOOKUP_UNAVAILABLE,
+      })
       await esperarFallo(altaConWallet(), BRAND_LOOKUP_UNAVAILABLE, HttpStatus.SERVICE_UNAVAILABLE)
     })
 
@@ -329,13 +379,19 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
 
     it('marca sin país cargado → 422 BRAND_WITHOUT_COUNTRY', async () => {
-      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code: BRAND_WITHOUT_COUNTRY })
+      clientPlatform.resolveBrandCountry.mockResolvedValue({
+        ok: false,
+        code: BRAND_WITHOUT_COUNTRY,
+      })
       await esperarFallo(altaConWallet(), BRAND_WITHOUT_COUNTRY, HttpStatus.UNPROCESSABLE_ENTITY)
     })
 
     it('plan sin precio para el país → 422 nombrando el plan pero NO el país de la marca', async () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
-      clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: false,
+        code: PRICE_NOT_FOUND_FOR_COUNTRY,
+      })
 
       expect.assertions(5)
       try {
@@ -366,17 +422,20 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       ['no-UUID', 'no-es-uuid'],
     ]
 
-    it.each(casos)('brandId %s → 400 INVALID_BRAND_ID sin llamar a platform', async (_label, brandId) => {
-      expect.assertions(4)
-      try {
-        await service.processCheckout(altaConWallet({ brandId }))
-      } catch (error) {
-        expect((error as RequestException).code).toBe('INVALID_BRAND_ID')
-        expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
-      }
-      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
-      expect(paymentRepo.save).not.toHaveBeenCalled()
-    })
+    it.each(casos)(
+      'brandId %s → 400 INVALID_BRAND_ID sin llamar a platform',
+      async (_label, brandId) => {
+        expect.assertions(4)
+        try {
+          await service.processCheckout(altaConWallet({ brandId }))
+        } catch (error) {
+          expect((error as RequestException).code).toBe('INVALID_BRAND_ID')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        }
+        expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+      },
+    )
 
     it('un UUID con espacios se normaliza una vez y viaja limpio a platform y al pago', async () => {
       await service.processCheckout(altaConWallet({ brandId: `  ${BRAND_ID}  ` }))
@@ -412,19 +471,22 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       ['sólo espacios', '   '],
     ]
 
-    it.each(ausentes)('planSlug %s → 400 INVALID_PLAN_SLUG sin consultar nada', async (_label, planSlug) => {
-      expect.assertions(6)
-      try {
-        await service.processCheckout(altaConWallet({ planSlug }))
-      } catch (error) {
-        expect((error as RequestException).code).toBe('INVALID_PLAN_SLUG')
-        expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
-      }
-      expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
-      expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
-      expect(paymentRepo.save).not.toHaveBeenCalled()
-      expect(walletService.debit).not.toHaveBeenCalled()
-    })
+    it.each(ausentes)(
+      'planSlug %s → 400 INVALID_PLAN_SLUG sin consultar nada',
+      async (_label, planSlug) => {
+        expect.assertions(6)
+        try {
+          await service.processCheckout(altaConWallet({ planSlug }))
+        } catch (error) {
+          expect((error as RequestException).code).toBe('INVALID_PLAN_SLUG')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        }
+        expect(clientPlatform.resolveBrandCountry).not.toHaveBeenCalled()
+        expect(clientRoles.resolvePriceForCountry).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(walletService.debit).not.toHaveBeenCalled()
+      },
+    )
 
     /**
      * La regresión exacta que cierra la tarea: con `amount`/`currency` en la request,
@@ -445,7 +507,9 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
      */
     it('renewal:true sin planSlug también se rechaza y no cae al precio legacy', async () => {
       await expect(
-        service.processCheckout(altaConWallet({ planSlug: undefined, renewal: true, amount: 1, currency: 'COP' })),
+        service.processCheckout(
+          altaConWallet({ planSlug: undefined, renewal: true, amount: 1, currency: 'COP' }),
+        ),
       ).rejects.toMatchObject({ code: 'INVALID_PLAN_SLUG' })
 
       expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
@@ -458,15 +522,18 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       ['service_payment', 'service_payment'],
     ]
 
-    it.each(otrosPropositos)('%s sin planSlug sigue cobrando el amount/currency del llamador', async (_label, purpose) => {
-      await service.processCheckout(
-        altaConWallet({ purpose, planSlug: undefined, amount: 50000, currency: 'COP' }),
-      )
+    it.each(otrosPropositos)(
+      '%s sin planSlug sigue cobrando el amount/currency del llamador',
+      async (_label, purpose) => {
+        await service.processCheckout(
+          altaConWallet({ purpose, planSlug: undefined, amount: 50000, currency: 'COP' }),
+        )
 
-      expect(paymentRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: 50000, currency: 'COP' }),
-      )
-    })
+        expect(paymentRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({ amount: 50000, currency: 'COP' }),
+        )
+      },
+    )
   })
 
   describe('renovación del cron (indulgente: intenta el país, cae al legacy)', () => {
@@ -516,7 +583,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     it('si el plan no tiene precio para el país, la renovación cae al legacy con el país en el log', async () => {
       const logError = jest.spyOn((service as any).log, 'error').mockImplementation(() => undefined)
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
-      clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: false,
+        code: PRICE_NOT_FOUND_FOR_COUNTRY,
+      })
 
       await service.processCheckout(altaConWallet({ renewal: true }))
 
@@ -548,19 +618,22 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
 
     it('renewal:true sin precio legacy sigue lanzando INVALID_PLAN', async () => {
-      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code: BRAND_LOOKUP_UNAVAILABLE })
+      clientPlatform.resolveBrandCountry.mockResolvedValue({
+        ok: false,
+        code: BRAND_LOOKUP_UNAVAILABLE,
+      })
       clientRoles.getPlanPrice.mockResolvedValue(null)
 
-      await expect(
-        service.processCheckout(altaConWallet({ renewal: true })),
-      ).rejects.toMatchObject({ code: 'INVALID_PLAN' })
+      await expect(service.processCheckout(altaConWallet({ renewal: true }))).rejects.toMatchObject(
+        { code: 'INVALID_PLAN' },
+      )
       expect(paymentRepo.save).not.toHaveBeenCalled()
     })
 
     it('el alta con los mismos datos exige UUID; la renovación no (el atajo es del llamador)', async () => {
-      await expect(
-        service.processCheckout(altaConWallet({ brandId: 'b1' })),
-      ).rejects.toMatchObject({ code: 'INVALID_BRAND_ID' })
+      await expect(service.processCheckout(altaConWallet({ brandId: 'b1' }))).rejects.toMatchObject(
+        { code: 'INVALID_BRAND_ID' },
+      )
     })
   })
 
@@ -657,7 +730,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-us', countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
+        price: priceRow({
+          id: 'price-us',
+          countryCode: 'US',
+          currency: 'USD',
+          price: 6.99,
+          isDefault: false,
+        }),
       })
     }
 
@@ -687,7 +766,15 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
 
       await service.processCheckout(altaConWallet())
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 6.99, expect.any(Object), 'USD')
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        6.99,
+        expect.objectContaining({
+          referenceType: 'payment',
+          idempotencyKey: expect.stringMatching(/^payment:.+:debit$/),
+        }),
+        'USD',
+      )
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
 
@@ -720,13 +807,31 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(walletService.debit).not.toHaveBeenCalled()
     })
 
-    /**
-     * La guarda es del alta de plan: es el único camino cuya moneda dejó de ser la
-     * del llamador. Un `service_payment` sigue cobrando lo que pide el llamador y no
-     * gana un 422 que antes no existía.
-     */
-    it('service_payment con wallet en otra moneda sigue pasando (guarda acotada al alta)', async () => {
-      walletService.findById.mockResolvedValue(walletEn('COP'))
+    it('rejects a service_payment with a USD wallet and a COP price with 422 without debiting the wallet', async () => {
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      expect.assertions(4)
+      try {
+        await service.processCheckout({
+          brandId: BRAND_ID,
+          userId: 'u-1',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: 'w-1',
+          amount: 50000,
+          currency: 'COP',
+        })
+      } catch (error) {
+        expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(walletService.debit).not.toHaveBeenCalled()
+      expect(paymentRepo.save).not.toHaveBeenCalled()
+    })
+
+    it('passes the resolved currency to walletService.debit on a matching service_payment', async () => {
+      walletService.findById.mockResolvedValue(walletEn('USD'))
 
       await service.processCheckout({
         brandId: BRAND_ID,
@@ -738,7 +843,69 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         currency: 'USD',
       })
 
-      expect(walletService.debit).toHaveBeenCalledWith('w-1', 50, expect.any(Object), undefined)
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        50,
+        expect.objectContaining({
+          category: 'service_payment',
+          referenceType: 'payment',
+        }),
+        'USD',
+      )
+    })
+
+    it.each(['plan_purchase', 'service_payment', 'wallet_recharge'] as const)(
+      'rejects a TKN wallet with 422 on %s without debiting the wallet',
+      async (purpose) => {
+        walletService.findById.mockResolvedValue(walletEn('TKN'))
+
+        expect.assertions(4)
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose,
+            provider: 'wallet',
+            planSlug: purpose === 'plan_purchase' ? 'dropi-roax' : undefined,
+            walletId: 'w-1',
+            amount: 100,
+            currency: 'TKN',
+          })
+        } catch (error) {
+          expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+        }
+
+        expect(walletService.debit).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+      },
+    )
+
+    it('debits the wallet, creates the invoice, and assigns the plan on a plan_purchase in the wallet currency', async () => {
+      marcaUS()
+      walletService.findById.mockResolvedValue(walletEn('USD'))
+
+      await service.processCheckout(altaConWallet())
+
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        6.99,
+        expect.objectContaining({
+          category: 'plan_payment',
+          referenceType: 'payment',
+          idempotencyKey: expect.stringMatching(/^payment:.+:debit$/),
+        }),
+        'USD',
+      )
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          subtotal: 6.99,
+          total: 6.99,
+          currency: 'USD',
+        }),
+      )
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
   })
 
@@ -759,9 +926,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     it('el gate de proveedor usa el país que decidió el precio, no el de facturación', async () => {
       marcaUS()
 
-      await service.processCheckout(
-        altaConWallet({ provider: 'stripe', walletId: undefined }),
-      )
+      await service.processCheckout(altaConWallet({ provider: 'stripe', walletId: undefined }))
 
       expect(providerConfig.isProviderAvailable).toHaveBeenCalledWith('US', 'stripe')
     })
@@ -798,7 +963,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-mx', countryCode: 'MX', currency: 'COP', price: 19900, isDefault: false }),
+        price: priceRow({
+          id: 'price-mx',
+          countryCode: 'MX',
+          currency: 'COP',
+          price: 19900,
+          isDefault: false,
+        }),
       })
 
       await service.processCheckout(altaConWallet())
@@ -892,7 +1063,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
       clientRoles.resolvePriceForCountry.mockResolvedValue({
         ok: true,
-        price: priceRow({ id: 'price-us', countryCode: 'US', currency: 'USD', price: 6.99, isDefault: false }),
+        price: priceRow({
+          id: 'price-us',
+          countryCode: 'US',
+          currency: 'USD',
+          price: 6.99,
+          isDefault: false,
+        }),
       })
 
       await service.processCheckout(
@@ -952,6 +1129,385 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       const guardada = subscriptionRepo.save.mock.calls[0][0]
       expect(guardada.trialStart).toBe(INICIO_TRIAL)
       expect(guardada.trialEnd).toBe(FIN_TRIAL)
+    })
+  })
+
+  describe('wallet recharge completion (credits subtotal, not VAT)', () => {
+    it('credits the 100,000 COP subtotal to the wallet and invoices 19,000 COP VAT for a Colombia recharge', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+
+      await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'wallet_recharge',
+        provider: 'stripe',
+        walletId: 'w-1',
+        amount: 100000,
+        currency: 'COP',
+      })
+
+      const createdPayment = paymentRepo.create.mock.results[0].value
+      expect(createdPayment.amount).toBe(119000)
+
+      paymentRepo.findOne.mockResolvedValue({
+        ...createdPayment,
+        status: 'pending',
+      })
+
+      await service.completeExternalPayment(createdPayment.id)
+
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-1',
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: createdPayment.id,
+          idempotencyKey: `payment:${createdPayment.id}:credit`,
+        }),
+      )
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          paymentId: createdPayment.id,
+          subtotal: 100000,
+          taxTotal: 19000,
+          total: 119000,
+          currency: 'COP',
+          items: [
+            expect.objectContaining({
+              productType: 'recharge',
+              unitPrice: 100000,
+              subtotal: 100000,
+              taxRate: 0.19,
+              taxAmount: 19000,
+              total: 119000,
+            }),
+          ],
+        }),
+      )
+    })
+
+    it('credits the full amount when the country has no tax (total equals subtotal)', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'Sales Tax',
+        taxRate: 0,
+        isInclusive: false,
+      })
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-us-recharge',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-usd',
+        provider: 'stripe',
+        amount: 100,
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'US' },
+      })
+
+      await service.completeExternalPayment('pay-us-recharge')
+
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-usd',
+        100,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-us-recharge',
+        }),
+      )
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotal: 100,
+          taxTotal: 0,
+          total: 100,
+          currency: 'USD',
+        }),
+      )
+    })
+
+    it('invoices an external plan purchase with subtotal and VAT as today without crediting the wallet', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-plan-co',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'stripe',
+        amount: 23681,
+        currency: 'COP',
+        status: 'pending',
+        purpose: 'plan_purchase',
+        purposeId: 'dropi-roax',
+        metadata: { country: 'CO' },
+      })
+
+      await service.completeExternalPayment('pay-plan-co')
+
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subtotal: 19900,
+          taxTotal: 3781,
+          total: 23681,
+          currency: 'COP',
+          items: [
+            expect.objectContaining({
+              productType: 'plan',
+              referenceId: 'dropi-roax',
+              unitPrice: 19900,
+              subtotal: 19900,
+              taxRate: 0.19,
+              taxAmount: 3781,
+              total: 23681,
+            }),
+          ],
+        }),
+      )
+    })
+  })
+
+  describe('wallet debit error propagation and failure handling', () => {
+    let mockQueryRunner: {
+      connect: jest.Mock
+      startTransaction: jest.Mock
+      commitTransaction: jest.Mock
+      rollbackTransaction: jest.Mock
+      release: jest.Mock
+      manager: {
+        findOne: jest.Mock
+        create: jest.Mock
+        save: jest.Mock
+      }
+    }
+    let realWalletService: WalletService
+
+    beforeEach(() => {
+      mockQueryRunner = {
+        connect: jest.fn(),
+        startTransaction: jest.fn(),
+        commitTransaction: jest.fn(),
+        rollbackTransaction: jest.fn(),
+        release: jest.fn(),
+        manager: {
+          findOne: jest.fn(),
+          create: jest.fn((_entity, data) => data),
+          save: jest.fn((_entity, data) => Promise.resolve(data)),
+        },
+      }
+
+      const walletReadRepo = {
+        findOne: jest.fn((opts) => mockQueryRunner.manager.findOne(Wallet, opts)),
+      }
+
+      realWalletService = new WalletService(
+        createMockRepo() as any,
+        walletReadRepo as any,
+        createMockRepo() as any,
+        createMockRepo() as any,
+        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+      )
+
+      walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
+      walletService.debit.mockImplementation((...args: Parameters<WalletService['debit']>) =>
+        realWalletService.debit(...args),
+      )
+    })
+
+    it('rejects a checkout with a frozen wallet with WALLET_FROZEN instead of INSUFFICIENT_BALANCE', async () => {
+      const frozenWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.FROZEN,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(frozenWallet)
+
+      expect.assertions(6)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('WALLET_FROZEN')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'failed' }),
+      )
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rejects a checkout with a closed wallet with WALLET_CLOSED instead of INSUFFICIENT_BALANCE', async () => {
+      const closedWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.CLOSED,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(closedWallet)
+
+      expect.assertions(5)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('WALLET_CLOSED')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('rejects a checkout with insufficient balance with INSUFFICIENT_BALANCE', async () => {
+      const lowBalanceWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity === Wallet ? lowBalanceWallet : null),
+      )
+
+      expect.assertions(5)
+      try {
+        await service.processCheckout(altaConWallet())
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).code).toBe('INSUFFICIENT_BALANCE')
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it('does not complete the payment or extend the subscription period when the debit fails due to a cut connection', async () => {
+      const activeWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 500000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+
+      await expect(service.processCheckout(altaConWallet())).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      )
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(paymentRepo.save).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: 'failed',
+          failureReason: 'Connection terminated unexpectedly',
+        }),
+      )
+      expect(paymentRepo.save).not.toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' }),
+      )
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['negative', -50000],
+      ['zero', 0],
+      ['non-numeric', 'abc' as unknown as number],
+    ])(
+      'rejects a service_payment with a %s amount with 400 before creating a payment, transaction, or invoice',
+      async (_label, invalidAmount) => {
+        const activeWallet = {
+          id: 'w-1',
+          brandId: BRAND_ID,
+          currency: 'COP',
+          balance: 1000,
+          status: WalletStatus.ACTIVE,
+        }
+        mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+
+        let thrownError: unknown
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose: 'service_payment',
+            provider: 'wallet',
+            walletId: 'w-1',
+            amount: invalidAmount,
+            currency: 'COP',
+          })
+        } catch (error) {
+          thrownError = error
+        }
+
+        expect(activeWallet.balance).toBe(1000)
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+        expect(invoiceService.create).not.toHaveBeenCalled()
+        expect(thrownError).toBeInstanceOf(RequestException)
+        expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      },
+    )
+
+    it('charges a positive service_payment amount (100) from a 1000 COP wallet as today', async () => {
+      const activeWallet = {
+        id: 'w-1',
+        brandId: BRAND_ID,
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(activeWallet)
+
+      const result = await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-1',
+        amount: 100,
+        currency: 'COP',
+      })
+
+      expect(result.status).toBe('completed')
+      expect(activeWallet.balance).toBe(900)
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 100, currency: 'COP', purpose: 'service_payment' }),
+      )
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
     })
   })
 })

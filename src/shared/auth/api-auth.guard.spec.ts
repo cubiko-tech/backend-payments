@@ -16,8 +16,7 @@ describe('ApiAuthGuard', () => {
   const roles = { checkPermission: jest.fn() } as any
   let fetchMock: jest.Mock
 
-  const makeGuard = (verify: jest.Mock) =>
-    new ApiAuthGuard(reflector, { verify } as any, roles)
+  const makeGuard = (verify: jest.Mock) => new ApiAuthGuard(reflector, { verify } as any, roles)
 
   beforeEach(() => {
     jest.clearAllMocks()

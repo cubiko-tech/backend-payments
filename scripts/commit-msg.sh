@@ -44,10 +44,10 @@ if [[ ! $first_line =~ $git_generated_re ]]; then
 		errors+=("Subject is ${#first_line} chars (max 72). Shorten it or move details to the body.")
 	fi
 
-	# A wip/ branch is never published, so it may omit the Jira key; line/payments accepts RXDEV-<n> or PAYL-<n>.
+	# A wip/ branch is never published, so it may omit the Jira key; protected branches require the canonical project prefix.
 	refs_re='^Refs: RXDEV-[0-9]+$'
-	if [[ $branch == "line/payments" ]]; then
-		refs_re='^Refs: (RXDEV|PAYL)-[0-9]+$'
+	if [[ $branch != "develop" && $branch != "staging" && $branch != "main" && $branch != "HEAD" ]]; then
+		refs_re='^Refs: [A-Z][A-Z0-9_]+-[0-9]+$'
 	fi
 	if [[ $branch != wip/* ]] && ! echo "$body" | grep -qE "$refs_re"; then
 		errors+=("Missing 'Refs: <KEY>' line with the Jira key (P4). Only a wip/ branch may omit it.")

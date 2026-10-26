@@ -20,7 +20,11 @@ function inputs(overrides: Partial<CreditInputs> = {}): CreditInputs {
     revenueMeta: 0, // informativo (Meta billing); el ROAS NO lo usa
     salesDelivered: 120_000_000, // 40M/mes (sVent 88) y ROAS real = 120M/30M = 4.0 → sRoas 80
     salesCurrencies: ['COP'],
-    coverage: { metaFirstDataAt: '2025-12-01T05:00:00.000Z', dropiFirstDataAt: '2025-12-01T05:00:00.000Z', adAccountCreatedAt: null },
+    coverage: {
+      metaFirstDataAt: '2025-12-01T05:00:00.000Z',
+      dropiFirstDataAt: '2025-12-01T05:00:00.000Z',
+      adAccountCreatedAt: null,
+    },
     fxToBase: { currency: 'COP', rate: 1, rateDate: null },
     ...overrides,
   }
@@ -55,8 +59,14 @@ describe('CreditService.calculate', () => {
         CreditService,
         { provide: getRepositoryToken(CreditScore, 'DBWrite'), useValue: repoMock },
         { provide: getRepositoryToken(CreditScore, 'DBRead'), useValue: repoMock },
-        { provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'), useValue: activationRepoMock },
-        { provide: getRepositoryToken(CreditActivationRequest, 'DBRead'), useValue: activationRepoMock },
+        {
+          provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'),
+          useValue: activationRepoMock,
+        },
+        {
+          provide: getRepositoryToken(CreditActivationRequest, 'DBRead'),
+          useValue: activationRepoMock,
+        },
         { provide: CreditInputsClient, useValue: client },
         { provide: ScaleConfigService, useValue: scaleConfig },
         { provide: BureauService, useValue: { getActiveBand: jest.fn().mockResolvedValue(null) } },
@@ -82,7 +92,9 @@ describe('CreditService.calculate', () => {
   })
 
   it('fx_unavailable cuando falta la tasa y la moneda no es la base', async () => {
-    const s = await run(inputs({ currency: 'MXN', fxToBase: { currency: 'COP', rate: null, rateDate: null } }))
+    const s = await run(
+      inputs({ currency: 'MXN', fxToBase: { currency: 'COP', rate: null, rateDate: null } }),
+    )
     expect(s.scoreStatus).toBe('fx_unavailable')
     expect(s.eligibilityStatus).toBe('not_applicable')
     expect(s.inputs.adSpend.converted).toBeNull()
@@ -90,7 +102,14 @@ describe('CreditService.calculate', () => {
 
   it('convierte a moneda base con la tasa del período', async () => {
     const s = await run(
-      inputs({ currency: 'USD', adSpend: 7_500, revenueMeta: 30_000, salesDelivered: 30_000, salesCurrencies: ['USD'], fxToBase: { currency: 'COP', rate: 4_000, rateDate: '2026-06-10' } }),
+      inputs({
+        currency: 'USD',
+        adSpend: 7_500,
+        revenueMeta: 30_000,
+        salesDelivered: 30_000,
+        salesCurrencies: ['USD'],
+        fxToBase: { currency: 'COP', rate: 4_000, rateDate: '2026-06-10' },
+      }),
     )
     expect(s.inputs.adSpend.fxRate).toBe(4_000)
     expect(s.inputs.adSpend.converted).toBe(30_000_000) // 7500 USD * 4000
@@ -98,13 +117,29 @@ describe('CreditService.calculate', () => {
   })
 
   it('insufficient_data cuando la cuenta es más nueva que 1 mes completo del período', async () => {
-    const s = await run(inputs({ coverage: { metaFirstDataAt: '2026-05-20T05:00:00.000Z', dropiFirstDataAt: '2026-05-20T05:00:00.000Z', adAccountCreatedAt: null } }))
+    const s = await run(
+      inputs({
+        coverage: {
+          metaFirstDataAt: '2026-05-20T05:00:00.000Z',
+          dropiFirstDataAt: '2026-05-20T05:00:00.000Z',
+          adAccountCreatedAt: null,
+        },
+      }),
+    )
     expect(s.scoreStatus).toBe('insufficient_data')
     expect(s.eligibilityStatus).toBe('not_applicable')
   })
 
   it('period_adjusted cuando la cuenta arranca dentro del período', async () => {
-    const s = await run(inputs({ coverage: { metaFirstDataAt: '2026-04-10T05:00:00.000Z', dropiFirstDataAt: '2026-04-10T05:00:00.000Z', adAccountCreatedAt: null } }))
+    const s = await run(
+      inputs({
+        coverage: {
+          metaFirstDataAt: '2026-04-10T05:00:00.000Z',
+          dropiFirstDataAt: '2026-04-10T05:00:00.000Z',
+          adAccountCreatedAt: null,
+        },
+      }),
+    )
     expect(s.periodAdjusted).toBe(true)
     expect(s.effectiveStart).toBe('2026-05-01') // abril incompleto → primer mes completo mayo
   })
@@ -162,8 +197,14 @@ describe('CreditService.getPreapproval', () => {
         CreditService,
         { provide: getRepositoryToken(CreditScore, 'DBWrite'), useValue: repoMock },
         { provide: getRepositoryToken(CreditScore, 'DBRead'), useValue: repoMock },
-        { provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'), useValue: activationRepoMock },
-        { provide: getRepositoryToken(CreditActivationRequest, 'DBRead'), useValue: activationRepoMock },
+        {
+          provide: getRepositoryToken(CreditActivationRequest, 'DBWrite'),
+          useValue: activationRepoMock,
+        },
+        {
+          provide: getRepositoryToken(CreditActivationRequest, 'DBRead'),
+          useValue: activationRepoMock,
+        },
         { provide: CreditInputsClient, useValue: { getBatch: jest.fn() } },
         { provide: ScaleConfigService, useValue: scaleConfig },
         { provide: BureauService, useValue: { getActiveBand: jest.fn() } },
@@ -282,11 +323,13 @@ describe('CreditService.getPreapproval', () => {
   it('createActivationRequest: rechaza si la marca no está elegible', async () => {
     repoMock.findOne.mockResolvedValueOnce(snapshot({ eligibilityStatus: 'bureau_pending' }))
 
-    await expect(service.createActivationRequest('brand-1', {
-      fullName: 'Juan Perez',
-      email: 'juan@mail.com',
-      phone: '3001234567',
-    })).rejects.toMatchObject({ status: 400 })
+    await expect(
+      service.createActivationRequest('brand-1', {
+        fullName: 'Juan Perez',
+        email: 'juan@mail.com',
+        phone: '3001234567',
+      }),
+    ).rejects.toMatchObject({ status: 400 })
   })
 
   it('createActivationRequest: rechaza si ya hay solicitud abierta', async () => {
@@ -297,11 +340,13 @@ describe('CreditService.getPreapproval', () => {
       createdAt: '2026-05-30T10:00:00.000Z',
     })
 
-    await expect(service.createActivationRequest('brand-1', {
-      fullName: 'Juan Perez',
-      email: 'juan@mail.com',
-      phone: '3001234567',
-    })).rejects.toMatchObject({ status: 409 })
+    await expect(
+      service.createActivationRequest('brand-1', {
+        fullName: 'Juan Perez',
+        email: 'juan@mail.com',
+        phone: '3001234567',
+      }),
+    ).rejects.toMatchObject({ status: 409 })
   })
 
   it('createActivationRequest: traduce la carrera (índice único) a 409', async () => {
@@ -311,17 +356,27 @@ describe('CreditService.getPreapproval', () => {
     activationRepoMock.findOne.mockResolvedValueOnce(null)
     activationRepoMock.save.mockRejectedValueOnce({ code: '23505' })
 
-    await expect(service.createActivationRequest('brand-1', {
-      fullName: 'Juan Perez',
-      email: 'juan@mail.com',
-      phone: '3001234567',
-    })).rejects.toMatchObject({ status: 409 })
+    await expect(
+      service.createActivationRequest('brand-1', {
+        fullName: 'Juan Perez',
+        email: 'juan@mail.com',
+        phone: '3001234567',
+      }),
+    ).rejects.toMatchObject({ status: 409 })
   })
 
   it('updateActivationRequest: aplica una transición válida, sella contactedAt y el actor', async () => {
-    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+    activationRepoMock.findOne.mockResolvedValueOnce({
+      id: 'req-1',
+      status: 'pending',
+      contactedAt: null,
+    })
 
-    const result = await service.updateActivationRequest('req-1', { status: 'contacted' }, 'admin-7')
+    const result = await service.updateActivationRequest(
+      'req-1',
+      { status: 'contacted' },
+      'admin-7',
+    )
 
     expect(result.status).toBe('contacted')
     expect(result.contactedAt).toBeInstanceOf(Date)
@@ -329,7 +384,11 @@ describe('CreditService.getPreapproval', () => {
   })
 
   it('updateActivationRequest: usa el contactedBy del operador si viene en el body', async () => {
-    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'pending', contactedAt: null })
+    activationRepoMock.findOne.mockResolvedValueOnce({
+      id: 'req-1',
+      status: 'pending',
+      contactedAt: null,
+    })
 
     const result = await service.updateActivationRequest(
       'req-1',
@@ -342,7 +401,11 @@ describe('CreditService.getPreapproval', () => {
   })
 
   it('updateActivationRequest: rechaza reabrir una solicitud cerrada', async () => {
-    activationRepoMock.findOne.mockResolvedValueOnce({ id: 'req-1', status: 'activated', contactedAt: null })
+    activationRepoMock.findOne.mockResolvedValueOnce({
+      id: 'req-1',
+      status: 'activated',
+      contactedAt: null,
+    })
 
     await expect(
       service.updateActivationRequest('req-1', { status: 'pending' }),
