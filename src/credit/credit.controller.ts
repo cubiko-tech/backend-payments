@@ -95,7 +95,10 @@ export class CreditController {
   async createActivationRequest(@Body() body: CreateActivationRequestDto, @Req() req: any) {
     const brandId = req?.user?.brand
     if (!brandId) {
-      throw new RequestException({ error: 'brandRequired', code: 'brandRequired' }, HttpStatus.BAD_REQUEST)
+      throw new RequestException(
+        { error: 'brandRequired', code: 'brandRequired' },
+        HttpStatus.BAD_REQUEST,
+      )
     }
     return {
       data: await this.creditService.createActivationRequest(brandId, body, req?.user?.id || null),
@@ -106,10 +109,7 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Último score (o historial) de una marca' })
-  async getByBrand(
-    @Param('brandId') brandId: string,
-    @Query('latest') latest?: string,
-  ) {
+  async getByBrand(@Param('brandId') brandId: string, @Query('latest') latest?: string) {
     const data = await this.creditService.getByBrand(brandId, latest !== 'false')
     return { data }
   }

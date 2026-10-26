@@ -19,7 +19,11 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
-import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from '../transaction/entities/transaction.entity'
 import { AuditService } from '../audit/audit.service'
 import { CreditService } from '../credit/credit.service'
 import {
@@ -106,8 +110,15 @@ export class AdminController {
       qb.andWhere('(s.brandId::text ILIKE :q OR s.planSlug ILIKE :q)', { q: `%${search}%` })
     }
 
-    const sortField = ['createdAt', 'currentPeriodEnd', 'status', 'planSlug', 'retryCount'].includes(orderBy || '')
-      ? `s.${orderBy}` : 's.createdAt'
+    const sortField = [
+      'createdAt',
+      'currentPeriodEnd',
+      'status',
+      'planSlug',
+      'retryCount',
+    ].includes(orderBy || '')
+      ? `s.${orderBy}`
+      : 's.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -253,11 +264,16 @@ export class AdminController {
     if (provider) qb.andWhere('p.provider = :provider', { provider })
     if (purpose) qb.andWhere('p.purpose = :purpose', { purpose })
     if (search) {
-      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', { q: `%${search}%` })
+      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', {
+        q: `%${search}%`,
+      })
     }
 
-    const sortField = ['createdAt', 'amount', 'status', 'provider', 'paidAt'].includes(orderBy || '')
-      ? `p.${orderBy}` : 'p.createdAt'
+    const sortField = ['createdAt', 'amount', 'status', 'provider', 'paidAt'].includes(
+      orderBy || '',
+    )
+      ? `p.${orderBy}`
+      : 'p.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -384,7 +400,10 @@ export class AdminController {
   ) {
     const p = Math.max(1, Number(page) || 1)
     const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
-    if (status && !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)) {
+    if (
+      status &&
+      !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)
+    ) {
       throw new BadRequestException('status inválido')
     }
     const { data, total } = await this.creditService.listActivationRequests({
@@ -481,8 +500,11 @@ export class AdminController {
       qb.andWhere('(w.brandId::text ILIKE :q OR w.label ILIKE :q)', { q: `%${search}%` })
     }
 
-    const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(orderBy || '')
-      ? `w.${orderBy}` : 'w.createdAt'
+    const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(
+      orderBy || '',
+    )
+      ? `w.${orderBy}`
+      : 'w.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -499,7 +521,8 @@ export class AdminController {
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
   async createWallet(
-    @Body() body: {
+    @Body()
+    body: {
       brandId: string
       userId?: string
       provider: string
@@ -534,7 +557,13 @@ export class AdminController {
       'wallet_created',
       'wallet',
       saved.id,
-      { brandId: body.brandId, provider: body.provider, currency: body.currency, balance: body.balance || 0, label: body.label },
+      {
+        brandId: body.brandId,
+        provider: body.provider,
+        currency: body.currency,
+        balance: body.balance || 0,
+        label: body.label,
+      },
       `Wallet ${body.provider}/${body.currency} creada manualmente para marca ${body.brandId}`,
     )
 
@@ -550,10 +579,12 @@ export class AdminController {
   ) {
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
     if (!wallet) return { error: 'Wallet no encontrada' }
-    if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada, no se puede modificar' }
+    if (wallet.status === WalletStatus.CLOSED)
+      return { error: 'Wallet cerrada, no se puede modificar' }
 
     const previousStatus = wallet.status
-    wallet.status = wallet.status === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
+    wallet.status =
+      wallet.status === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
 
     await this.walletWriteRepo.save(wallet)
 
@@ -574,7 +605,8 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Ajuste realizado' })
   async adjustWallet(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: {
+    @Body()
+    body: {
       type: 'credit' | 'debit'
       amount: number
       description?: string
@@ -593,9 +625,7 @@ export class AdminController {
     if (!amount || amount <= 0) return { error: 'Monto inválido' }
 
     const balanceBefore = Number(wallet.balance)
-    const balanceAfter = body.type === 'credit'
-      ? balanceBefore + amount
-      : balanceBefore - amount
+    const balanceAfter = body.type === 'credit' ? balanceBefore + amount : balanceBefore - amount
 
     if (body.type === 'debit' && balanceAfter < 0) {
       return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
@@ -626,7 +656,13 @@ export class AdminController {
       body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
       'wallet',
       id,
-      { amount, balanceBefore, balanceAfter, category: body.category, transactionId: transaction.id },
+      {
+        amount,
+        balanceBefore,
+        balanceAfter,
+        category: body.category,
+        transactionId: transaction.id,
+      },
       `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
     )
 
@@ -642,7 +678,10 @@ export class AdminController {
     })
 
     // Agrupar por provider + currency
-    const groups: Record<string, { count: number; total: number; currency: string; provider: string }> = {}
+    const groups: Record<
+      string,
+      { count: number; total: number; currency: string; provider: string }
+    > = {}
 
     for (const w of wallets) {
       const key = `${w.provider}:${w.currency}`
@@ -720,7 +759,8 @@ export class AdminController {
   @ApiOperation({ summary: 'Crear configuración de proveedor' })
   @ApiResponse({ status: 201, description: 'Proveedor creado' })
   async createProvider(
-    @Body() body: {
+    @Body()
+    body: {
       country: string
       provider: string
       isActive?: boolean

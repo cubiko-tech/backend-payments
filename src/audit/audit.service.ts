@@ -41,7 +41,9 @@ export class AuditService {
       return { data: saved }
     } catch (error) {
       // No lanzar excepción para no interrumpir el flujo principal
-      this.logger.error(`Error al registrar auditoría [${action}/${entityType}/${entityId}]: ${error.message}`)
+      this.logger.error(
+        `Error al registrar auditoría [${action}/${entityType}/${entityId}]: ${error.message}`,
+      )
       return { error: error.message }
     }
   }

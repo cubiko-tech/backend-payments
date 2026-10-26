@@ -45,12 +45,7 @@ export class WebhookService {
   /**
    * Recibir y registrar un evento de webhook.
    */
-  async receive(
-    provider: string,
-    eventType: string,
-    providerEventId: string,
-    payload: any,
-  ) {
+  async receive(provider: string, eventType: string, providerEventId: string, payload: any) {
     try {
       // Idempotencia. El chequeo previo existe para evitar un INSERT condenado,
       // no para garantizar unicidad: entre el SELECT y el INSERT entra otra
@@ -88,7 +83,9 @@ export class WebhookService {
         const winner = await this.webhookEventRepository.findOne({
           where: { providerEventId },
         })
-        this.logger.warn(`Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`)
+        this.logger.warn(
+          `Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`,
+        )
         return { data: winner, duplicate: true }
       }
 
@@ -126,19 +123,27 @@ export class WebhookService {
       if (event.retryCount >= MAX_WEBHOOK_RETRIES) {
         // Máximo de reintentos alcanzado → dead letter
         event.status = WebhookStatus.FAILED
-        this.logger.error(`Webhook ${event.id} fallido definitivamente después de ${MAX_WEBHOOK_RETRIES} intentos`)
+        this.logger.error(
+          `Webhook ${event.id} fallido definitivamente después de ${MAX_WEBHOOK_RETRIES} intentos`,
+        )
       } else {
         // Encolar para reintento con backoff exponencial
         event.status = WebhookStatus.FAILED
         const delays = [60000, 300000, 1800000] // 1min, 5min, 30min
         const delay = delays[event.retryCount - 1] || 1800000
 
-        await this.retryQueue.add('retry', { eventId: event.id }, {
-          delay,
-          attempts: 1,
-          removeOnComplete: true,
-        })
-        this.logger.warn(`Webhook ${event.id} fallido, reintento #${event.retryCount} en ${delay / 1000}s`)
+        await this.retryQueue.add(
+          'retry',
+          { eventId: event.id },
+          {
+            delay,
+            attempts: 1,
+            removeOnComplete: true,
+          },
+        )
+        this.logger.warn(
+          `Webhook ${event.id} fallido, reintento #${event.retryCount} en ${delay / 1000}s`,
+        )
       }
 
       await this.webhookEventRepository.save(event)
@@ -157,12 +162,10 @@ export class WebhookService {
     // =============================================
     if (provider === 'stripe') {
       // Pago completado (checkout session o payment intent)
-      if (
-        eventType === 'checkout.session.completed' ||
-        eventType === 'payment_intent.succeeded'
-      ) {
-        const paymentId = payload.data?.object?.metadata?.paymentId
-          || await this.findPaymentByProviderIds(payload.data?.object?.id)
+      if (eventType === 'checkout.session.completed' || eventType === 'payment_intent.succeeded') {
+        const paymentId =
+          payload.data?.object?.metadata?.paymentId ||
+          (await this.findPaymentByProviderIds(payload.data?.object?.id))
 
         if (paymentId) {
           await this.completePayment(paymentId, payload.data?.object)
@@ -189,7 +192,9 @@ export class WebhookService {
 
       // Pago de suscripción fallido
       if (eventType === 'invoice.payment_failed') {
-        this.logger.warn(`Stripe subscription payment failed: ${payload.data?.object?.subscription}`)
+        this.logger.warn(
+          `Stripe subscription payment failed: ${payload.data?.object?.subscription}`,
+        )
         return
       }
     }
@@ -258,7 +263,9 @@ export class WebhookService {
         if (paymentId) {
           await this.completePayment(paymentId, payload)
         } else {
-          this.logger.warn(`Confio: pago no encontrado para name=${data.name} correlationId=${data.correlationId}`)
+          this.logger.warn(
+            `Confio: pago no encontrado para name=${data.name} correlationId=${data.correlationId}`,
+          )
         }
         return
       }
@@ -298,7 +305,17 @@ export class WebhookService {
       where,
       order: { createdAt: 'DESC' },
       take: filters.limit || 100,
-      select: ['id', 'provider', 'eventType', 'providerEventId', 'status', 'error', 'retryCount', 'processedAt', 'createdAt'],
+      select: [
+        'id',
+        'provider',
+        'eventType',
+        'providerEventId',
+        'status',
+        'error',
+        'retryCount',
+        'processedAt',
+        'createdAt',
+      ],
     })
 
     // Stats globales

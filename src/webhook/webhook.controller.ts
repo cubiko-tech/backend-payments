@@ -21,7 +21,10 @@ import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
-import { buildConfioWebhookEventId, classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
+import {
+  buildConfioWebhookEventId,
+  classifyConfioWebhookEvent,
+} from '../provider/confio/confio-webhook'
 import {
   timingSafeEqualStrings,
   verifyConfioWebhookSignature,
@@ -306,8 +309,7 @@ export class WebhookController {
    */
   private autenticarRamoOneShot(rawBody: Buffer, bearer: string): void {
     const conAccessToken = this.confioProvider.validateWebhookSignature(rawBody, bearer)
-    const conClaveDeWebhook =
-      !!this.webhookKey && timingSafeEqualStrings(bearer, this.webhookKey)
+    const conClaveDeWebhook = !!this.webhookKey && timingSafeEqualStrings(bearer, this.webhookKey)
 
     if (!conAccessToken && !conClaveDeWebhook) {
       throw this.rechazarWebhookConfio(

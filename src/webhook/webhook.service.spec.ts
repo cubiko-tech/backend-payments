@@ -41,7 +41,8 @@ function conexionCaida(): Error {
   return new QueryFailedError('INSERT INTO webhook_events', [], driverError)
 }
 
-const EVENT_ID = 'stores/s/subscription-plans/p/subscriptions/sub:subscription.billingStatusChanged:ciclo-3'
+const EVENT_ID =
+  'stores/s/subscription-plans/p/subscriptions/sub:subscription.billingStatusChanged:ciclo-3'
 
 describe('WebhookService.receive', () => {
   let service: WebhookService
@@ -91,7 +92,10 @@ describe('WebhookService.receive', () => {
 
     const res = await recibir()
 
-    expect(res).toEqual({ data: { id: 'we-existente', providerEventId: EVENT_ID }, duplicate: true })
+    expect(res).toEqual({
+      data: { id: 'we-existente', providerEventId: EVENT_ID },
+      duplicate: true,
+    })
     expect(writeRepo.save).not.toHaveBeenCalled()
   })
 
@@ -356,14 +360,17 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       expect(suscripcionGuardada().cancelledAt).toBe(previo)
     })
 
-    it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])('%s no cambia el estado ni escribe', async (wire) => {
-      conSuscripcion(suscripcion())
+    it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])(
+      '%s no cambia el estado ni escribe',
+      async (wire) => {
+        conSuscripcion(suscripcion())
 
-      await despachar(cambioDeEstado(wire))
+        await despachar(cambioDeEstado(wire))
 
-      expect(manager.save).not.toHaveBeenCalled()
-      expect(historial()).toHaveLength(0)
-    })
+        expect(manager.save).not.toHaveBeenCalled()
+        expect(historial()).toHaveLength(0)
+      },
+    )
 
     it('un estado desconocido se loguea, no escribe y no lanza', async () => {
       conSuscripcion(suscripcion())
@@ -468,22 +475,25 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       expect(guardada.nextBillingDate).toEqual(unMesDespues(FIN_ANTERIOR))
     })
 
-    it.each(['FAILED', 'SOMETHING_NEW'])('%s deja past_due sin avanzar el período', async (status) => {
-      conSuscripcion(suscripcion())
+    it.each(['FAILED', 'SOMETHING_NEW'])(
+      '%s deja past_due sin avanzar el período',
+      async (status) => {
+        conSuscripcion(suscripcion())
 
-      await despachar(cobro(status))
+        await despachar(cobro(status))
 
-      const guardada = suscripcionGuardada()
-      expect(guardada.status).toBe(SubscriptionStatus.PAST_DUE)
-      expect(guardada.currentPeriodEnd).toEqual(FIN_ANTERIOR)
-      expect(guardada.nextBillingDate).toEqual(FIN_ANTERIOR)
-      expect(confio.getSubscription).not.toHaveBeenCalled()
-      expect(historial()[0].metadata).toMatchObject({
-        event: 'subscription.billingStatusChanged',
-        providerEventId: 'ev-1',
-        cycleNumber: 3,
-      })
-    })
+        const guardada = suscripcionGuardada()
+        expect(guardada.status).toBe(SubscriptionStatus.PAST_DUE)
+        expect(guardada.currentPeriodEnd).toEqual(FIN_ANTERIOR)
+        expect(guardada.nextBillingDate).toEqual(FIN_ANTERIOR)
+        expect(confio.getSubscription).not.toHaveBeenCalled()
+        expect(historial()[0].metadata).toMatchObject({
+          event: 'subscription.billingStatusChanged',
+          providerEventId: 'ev-1',
+          cycleNumber: 3,
+        })
+      },
+    )
   })
 
   // ------------------------------------------------------------ resolución (1)

@@ -1,4 +1,5 @@
 import {
+  ALLOWED_BRAND_ROLES,
   BRAND_LOOKUP_UNAVAILABLE,
   BRAND_NOT_FOUND,
   BRAND_WITHOUT_COUNTRY,
@@ -122,7 +123,10 @@ describe('ClientPlatformService — país de la marca', () => {
       expect(result.code).toBe(BRAND_LOOKUP_UNAVAILABLE)
       expect(result.code).not.toBe(BRAND_NOT_FOUND)
 
-      global.fetch = mockStatus(404, { message: 'Not Found', statusCode: 404 }) as unknown as typeof fetch
+      global.fetch = mockStatus(404, {
+        message: 'Not Found',
+        statusCode: 404,
+      }) as unknown as typeof fetch
       await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
     })
 
@@ -149,20 +153,25 @@ describe('ClientPlatformService — país de la marca', () => {
       ['undefined', undefined],
       ['vacío', ''],
       ['en blanco', '   '],
-    ])('la marca existe y no trae país (%s) → BRAND_WITHOUT_COUNTRY y null', async (_caso, country) => {
-      global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
+    ])(
+      'la marca existe y no trae país (%s) → BRAND_WITHOUT_COUNTRY y null',
+      async (_caso, country) => {
+        global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
 
-      const result = await service.resolveBrandCountry(BRAND_ID)
-      expect(result.ok).toBe(false)
-      expect(result.code).toBe(BRAND_WITHOUT_COUNTRY)
-      expect(result.code).not.toBe(BRAND_NOT_FOUND)
+        const result = await service.resolveBrandCountry(BRAND_ID)
+        expect(result.ok).toBe(false)
+        expect(result.code).toBe(BRAND_WITHOUT_COUNTRY)
+        expect(result.code).not.toBe(BRAND_NOT_FOUND)
 
-      global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
-      await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
-    })
+        global.fetch = mockOk(brandBody({ country })) as unknown as typeof fetch
+        await expect(service.getBrandCountry(BRAND_ID)).resolves.toBeNull()
+      },
+    )
 
     it('un fetch que rechaza (red caída) es transitorio y no propaga la excepción', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
 
       const result = await service.resolveBrandCountry(BRAND_ID)
       expect(result.ok).toBe(false)
@@ -216,8 +225,14 @@ describe('ClientPlatformService — país de la marca', () => {
       const fetchMock = mockOk(brandBody())
       global.fetch = fetchMock as unknown as typeof fetch
 
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
 
       expect(fetchMock).toHaveBeenCalledTimes(1)
     })
@@ -245,7 +260,10 @@ describe('ClientPlatformService — país de la marca', () => {
       jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000)
       global.fetch = mockStatus(500, { statusCode: 500 }) as unknown as typeof fetch
 
-      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({ ok: true, country: 'CO' })
+      await expect(service.resolveBrandCountry(BRAND_ID)).resolves.toMatchObject({
+        ok: true,
+        country: 'CO',
+      })
     })
 
     /**
@@ -282,5 +300,60 @@ describe('ClientPlatformService — país de la marca', () => {
     const result = await service.resolveBrandCountry(BRAND_ID)
     expect(result.ok).toBe(true)
     expect(result.country).toBe('CO')
+  })
+
+  describe('canViewBrandCredit — brand membership and paying role check', () => {
+    const USER_ID = '11111111-1111-4111-8111-111111111111'
+
+    it.each(ALLOWED_BRAND_ROLES)(
+      'returns true when the user is a member of the brand with allowed role %s',
+      async (role) => {
+        const fetchMock = mockOk({
+          data: [{ user: { id: USER_ID }, rol: { name: role } }],
+        })
+        global.fetch = fetchMock as unknown as typeof fetch
+
+        await expect(service.canViewBrandCredit(USER_ID, `  ${BRAND_ID}  `)).resolves.toBe(true)
+
+        const [url, opts] = fetchMock.mock.calls[0]
+        expect(url).toBe(`${PLATFORM_URL}/v1/brand/rol/user?brand.id=${BRAND_ID}`)
+        expect(opts.headers.Authorization).toBe('Bearer server-token-123')
+      },
+    )
+
+    it('returns false when the user is not a member of the brand', async () => {
+      global.fetch = mockOk({
+        data: [{ user: { id: 'other-user' }, rol: { name: 'superuser' } }],
+      }) as unknown as typeof fetch
+
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+    })
+
+    it('returns false when the user is a member with a role outside ALLOWED_BRAND_ROLES', async () => {
+      global.fetch = mockOk({
+        data: [{ user: { id: USER_ID }, rol: { name: 'operator' } }],
+      }) as unknown as typeof fetch
+
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+    })
+
+    it('fails closed without calling fetch when userId or brandId is blank', async () => {
+      const fetchMock = jest.fn()
+      global.fetch = fetchMock as unknown as typeof fetch
+
+      await expect(service.canViewBrandCredit('', BRAND_ID)).resolves.toBe(false)
+      await expect(service.canViewBrandCredit(USER_ID, '   ')).resolves.toBe(false)
+      expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when platform does not respond or returns an error status', async () => {
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+
+      global.fetch = mockStatus(503, { statusCode: 503 }) as unknown as typeof fetch
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+    })
   })
 })

@@ -2,8 +2,17 @@ import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
 // Mantenemos el enum para referencia en código existente, pero la columna es varchar
-export enum WalletProvider { INTERNAL = 'internal', DROPI = 'dropi', STRIPE = 'stripe', MERCADOPAGO = 'mercadopago' }
-export enum WalletStatus { ACTIVE = 'active', FROZEN = 'frozen', CLOSED = 'closed' }
+export enum WalletProvider {
+  INTERNAL = 'internal',
+  DROPI = 'dropi',
+  STRIPE = 'stripe',
+  MERCADOPAGO = 'mercadopago',
+}
+export enum WalletStatus {
+  ACTIVE = 'active',
+  FROZEN = 'frozen',
+  CLOSED = 'closed',
+}
 
 @Entity('wallets')
 @Index(['brandId', 'provider', 'currency'], { unique: true })

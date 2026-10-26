@@ -186,6 +186,20 @@ export class WalletService {
     expectedCurrency?: string,
     idempotencyKey?: string,
   ) {
+    if (typeof walletId !== 'string' || !walletId.trim()) {
+      throw new RequestException(
+        { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
@@ -198,10 +212,37 @@ export class WalletService {
         lock: { mode: 'pessimistic_write' },
       })
 
+      if (resolvedKey) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey, wallet)
+        if (existing) {
+          await queryRunner.rollbackTransaction()
+          return { data: existing }
+        }
+      }
+
       if (!wallet) {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
           HttpStatus.NOT_FOUND,
+        )
+      }
+
+      if ('brandId' in txData && (!txData.brandId || wallet.brandId !== txData.brandId)) {
+        throw new RequestException(
+          { code: 'WALLET_NOT_FOUND', message: 'Wallet does not belong to the paying brand' },
+          HttpStatus.NOT_FOUND,
+        )
+      }
+
+      const walletCurrency = wallet.currency?.toUpperCase()
+      const requestedCurrency = expectedCurrency?.toUpperCase()
+      if (walletCurrency === 'TKN' || requestedCurrency === 'TKN') {
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: 'Token wallets cannot be debited for monetary charges',
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
 
@@ -288,7 +329,7 @@ export class WalletService {
       }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en débito de wallet ${walletId}: ${error.message}`)
-      return { error: error.message }
+      throw error
     } finally {
       await queryRunner.release()
     }
@@ -311,19 +352,55 @@ export class WalletService {
     return error?.code === '23505' || error?.driverError?.code === '23505'
   }
 
+  async findDebitByIdempotencyKey(
+    walletId: string,
+    idempotencyKey: string,
+  ): Promise<Transaction | null> {
+    if (!idempotencyKey) return null
+
+    const readMatch = await this.transactionReadRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (readMatch && readMatch.idempotencyKey === idempotencyKey) {
+      return readMatch
+    }
+
+    const writeMatch = await this.transactionRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (writeMatch && writeMatch.idempotencyKey === idempotencyKey) {
+      return writeMatch
+    }
+
+    if (typeof this.dataSource?.createQueryRunner === 'function') {
+      const queryRunner = this.dataSource.createQueryRunner()
+      await queryRunner.connect()
+      try {
+        const existing = await this.findExistingMovement(queryRunner, walletId, idempotencyKey)
+        return existing?.transaction ?? null
+      } finally {
+        await queryRunner.release()
+      }
+    }
+
+    return null
+  }
+
   private async findExistingMovement(
     queryRunner: { manager: { findOne: DataSource['manager']['findOne'] } },
     walletId: string,
     idempotencyKey: string,
+    fallbackWallet?: Wallet | null,
   ) {
     const existingTransaction = await queryRunner.manager.findOne(Transaction, {
       where: { idempotencyKey },
     })
-    if (!existingTransaction) return null
+    if (!existingTransaction || existingTransaction.idempotencyKey !== idempotencyKey) return null
 
-    const currentWallet = await queryRunner.manager.findOne(Wallet, {
-      where: { id: existingTransaction.walletId || walletId },
-    })
+    const currentWallet =
+      (await queryRunner.manager.findOne(Wallet, {
+        where: { id: existingTransaction.walletId || walletId },
+      })) ?? fallbackWallet
     if (currentWallet) {
       currentWallet.balance = Number(currentWallet.balance)
     }

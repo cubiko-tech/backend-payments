@@ -46,9 +46,7 @@ const findUsdRow = (rows: PlanPriceRow[]): PlanPriceRow | undefined => {
   return usd.find((row) => row.isDefault) ?? usd[0]
 }
 
-export type PriceResolutionErrorCode =
-  | typeof PLAN_NOT_FOUND
-  | typeof PRICE_NOT_FOUND_FOR_COUNTRY
+export type PriceResolutionErrorCode = typeof PLAN_NOT_FOUND | typeof PRICE_NOT_FOUND_FOR_COUNTRY
 
 /**
  * Resultado discriminado por `ok`. Los `?: never` de la rama contraria están a
@@ -91,6 +89,10 @@ export class ClientRolesService {
     if (!planPrices) return null
     const price = planPrices.get(currency)
     return price !== undefined ? price : null
+  }
+
+  hasCachedPrices(): boolean {
+    return this.cache !== null
   }
 
   /**
@@ -184,7 +186,7 @@ export class ClientRolesService {
    */
   private async getPlanRows(): Promise<Map<string, PlanPriceRow[]>> {
     // Si hay caché válido, retornar
-    if (this.cache && (Date.now() - this.cache.fetchedAt) < this.CACHE_TTL_MS) {
+    if (this.cache && Date.now() - this.cache.fetchedAt < this.CACHE_TTL_MS) {
       return this.cache.prices
     }
 
@@ -241,14 +243,16 @@ export class ClientRolesService {
           // Congelada: la fila se entrega por referencia desde el caché y una
           // mutación de un consumidor corrompería el precio para todos hasta que
           // expire el TTL.
-          rows.push(Object.freeze({
-            id: String(price.id),
-            countryCode: String(price.countryCode ?? ''),
-            // `price` viaja como string: `plan_prices.price` es decimal en backend-roles.
-            currency: String(price.currency),
-            price: Number(price.price),
-            isDefault: !!price.isDefault,
-          }))
+          rows.push(
+            Object.freeze({
+              id: String(price.id),
+              countryCode: String(price.countryCode ?? ''),
+              // `price` arrives as a string because `plan_prices.price` is decimal in backend-roles.
+              currency: String(price.currency),
+              price: Number(price.price),
+              isDefault: !!price.isDefault,
+            }),
+          )
         }
       }
 

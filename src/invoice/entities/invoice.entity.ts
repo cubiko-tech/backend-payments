@@ -2,8 +2,16 @@ import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index, OneToMany } from 'typeorm'
 import { InvoiceItem } from './invoiceItem.entity'
 
-export enum InvoiceType { INVOICE = 'invoice', CREDIT_NOTE = 'credit_note' }
-export enum InvoiceStatus { DRAFT = 'draft', ISSUED = 'issued', PAID = 'paid', VOID = 'void' }
+export enum InvoiceType {
+  INVOICE = 'invoice',
+  CREDIT_NOTE = 'credit_note',
+}
+export enum InvoiceStatus {
+  DRAFT = 'draft',
+  ISSUED = 'issued',
+  PAID = 'paid',
+  VOID = 'void',
+}
 
 @Entity('invoices')
 @Index(['brandId', 'createdAt'])

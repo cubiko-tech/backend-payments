@@ -1,20 +1,13 @@
 import { ConfioProvider } from '../../provider/confio/confio.provider'
 
 /**
- * «Es producción» se decidía en tres lugares con
- * `GO_ENV === 'production' || NODE_ENV === 'production'`, y **ninguna de esas
- * dos variables existe en la configuración de este servicio**: `.env.schema`
- * declara `ENV` como requerida, `.env-template` la fija y `entrypoint.sh`
- * ramifica sobre `$ENV`. O sea que el predicado daba `false` siempre, incluso
- * corriendo en producción.
+ * Production detection in `isProductionEnv` checks `ENV === 'production'`
+ * alongside legacy `GO_ENV` and `NODE_ENV` because `.env.schema`,
+ * `.env-template`, and `entrypoint.sh` only define `ENV`.
  *
- * El de `validateWebhookSignature` es el caro: sin token configurado devolvía
- * `true` —acepta cualquier firma— en el camino del dinero, latente sólo porque
- * el token está puesto.
- *
- * Los tres consumidores se prueban juntos a propósito: son un solo predicado y
- * lo que importa es que ninguno quede atrás, que es exactamente cómo nació el
- * bug (el helper existía, probado, y no lo llamaba nadie).
+ * `validateWebhookSignature` rejects missing `CONFIO_ACCESS_TOKEN` in every
+ * environment without consulting `isProductionEnv`, while `ConfioProvider`
+ * (`baseUrl`) and `logger` (console transport) branch on `isProductionEnv`.
  */
 describe('isProductionEnv — sus tres consumidores', () => {
   let env: NodeJS.ProcessEnv
@@ -35,9 +28,8 @@ describe('isProductionEnv — sus tres consumidores', () => {
   })
 
   describe('la firma del webhook no hace fail-open', () => {
-    // Mutación M1: sacar `env.ENV === 'production'` del predicado, o volver al
-    // `GO_ENV || NODE_ENV` de antes → rojo. Es el caso que la tarea existe para
-    // cerrar: aceptar cualquier firma en producción.
+    // Mutation M1: return true when `!this.accessToken` in validateWebhookSignature
+    // (failing open when no token is configured) turns this block red.
     it('con ENV=production y sin token, rechaza la firma', () => {
       process.env.ENV = 'production'
 

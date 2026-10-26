@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-  ParseUUIDPipe,
-} from '@nestjs/common'
+import { Controller, Get, Post, Body, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
@@ -53,10 +44,7 @@ export class RefundController {
   @Post(':id/approve')
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
-  async approve(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() data: { approvedBy: string },
-  ) {
+  async approve(@Param('id', ParseUUIDPipe) id: string, @Body() data: { approvedBy: string }) {
     return this.refundService.approve(id, data.approvedBy)
   }
 }

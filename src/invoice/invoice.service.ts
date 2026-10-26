@@ -65,7 +65,10 @@ export class InvoiceService {
   /**
    * Listar facturas de una marca
    */
-  async findByBrand(brandId: string, filters: { page?: number; limit?: number; type?: string } = {}) {
+  async findByBrand(
+    brandId: string,
+    filters: { page?: number; limit?: number; type?: string } = {},
+  ) {
     try {
       const { page = 1, limit = 20, type } = filters
       const skip = (page - 1) * limit

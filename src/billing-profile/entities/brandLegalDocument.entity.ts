@@ -30,10 +30,10 @@ export class BrandLegalDocument {
   country: string
 
   @Column({ nullable: false })
-  documentType: string                 // "rut", "camara_comercio", "constancia_situacion_fiscal"
+  documentType: string // "rut", "camara_comercio", "constancia_situacion_fiscal"
 
   @Column({ nullable: false })
-  documentUrl: string                  // URL del archivo subido (S3/GCS)
+  documentUrl: string // Uploaded file URL (S3/GCS)
 
   @Column({ type: 'enum', enum: DocumentStatus, default: DocumentStatus.PENDING })
   status: DocumentStatus
@@ -42,7 +42,7 @@ export class BrandLegalDocument {
   verifiedAt: Date
 
   @Column({ nullable: true })
-  verifiedBy: string                   // userId del admin que verificó
+  verifiedBy: string // Admin userId that verified the document
 
   @Column({ type: 'text', nullable: true })
   rejectionReason: string

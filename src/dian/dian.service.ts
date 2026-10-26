@@ -106,7 +106,10 @@ export class DianService {
     // Verificar si el país requiere facturación electrónica
     const requires = await this.countryConfig.requiresElectronicInvoice(country)
     if (!requires) {
-      logger.log('info', `DianService: país ${country} no requiere facturación electrónica, omitiendo`)
+      logger.log(
+        'info',
+        `DianService: país ${country} no requiere facturación electrónica, omitiendo`,
+      )
       return {
         success: true,
         cufe: `no-required-${country}`,
@@ -116,9 +119,10 @@ export class DianService {
     }
 
     const provider = await this.getProviderForCountry(country)
-    const response = invoice.type === InvoiceType.CREDIT_NOTE
-      ? await provider.sendCreditNote(data)
-      : await provider.sendInvoice(data)
+    const response =
+      invoice.type === InvoiceType.CREDIT_NOTE
+        ? await provider.sendCreditNote(data)
+        : await provider.sendInvoice(data)
 
     // Actualizar factura con CUFE
     if (response.success && response.cufe) {
@@ -262,9 +266,7 @@ class MockDianProvider implements DianProvider {
   }
 
   private generateMockCufe(invoiceNumber: string): string {
-    const hash = createHash('sha256')
-      .update(`${invoiceNumber}-${Date.now()}`)
-      .digest('hex')
+    const hash = createHash('sha256').update(`${invoiceNumber}-${Date.now()}`).digest('hex')
     return hash.substring(0, 40)
   }
 }

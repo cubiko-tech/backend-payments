@@ -1,10 +1,11 @@
-// Red when pre-push.sh reads HEAD instead of stdin refs, skips P4/line rules, or measures disk vs commit.
+// Red when pre-push.sh validates branch names, reads HEAD instead of stdin refs, or measures disk vs commit.
 import { spawnSync } from 'child_process'
 import {
   chmodSync,
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -358,25 +359,35 @@ describe('scripts/pre-push.sh and .husky/pre-push hooks', () => {
     expect(content).toContain('scripts/pre-push.sh')
   })
 
-  it('accepts line/payments under the P3 line branch exception when all gates pass', () => {
-    const res = runPushDryRun({ branch: 'line/payments' })
-    expect(res.status).toBe(0)
-  }, 30000)
-
-  it('accepts a valid P4 branch (<type>/RXDEV-<n>-<desc>) when all gates pass', () => {
-    const res = runPushDryRun({ branch: 'feat/RXDEV-108-pre-push-hook' })
-    expect(res.status).toBe(0)
-  }, 30000)
-
-  it('rejects git push --dry-run <bare> HEAD:feature/sin-clave from line/payments and names feature/sin-clave', () => {
-    const res = runPushDryRun({ branch: 'line/payments' }, (bareDir) => [
-      bareDir,
-      'HEAD:feature/sin-clave',
-    ])
-    expect(res.status).toBe(1)
-    expect(res.output).toContain('feature/sin-clave')
-    expect(res.output).toContain('<tipo>/<CLAVE>-<desc>')
+  it('does not name line/, integration/, PAYL, AUTL, or LOC in scripts/ or .husky/', () => {
+    const forbiddenRe = /line\/|integration\/|\b(PAYL|AUTL|LOC)\b/
+    for (const relDir of ['scripts', '.husky']) {
+      const absDir = join(repoRoot, relDir)
+      for (const entry of readdirSync(absDir)) {
+        const fileContent = readFileSync(join(absDir, entry), 'utf8')
+        expect(fileContent).not.toMatch(forbiddenRe)
+      }
+    }
   })
+
+  it('accepts git push --dry-run <bare> HEAD:integration/manuel and HEAD:cualquier-nombre without judging branch names when all gates pass', () => {
+    const { bareDir, workspaceDir, binDir } = setupCloneAndBare({ branch: 'line/manuel-payments' })
+
+    for (const remoteBranch of [
+      'integration/manuel',
+      'cualquier-nombre',
+      'line/manuel-payments',
+      'feat/RXDEV-108-pre-push-hook',
+    ]) {
+      const res = runGit(workspaceDir, binDir, [
+        'push',
+        '--dry-run',
+        bareDir,
+        `HEAD:${remoteBranch}`,
+      ])
+      expect(res.status).toBe(0)
+    }
+  }, 90000)
 
   it('accepts pushing a healthy tag commit behind a broken HEAD and rejects pushing the broken HEAD', () => {
     const { bareDir, workspaceDir, binDir } = setupCloneAndBare({ branch: 'line/payments' })
@@ -437,34 +448,6 @@ describe('scripts/pre-push.sh and .husky/pre-push hooks', () => {
     expect(res.status).toBe(1)
     expect(res.output).toContain('@typescript-eslint/no-unused-vars')
   }, 30000)
-
-  it('rejects branch shapes outside P4 and line/<name> and reports the expected shape', () => {
-    const overMaxLen = `feat/RXDEV-108-${'a'.repeat(46)}`
-    expect(overMaxLen.length).toBe(61)
-
-    const invalidBranches = [
-      'feature/sin-clave',
-      'feat/sin-clave',
-      'feature/RXDEV-108-wrong-type',
-      'wip/local-spike',
-      'develop',
-      'main',
-      'feat/rxdev-108-lowercase-key',
-      'feat/RXDEV-108-Uppercase-Desc',
-      'line/',
-      'line/Payments',
-      overMaxLen,
-    ]
-
-    const { bareDir, workspaceDir, binDir } = setupCloneAndBare({ branch: 'line/payments' })
-    for (const branch of invalidBranches) {
-      const res = runGit(workspaceDir, binDir, ['push', '--dry-run', bareDir, `HEAD:${branch}`])
-      expect(res.status).toBe(1)
-      expect(res.output).toContain(branch)
-      expect(res.output).toContain('<tipo>/<CLAVE>-<desc>')
-      expect(res.output).toContain('line/<nombre>')
-    }
-  })
 
   it('rejects push when any CI-required file is missing in the pushed commit and names the missing file', () => {
     const requiredFiles = ['.env-template', '.env.schema', 'docker-compose.yml', 'entrypoint.sh']

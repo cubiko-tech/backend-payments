@@ -12,8 +12,14 @@ import { CreditModule } from '../credit/credit.module'
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Subscription, Payment, Wallet, ProviderConfig, Transaction], 'DBWrite'),
-    TypeOrmModule.forFeature([Subscription, Payment, Wallet, WalletBalanceSnapshot, ProviderConfig, Transaction], 'DBRead'),
+    TypeOrmModule.forFeature(
+      [Subscription, Payment, Wallet, ProviderConfig, Transaction],
+      'DBWrite',
+    ),
+    TypeOrmModule.forFeature(
+      [Subscription, Payment, Wallet, WalletBalanceSnapshot, ProviderConfig, Transaction],
+      'DBRead',
+    ),
     AuditModule,
     CreditModule,
   ],

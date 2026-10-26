@@ -31,7 +31,11 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
    * Se afirma sobre el `code` y el status, NUNCA sobre el texto del mensaje: el
    * cuerpo es lo que ve el cliente y el campo estable del contrato es `code`.
    */
-  async function expectRequestException(promise: Promise<unknown>, code: string, status: HttpStatus) {
+  async function expectRequestException(
+    promise: Promise<unknown>,
+    code: string,
+    status: HttpStatus,
+  ) {
     await expect(promise).rejects.toBeInstanceOf(RequestException)
     await promise.catch((error: RequestException) => {
       expect(error.getStatus()).toBe(status)
@@ -68,21 +72,27 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
     service = module.get(SubscriptionService)
   })
 
-  it.each(READS)('%s: el principal de servicio sí puede nombrar la marca por query', async (method) => {
-    await controller[method]('B', { user: { ...SERVER_PRINCIPAL } })
+  it.each(READS)(
+    '%s: el principal de servicio sí puede nombrar la marca por query',
+    async (method) => {
+      await controller[method]('B', { user: { ...SERVER_PRINCIPAL } })
 
-    expect(service[method]).toHaveBeenCalledWith('B')
-  })
+      expect(service[method]).toHaveBeenCalledWith('B')
+    },
+  )
 
-  it.each(READS)('%s: el principal de servicio sin brandId da 400 y no consulta', async (method) => {
-    await expectRequestException(
-      controller[method](undefined as unknown as string, { user: { ...SERVER_PRINCIPAL } }),
-      'BRAND_ID_REQUIRED',
-      HttpStatus.BAD_REQUEST,
-    )
+  it.each(READS)(
+    '%s: el principal de servicio sin brandId da 400 y no consulta',
+    async (method) => {
+      await expectRequestException(
+        controller[method](undefined as unknown as string, { user: { ...SERVER_PRINCIPAL } }),
+        'BRAND_ID_REQUIRED',
+        HttpStatus.BAD_REQUEST,
+      )
 
-    expect(service[method]).not.toHaveBeenCalled()
-  })
+      expect(service[method]).not.toHaveBeenCalled()
+    },
+  )
 
   it.each(READS)('%s: al usuario se le lee SU marca y el query se ignora', async (method) => {
     await controller[method]('B', { user: { ...USER_WITH_BRAND } })
@@ -121,7 +131,9 @@ describe('SubscriptionController — alta paga', () => {
       providers: [
         {
           provide: SubscriptionService,
-          useValue: { startPaid: jest.fn().mockResolvedValue({ data: {}, acceptanceUrl: 'https://pay/x' }) },
+          useValue: {
+            startPaid: jest.fn().mockResolvedValue({ data: {}, acceptanceUrl: 'https://pay/x' }),
+          },
         },
         { provide: EnterprisePricingService, useValue: {} },
       ],

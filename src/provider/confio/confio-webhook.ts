@@ -63,12 +63,12 @@ export function buildConfioWebhookEventId(payload: ConfioWebhookPayload): string
   // es lo que los separa, y el discriminador de intento —`payment` en el éxito,
   // `failedCount` en el fallo— separa los reintentos dentro de un mismo ciclo.
   if (event === 'subscription.billingStatusChanged') {
-    const cycle = data.cycleNumber !== undefined && data.cycleNumber !== null
-      ? `ciclo-${data.cycleNumber}`
-      // Degradado: el contrato dice que `cycleNumber` siempre viaja en este
-      // evento. Si faltara, el timestamp firmado es lo único que sigue siendo
-      // estable entre reentregas; una constante recrearía exactamente el bug.
-      : `ts-${payload?.timestamp}`
+    const cycle =
+      data.cycleNumber !== undefined && data.cycleNumber !== null
+        ? `ciclo-${data.cycleNumber}`
+        : // Fallback when cycleNumber is missing: signed timestamp stays stable
+          // across redeliveries whereas a constant would recreate the collision bug.
+          `ts-${payload?.timestamp}`
     const attempt = data.payment
       ? data.payment
       : data.failedCount !== undefined && data.failedCount !== null

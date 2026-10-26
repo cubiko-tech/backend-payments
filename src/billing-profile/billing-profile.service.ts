@@ -34,7 +34,9 @@ export class BillingProfileService {
       return { data: profile }
     } catch (error) {
       if (error instanceof RequestException) throw error
-      this.logger.error(`Error al obtener perfil de facturación de marca ${brandId}: ${error.message}`)
+      this.logger.error(
+        `Error al obtener perfil de facturación de marca ${brandId}: ${error.message}`,
+      )
       return { error: error.message }
     }
   }
@@ -45,7 +47,9 @@ export class BillingProfileService {
   async getRequirements(country: string) {
     const config = await this.countryConfig.getForCountry(country)
     if (!config) {
-      return { data: { country, requiredFields: ['legalName', 'country', 'email'], legalDocuments: [] } }
+      return {
+        data: { country, requiredFields: ['legalName', 'country', 'email'], legalDocuments: [] },
+      }
     }
     return {
       data: {
@@ -124,7 +128,9 @@ export class BillingProfileService {
       return { data: saved }
     } catch (error) {
       if (error instanceof RequestException) throw error
-      this.logger.error(`Error al actualizar perfil de facturación de marca ${brandId}: ${error.message}`)
+      this.logger.error(
+        `Error al actualizar perfil de facturación de marca ${brandId}: ${error.message}`,
+      )
       return { error: error.message }
     }
   }

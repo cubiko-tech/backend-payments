@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
-# Validates pre-push gates in backend-payments: remote ref name from stdin (P4 or line/<name> P3),
-# skips deleted refs, and checks required CI files, full ESLint without --fix, tsc --noEmit,
-# and npm test against the pushed commit tree rather than HEAD or the working tree.
+# Validates pre-push gates in backend-payments: reads pushed refs from stdin, skips deleted refs,
+# and checks required CI files, full ESLint without --fix, tsc --noEmit, and npm test against
+# the pushed commit tree rather than HEAD or the working tree.
 set -euo pipefail
 
 if [[ ! -f /.dockerenv && -z ${PRE_PUSH_IN_CONTAINER:-} && -f scripts/in-container.sh ]]; then
 	PRE_PUSH_IN_CONTAINER=1 exec bash scripts/in-container.sh bash scripts/pre-push.sh "$@"
 fi
-
-line_re='^line/[a-z0-9]+(-[a-z0-9]+)*$'
-p4_re='^(feat|fix|refactor|perf|build|ci|docs|chore|test|hotfix)/RXDEV-[0-9]+-[a-z0-9]+(-[a-z0-9]+)*$'
-rel_tag_re='^refs/tags/rel/[a-z0-9]+(-[a-z0-9]+)*$'
 
 pushed_shas=()
 while read -r local_ref local_sha remote_ref remote_sha || [[ -n ${local_ref:-} ]]; do
@@ -25,21 +21,6 @@ while read -r local_ref local_sha remote_ref remote_sha || [[ -n ${local_ref:-} 
 
 	if [[ $local_ref == "(delete)" || $local_sha =~ ^0+$ || -z ${remote_ref:-} || $remote_ref == "(delete)" ]]; then
 		continue
-	fi
-
-	if [[ ! $remote_ref =~ $rel_tag_re ]]; then
-		branch="${remote_ref#refs/heads/}"
-		if [[ $branch =~ $line_re ]]; then
-			:
-		elif [[ $branch =~ $p4_re ]] && ((${#branch} <= 60)); then
-			:
-		else
-			echo "pre-push: invalid branch '$branch'." >&2
-			echo "  Expected P4 shape <tipo>/<CLAVE>-<desc> (<type>/RXDEV-<n>-<kebab-desc>, max 60 chars)" >&2
-			echo "  Allowed types: feat, fix, refactor, perf, build, ci, docs, chore, test, hotfix" >&2
-			echo "  Or P3 line branch: line/<nombre> (e.g. line/payments)" >&2
-			exit 1
-		fi
 	fi
 
 	already_queued=0

@@ -1,9 +1,26 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-export enum PaymentProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago', DROPI = 'dropi', WALLET = 'wallet', CONFIO = 'confio' }
-export enum PaymentStatus { PENDING = 'pending', PROCESSING = 'processing', COMPLETED = 'completed', FAILED = 'failed', REFUNDED = 'refunded', DISPUTED = 'disputed' }
-export enum PaymentPurpose { PLAN_PURCHASE = 'plan_purchase', WALLET_RECHARGE = 'wallet_recharge', SERVICE_PAYMENT = 'service_payment' }
+export enum PaymentProvider {
+  STRIPE = 'stripe',
+  MERCADOPAGO = 'mercadopago',
+  DROPI = 'dropi',
+  WALLET = 'wallet',
+  CONFIO = 'confio',
+}
+export enum PaymentStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+  REFUNDED = 'refunded',
+  DISPUTED = 'disputed',
+}
+export enum PaymentPurpose {
+  PLAN_PURCHASE = 'plan_purchase',
+  WALLET_RECHARGE = 'wallet_recharge',
+  SERVICE_PAYMENT = 'service_payment',
+}
 
 @Entity('payments')
 @Index(['brandId', 'status', 'createdAt'])
@@ -16,7 +33,8 @@ export class Payment extends Content {
   @Column({ nullable: true }) providerPaymentId: string
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ length: 3 }) currency: string
-  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING }) status: PaymentStatus
+  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
+  status: PaymentStatus
   @Column({ type: 'enum', enum: PaymentPurpose }) purpose: PaymentPurpose
   @Column({ nullable: true }) purposeId: string
   @Column({ type: 'text', nullable: true }) checkoutUrl: string

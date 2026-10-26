@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { WalletService } from './wallet.service'
-import { Wallet } from './entities/wallet.entity'
+import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
   Transaction,
   TransactionType,
@@ -370,6 +370,282 @@ describe('WalletService', () => {
           balanceAfter: 120,
         }),
       })
+    })
+
+    it('returns the original debit movement without moving the balance when the wallet is frozen afterwards', async () => {
+      const originalTx = {
+        id: 'tx-frozen-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const frozenWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.FROZEN,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return frozenWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(frozenWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data).toEqual({
+        wallet: expect.objectContaining({
+          id: 'w1',
+          balance: 150000,
+          status: WalletStatus.FROZEN,
+        }),
+        transaction: expect.objectContaining({
+          id: 'tx-frozen-retry',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+          amount: 50000,
+          balanceBefore: 200000,
+          balanceAfter: 150000,
+        }),
+      })
+    })
+
+    it('returns the original debit movement without moving the balance when the wallet is closed afterwards', async () => {
+      const originalTx = {
+        id: 'tx-closed-retry',
+        walletId: 'w1',
+        brandId: 'brand-1',
+        type: TransactionType.DEBIT,
+        amount: '50000.00',
+        balanceBefore: '200000.00',
+        balanceAfter: '150000.00',
+        status: TransactionStatus.COMPLETED,
+        idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+      }
+      const closedWallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 150000,
+        status: WalletStatus.CLOSED,
+      }
+
+      mockQueryRunner.manager.findOne.mockImplementation(async (entity: any) => {
+        if (entity === Transaction) return originalTx
+        return closedWallet
+      })
+
+      const result = await service.debit(
+        'w1',
+        50000,
+        {
+          brandId: 'brand-1',
+          idempotencyKey: 'subscription:sub-1:2026-08-01T00:00:00.000Z',
+        },
+        'COP',
+      )
+
+      expect(closedWallet.balance).toBe(150000)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(result.data?.transaction.id).toBe('tx-closed-retry')
+    })
+  })
+
+  describe('debit — walletId and brand ownership guard (C3)', () => {
+    it('rejects a null or empty walletId before querying the database and does not debit another wallet', async () => {
+      const otherWallet = {
+        id: 'w-other',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
+
+      await expect(service.debit(null as any, 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+      await expect(service.debit('   ', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(otherWallet.balance).toBe(200)
+    })
+
+    it('rejects a charge from brand A against brand B wallet and leaves brand B wallet unchanged', async () => {
+      const walletBrandB = {
+        id: 'w-brand-b',
+        brandId: 'brand-b',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandB)
+
+      expect.assertions(6)
+      try {
+        await service.debit('w-brand-b', 80, { brandId: 'brand-a' })
+      } catch (error) {
+        expect(error).toBeInstanceOf(RequestException)
+        expect((error as RequestException).getStatus()).toBe(HttpStatus.NOT_FOUND)
+      }
+
+      expect(walletBrandB.balance).toBe(200)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+    })
+
+    it('debits normally when the wallet belongs to the paying brand', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+
+      const result = await service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')
+
+      expect(walletBrandA.balance).toBe(120)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).not.toHaveBeenCalled()
+      expect(result.data?.wallet.balance).toBe(120)
+    })
+
+    it('rejects debiting a TKN wallet even when expectedCurrency is omitted', async () => {
+      const tknWallet = {
+        id: 'w-tkn',
+        brandId: 'brand-a',
+        currency: 'TKN',
+        balance: 500,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(tknWallet)
+
+      await expect(service.debit('w-tkn', 80, { brandId: 'brand-a' })).rejects.toThrow(
+        RequestException,
+      )
+
+      expect(tknWallet.balance).toBe(500)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+    })
+
+    it('rethrows unexpected database errors on debit after rolling back the transaction', async () => {
+      const walletBrandA = {
+        id: 'w-brand-a',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(walletBrandA)
+      mockQueryRunner.manager.save.mockRejectedValueOnce(
+        new Error('Connection terminated unexpectedly'),
+      )
+
+      await expect(service.debit('w-brand-a', 80, { brandId: 'brand-a' }, 'COP')).rejects.toThrow(
+        'Connection terminated unexpectedly',
+      )
+
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.release).toHaveBeenCalled()
+    })
+  })
+
+  describe('debit — positive finite amount guard', () => {
+    let copWallet: {
+      id: string
+      brandId: string
+      currency: string
+      balance: number
+      status: WalletStatus
+    }
+
+    beforeEach(() => {
+      copWallet = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: 1000,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(copWallet)
+      mockQueryRunner.manager.save.mockImplementation((_entity, data) => Promise.resolve(data))
+    })
+
+    it('rejects a negative amount before opening a transaction and does not increase the wallet balance', async () => {
+      let thrownError: unknown
+      try {
+        await service.debit('w-cop', -50000, { brandId: 'brand-a' }, 'COP')
+      } catch (error) {
+        thrownError = error
+      }
+
+      expect(copWallet.balance).toBe(1000)
+      expect(thrownError).toBeInstanceOf(RequestException)
+      expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+      expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+      expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['zero', 0],
+      ['NaN', Number.NaN],
+      ['non-numeric string', 'abc' as unknown as number],
+    ])(
+      'rejects a %s amount before opening a transaction and leaves the wallet balance at 1000',
+      async (_label, invalidAmount) => {
+        let thrownError: unknown
+        try {
+          await service.debit('w-cop', invalidAmount, { brandId: 'brand-a' }, 'COP')
+        } catch (error) {
+          thrownError = error
+        }
+
+        expect(copWallet.balance).toBe(1000)
+        expect(thrownError).toBeInstanceOf(RequestException)
+        expect((thrownError as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        expect((thrownError as RequestException).code).toBe('INVALID_AMOUNT')
+        expect(mockQueryRunner.startTransaction).not.toHaveBeenCalled()
+        expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      },
+    )
+
+    it('debits a positive amount (100) from a 1000 COP wallet as today', async () => {
+      const result = await service.debit('w-cop', 100, { brandId: 'brand-a' }, 'COP')
+
+      expect(copWallet.balance).toBe(900)
+      expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
+      expect(result.data?.wallet.balance).toBe(900)
+      expect(result.data?.transaction.amount).toBe(100)
     })
   })
 
