@@ -1216,7 +1216,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       })
 
       await service.completeExternalPayment(createdPayment.id, {
-        data: { status: 'Pagado', amount: 100000, correlationId: createdPayment.id },
+        data: { status: 'Pagado', amountCents: 10000000, correlationId: createdPayment.id },
       })
 
       expect(taxService.getTaxForCountry).not.toHaveBeenCalled()
@@ -1312,7 +1312,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         })
 
         await service.completeExternalPayment(createdPayment.id, {
-          amount: totalAmount,
+          data: { status: 'Pagado', amountCents: Math.round(totalAmount * 100) },
         })
 
         const invoicePayload = invoiceService.create.mock.calls[0][0]
@@ -1363,14 +1363,143 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       },
     )
 
-    it('rejects completeExternalPayment without crediting the wallet or invoicing and logs payment.id when provider confirmed gross amount mismatches payment.amount', async () => {
+    it('marks payment as failed with its id and error on Confio amountCents mismatch and keeps credit at 0 across the subsequent cron pass and return page reconciliation', async () => {
       const errorLogSpy = jest.spyOn((service as any).log, 'error')
-      paymentRepo.findOne.mockResolvedValue({
+      const paymentRow: any = {
         id: 'pay-mismatch-99',
         brandId: BRAND_ID,
         userId: 'u-1',
         walletId: 'w-1',
         provider: 'confio',
+        providerPaymentId: 'confio-order-99',
+        amount: 100000,
+        currency: 'COP',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        failureReason: null,
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      }
+      paymentRepo.findOne.mockResolvedValue(paymentRow)
+      providerFactory.getProvider.mockReturnValue({
+        createCheckout,
+        getPaymentStatus: jest.fn().mockResolvedValue({
+          status: 'completed',
+          metadata: { rawStatus: 'CONFIRMADO' },
+        }),
+      })
+
+      await expect(
+        service.completeExternalPayment('pay-mismatch-99', {
+          data: { status: 'Pagado', amountCents: 8403361 },
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROVIDER_AMOUNT_MISMATCH',
+        message: expect.stringContaining('pay-mismatch-99'),
+      })
+
+      await service.completeExternalPayment('pay-mismatch-99', { source: 'cron-reconcile' })
+      const returnPageResult = await service.reconcilePayment('pay-mismatch-99')
+
+      expect(walletService.credit).toHaveBeenCalledTimes(0)
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(returnPageResult.status).toBe('failed')
+      expect(errorLogSpy).toHaveBeenCalledWith(expect.stringContaining('pay-mismatch-99'))
+      expect(paymentRow.status).toBe(PaymentStatus.FAILED)
+      expect(paymentRow.status).not.toBe(PaymentStatus.PROCESSING)
+      expect(paymentRow.failureReason).toContain('pay-mismatch-99')
+      expect(paymentRow.metadata.amountMismatch).toEqual(
+        expect.objectContaining({
+          code: 'PROVIDER_AMOUNT_MISMATCH',
+          paymentId: 'pay-mismatch-99',
+          provider: 'confio',
+          unit: 'cents',
+          expectedAmount: 10000000,
+          confirmedAmount: 8403361,
+        }),
+      )
+    })
+
+    it('completes a Stripe payment when payment_intent.succeeded sends matching amount in cents and rejects without crediting when cents mismatch', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'Sales Tax',
+        taxRate: 0,
+        isInclusive: false,
+      })
+
+      const matchingStripePayment: any = {
+        id: 'pay-stripe-cents-ok',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-usd',
+        provider: 'stripe',
+        amount: 100,
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'US' },
+      }
+      paymentRepo.findOne.mockResolvedValueOnce(matchingStripePayment)
+
+      await service.completeExternalPayment('pay-stripe-cents-ok', {
+        id: 'pi_ok',
+        object: 'payment_intent',
+        amount: 10000,
+        currency: 'usd',
+      })
+
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-usd',
+        100,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-stripe-cents-ok',
+        }),
+      )
+
+      walletService.credit.mockClear()
+      invoiceService.create.mockClear()
+
+      const mismatchedStripePayment: any = {
+        id: 'pay-stripe-cents-mismatch',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-usd',
+        provider: 'stripe',
+        amount: 100,
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'US' },
+      }
+      paymentRepo.findOne.mockResolvedValue(mismatchedStripePayment)
+
+      await expect(
+        service.completeExternalPayment('pay-stripe-cents-mismatch', {
+          id: 'pi_mismatch',
+          object: 'payment_intent',
+          amount: 8400,
+          currency: 'usd',
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROVIDER_AMOUNT_MISMATCH',
+        message: expect.stringContaining('pay-stripe-cents-mismatch'),
+      })
+
+      expect(mismatchedStripePayment.status).toBe(PaymentStatus.FAILED)
+      expect(walletService.credit).toHaveBeenCalledTimes(0)
+      expect(invoiceService.create).not.toHaveBeenCalled()
+    })
+
+    it('completes a Mercado Pago payment when webhook payload omits amount as declared in provider specs', async () => {
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-mp-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'mercadopago',
         amount: 100000,
         currency: 'COP',
         status: 'pending',
@@ -1378,18 +1507,21 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
       })
 
-      await expect(
-        service.completeExternalPayment('pay-mismatch-99', {
-          data: { status: 'Pagado', amount: 84033.61 },
-        }),
-      ).rejects.toMatchObject({
-        code: 'PROVIDER_AMOUNT_MISMATCH',
-        message: expect.stringContaining('pay-mismatch-99'),
+      await service.completeExternalPayment('pay-mp-1', {
+        mpPaymentId: 'mp-987654',
       })
 
-      expect(errorLogSpy).toHaveBeenCalledWith(expect.stringContaining('pay-mismatch-99'))
-      expect(walletService.credit).not.toHaveBeenCalled()
-      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-1',
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-mp-1',
+        }),
+      )
     })
 
     it('credits the full payment.amount without deducting provider commission when provider payload includes fee and netAmount', async () => {
@@ -1409,7 +1541,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       await service.completeExternalPayment('pay-commission-1', {
         data: {
           status: 'Pagado',
-          amount: 100000,
+          amountCents: 10000000,
           commission: 3500,
           fee: 3500,
           netAmount: 96500,

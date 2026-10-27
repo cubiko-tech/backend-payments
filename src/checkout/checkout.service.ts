@@ -576,7 +576,15 @@ export class CheckoutService implements OnModuleInit {
     this.inFlightCompletions.add(paymentId)
     try {
       const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
-      if (!payment || payment.status === PaymentStatus.COMPLETED) return
+      if (
+        !payment ||
+        payment.status === PaymentStatus.COMPLETED ||
+        payment.status === PaymentStatus.FAILED ||
+        payment.status === PaymentStatus.DISPUTED ||
+        this.hasAmountMismatchMark(payment)
+      ) {
+        return
+      }
 
       const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
       const claimed = await this.paymentRepo.update(
@@ -600,13 +608,26 @@ export class CheckoutService implements OnModuleInit {
     providerData?: any,
     metadata?: any,
   ): Promise<void> {
+    if (this.hasAmountMismatchMark(payment)) {
+      throw new RequestException(
+        {
+          code: 'PROVIDER_AMOUNT_MISMATCH',
+          paymentId: payment.id,
+          message:
+            payment.metadata?.amountMismatch?.message ||
+            `Payment ${payment.id} is marked with PROVIDER_AMOUNT_MISMATCH`,
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
+
     payment.status = PaymentStatus.PROCESSING
     if (providerData) {
       payment.metadata = metadata
     }
 
     const totalAmount = parseFloat(String(payment.amount))
-    this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
+    await this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
 
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
@@ -772,13 +793,25 @@ export class CheckoutService implements OnModuleInit {
     if (payment.status === PaymentStatus.COMPLETED) {
       return { status: 'completed', planSlug: payment.purposeId || undefined }
     }
-    if (payment.status === PaymentStatus.FAILED) {
+    if (
+      payment.status === PaymentStatus.FAILED ||
+      payment.status === PaymentStatus.DISPUTED ||
+      this.hasAmountMismatchMark(payment)
+    ) {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
       if (payment.status === PaymentStatus.PROCESSING) {
         try {
           await this.completeExternalPayment(paymentId, { source: 'reconcile' })
+          const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
+          if (
+            afterReconcile &&
+            (afterReconcile.status === PaymentStatus.FAILED ||
+              this.hasAmountMismatchMark(afterReconcile))
+          ) {
+            return { status: 'failed' }
+          }
           return { status: 'completed', planSlug: payment.purposeId || undefined }
         } catch (error) {
           this.log.warn(
@@ -800,6 +833,14 @@ export class CheckoutService implements OnModuleInit {
           source: 'reconcile',
           providerStatus: real.metadata,
         })
+        const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
+        if (
+          afterReconcile &&
+          (afterReconcile.status === PaymentStatus.FAILED ||
+            this.hasAmountMismatchMark(afterReconcile))
+        ) {
+          return { status: 'failed' }
+        }
         return { status: 'completed', planSlug: payment.purposeId || undefined }
       }
 
@@ -1558,74 +1599,141 @@ export class CheckoutService implements OnModuleInit {
     }
   }
 
-  private extractConfirmedGrossAmount(providerData: any): number | null {
-    if (!providerData || typeof providerData !== 'object') {
-      return null
-    }
-    const directCandidates = [
-      providerData.grossAmount,
-      providerData.confirmedAmount,
-      providerData.totalAmount,
-      providerData.amount,
-      providerData.transaction_amount,
-      providerData.data?.grossAmount,
-      providerData.data?.confirmedAmount,
-      providerData.data?.totalAmount,
-      providerData.data?.amount,
-      providerData.data?.transaction_amount,
-      providerData.providerStatus?.grossAmount,
-      providerData.providerStatus?.confirmedAmount,
-      providerData.providerStatus?.totalAmount,
-      providerData.providerStatus?.amount,
-    ]
-    for (const candidate of directCandidates) {
-      if (candidate !== undefined && candidate !== null && candidate !== '') {
-        const numeric = Number(candidate)
-        if (Number.isFinite(numeric)) {
-          return numeric
-        }
+  private readonly providerConfirmedAmountSpecs: Record<
+    string,
+    | {
+        verifiesAmount: false
+        reason: 'provider_webhook_omits_confirmed_amount'
       }
-    }
-    const centCandidates = [
-      providerData.amountCents,
-      providerData.data?.amountCents,
-      providerData.providerStatus?.amountCents,
-    ]
-    for (const candidate of centCandidates) {
-      if (candidate !== undefined && candidate !== null && candidate !== '') {
-        const numeric = Number(candidate)
-        if (Number.isFinite(numeric)) {
-          return Math.round(numeric) / 100
-        }
+    | {
+        verifiesAmount: true
+        unit: 'cents' | 'major'
+        extractConfirmedAmount: (providerData: any) => unknown
       }
-    }
-    return null
+  > = {
+    [PaymentProvider.STRIPE]: {
+      verifiesAmount: true,
+      unit: 'cents',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.amount ??
+        providerData?.amount_total ??
+        providerData?.amountTotal ??
+        providerData?.data?.object?.amount ??
+        providerData?.data?.object?.amount_total ??
+        providerData?.providerStatus?.amountTotal,
+    },
+    [PaymentProvider.CONFIO]: {
+      verifiesAmount: true,
+      unit: 'cents',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.data?.amountCents ??
+        providerData?.amountCents ??
+        providerData?.providerStatus?.amountCents,
+    },
+    [PaymentProvider.DROPI]: {
+      verifiesAmount: true,
+      unit: 'major',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.amount ?? providerData?.data?.amount,
+    },
+    [PaymentProvider.MERCADOPAGO]: {
+      verifiesAmount: false,
+      reason: 'provider_webhook_omits_confirmed_amount',
+    },
   }
 
-  private assertProviderConfirmedAmount(
+  private hasAmountMismatchMark(payment?: Payment | null): boolean {
+    return Boolean(payment?.metadata && payment.metadata.amountMismatch)
+  }
+
+  private async markPaymentAmountMismatch(
+    payment: Payment,
+    providerData: any,
+    mismatch: {
+      code: 'PROVIDER_AMOUNT_MISMATCH'
+      paymentId: string
+      provider: string
+      unit: 'cents' | 'major'
+      expectedAmount: number
+      confirmedAmount: number
+      message: string
+    },
+  ): Promise<void> {
+    const updatedMetadata = {
+      ...(payment.metadata || {}),
+      ...(providerData ? { providerData } : {}),
+      amountMismatch: mismatch,
+    }
+    await this.paymentRepo.update(
+      { id: payment.id, status: payment.status },
+      {
+        status: PaymentStatus.FAILED,
+        failureReason: mismatch.message,
+        metadata: updatedMetadata,
+      },
+    )
+    payment.status = PaymentStatus.FAILED
+    payment.failureReason = mismatch.message
+    payment.metadata = updatedMetadata
+  }
+
+  private toConfirmedAmountUnit(amountInMajorUnits: number, unit: 'cents' | 'major'): number {
+    if (unit === 'cents') {
+      return Math.round(Number(amountInMajorUnits) * 100)
+    }
+    return Math.round(Number(amountInMajorUnits) * 100) / 100
+  }
+
+  private normalizeConfirmedAmountInUnit(rawAmount: number, unit: 'cents' | 'major'): number {
+    if (unit === 'cents') {
+      return Math.round(rawAmount)
+    }
+    return Math.round(rawAmount * 100) / 100
+  }
+
+  private async assertProviderConfirmedAmount(
     payment: Payment,
     expectedAmount: number,
     providerData?: any,
-  ): void {
-    const confirmedAmount = this.extractConfirmedGrossAmount(providerData)
-    if (confirmedAmount === null) {
+  ): Promise<void> {
+    const providerKey = String(payment.provider || '').toLowerCase()
+    const spec = this.providerConfirmedAmountSpecs[providerKey]
+    if (!spec || !spec.verifiesAmount) {
       return
     }
-    const expectedCents = Math.round(Number(expectedAmount) * 100)
-    const confirmedCents = Math.round(Number(confirmedAmount) * 100)
-    if (expectedCents !== confirmedCents) {
+    if (!providerData || typeof providerData !== 'object') {
+      return
+    }
+    const rawCandidate = spec.extractConfirmedAmount(providerData)
+    if (rawCandidate === undefined || rawCandidate === null || rawCandidate === '') {
+      return
+    }
+    const numericConfirmed = Number(rawCandidate)
+    if (!Number.isFinite(numericConfirmed)) {
+      return
+    }
+    const expectedInUnit = this.toConfirmedAmountUnit(expectedAmount, spec.unit)
+    const confirmedInUnit = this.normalizeConfirmedAmountInUnit(numericConfirmed, spec.unit)
+    if (expectedInUnit !== confirmedInUnit) {
       const message =
-        `Provider confirmed gross amount (${confirmedAmount}) does not match ` +
-        `payment.amount (${expectedAmount}) for payment ${payment.id}`
-      this.log.error(message)
-      winstonLogger.log('error', message, {
+        `Provider confirmed gross amount (${confirmedInUnit} ${spec.unit}) does not match ` +
+        `payment.amount (${expectedInUnit} ${spec.unit}) for payment ${payment.id}`
+      const mismatch = {
+        code: 'PROVIDER_AMOUNT_MISMATCH' as const,
         paymentId: payment.id,
-        expectedAmount,
-        confirmedAmount,
-      })
+        provider: providerKey,
+        unit: spec.unit,
+        expectedAmount: expectedInUnit,
+        confirmedAmount: confirmedInUnit,
+        message,
+      }
+      this.log.error(message)
+      winstonLogger.log('error', message, mismatch)
+      await this.markPaymentAmountMismatch(payment, providerData, mismatch)
       throw new RequestException(
         {
           code: 'PROVIDER_AMOUNT_MISMATCH',
+          paymentId: payment.id,
           message,
         },
         HttpStatus.CONFLICT,

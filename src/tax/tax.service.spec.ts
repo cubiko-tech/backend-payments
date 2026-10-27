@@ -68,7 +68,7 @@ describe('TaxService', () => {
     const tax = await service.getTaxForCountry('CO')
 
     expect(tax).toEqual({ taxName: 'N/A', taxRate: 0, isInclusive: false })
-    expect(error).toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith('Invalid tax rate for CO: not-a-rate')
   })
 
   it('identifies VAT countries accurately via isVatCountry', () => {

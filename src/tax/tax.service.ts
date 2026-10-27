@@ -68,7 +68,7 @@ export class TaxService {
       const parsedRate =
         config.taxRate !== null && config.taxRate !== undefined ? Number(config.taxRate) : NaN
       if (!Number.isFinite(parsedRate) || parsedRate < 0) {
-        this.logger.error(`Tasa de impuestos inválida para ${country}: ${String(config.taxRate)}`)
+        this.logger.error(`Invalid tax rate for ${country}: ${String(config.taxRate)}`)
         return { taxName: 'N/A', taxRate: 0, isInclusive: false }
       }
 
