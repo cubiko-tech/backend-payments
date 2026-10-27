@@ -170,14 +170,22 @@ export class WalletService {
   }
 
   /**
-   * Debitar fondos de una wallet con bloqueo pesimista.
-   * Verifica saldo suficiente antes de debitar.
-   * Operación atómica: actualiza balance y crea transacción.
+   * Atomically debits `amount` from `walletId` under a `pessimistic_write` row lock
+   * and records the corresponding `DEBIT` transaction.
    *
-   * @param expectedCurrency moneda en la que se está cobrando. Opcional: si se pasa y no
-   * coincide con la de la wallet, rechaza con `WALLET_CURRENCY_MISMATCH` (422) sin dejar
-   * movimiento. Omitirlo mantiene el comportamiento histórico (lo hace el cron de
-   * renovación, `tasks.service.ts:renewFromWallet`, que sigue sin guarda de moneda).
+   * When `idempotencyKey` (or `data.idempotencyKey`) matches an existing `DEBIT`
+   * movement for `walletId`, returns the existing wallet and transaction without
+   * charging again. Rejects `TKN` wallets or charges, brand ownership mismatches
+   * when `data.brandId` is supplied, frozen or closed wallets, and currency
+   * mismatches when `expectedCurrency` is provided (used by checkout and wallet
+   * subscription renewals).
+   *
+   * @param walletId Target wallet identifier.
+   * @param amount Positive finite debit amount in the wallet currency.
+   * @param data Transaction metadata or referenceId string.
+   * @param expectedCurrency Expected ISO currency code for the charge; when provided
+   * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
+   * @param idempotencyKey Optional key deduplicating retries on the same wallet.
    */
   async debit(
     walletId: string,
@@ -246,15 +254,8 @@ export class WalletService {
         )
       }
 
-      // La guarda de moneda va ACÁ y no sólo en checkout: `assertWalletCurrency`
-      // (checkout.service.ts) lee la wallet por la réplica DBRead y FUERA de todo
-      // bloqueo, así que entre esa comprobación y este débito hay una ventana. Este
-      // punto corre sobre la fila ya tomada con `pessimistic_write` dentro de la
-      // transacción abierta, y es el último cuello de botella antes de que se mueva
-      // plata. Comparación estricta, igual que `assertWalletCurrency` y `transfer`.
-      // `credit`, `transfer` y el cron `renewFromWallet` NO llevan esta guarda a
-      // propósito: `transfer` ya compara las monedas de las dos wallets, y sumarla al
-      // cron cambiaría renovaciones que hoy pasan.
+      // Re-check currency under the `pessimistic_write` row lock because checkout
+      // pre-validates on the read replica outside this transaction.
       if (expectedCurrency && wallet.currency !== expectedCurrency) {
         throw new RequestException(
           {

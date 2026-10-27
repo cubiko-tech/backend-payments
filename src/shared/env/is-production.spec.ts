@@ -1,3 +1,5 @@
+import * as fs from 'fs'
+import * as path from 'path'
 import { ConfioProvider } from '../../provider/confio/confio.provider'
 
 /**
@@ -110,6 +112,114 @@ describe('isProductionEnv — sus tres consumidores', () => {
       process.env.ENV = 'development'
 
       expect(tieneConsola(cargarLogger())).toBe(true)
+    })
+  })
+
+  describe('service risk documentation and contract comments (LOC-36)', () => {
+    const repoRoot = path.resolve(__dirname, '../../..')
+
+    it('keeps every docs/RIESGOS.md anchor pointing to the named line and no closed entry marked open', () => {
+      const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
+      const sections = risksDoc.split(/^## /m).slice(1)
+
+      expect(sections.length).toBeGreaterThanOrEqual(9)
+
+      for (const section of sections) {
+        const heading = section.split('\n')[0].trim()
+        const estadoParts = section.split('- **Estado**:')
+        expect(estadoParts.length).toBe(2)
+        const estadoText = estadoParts[1].trim()
+        expect(estadoText).not.toMatch(/^abiert[oa]\b/i)
+
+        let currentFile: string | null = null
+        const tokenRegex = /`(src\/[^`:]+):(\d+)(?:-(\d+))?`|`:(\d+)(?:-(\d+))?`/g
+        let match: RegExpExecArray | null
+        const anchors: Array<{ file: string; start: number; end: number }> = []
+
+        while ((match = tokenRegex.exec(section)) !== null) {
+          if (match[1]) {
+            currentFile = match[1]
+            const start = Number(match[2])
+            const end = match[3] ? Number(match[3]) : start
+            anchors.push({ file: currentFile, start, end })
+          } else if (currentFile && match[4]) {
+            const start = Number(match[4])
+            const end = match[5] ? Number(match[5]) : start
+            anchors.push({ file: currentFile, start, end })
+          }
+        }
+
+        expect(anchors.length).toBeGreaterThan(0)
+        for (const anchor of anchors) {
+          const filePath = path.join(repoRoot, anchor.file)
+          expect(fs.existsSync(filePath)).toBe(true)
+          const fileLines = fs.readFileSync(filePath, 'utf8').split('\n')
+          expect(anchor.start).toBeGreaterThanOrEqual(1)
+          expect(anchor.end).toBeGreaterThanOrEqual(anchor.start)
+          expect(anchor.end).toBeLessThanOrEqual(fileLines.length)
+
+          const snippet = fileLines
+            .slice(anchor.start - 1, anchor.end)
+            .join('\n')
+            .trim()
+          expect(snippet.length).toBeGreaterThan(0)
+        }
+
+        if (heading.includes('LOC-14') || heading.includes('LOC-16')) {
+          expect(estadoText).toMatch(/mitigado/i)
+          expect(estadoText).toMatch(/Abierto/i)
+        }
+      }
+
+      const walletLines = fs
+        .readFileSync(path.join(repoRoot, 'src/wallet/wallet.service.ts'), 'utf8')
+        .split('\n')
+      expect(walletLines[189]).toContain('async debit(')
+      expect(walletLines.slice(244, 255).join('\n')).toContain("walletCurrency === 'TKN'")
+
+      const checkoutLines = fs
+        .readFileSync(path.join(repoRoot, 'src/checkout/checkout.service.ts'), 'utf8')
+        .split('\n')
+      expect(checkoutLines.slice(210, 213).join('\n')).toContain('assertWalletCurrency')
+      expect(checkoutLines[1057]).toContain('private async assertWalletCurrency(')
+
+      const tasksLines = fs
+        .readFileSync(path.join(repoRoot, 'src/tasks/tasks.service.ts'), 'utf8')
+        .split('\n')
+      expect(tasksLines[1122]).toContain('private async renewFromWallet(')
+      expect(tasksLines[1412]).toContain('private async extendSubscriptionPeriod(')
+      expect(tasksLines[1460]).toContain('private isPostponementGraceExceeded(')
+      expect(tasksLines[1472]).toContain('private async acquireSubscriptionLock(')
+    })
+
+    it('keeps comments on isProductionEnv, WalletService.debit, and assertWalletCurrency aligned with the contract in English', () => {
+      const isProductionSource = fs.readFileSync(
+        path.join(repoRoot, 'src/shared/env/is-production.ts'),
+        'utf8',
+      )
+      expect(isProductionSource).not.toContain('confio.provider.ts:511')
+      expect(isProductionSource).not.toContain('NO lo toca')
+      expect(isProductionSource).toContain("configured as `'production'`")
+
+      const walletSource = fs.readFileSync(
+        path.join(repoRoot, 'src/wallet/wallet.service.ts'),
+        'utf8',
+      )
+      expect(walletSource).not.toContain('no tiene guarda propia')
+      expect(walletSource).not.toContain('el cron sigue llamando con 3 argumentos')
+      expect(walletSource).toContain(
+        'Atomically debits `amount` from `walletId` under a `pessimistic_write` row lock',
+      )
+
+      const checkoutSource = fs.readFileSync(
+        path.join(repoRoot, 'src/checkout/checkout.service.ts'),
+        'utf8',
+      )
+      expect(checkoutSource).not.toContain('Acotado a `plan_purchase`')
+      expect(checkoutSource).not.toContain('quedan fuera del alcance de esta tarea')
+      expect(checkoutSource).toContain(
+        'Validates that the wallet referenced by `req` can settle a checkout in `currency`',
+      )
     })
   })
 })

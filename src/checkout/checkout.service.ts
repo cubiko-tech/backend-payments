@@ -206,10 +206,8 @@ export class CheckoutService implements OnModuleInit {
       }
     }
 
-    // 3. Antes el precio salía de `req.currency` (COP por defecto) y coincidía con la
-    // wallet por construcción; ahora la moneda es un dato DERIVADO del país de la marca,
-    // así que hay que compararla contra la wallet ANTES de persistir y debitar. Acotado
-    // a `plan_purchase`: es el único camino cuya moneda dejó de ser la del llamador.
+    // 3. Pre-validate wallet ownership, non-TKN currency, and currency match
+    // before persisting the payment or debiting across any checkout purpose.
     if (req.provider === 'wallet' || req.walletId) {
       await this.assertWalletCurrency(req, currency)
     }
@@ -1044,25 +1042,18 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * La wallet con la que se paga el plan tiene que ser de la marca y estar en la
-   * moneda del precio resuelto.
+   * Validates that the wallet referenced by `req` can settle a checkout in `currency`
+   * before a `Payment` record is persisted.
    *
-   * `WalletService.debit` sólo mira existencia, estado y saldo —el que compara
-   * monedas es `transfer`—, así que sin esta guarda una marca US pagaría 6,99 USD
-   * debitando 6,99 COP, o al revés. Se valida acá y no en `wallet.service.ts`,
-   * que pertenece a la tarea hermana `guarda-de-moneda-en-wallet`.
+   * Rejects missing `req.walletId` (`MISSING_WALLET_ID`, 400) so `findById` is never
+   * called with `undefined`, rejects wallets owned by another brand with the generic
+   * `WALLET_NOT_FOUND` (404) response to avoid an existence oracle, and rejects
+   * `TKN` wallets or currency mismatches with `WALLET_CURRENCY_MISMATCH` (422).
+   * `WalletService.debit` re-enforces these invariants under the `pessimistic_write`
+   * row lock during the debit transaction.
    *
-   * El `walletId` se EXIGE: `findById(undefined)` no falla, porque TypeORM descarta
-   * las condiciones `undefined` (`invalidWhereValuesBehavior` por defecto) y la
-   * consulta degenera en "la primera wallet de la tabla". Sin este rechazo la guarda
-   * compararía la moneda de una wallet ajena —y filtraría cuál es en el mensaje—
-   * mientras el débito posterior toca otra.
-   *
-   * La pertenencia se responde con el mismo 404 genérico de `findById`: decirle al
-   * llamador "esa wallet existe pero no es tuya" convierte el error en un oráculo.
-   *
-   * Si la lectura de la wallet falla (no si no existe: eso ya lo rechaza `findById`
-   * con 404) se deja seguir: el débito volverá a fallar por su cuenta.
+   * @param req Checkout request containing `brandId` and `walletId`.
+   * @param currency Resolved ISO currency code for the checkout charge.
    */
   private async assertWalletCurrency(req: CheckoutRequest, currency: string) {
     if (!req.walletId) {
