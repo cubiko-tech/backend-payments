@@ -112,6 +112,8 @@ export interface CheckoutResult {
   checkoutUrl?: string // Only when provider is Stripe/MP
   subscriptionId?: string // Only when purpose is plan_purchase
   invoiceId?: string // Only when payment was immediate
+  renewal?: 'extended'
+  currentPeriodEnd?: Date
 }
 
 @Injectable()
@@ -392,17 +394,32 @@ export class CheckoutService implements OnModuleInit {
       status: 'completed',
     }
 
+    let extendedUntil: Date | undefined
+
     // Si es compra de plan → crear/renovar suscripción
     if (req.purpose === 'plan_purchase' && req.planSlug) {
-      const sub = await this.createOrRenewSubscription(req, payment)
+      const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
       result.subscriptionId = sub.id
+      if (extended && sub.currentPeriodEnd) {
+        result.renewal = 'extended'
+        result.currentPeriodEnd = sub.currentPeriodEnd
+        extendedUntil = sub.currentPeriodEnd
+      }
 
       // Asignar plan en backend-roles
-      await this.assignPlanInRoles(req.brandId, req.planSlug)
+      await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
     }
 
     // Generar factura
-    const invoice = await this.generateInvoice(payment, req, subtotal, taxAmount, currency, tax)
+    const invoice = await this.generateInvoice(
+      payment,
+      req,
+      subtotal,
+      taxAmount,
+      currency,
+      tax,
+      extendedUntil,
+    )
     result.invoiceId = invoice.id
 
     // Enviar a DIAN (async, no bloquea)
@@ -574,9 +591,11 @@ export class CheckoutService implements OnModuleInit {
         : 0
     const subtotal = totalAmount - taxAmount
 
+    let extendedUntil: Date | undefined
+
     // Si es compra de plan → crear/renovar suscripción
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      const subscription = await this.createOrRenewSubscription(
+      const { subscription, extended } = await this.createOrRenewSubscription(
         {
           brandId: payment.brandId,
           userId: payment.userId,
@@ -587,7 +606,14 @@ export class CheckoutService implements OnModuleInit {
         },
         payment,
       )
-      await this.assignPlanInRoles(payment.brandId, subscription?.planSlug || payment.purposeId)
+      if (extended && subscription?.currentPeriodEnd) {
+        extendedUntil = subscription.currentPeriodEnd
+      }
+      await this.assignPlanInRoles(
+        payment.brandId,
+        subscription?.planSlug || payment.purposeId,
+        subscription?.currentPeriodEnd,
+      )
     }
 
     // Si es recarga de wallet → acreditar
@@ -624,6 +650,7 @@ export class CheckoutService implements OnModuleInit {
       taxAmount,
       payment.currency,
       tax,
+      extendedUntil,
     )
 
     const paidAt = new Date()
@@ -1137,7 +1164,7 @@ export class CheckoutService implements OnModuleInit {
   private async createOrRenewSubscription(
     req: CheckoutRequest,
     payment: Payment,
-  ): Promise<Subscription> {
+  ): Promise<{ subscription: Subscription; extended: boolean }> {
     const now = new Date()
     const periodEnd = new Date()
     periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
@@ -1149,27 +1176,49 @@ export class CheckoutService implements OnModuleInit {
 
     if (subscription) {
       if (payment?.id) {
-        if (subscription.lastPaymentId === payment.id) {
-          return subscription
-        }
         const existingEvent = await this.subscriptionEventRepo.findOne({
           where: { paymentId: payment.id },
         })
-        if (existingEvent) {
-          return subscription
+        if (subscription.lastPaymentId === payment.id || existingEvent) {
+          return {
+            subscription,
+            extended: existingEvent?.metadata?.renewal === 'extended',
+          }
         }
       }
       // Renovar/cambiar plan
       const fromPlan = subscription.planSlug
       const fromStatus = subscription.status
+      const existingPeriodEnd =
+        subscription.currentPeriodEnd instanceof Date
+          ? subscription.currentPeriodEnd
+          : subscription.currentPeriodEnd
+            ? new Date(subscription.currentPeriodEnd)
+            : null
+      const isSameActivePlanExtension =
+        fromStatus === SubscriptionStatus.ACTIVE &&
+        !subscription.cancelledAt &&
+        fromPlan === req.planSlug &&
+        existingPeriodEnd !== null &&
+        !Number.isNaN(existingPeriodEnd.getTime()) &&
+        existingPeriodEnd.getTime() > now.getTime()
+
+      const targetPeriodEnd = isSameActivePlanExtension
+        ? new Date(existingPeriodEnd.getTime())
+        : periodEnd
+      if (isSameActivePlanExtension) {
+        targetPeriodEnd.setDate(targetPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
+      }
 
       subscription.planSlug = req.planSlug
       subscription.status = SubscriptionStatus.ACTIVE
       subscription.provider = req.provider as SubscriptionProvider
       subscription.walletId = req.walletId || subscription.walletId
-      subscription.currentPeriodStart = now
-      subscription.currentPeriodEnd = periodEnd
-      subscription.nextBillingDate = periodEnd
+      subscription.currentPeriodStart = isSameActivePlanExtension
+        ? subscription.currentPeriodStart || now
+        : now
+      subscription.currentPeriodEnd = targetPeriodEnd
+      subscription.nextBillingDate = targetPeriodEnd
       subscription.lastPaymentId = payment.id
       subscription.retryCount = 0
       subscription.cancelledAt = null
@@ -1202,8 +1251,18 @@ export class CheckoutService implements OnModuleInit {
             eventType === SubscriptionEventType.PLAN_CHANGED
               ? `Cambio de plan ${fromPlan} → ${req.planSlug}`
               : 'Renovación por pago',
+          ...(isSameActivePlanExtension
+            ? {
+                metadata: {
+                  renewal: 'extended',
+                  currentPeriodEnd: targetPeriodEnd.toISOString(),
+                },
+              }
+            : {}),
         }),
       )
+
+      return { subscription, extended: isSameActivePlanExtension }
     } else {
       // Crear nueva
       subscription = this.subscriptionRepo.create({
@@ -1233,7 +1292,7 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    return subscription
+    return { subscription, extended: false }
   }
 
   /**
@@ -1246,6 +1305,7 @@ export class CheckoutService implements OnModuleInit {
     taxAmount: number,
     currency: string,
     tax: any,
+    extendedUntil?: Date,
   ): Promise<any> {
     const billingProfile = await this.billingProfileRepo.findOne({
       where: { brandId: payment.brandId },
@@ -1259,8 +1319,11 @@ export class CheckoutService implements OnModuleInit {
     const items = []
 
     if (req.purpose === 'plan_purchase') {
+      const description = extendedUntil
+        ? `Extensión del plan ${req.planSlug} hasta ${extendedUntil.toISOString()}`
+        : `Plan ${req.planSlug} — Suscripción mensual Cubiko`
       items.push({
-        description: `Plan ${req.planSlug} — Suscripción mensual Cubiko`,
+        description,
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
@@ -1353,10 +1416,14 @@ export class CheckoutService implements OnModuleInit {
    * Asignar plan a la marca en backend-roles con expiresAt.
    * Calcula expiresAt = currentPeriodEnd de la suscripción (BILLING_PERIOD_DAYS).
    */
-  private async assignPlanInRoles(brandId: string, planSlug: string) {
-    const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + this.BILLING_PERIOD_DAYS)
-    await this.clientRoles.assignPlanToBrand(brandId, planSlug, expiresAt)
+  private async assignPlanInRoles(brandId: string, planSlug: string, expiresAt?: Date) {
+    let resolvedExpiresAt =
+      expiresAt instanceof Date && !Number.isNaN(expiresAt.getTime()) ? expiresAt : null
+    if (!resolvedExpiresAt) {
+      resolvedExpiresAt = new Date()
+      resolvedExpiresAt.setDate(resolvedExpiresAt.getDate() + this.BILLING_PERIOD_DAYS)
+    }
+    await this.clientRoles.assignPlanToBrand(brandId, planSlug, resolvedExpiresAt)
   }
 
   /**

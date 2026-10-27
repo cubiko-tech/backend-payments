@@ -1831,4 +1831,167 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(storedSub.currentPeriodEnd.getTime()).toBe(periodEndAfterFirstAttempt)
     })
   })
+
+  describe('same active plan purchase extends current period', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000
+
+    const buildActiveSubscription = (activeUntil: Date, overrides: Record<string, any> = {}) => ({
+      id: 'sub-active-1',
+      brandId: BRAND_ID,
+      userId: 'u-1',
+      planSlug: 'dropi-roax',
+      status: 'active',
+      provider: 'wallet',
+      walletId: 'w-1',
+      currentPeriodStart: new Date(activeUntil.getTime() - 30 * DAY_MS),
+      currentPeriodEnd: activeUntil,
+      nextBillingDate: activeUntil,
+      lastPaymentId: 'pay-initial',
+      retryCount: 0,
+      cancelledAt: null,
+      cancelReason: null,
+      accessEndsAt: null,
+      autoRenew: true,
+      ...overrides,
+    })
+
+    it('extends currentPeriodEnd by one period from D, debits once, and returns renewal extended with the new date', async () => {
+      const activeUntil = new Date(Date.now() + 15 * DAY_MS)
+      const originalStart = new Date(activeUntil.getTime() - 30 * DAY_MS)
+      const expectedExtendedEnd = new Date(activeUntil.getTime())
+      expectedExtendedEnd.setDate(expectedExtendedEnd.getDate() + 30)
+
+      subscriptionRepo.findOne.mockResolvedValue(
+        buildActiveSubscription(activeUntil, { currentPeriodStart: originalStart }),
+      )
+
+      const result = await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(subscriptionRepo.save).toHaveBeenCalledTimes(1)
+      const savedSub = subscriptionRepo.save.mock.calls[0][0]
+      expect(savedSub.currentPeriodEnd).toEqual(expectedExtendedEnd)
+      expect(savedSub.nextBillingDate).toEqual(expectedExtendedEnd)
+      expect(savedSub.currentPeriodStart).toEqual(originalStart)
+      expect(result).toEqual(
+        expect.objectContaining({
+          status: 'completed',
+          subscriptionId: 'sub-active-1',
+          renewal: 'extended',
+          currentPeriodEnd: expectedExtendedEnd,
+        }),
+      )
+    })
+
+    it('sets the invoice item description to state the plan extension and the new expiration date', async () => {
+      const activeUntil = new Date(Date.now() + 15 * DAY_MS)
+      const expectedExtendedEnd = new Date(activeUntil.getTime())
+      expectedExtendedEnd.setDate(expectedExtendedEnd.getDate() + 30)
+
+      subscriptionRepo.findOne.mockResolvedValue(buildActiveSubscription(activeUntil))
+
+      await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      const invoicePayload = invoiceService.create.mock.calls[0][0]
+      expect(invoicePayload.items).toEqual([
+        expect.objectContaining({
+          description: `Extensión del plan dropi-roax hasta ${expectedExtendedEnd.toISOString()}`,
+          productType: 'plan',
+          referenceType: 'subscription',
+          referenceId: 'dropi-roax',
+        }),
+      ])
+    })
+
+    it('starts a new billing period from today when the subscription is expired, cancelled, or for a different plan', async () => {
+      const pastEnd = new Date(Date.now() - 5 * DAY_MS)
+      const beforeCheckout = Date.now()
+      const expectedMaxEnd = new Date(beforeCheckout + 31 * DAY_MS)
+
+      subscriptionRepo.findOne.mockResolvedValue(
+        buildActiveSubscription(pastEnd, {
+          status: 'expired',
+          autoRenew: false,
+        }),
+      )
+
+      const expiredResult = await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+
+      const savedFromExpired = subscriptionRepo.save.mock.calls[0][0]
+      expect(savedFromExpired.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(beforeCheckout)
+      expect(savedFromExpired.currentPeriodEnd.getTime()).toBeLessThanOrEqual(
+        expectedMaxEnd.getTime(),
+      )
+      expect(expiredResult.renewal).toBeUndefined()
+      expect(expiredResult.currentPeriodEnd).toBeUndefined()
+      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
+        'Plan dropi-roax — Suscripción mensual Cubiko',
+      )
+
+      subscriptionRepo.save.mockClear()
+      invoiceService.create.mockClear()
+
+      const futureEnd = new Date(Date.now() + 15 * DAY_MS)
+      subscriptionRepo.findOne.mockResolvedValue(
+        buildActiveSubscription(futureEnd, {
+          status: 'cancelled',
+          cancelledAt: new Date(Date.now() - DAY_MS),
+          autoRenew: false,
+        }),
+      )
+
+      const cancelledResult = await service.processCheckout(
+        altaConWallet({ planSlug: 'dropi-roax' }),
+      )
+
+      const savedFromCancelled = subscriptionRepo.save.mock.calls[0][0]
+      expect(savedFromCancelled.currentPeriodEnd.getTime()).toBeLessThan(
+        futureEnd.getTime() + 20 * DAY_MS,
+      )
+      expect(cancelledResult.renewal).toBeUndefined()
+      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
+        'Plan dropi-roax — Suscripción mensual Cubiko',
+      )
+
+      subscriptionRepo.save.mockClear()
+      invoiceService.create.mockClear()
+
+      subscriptionRepo.findOne.mockResolvedValue(
+        buildActiveSubscription(futureEnd, {
+          planSlug: 'starter',
+        }),
+      )
+
+      const differentPlanResult = await service.processCheckout(
+        altaConWallet({ planSlug: 'dropi-roax' }),
+      )
+
+      const savedFromDifferentPlan = subscriptionRepo.save.mock.calls[0][0]
+      expect(savedFromDifferentPlan.currentPeriodEnd.getTime()).toBeLessThan(
+        futureEnd.getTime() + 20 * DAY_MS,
+      )
+      expect(differentPlanResult.renewal).toBeUndefined()
+      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
+        'Plan dropi-roax — Suscripción mensual Cubiko',
+      )
+    })
+
+    it('sends the extended expiration date D + 1 period to backend-roles when extending an active plan', async () => {
+      const activeUntil = new Date(Date.now() + 15 * DAY_MS)
+      const expectedExtendedEnd = new Date(activeUntil.getTime())
+      expectedExtendedEnd.setDate(expectedExtendedEnd.getDate() + 30)
+
+      subscriptionRepo.findOne.mockResolvedValue(buildActiveSubscription(activeUntil))
+
+      await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith(
+        BRAND_ID,
+        'dropi-roax',
+        expectedExtendedEnd,
+      )
+    })
+  })
 })
