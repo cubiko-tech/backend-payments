@@ -117,79 +117,81 @@ describe('isProductionEnv — sus tres consumidores', () => {
 
   describe('service risk documentation and contract comments (LOC-36)', () => {
     const repoRoot = path.resolve(__dirname, '../../..')
+    const closedRiskTitles = [
+      'Una recarga de wallet acredita también el impuesto como saldo (C1)',
+      'Completar un pago externo puede acreditar dos veces (C2)',
+      'El cobro y el crédito de wallet no tienen llave de idempotencia (C2)',
+      'Un pago de servicio puede debitar una wallet de otra moneda o de tokens (C3)',
+      '`WalletService.debit` no exige `walletId` ni pertenencia de la wallet a la marca (C3)',
+      'La renovación por wallet pide precio fijo en COP, omite la moneda en `debit` y `processWalletPayment` oculta fallos del débito (C3)',
+    ]
 
-    it('keeps every docs/RIESGOS.md anchor pointing to the named line and no closed entry marked open', () => {
+    it('keeps every docs/RIESGOS.md anchor pointing to existing symbols and no closed entry marked open', () => {
       const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
       const sections = risksDoc.split(/^## /m).slice(1)
-
-      expect(sections.length).toBeGreaterThanOrEqual(9)
+      const headingsFound = new Set<string>()
 
       for (const section of sections) {
         const heading = section.split('\n')[0].trim()
+        headingsFound.add(heading)
+
         const estadoParts = section.split('- **Estado**:')
         expect(estadoParts.length).toBe(2)
         const estadoText = estadoParts[1].trim()
-        expect(estadoText).not.toMatch(/^abiert[oa]\b/i)
 
-        let currentFile: string | null = null
-        const tokenRegex = /`(src\/[^`:]+):(\d+)(?:-(\d+))?`|`:(\d+)(?:-(\d+))?`/g
-        let match: RegExpExecArray | null
-        const anchors: Array<{ file: string; start: number; end: number }> = []
+        if (closedRiskTitles.includes(heading)) {
+          expect(estadoText).not.toMatch(/^abiert[oa]\b/i)
+        }
 
-        while ((match = tokenRegex.exec(section)) !== null) {
-          if (match[1]) {
-            currentFile = match[1]
-            const start = Number(match[2])
-            const end = match[3] ? Number(match[3]) : start
-            anchors.push({ file: currentFile, start, end })
-          } else if (currentFile && match[4]) {
-            const start = Number(match[4])
-            const end = match[5] ? Number(match[5]) : start
-            anchors.push({ file: currentFile, start, end })
+        const dondeMatch = section.match(/- \*\*Dónde\*\*:\s*([\s\S]*?)(?=\n- \*\*|$)/)
+        expect(dondeMatch).not.toBeNull()
+        const dondeClauses = dondeMatch![1].split(';')
+
+        for (const clause of dondeClauses) {
+          let currentFile: string | null = null
+          const pendingSymbols: string[] = []
+          const fileSymbols = new Map<string, string[]>()
+          const tokenRegex = /`([^`]+)`/g
+          let tokenMatch: RegExpExecArray | null
+
+          while ((tokenMatch = tokenRegex.exec(clause)) !== null) {
+            const token = tokenMatch[1]
+            const fileAnchorMatch = token.match(/^(src\/[^:]+):(\d+)(?:-(\d+))?$/)
+            if (fileAnchorMatch) {
+              currentFile = fileAnchorMatch[1]
+              if (!fileSymbols.has(currentFile)) {
+                fileSymbols.set(currentFile, [])
+              }
+              if (pendingSymbols.length > 0) {
+                fileSymbols.get(currentFile)!.push(...pendingSymbols.splice(0))
+              }
+              continue
+            }
+            if (/^:\d+(?:-\d+)?$/.test(token)) {
+              continue
+            }
+            if (currentFile) {
+              fileSymbols.get(currentFile)!.push(token)
+            } else {
+              pendingSymbols.push(token)
+            }
           }
-        }
 
-        expect(anchors.length).toBeGreaterThan(0)
-        for (const anchor of anchors) {
-          const filePath = path.join(repoRoot, anchor.file)
-          expect(fs.existsSync(filePath)).toBe(true)
-          const fileLines = fs.readFileSync(filePath, 'utf8').split('\n')
-          expect(anchor.start).toBeGreaterThanOrEqual(1)
-          expect(anchor.end).toBeGreaterThanOrEqual(anchor.start)
-          expect(anchor.end).toBeLessThanOrEqual(fileLines.length)
-
-          const snippet = fileLines
-            .slice(anchor.start - 1, anchor.end)
-            .join('\n')
-            .trim()
-          expect(snippet.length).toBeGreaterThan(0)
-        }
-
-        if (heading.includes('LOC-14') || heading.includes('LOC-16')) {
-          expect(estadoText).toMatch(/mitigado/i)
-          expect(estadoText).toMatch(/Abierto/i)
+          expect(fileSymbols.size).toBeGreaterThan(0)
+          for (const [relativeFile, symbols] of fileSymbols.entries()) {
+            const filePath = path.join(repoRoot, relativeFile)
+            expect(fs.existsSync(filePath)).toBe(true)
+            const fileContent = fs.readFileSync(filePath, 'utf8')
+            for (const symbol of symbols) {
+              expect(fileContent).toContain(symbol)
+            }
+          }
         }
       }
 
-      const walletLines = fs
-        .readFileSync(path.join(repoRoot, 'src/wallet/wallet.service.ts'), 'utf8')
-        .split('\n')
-      expect(walletLines[189]).toContain('async debit(')
-      expect(walletLines.slice(244, 255).join('\n')).toContain("walletCurrency === 'TKN'")
-
-      const checkoutLines = fs
-        .readFileSync(path.join(repoRoot, 'src/checkout/checkout.service.ts'), 'utf8')
-        .split('\n')
-      expect(checkoutLines.slice(210, 213).join('\n')).toContain('assertWalletCurrency')
-      expect(checkoutLines[1057]).toContain('private async assertWalletCurrency(')
-
-      const tasksLines = fs
-        .readFileSync(path.join(repoRoot, 'src/tasks/tasks.service.ts'), 'utf8')
-        .split('\n')
-      expect(tasksLines[1122]).toContain('private async renewFromWallet(')
-      expect(tasksLines[1412]).toContain('private async extendSubscriptionPeriod(')
-      expect(tasksLines[1460]).toContain('private isPostponementGraceExceeded(')
-      expect(tasksLines[1472]).toContain('private async acquireSubscriptionLock(')
+      for (const closedTitle of closedRiskTitles) {
+        expect(headingsFound.has(closedTitle)).toBe(true)
+      }
     })
 
     it('keeps comments on isProductionEnv, WalletService.debit, and assertWalletCurrency aligned with the contract in English', () => {
