@@ -6,7 +6,7 @@ import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { AuditService } from '../audit/audit.service'
-import { TaxService } from '../tax/tax.service'
+import { TaxService, isVatCountry } from '../tax/tax.service'
 import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -224,10 +224,20 @@ export class CheckoutService implements OnModuleInit {
     // lleva impuesto, o falla con un error que lo dice») se cumple sin inventar un error
     // nuevo sobre un endpoint de plata.
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
-    const tax = await this.taxService.getTaxForCountry(taxCountry)
-    const taxAmount =
-      tax.taxRate > 0 && !tax.isInclusive ? Math.round(amount * tax.taxRate * 100) / 100 : 0
-    const totalAmount = amount + taxAmount
+    const isWalletRecharge = req.purpose === 'wallet_recharge'
+    const tax = isWalletRecharge
+      ? await this.resolveRechargeTax(taxCountry)
+      : await this.taxService.getTaxForCountry(taxCountry)
+    const rechargeBreakdown = isWalletRecharge
+      ? this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
+      : null
+    const subtotalAmount = rechargeBreakdown ? rechargeBreakdown.subtotal : amount
+    const taxAmount = rechargeBreakdown
+      ? rechargeBreakdown.taxAmount
+      : tax.taxRate > 0 && !tax.isInclusive
+        ? Math.round(amount * tax.taxRate * 100) / 100
+        : 0
+    const totalAmount = rechargeBreakdown ? rechargeBreakdown.totalAmount : amount + taxAmount
 
     // 2. Crear registro de pago
     const payment = this.paymentRepo.create({
@@ -247,9 +257,19 @@ export class CheckoutService implements OnModuleInit {
       // perfil cae al 19% colombiano — el bug que esta tarea cierra. Va en `metadata` y no
       // en una columna nueva: es un dato del checkout, no del dominio del pago, y no
       // necesita migración.
-      metadata: req.idempotencyKey
-        ? { country: taxCountry, idempotencyFingerprint }
-        : { country: taxCountry },
+      metadata: {
+        country: taxCountry,
+        ...(isWalletRecharge
+          ? {
+              taxRate: tax.taxRate,
+              taxName: tax.taxName,
+              subtotal: subtotalAmount,
+              taxAmount,
+              ...(req.buyer ? { buyer: req.buyer } : {}),
+            }
+          : {}),
+        ...(req.idempotencyKey ? { idempotencyFingerprint } : {}),
+      },
     })
 
     const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
@@ -269,7 +289,7 @@ export class CheckoutService implements OnModuleInit {
       const executionPromise = this.executeCheckoutPayment(
         payment,
         req,
-        amount,
+        subtotalAmount,
         taxAmount,
         totalAmount,
         currency,
@@ -286,7 +306,15 @@ export class CheckoutService implements OnModuleInit {
       }
     }
 
-    return this.executeCheckoutPayment(payment, req, amount, taxAmount, totalAmount, currency, tax)
+    return this.executeCheckoutPayment(
+      payment,
+      req,
+      subtotalAmount,
+      taxAmount,
+      totalAmount,
+      currency,
+      tax,
+    )
   }
 
   private executeCheckoutPayment(
@@ -315,7 +343,7 @@ export class CheckoutService implements OnModuleInit {
     currency: string,
     tax: any,
   ): Promise<CheckoutResult> {
-    const totalAmount = subtotal + taxAmount
+    const totalAmount = Math.round((subtotal + taxAmount) * 100) / 100
 
     // Registrar intento
     await this.attemptRepo.save(
@@ -577,17 +605,46 @@ export class CheckoutService implements OnModuleInit {
       payment.metadata = metadata
     }
 
+    const totalAmount = parseFloat(String(payment.amount))
+    this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
+
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
     // los pagos anteriores a este cambio, que no lo llevan.
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
-    const tax = await this.taxService.getTaxForCountry(country)
-    const totalAmount = parseFloat(String(payment.amount))
-    const taxAmount =
-      tax.taxRate > 0 && !tax.isInclusive
-        ? Math.round(((totalAmount * tax.taxRate) / (1 + tax.taxRate)) * 100) / 100
-        : 0
-    const subtotal = totalAmount - taxAmount
+    const isWalletRecharge = payment.purpose === PaymentPurpose.WALLET_RECHARGE
+    const hasSavedRechargeTaxRate =
+      isWalletRecharge &&
+      payment.metadata &&
+      payment.metadata.taxRate !== undefined &&
+      payment.metadata.taxRate !== null
+
+    let tax: { taxName: string; taxRate: number; isInclusive: boolean }
+    if (hasSavedRechargeTaxRate) {
+      tax = this.validateRechargeTaxConfig(country, {
+        taxName: String(payment.metadata.taxName || ''),
+        taxRate: Number(payment.metadata.taxRate),
+        isInclusive: true,
+      })
+    } else if (isWalletRecharge) {
+      tax = await this.resolveRechargeTax(country)
+    } else {
+      tax = await this.taxService.getTaxForCountry(country)
+    }
+
+    let subtotal: number
+    let taxAmount: number
+    if (isWalletRecharge) {
+      const breakdown = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
+      subtotal = breakdown.subtotal
+      taxAmount = breakdown.taxAmount
+    } else {
+      taxAmount =
+        tax.taxRate > 0 && !tax.isInclusive
+          ? Math.round(((totalAmount * tax.taxRate) / (1 + tax.taxRate)) * 100) / 100
+          : 0
+      subtotal = totalAmount - taxAmount
+    }
 
     let extendedUntil: Date | undefined
 
@@ -614,9 +671,8 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    // Si es recarga de wallet → acreditar
-    if (payment.purpose === PaymentPurpose.WALLET_RECHARGE && payment.walletId) {
-      const creditResult = await this.walletService.credit(payment.walletId, subtotal, {
+    if (isWalletRecharge && payment.walletId) {
+      const creditResult = await this.walletService.credit(payment.walletId, totalAmount, {
         brandId: payment.brandId,
         category: 'recharge',
         description: `Recarga via ${payment.provider}`,
@@ -643,6 +699,7 @@ export class CheckoutService implements OnModuleInit {
         purpose: payment.purpose as any,
         planSlug: payment.purposeId,
         provider: payment.provider as any,
+        buyer: payment.metadata?.buyer,
       },
       subtotal,
       taxAmount,
@@ -1307,6 +1364,7 @@ export class CheckoutService implements OnModuleInit {
       : ''
     const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}${suffix}`
 
+    const invoiceTotal = Math.round((subtotal + taxAmount) * 100) / 100
     const items = []
 
     if (req.purpose === 'plan_purchase') {
@@ -1320,20 +1378,20 @@ export class CheckoutService implements OnModuleInit {
         subtotal,
         taxRate: tax.taxRate || 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'plan',
         referenceType: 'subscription',
         referenceId: req.planSlug,
       })
     } else if (req.purpose === 'wallet_recharge') {
       items.push({
-        description: `Recarga de wallet via ${payment.provider}`,
+        description: 'Créditos de uso de la plataforma ROAX',
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'recharge',
         referenceType: 'payment',
         referenceId: payment.id,
@@ -1346,11 +1404,39 @@ export class CheckoutService implements OnModuleInit {
         subtotal,
         taxRate: tax.taxRate || 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'service',
         referenceType: 'payment',
         referenceId: payment.id,
       })
+    }
+
+    const requestBuyer = req?.buyer || payment.metadata?.buyer
+    const buyerIdentification = {
+      brandId: payment.brandId,
+      userId: payment.userId,
+      ...(billingProfile
+        ? {
+            billingProfileId: billingProfile.id,
+            legalName: billingProfile.legalName,
+            taxId: billingProfile.taxId,
+            taxIdType: billingProfile.taxIdType,
+            email: billingProfile.email,
+            country: billingProfile.country,
+          }
+        : {}),
+      ...(requestBuyer
+        ? {
+            firstName: requestBuyer.firstName,
+            lastName: requestBuyer.lastName,
+            name:
+              [requestBuyer.firstName, requestBuyer.lastName].filter(Boolean).join(' ') ||
+              billingProfile?.legalName ||
+              undefined,
+            email: requestBuyer.email || billingProfile?.email,
+            phoneNumber: requestBuyer.phoneNumber || billingProfile?.phone,
+          }
+        : {}),
     }
 
     const result = await this.invoiceService.create({
@@ -1360,11 +1446,21 @@ export class CheckoutService implements OnModuleInit {
       invoiceNumber,
       subtotal,
       taxTotal: taxAmount,
-      total: subtotal + taxAmount,
+      total: invoiceTotal,
       currency,
       status: InvoiceStatus.PAID,
       issuedAt: new Date(),
       paidAt: new Date(),
+      ...(req.purpose === 'wallet_recharge'
+        ? {
+            metadata: {
+              serviceDescription: 'Créditos de uso de la plataforma ROAX',
+              taxRate: tax.taxRate ?? 0,
+              taxName: tax.taxName || 'N/A',
+              buyer: buyerIdentification,
+            },
+          }
+        : {}),
       items,
     })
 
@@ -1376,6 +1472,165 @@ export class CheckoutService implements OnModuleInit {
     }
 
     return result.data
+  }
+
+  private async resolveRechargeTax(
+    taxCountry: string,
+  ): Promise<{ taxName: string; taxRate: number; isInclusive: boolean }> {
+    const normalizedCountry = String(taxCountry || '')
+      .trim()
+      .toUpperCase()
+    let tax: { taxName: string; taxRate: number; isInclusive: boolean } | null = null
+    try {
+      tax = await this.taxService.getTaxForCountry(taxCountry)
+    } catch (error) {
+      this.log.error(
+        `Unable to read tax rate for country ${normalizedCountry || taxCountry}: ${error.message}`,
+      )
+      throw new RequestException(
+        {
+          code: 'TAX_RATE_UNAVAILABLE',
+          message: `Unable to read tax rate for country ${normalizedCountry || taxCountry}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    return this.validateRechargeTaxConfig(taxCountry, tax)
+  }
+
+  private validateRechargeTaxConfig(
+    taxCountry: string,
+    tax: { taxName: string; taxRate: number; isInclusive: boolean } | null | undefined,
+  ): { taxName: string; taxRate: number; isInclusive: boolean } {
+    const normalizedCountry = String(taxCountry || '')
+      .trim()
+      .toUpperCase()
+    const parsedRate =
+      tax && tax.taxRate !== null && tax.taxRate !== undefined ? Number(tax.taxRate) : NaN
+    const normalizedTaxName = String(tax?.taxName || '').trim()
+    const requiresVat = isVatCountry(normalizedCountry) || normalizedTaxName.toUpperCase() === 'IVA'
+    const isUnreadable =
+      !tax ||
+      !Number.isFinite(parsedRate) ||
+      parsedRate < 0 ||
+      (requiresVat && (normalizedTaxName === 'N/A' || parsedRate <= 0))
+
+    if (isUnreadable) {
+      this.log.error(
+        `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
+      )
+      throw new RequestException(
+        {
+          code: 'TAX_RATE_UNAVAILABLE',
+          message: `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    return {
+      taxName: normalizedTaxName || 'N/A',
+      taxRate: parsedRate,
+      isInclusive: true,
+    }
+  }
+
+  private breakDownTaxInclusiveAmount(
+    totalAmount: number,
+    taxRate: number,
+  ): { subtotal: number; taxAmount: number; totalAmount: number } {
+    const normalizedTotal = Math.round(Number(totalAmount) * 100) / 100
+    const normalizedRate = Number(taxRate)
+    if (!Number.isFinite(normalizedRate) || normalizedRate <= 0) {
+      return {
+        subtotal: normalizedTotal,
+        taxAmount: 0,
+        totalAmount: normalizedTotal,
+      }
+    }
+    const subtotal = Math.round((normalizedTotal / (1 + normalizedRate)) * 100) / 100
+    const taxAmount = Math.round((normalizedTotal - subtotal) * 100) / 100
+    return {
+      subtotal,
+      taxAmount,
+      totalAmount: normalizedTotal,
+    }
+  }
+
+  private extractConfirmedGrossAmount(providerData: any): number | null {
+    if (!providerData || typeof providerData !== 'object') {
+      return null
+    }
+    const directCandidates = [
+      providerData.grossAmount,
+      providerData.confirmedAmount,
+      providerData.totalAmount,
+      providerData.amount,
+      providerData.transaction_amount,
+      providerData.data?.grossAmount,
+      providerData.data?.confirmedAmount,
+      providerData.data?.totalAmount,
+      providerData.data?.amount,
+      providerData.data?.transaction_amount,
+      providerData.providerStatus?.grossAmount,
+      providerData.providerStatus?.confirmedAmount,
+      providerData.providerStatus?.totalAmount,
+      providerData.providerStatus?.amount,
+    ]
+    for (const candidate of directCandidates) {
+      if (candidate !== undefined && candidate !== null && candidate !== '') {
+        const numeric = Number(candidate)
+        if (Number.isFinite(numeric)) {
+          return numeric
+        }
+      }
+    }
+    const centCandidates = [
+      providerData.amountCents,
+      providerData.data?.amountCents,
+      providerData.providerStatus?.amountCents,
+    ]
+    for (const candidate of centCandidates) {
+      if (candidate !== undefined && candidate !== null && candidate !== '') {
+        const numeric = Number(candidate)
+        if (Number.isFinite(numeric)) {
+          return Math.round(numeric) / 100
+        }
+      }
+    }
+    return null
+  }
+
+  private assertProviderConfirmedAmount(
+    payment: Payment,
+    expectedAmount: number,
+    providerData?: any,
+  ): void {
+    const confirmedAmount = this.extractConfirmedGrossAmount(providerData)
+    if (confirmedAmount === null) {
+      return
+    }
+    const expectedCents = Math.round(Number(expectedAmount) * 100)
+    const confirmedCents = Math.round(Number(confirmedAmount) * 100)
+    if (expectedCents !== confirmedCents) {
+      const message =
+        `Provider confirmed gross amount (${confirmedAmount}) does not match ` +
+        `payment.amount (${expectedAmount}) for payment ${payment.id}`
+      this.log.error(message)
+      winstonLogger.log('error', message, {
+        paymentId: payment.id,
+        expectedAmount,
+        confirmedAmount,
+      })
+      throw new RequestException(
+        {
+          code: 'PROVIDER_AMOUNT_MISMATCH',
+          message,
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
   }
 
   /**

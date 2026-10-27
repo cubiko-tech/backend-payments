@@ -525,6 +525,13 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     it.each(otrosPropositos)(
       '%s sin planSlug sigue cobrando el amount/currency del llamador',
       async (_label, purpose) => {
+        if (purpose === 'wallet_recharge') {
+          taxService.getTaxForCountry.mockResolvedValue({
+            taxName: 'IVA',
+            taxRate: 0.19,
+            isInclusive: false,
+          })
+        }
         await service.processCheckout(
           altaConWallet({ purpose, planSlug: undefined, amount: 50000, currency: 'COP' }),
         )
@@ -1026,6 +1033,11 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       // la marca (`MX`) DISTINTOS, el caso distingue las dos reglas. Con los dos en `CO`
       // pasaría igual con cualquiera de las dos y no probaría nada.
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'MX' })
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
 
       await service.processCheckout(
         altaConWallet({
@@ -1132,8 +1144,18 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
   })
 
-  describe('wallet recharge completion (credits subtotal, not VAT)', () => {
-    it('credits the 100,000 COP subtotal to the wallet and invoices 19,000 COP VAT for a Colombia recharge', async () => {
+  describe('wallet recharge completion (tax-inclusive VAT breakdown, saved taxRate, and provider amount check)', () => {
+    it('charges 100,000 COP via Confio, breaks down VAT inside 100,000 using the saved taxRate, identifies the digital service and buyer on the invoice, and credits 100,000 COP once', async () => {
+      const billingProfileRepo = (service as any).billingProfileRepo
+      billingProfileRepo.findOne.mockResolvedValue({
+        id: 'bp-co-1',
+        brandId: BRAND_ID,
+        legalName: 'Comercializadora Andina SAS',
+        taxId: '900123456-7',
+        taxIdType: 'NIT',
+        email: 'facturacion@andina.co',
+        country: 'CO',
+      })
       taxService.getTaxForCountry.mockResolvedValue({
         taxName: 'IVA',
         taxRate: 0.19,
@@ -1144,22 +1166,61 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         brandId: BRAND_ID,
         userId: 'u-1',
         purpose: 'wallet_recharge',
-        provider: 'stripe',
+        provider: 'confio',
         walletId: 'w-1',
         amount: 100000,
         currency: 'COP',
+        buyer: {
+          firstName: 'Camila',
+          lastName: 'Rojas',
+          email: 'camila@andina.co',
+          phoneNumber: '+573001112233',
+        },
       })
 
+      expect(createCheckout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 100000,
+          currency: 'COP',
+        }),
+      )
+
       const createdPayment = paymentRepo.create.mock.results[0].value
-      expect(createdPayment.amount).toBe(119000)
+      expect(createdPayment.amount).toBe(100000)
+      expect(createdPayment.metadata).toEqual(
+        expect.objectContaining({
+          country: 'CO',
+          taxRate: 0.19,
+          taxName: 'IVA',
+          subtotal: 84033.61,
+          taxAmount: 15966.39,
+          buyer: {
+            firstName: 'Camila',
+            lastName: 'Rojas',
+            email: 'camila@andina.co',
+            phoneNumber: '+573001112233',
+          },
+        }),
+      )
+
+      taxService.getTaxForCountry.mockClear()
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.05,
+        isInclusive: false,
+      })
 
       paymentRepo.findOne.mockResolvedValue({
         ...createdPayment,
         status: 'pending',
       })
 
-      await service.completeExternalPayment(createdPayment.id)
+      await service.completeExternalPayment(createdPayment.id, {
+        data: { status: 'Pagado', amount: 100000, correlationId: createdPayment.id },
+      })
 
+      expect(taxService.getTaxForCountry).not.toHaveBeenCalled()
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
       expect(walletService.credit).toHaveBeenCalledWith(
         'w-1',
         100000,
@@ -1171,24 +1232,198 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           idempotencyKey: `payment:${createdPayment.id}:credit`,
         }),
       )
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
       expect(invoiceService.create).toHaveBeenCalledWith(
         expect.objectContaining({
           brandId: BRAND_ID,
           paymentId: createdPayment.id,
-          subtotal: 100000,
-          taxTotal: 19000,
-          total: 119000,
+          billingProfileId: 'bp-co-1',
+          subtotal: 84033.61,
+          taxTotal: 15966.39,
+          total: 100000,
           currency: 'COP',
+          metadata: expect.objectContaining({
+            serviceDescription: 'Créditos de uso de la plataforma ROAX',
+            taxRate: 0.19,
+            taxName: 'IVA',
+            buyer: expect.objectContaining({
+              brandId: BRAND_ID,
+              userId: 'u-1',
+              billingProfileId: 'bp-co-1',
+              legalName: 'Comercializadora Andina SAS',
+              taxId: '900123456-7',
+              email: 'camila@andina.co',
+              phoneNumber: '+573001112233',
+            }),
+          }),
           items: [
             expect.objectContaining({
+              description: 'Créditos de uso de la plataforma ROAX',
               productType: 'recharge',
-              unitPrice: 100000,
-              subtotal: 100000,
+              unitPrice: 84033.61,
+              subtotal: 84033.61,
               taxRate: 0.19,
-              taxAmount: 19000,
-              total: 119000,
+              taxAmount: 15966.39,
+              total: 100000,
             }),
           ],
+        }),
+      )
+    })
+
+    it('preserves subtotal + taxAmount === totalAmount without cent rounding drift on fractional cent amounts', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+
+      const centAmounts = [100.05, 1234.56, 100000]
+
+      for (const totalAmount of centAmounts) {
+        paymentRepo.create.mockClear()
+        invoiceService.create.mockClear()
+        walletService.credit.mockClear()
+
+        await service.processCheckout({
+          brandId: BRAND_ID,
+          userId: 'u-1',
+          purpose: 'wallet_recharge',
+          provider: 'confio',
+          walletId: 'w-1',
+          amount: totalAmount,
+          currency: 'COP',
+        })
+
+        const createdPayment = paymentRepo.create.mock.results[0].value
+        expect(createdPayment.amount).toBe(totalAmount)
+
+        const expectedSubtotal = Math.round((totalAmount / 1.19) * 100) / 100
+        const expectedTaxAmount = Math.round((totalAmount - expectedSubtotal) * 100) / 100
+        expect(createdPayment.metadata.subtotal).toBe(expectedSubtotal)
+        expect(createdPayment.metadata.taxAmount).toBe(expectedTaxAmount)
+        expect(createdPayment.metadata.subtotal + createdPayment.metadata.taxAmount).toBe(
+          totalAmount,
+        )
+
+        paymentRepo.findOne.mockResolvedValue({
+          ...createdPayment,
+          status: 'pending',
+        })
+
+        await service.completeExternalPayment(createdPayment.id, {
+          amount: totalAmount,
+        })
+
+        const invoicePayload = invoiceService.create.mock.calls[0][0]
+        expect(invoicePayload.subtotal).toBe(expectedSubtotal)
+        expect(invoicePayload.taxTotal).toBe(expectedTaxAmount)
+        expect(invoicePayload.subtotal + invoicePayload.taxTotal).toBe(totalAmount)
+        expect(invoicePayload.total).toBe(totalAmount)
+        expect(invoicePayload.items[0].subtotal + invoicePayload.items[0].taxAmount).toBe(
+          totalAmount,
+        )
+      }
+    })
+
+    it.each(['CO', 'MX'])(
+      'fails with TAX_RATE_UNAVAILABLE and neither charges nor invoices when tax rate cannot be read in VAT country %s',
+      async (vatCountry) => {
+        const billingProfileRepo = (service as any).billingProfileRepo
+        billingProfileRepo.findOne.mockResolvedValue({
+          id: `bp-${vatCountry.toLowerCase()}`,
+          brandId: BRAND_ID,
+          country: vatCountry,
+        })
+        taxService.getTaxForCountry.mockResolvedValue({
+          taxName: 'N/A',
+          taxRate: 0,
+          isInclusive: false,
+        })
+
+        await expect(
+          service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            walletId: 'w-1',
+            amount: 100000,
+            currency: 'COP',
+          }),
+        ).rejects.toMatchObject({
+          code: 'TAX_RATE_UNAVAILABLE',
+        })
+
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(createCheckout).not.toHaveBeenCalled()
+        expect(walletService.credit).not.toHaveBeenCalled()
+        expect(invoiceService.create).not.toHaveBeenCalled()
+      },
+    )
+
+    it('rejects completeExternalPayment without crediting the wallet or invoicing and logs payment.id when provider confirmed gross amount mismatches payment.amount', async () => {
+      const errorLogSpy = jest.spyOn((service as any).log, 'error')
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-mismatch-99',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'confio',
+        amount: 100000,
+        currency: 'COP',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      })
+
+      await expect(
+        service.completeExternalPayment('pay-mismatch-99', {
+          data: { status: 'Pagado', amount: 84033.61 },
+        }),
+      ).rejects.toMatchObject({
+        code: 'PROVIDER_AMOUNT_MISMATCH',
+        message: expect.stringContaining('pay-mismatch-99'),
+      })
+
+      expect(errorLogSpy).toHaveBeenCalledWith(expect.stringContaining('pay-mismatch-99'))
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+    })
+
+    it('credits the full payment.amount without deducting provider commission when provider payload includes fee and netAmount', async () => {
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-commission-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'confio',
+        amount: 100000,
+        currency: 'COP',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      })
+
+      await service.completeExternalPayment('pay-commission-1', {
+        data: {
+          status: 'Pagado',
+          amount: 100000,
+          commission: 3500,
+          fee: 3500,
+          netAmount: 96500,
+        },
+      })
+
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-1',
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-commission-1',
         }),
       )
     })
@@ -1634,7 +1869,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         walletId: 'w-1',
         provider: 'confio',
         providerPaymentId: 'confio-ext-1',
-        amount: 119000,
+        amount: 100000,
         currency: 'COP',
         status: PaymentStatus.PENDING,
         purpose: PaymentPurpose.WALLET_RECHARGE,

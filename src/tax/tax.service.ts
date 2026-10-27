@@ -3,6 +3,34 @@ import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 import { TaxConfig } from './entities/taxConfig.entity'
 
+export const VAT_COUNTRIES: ReadonlySet<string> = new Set([
+  'AR',
+  'BO',
+  'CL',
+  'CO',
+  'CR',
+  'DO',
+  'EC',
+  'ES',
+  'GT',
+  'HN',
+  'MX',
+  'NI',
+  'PA',
+  'PE',
+  'PY',
+  'SV',
+  'UY',
+  'VE',
+])
+
+export function isVatCountry(country: string): boolean {
+  const normalized = String(country || '')
+    .trim()
+    .toUpperCase()
+  return VAT_COUNTRIES.has(normalized)
+}
+
 @Injectable()
 export class TaxService {
   private readonly logger = new Logger(TaxService.name)
@@ -37,9 +65,16 @@ export class TaxService {
         return { taxName: 'N/A', taxRate: 0, isInclusive: false }
       }
 
+      const parsedRate =
+        config.taxRate !== null && config.taxRate !== undefined ? Number(config.taxRate) : NaN
+      if (!Number.isFinite(parsedRate) || parsedRate < 0) {
+        this.logger.error(`Tasa de impuestos inválida para ${country}: ${String(config.taxRate)}`)
+        return { taxName: 'N/A', taxRate: 0, isInclusive: false }
+      }
+
       return {
         taxName: config.taxName,
-        taxRate: Number(config.taxRate),
+        taxRate: parsedRate,
         isInclusive: config.isInclusive,
       }
     } catch (error) {
