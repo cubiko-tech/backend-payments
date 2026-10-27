@@ -1363,9 +1363,30 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       },
     )
 
-    it('marks payment as failed with its id and error on Confio amountCents mismatch and keeps credit at 0 across the subsequent cron pass and return page reconciliation', async () => {
+    const wirePersistedPaymentRow = (initialRow: Record<string, any>) => {
+      let dbRow = JSON.parse(JSON.stringify(initialRow))
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id && where.id !== dbRow.id) return null
+        return JSON.parse(JSON.stringify(dbRow))
+      })
+      paymentRepo.update.mockImplementation(async (where: any, partial: any) => {
+        if (where?.id === dbRow.id && (!where.status || where.status === dbRow.status)) {
+          dbRow = {
+            ...dbRow,
+            ...JSON.parse(JSON.stringify(partial)),
+          }
+          return { affected: 1 }
+        }
+        return { affected: 0 }
+      })
+      return {
+        getDbRow: () => JSON.parse(JSON.stringify(dbRow)),
+      }
+    }
+
+    it('marks payment as failed with its id and error on Confio amountCents mismatch and keeps credit at 0 across subsequent confirmation, cron pass, and return page reconciliation', async () => {
       const errorLogSpy = jest.spyOn((service as any).log, 'error')
-      const paymentRow: any = {
+      const { getDbRow } = wirePersistedPaymentRow({
         id: 'pay-mismatch-99',
         brandId: BRAND_ID,
         userId: 'u-1',
@@ -1378,8 +1399,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         purpose: 'wallet_recharge',
         failureReason: null,
         metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
-      }
-      paymentRepo.findOne.mockResolvedValue(paymentRow)
+      })
       providerFactory.getProvider.mockReturnValue({
         createCheckout,
         getPaymentStatus: jest.fn().mockResolvedValue({
@@ -1397,17 +1417,39 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         message: expect.stringContaining('pay-mismatch-99'),
       })
 
+      expect(paymentRepo.update).toHaveBeenCalledWith(
+        { id: 'pay-mismatch-99', status: PaymentStatus.PROCESSING },
+        expect.objectContaining({
+          status: PaymentStatus.FAILED,
+          failureReason: expect.stringContaining('pay-mismatch-99'),
+          metadata: expect.objectContaining({
+            amountMismatch: expect.objectContaining({
+              code: 'PROVIDER_AMOUNT_MISMATCH',
+              paymentId: 'pay-mismatch-99',
+              provider: 'confio',
+              unit: 'cents',
+              expectedAmount: 10000000,
+              confirmedAmount: 8403361,
+            }),
+          }),
+        }),
+      )
+
       await service.completeExternalPayment('pay-mismatch-99', { source: 'cron-reconcile' })
+      await service.completeExternalPayment('pay-mismatch-99', {
+        data: { status: 'Pagado', amountCents: 10000000 },
+      })
       const returnPageResult = await service.reconcilePayment('pay-mismatch-99')
 
+      const persistedRow = getDbRow()
       expect(walletService.credit).toHaveBeenCalledTimes(0)
       expect(invoiceService.create).not.toHaveBeenCalled()
       expect(returnPageResult.status).toBe('failed')
       expect(errorLogSpy).toHaveBeenCalledWith(expect.stringContaining('pay-mismatch-99'))
-      expect(paymentRow.status).toBe(PaymentStatus.FAILED)
-      expect(paymentRow.status).not.toBe(PaymentStatus.PROCESSING)
-      expect(paymentRow.failureReason).toContain('pay-mismatch-99')
-      expect(paymentRow.metadata.amountMismatch).toEqual(
+      expect(persistedRow.status).toBe(PaymentStatus.FAILED)
+      expect(persistedRow.status).not.toBe(PaymentStatus.PROCESSING)
+      expect(persistedRow.failureReason).toContain('pay-mismatch-99')
+      expect(persistedRow.metadata.amountMismatch).toEqual(
         expect.objectContaining({
           code: 'PROVIDER_AMOUNT_MISMATCH',
           paymentId: 'pay-mismatch-99',
@@ -1419,6 +1461,50 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       )
     })
 
+    it('credits and invoices a failed payment without amountMismatch mark when the provider confirms with the matching amount', async () => {
+      const { getDbRow } = wirePersistedPaymentRow({
+        id: 'pay-expired-100k',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'confio',
+        providerPaymentId: 'confio-order-expired',
+        amount: 100000,
+        currency: 'COP',
+        status: PaymentStatus.FAILED,
+        purpose: 'wallet_recharge',
+        failureReason: 'Checkout expirado por inactividad',
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      })
+
+      await service.completeExternalPayment('pay-expired-100k', {
+        data: { status: 'Pagado', amountCents: 10000000 },
+      })
+
+      const persistedRow = getDbRow()
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(walletService.credit).toHaveBeenCalledWith(
+        'w-1',
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-expired-100k',
+        }),
+      )
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paymentId: 'pay-expired-100k',
+          subtotal: 84033.61,
+          taxTotal: 15966.39,
+          total: 100000,
+        }),
+      )
+      expect(persistedRow.status).toBe(PaymentStatus.COMPLETED)
+    })
+
     it('completes a Stripe payment when payment_intent.succeeded sends matching amount in cents and rejects without crediting when cents mismatch', async () => {
       taxService.getTaxForCountry.mockResolvedValue({
         taxName: 'Sales Tax',
@@ -1426,7 +1512,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         isInclusive: false,
       })
 
-      const matchingStripePayment: any = {
+      wirePersistedPaymentRow({
         id: 'pay-stripe-cents-ok',
         brandId: BRAND_ID,
         userId: 'u-1',
@@ -1437,8 +1523,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         status: 'pending',
         purpose: 'wallet_recharge',
         metadata: { country: 'US' },
-      }
-      paymentRepo.findOne.mockResolvedValueOnce(matchingStripePayment)
+      })
 
       await service.completeExternalPayment('pay-stripe-cents-ok', {
         id: 'pi_ok',
@@ -1462,7 +1547,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       walletService.credit.mockClear()
       invoiceService.create.mockClear()
 
-      const mismatchedStripePayment: any = {
+      const { getDbRow: getMismatchedStripeRow } = wirePersistedPaymentRow({
         id: 'pay-stripe-cents-mismatch',
         brandId: BRAND_ID,
         userId: 'u-1',
@@ -1473,8 +1558,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         status: 'pending',
         purpose: 'wallet_recharge',
         metadata: { country: 'US' },
-      }
-      paymentRepo.findOne.mockResolvedValue(mismatchedStripePayment)
+      })
 
       await expect(
         service.completeExternalPayment('pay-stripe-cents-mismatch', {
@@ -1488,7 +1572,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         message: expect.stringContaining('pay-stripe-cents-mismatch'),
       })
 
-      expect(mismatchedStripePayment.status).toBe(PaymentStatus.FAILED)
+      expect(getMismatchedStripeRow().status).toBe(PaymentStatus.FAILED)
       expect(walletService.credit).toHaveBeenCalledTimes(0)
       expect(invoiceService.create).not.toHaveBeenCalled()
     })

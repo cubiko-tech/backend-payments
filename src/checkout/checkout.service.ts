@@ -579,8 +579,6 @@ export class CheckoutService implements OnModuleInit {
       if (
         !payment ||
         payment.status === PaymentStatus.COMPLETED ||
-        payment.status === PaymentStatus.FAILED ||
-        payment.status === PaymentStatus.DISPUTED ||
         this.hasAmountMismatchMark(payment)
       ) {
         return
@@ -608,19 +606,6 @@ export class CheckoutService implements OnModuleInit {
     providerData?: any,
     metadata?: any,
   ): Promise<void> {
-    if (this.hasAmountMismatchMark(payment)) {
-      throw new RequestException(
-        {
-          code: 'PROVIDER_AMOUNT_MISMATCH',
-          paymentId: payment.id,
-          message:
-            payment.metadata?.amountMismatch?.message ||
-            `Payment ${payment.id} is marked with PROVIDER_AMOUNT_MISMATCH`,
-        },
-        HttpStatus.CONFLICT,
-      )
-    }
-
     payment.status = PaymentStatus.PROCESSING
     if (providerData) {
       payment.metadata = metadata
@@ -793,11 +778,7 @@ export class CheckoutService implements OnModuleInit {
     if (payment.status === PaymentStatus.COMPLETED) {
       return { status: 'completed', planSlug: payment.purposeId || undefined }
     }
-    if (
-      payment.status === PaymentStatus.FAILED ||
-      payment.status === PaymentStatus.DISPUTED ||
-      this.hasAmountMismatchMark(payment)
-    ) {
+    if (payment.status === PaymentStatus.FAILED || this.hasAmountMismatchMark(payment)) {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
@@ -1672,9 +1653,6 @@ export class CheckoutService implements OnModuleInit {
         metadata: updatedMetadata,
       },
     )
-    payment.status = PaymentStatus.FAILED
-    payment.failureReason = mismatch.message
-    payment.metadata = updatedMetadata
   }
 
   private toConfirmedAmountUnit(amountInMajorUnits: number, unit: 'cents' | 'major'): number {
