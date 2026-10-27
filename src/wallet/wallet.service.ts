@@ -173,10 +173,12 @@ export class WalletService {
    * Atomically debits `amount` from `walletId` under a `pessimistic_write` row lock
    * and records the corresponding `DEBIT` transaction.
    *
-   * When `idempotencyKey` (or `data.idempotencyKey`) matches an existing `DEBIT`
-   * movement for `walletId`, returns the existing wallet and transaction without
-   * charging again. Rejects `TKN` wallets or charges, brand ownership mismatches
-   * when `data.brandId` is supplied, frozen or closed wallets, and currency
+   * When `idempotencyKey` (or `data.idempotencyKey`) is provided, looks up an
+   * existing movement by `idempotencyKey` alone (`findExistingMovement`) and, if
+   * found, returns that movement as recorded along with the wallet of that
+   * transaction (`existingTransaction.walletId || walletId`) without charging
+   * again. Rejects `TKN` wallets or charges, brand ownership mismatches when
+   * `data.brandId` is supplied, frozen or closed wallets, and currency
    * mismatches when `expectedCurrency` is provided (used by checkout and wallet
    * subscription renewals).
    *
@@ -185,7 +187,8 @@ export class WalletService {
    * @param data Transaction metadata or referenceId string.
    * @param expectedCurrency Expected ISO currency code for the charge; when provided
    * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
-   * @param idempotencyKey Optional key deduplicating retries on the same wallet.
+   * @param idempotencyKey Optional key looked up by key alone to return a repeated
+   * movement as recorded.
    */
   async debit(
     walletId: string,
