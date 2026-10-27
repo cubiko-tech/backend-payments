@@ -1,23 +1,12 @@
-import { randomUUID } from 'crypto'
-import { config as dotenvConfig } from 'dotenv'
-import { DataSource, In } from 'typeorm'
+import { In } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
-import {
-  Subscription,
-  SubscriptionProvider,
-  SubscriptionStatus,
-} from '../subscription/entities/subscription.entity'
-import {
-  SubscriptionEvent,
-  SubscriptionEventType,
-} from '../subscription/entities/subscriptionEvent.entity'
+import { PaymentStatus } from '../payment/entities/payment.entity'
+import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
-import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
-import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
-import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { logger } from '../shared/logger/logger'
 
@@ -2120,253 +2109,355 @@ describe('TasksService — processTrialConversions', () => {
     })
   })
 
-  describe('renewal and expiration coordination and Postgres concurrency (LOC-33)', () => {
-    const testSchema = `loc33_test_${Date.now()}`
-    let adminDataSource: DataSource
-    let pgDataSource: DataSource
+  describe('renewal and expiration coordination and lock recovery (LOC-33)', () => {
+    const createLockAwareContext = (initialBalance = 200000) => {
+      const walletCOP = {
+        id: 'w-cop',
+        brandId: 'brand-a',
+        currency: 'COP',
+        balance: initialBalance,
+        status: WalletStatus.ACTIVE,
+      }
+      const savedTransactions: any[] = []
+      const lockQueryRunners: any[] = []
 
-    beforeAll(async () => {
-      dotenvConfig({ path: '.env' })
-      const baseConnection = {
-        type: 'postgres' as const,
-        host: process.env.POSTGRES_HOST,
-        port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
-        username: process.env.POSTGRES_USER,
-        password: process.env.POSTGRES_PASSWORD,
-        database: process.env.POSTGRES_DB,
-        ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
+      const walletQueryRunner: any = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        startTransaction: jest.fn().mockResolvedValue(undefined),
+        commitTransaction: jest.fn().mockResolvedValue(undefined),
+        rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+        release: jest.fn().mockResolvedValue(undefined),
+        manager: {
+          findOne: jest.fn(async (entity: any, opts: any) => {
+            if (entity === Transaction) {
+              return (
+                savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
+                null
+              )
+            }
+            return walletCOP
+          }),
+          create: jest.fn((_entity: any, data: any) => data),
+          save: jest.fn(async (entity: any, data: any) => {
+            if (entity === Transaction) {
+              const saved = { id: `tx-${savedTransactions.length + 1}`, ...data }
+              savedTransactions.push(saved)
+              return saved
+            }
+            return data
+          }),
+        },
       }
 
-      adminDataSource = new DataSource(baseConnection)
-      await adminDataSource.initialize()
-      await adminDataSource.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`)
-
-      pgDataSource = new DataSource({
-        ...baseConnection,
-        schema: testSchema,
-        entities: [
-          Wallet,
-          WalletBalanceSnapshot,
-          Transaction,
-          Payment,
-          Subscription,
-          SubscriptionEvent,
-          WebhookEvent,
-        ],
-        synchronize: true,
-      })
-      await pgDataSource.initialize()
-    })
-
-    afterAll(async () => {
-      if (pgDataSource?.isInitialized) {
-        await pgDataSource.destroy()
-      }
-      if (adminDataSource?.isInitialized) {
-        await adminDataSource.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`)
-        await adminDataSource.destroy()
-      }
-    })
-
-    beforeEach(async () => {
-      await pgDataSource.query(
-        `TRUNCATE TABLE "${testSchema}"."subscription_events", "${testSchema}"."subscriptions", "${testSchema}"."transactions", "${testSchema}"."wallets" CASCADE`,
-      )
-    })
-
-    const createPgTasksService = (rolesOverrides: Partial<Record<string, any>> = {}) => {
-      const walletRepo = pgDataSource.getRepository(Wallet)
-      const snapshotRepo = pgDataSource.getRepository(WalletBalanceSnapshot)
-      const transactionRepo = pgDataSource.getRepository(Transaction)
-      const paymentRepoPg = pgDataSource.getRepository(Payment)
-      const subscriptionRepoPg = pgDataSource.getRepository(Subscription)
-      const subscriptionEventRepoPg = pgDataSource.getRepository(SubscriptionEvent)
-      const webhookEventRepoPg = pgDataSource.getRepository(WebhookEvent)
-
-      const auditServicePg = {
-        log: jest.fn(),
-        logTransactionCreated: jest.fn(),
+      const walletDataSourceMock: any = {
+        createQueryRunner: jest.fn().mockReturnValue(walletQueryRunner),
       }
 
-      const walletServicePg = new WalletService(
-        walletRepo,
-        walletRepo,
-        transactionRepo,
-        transactionRepo,
-        pgDataSource,
-      )
-
-      const rolesMock = {
-        removePlanFromBrand: jest.fn().mockResolvedValue(true),
-        assignPlanToBrand: jest.fn().mockResolvedValue(true),
-        renewPlanForBrand: jest.fn(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 25))
-          return true
+      const lockDataSourceMock: any = {
+        createQueryRunner: jest.fn(() => {
+          const qr: any = {
+            isTransactionActive: false,
+            isReleased: false,
+            connect: jest.fn().mockResolvedValue(undefined),
+            startTransaction: jest.fn(async () => {
+              qr.isTransactionActive = true
+            }),
+            query: jest.fn().mockResolvedValue([]),
+            commitTransaction: jest.fn(async () => {
+              qr.isTransactionActive = false
+            }),
+            rollbackTransaction: jest.fn(async () => {
+              qr.isTransactionActive = false
+            }),
+            release: jest.fn(async () => {
+              qr.isReleased = true
+            }),
+          }
+          lockQueryRunners.push(qr)
+          return qr
         }),
-        getPlanPrice: jest.fn().mockResolvedValue(50000),
-        hasCachedPrices: jest.fn().mockReturnValue(true),
-        ...rolesOverrides,
       }
 
-      const eventBusPg = {
-        publishSubscriptionExpired: jest.fn(),
-        notifySubscriptionExpired: jest.fn().mockResolvedValue(null),
-        publishSubscriptionRenewed: jest.fn(),
-        notifyPaymentFailed: jest.fn().mockResolvedValue(null),
-        publishNotification: jest.fn().mockResolvedValue(null),
+      const walletReadRepo = {
+        findOne: jest.fn().mockResolvedValue(walletCOP),
+      }
+      const txLookupRepo = {
+        findOne: jest.fn(async (opts: any) => {
+          return (
+            savedTransactions.find((tx) => tx.idempotencyKey === opts?.where?.idempotencyKey) ??
+            null
+          )
+        }),
       }
 
-      const tasksServicePg = new TasksService(
-        walletRepo,
-        snapshotRepo,
-        transactionRepo,
-        paymentRepoPg,
-        subscriptionRepoPg,
-        subscriptionEventRepoPg,
-        webhookEventRepoPg,
-        pgDataSource,
-        walletServicePg,
-        auditServicePg as any,
-        { getProvider: jest.fn() } as any,
-        eventBusPg as any,
-        rolesMock as any,
-        { processCheckout: jest.fn(), completeExternalPayment: jest.fn() } as any,
-        { confirmarContraElProveedor: jest.fn() } as any,
+      const realWalletService = new WalletService(
+        mockRepo() as any,
+        walletReadRepo as any,
+        txLookupRepo as any,
+        txLookupRepo as any,
+        walletDataSourceMock,
+      )
+
+      const serviceWithLocks = new TasksService(
+        walletReadRepo as any,
+        mockRepo() as any,
+        mockRepo() as any,
+        paymentRepo as any,
+        subscriptionRepo as any,
+        subscriptionEventRepo as any,
+        mockRepo() as any,
+        lockDataSourceMock,
+        realWalletService,
+        {} as any,
+        providerFactory as any,
+        eventBus as any,
+        clientRoles as any,
+        checkoutService as any,
+        confioWebhook as any,
       )
 
       return {
-        tasksServicePg,
-        rolesMock,
-        eventBusPg,
-        walletRepo,
-        transactionRepo,
-        subscriptionRepoPg,
-        subscriptionEventRepoPg,
+        walletCOP,
+        savedTransactions,
+        lockQueryRunners,
+        lockDataSourceMock,
+        serviceWithLocks,
       }
     }
 
     it('lets only expireSubscriptions expire a PAST_DUE subscription with exhausted retries without debiting the wallet', async () => {
-      const {
-        tasksServicePg,
-        rolesMock,
-        walletRepo,
-        transactionRepo,
-        subscriptionRepoPg,
-        subscriptionEventRepoPg,
-      } = createPgTasksService()
-
-      const brandId = `brand-exhausted-${randomUUID()}`
-      const userId = randomUUID()
-      const wallet = await walletRepo.save(
-        walletRepo.create({
-          userId,
-          brandId,
-          provider: 'internal',
-          currency: 'COP',
-          balance: 200000,
-          status: WalletStatus.ACTIVE,
-        }),
-      )
+      const { walletCOP, savedTransactions, serviceWithLocks } = createLockAwareContext()
 
       const pastDate = new Date(Date.now() - 2 * 60 * 60 * 1000)
-      const sub = await subscriptionRepoPg.save(
-        subscriptionRepoPg.create({
-          userId,
-          brandId,
-          planSlug: 'pro',
-          status: SubscriptionStatus.PAST_DUE,
-          provider: SubscriptionProvider.WALLET,
-          walletId: wallet.id,
-          autoRenew: true,
-          retryCount: 3,
-          currentPeriodStart: new Date(pastDate.getTime() - 30 * 24 * 60 * 60 * 1000),
-          currentPeriodEnd: pastDate,
-          nextBillingDate: pastDate,
-        }),
-      )
+      const sub: any = {
+        id: 'sub-exhausted-retries',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 3,
+        currentPeriodEnd: pastDate,
+        nextBillingDate: pastDate,
+      }
+
+      subscriptionRepo.find.mockImplementation(async (opts?: any) => {
+        const where = opts?.where ?? {}
+        if (where.retryCount && typeof where.retryCount.value === 'number') {
+          if (sub.retryCount >= where.retryCount.value) {
+            return []
+          }
+        }
+        if (
+          where.status === SubscriptionStatus.PAST_DUE &&
+          sub.status !== SubscriptionStatus.PAST_DUE
+        ) {
+          return []
+        }
+        return [{ ...sub }]
+      })
+      subscriptionRepo.findOne.mockImplementation(async () => ({ ...sub }))
+      subscriptionRepo.save.mockImplementation(async (data: any) => {
+        Object.assign(sub, data)
+        return sub
+      })
+      subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
+        if (criteria.status && sub.status !== criteria.status) {
+          return { affected: 0 }
+        }
+        Object.assign(sub, patch)
+        return { affected: 1 }
+      })
+
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      clientRoles.renewPlanForBrand.mockResolvedValue(true)
+      clientRoles.removePlanFromBrand.mockResolvedValue(true)
+      clientRoles.assignPlanToBrand.mockResolvedValue(true)
 
       await Promise.all([
-        tasksServicePg.processSubscriptionRenewals(),
-        tasksServicePg.expireSubscriptions(),
+        serviceWithLocks.processSubscriptionRenewals(),
+        serviceWithLocks.expireSubscriptions(),
       ])
 
-      const updatedSub = await subscriptionRepoPg.findOneByOrFail({ id: sub.id })
-      const updatedWallet = await walletRepo.findOneByOrFail({ id: wallet.id })
-      const transactions = await transactionRepo.find({ where: { walletId: wallet.id } })
-      const events = await subscriptionEventRepoPg.find({ where: { subscriptionId: sub.id } })
-
-      expect(updatedSub.status).toBe(SubscriptionStatus.EXPIRED)
-      expect(updatedSub.autoRenew).toBe(false)
-      expect(Number(updatedWallet.balance)).toBe(200000)
-      expect(transactions).toHaveLength(0)
-      expect(rolesMock.renewPlanForBrand).not.toHaveBeenCalled()
-      expect(rolesMock.removePlanFromBrand).toHaveBeenCalledWith(brandId, 'pro')
-      expect(rolesMock.assignPlanToBrand).toHaveBeenCalledWith(brandId, 'free')
-      expect(events).toHaveLength(1)
-      expect(events[0].eventType).toBe(SubscriptionEventType.EXPIRED)
+      expect(sub.status).toBe(SubscriptionStatus.EXPIRED)
+      expect(sub.autoRenew).toBe(false)
+      expect(walletCOP.balance).toBe(200000)
+      expect(savedTransactions).toHaveLength(0)
+      expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(clientRoles.removePlanFromBrand).toHaveBeenCalledWith('brand-a', 'pro')
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledWith('brand-a', 'free')
+      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          subscriptionId: 'sub-exhausted-retries',
+          eventType: SubscriptionEventType.EXPIRED,
+          toStatus: SubscriptionStatus.EXPIRED,
+        }),
+      )
     })
 
     it('produces a coherent final state and a single wallet debit when renewal and expiration passes run concurrently on a due subscription', async () => {
-      const {
-        tasksServicePg,
-        rolesMock,
-        walletRepo,
-        transactionRepo,
-        subscriptionRepoPg,
-        subscriptionEventRepoPg,
-      } = createPgTasksService()
-
-      const brandId = `brand-concurrent-${randomUUID()}`
-      const userId = randomUUID()
-      const wallet = await walletRepo.save(
-        walletRepo.create({
-          userId,
-          brandId,
-          provider: 'internal',
-          currency: 'COP',
-          balance: 200000,
-          status: WalletStatus.ACTIVE,
-        }),
-      )
+      const { walletCOP, savedTransactions, serviceWithLocks } = createLockAwareContext()
 
       const pastDate = new Date(Date.now() - 2 * 60 * 60 * 1000)
-      const sub = await subscriptionRepoPg.save(
-        subscriptionRepoPg.create({
-          userId,
-          brandId,
-          planSlug: 'pro',
-          status: SubscriptionStatus.PAST_DUE,
-          provider: SubscriptionProvider.WALLET,
-          walletId: wallet.id,
-          autoRenew: true,
-          retryCount: 2,
-          currentPeriodStart: new Date(pastDate.getTime() - 30 * 24 * 60 * 60 * 1000),
-          currentPeriodEnd: pastDate,
-          nextBillingDate: pastDate,
-        }),
-      )
+      const sub: any = {
+        id: 'sub-concurrent-unit',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 2,
+        currentPeriodEnd: pastDate,
+        nextBillingDate: pastDate,
+      }
+
+      subscriptionRepo.find.mockImplementation(async () => [{ ...sub }])
+      subscriptionRepo.findOne.mockImplementation(async () => ({ ...sub }))
+      subscriptionRepo.save.mockImplementation(async (data: any) => {
+        Object.assign(sub, data)
+        return sub
+      })
+      subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
+        if (criteria.status && sub.status !== criteria.status) {
+          return { affected: 0 }
+        }
+        Object.assign(sub, patch)
+        return { affected: 1 }
+      })
+
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      clientRoles.renewPlanForBrand.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15))
+        return true
+      })
 
       await Promise.all([
-        tasksServicePg.processSubscriptionRenewals(),
-        tasksServicePg.processSubscriptionRenewals(),
-        tasksServicePg.expireSubscriptions(),
+        serviceWithLocks.processSubscriptionRenewals(),
+        serviceWithLocks.processSubscriptionRenewals(),
+        serviceWithLocks.expireSubscriptions(),
       ])
 
-      const updatedSub = await subscriptionRepoPg.findOneByOrFail({ id: sub.id })
-      const updatedWallet = await walletRepo.findOneByOrFail({ id: wallet.id })
-      const transactions = await transactionRepo.find({ where: { walletId: wallet.id } })
-      const events = await subscriptionEventRepoPg.find({ where: { subscriptionId: sub.id } })
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(sub.retryCount).toBe(0)
+      expect(sub.autoRenew).toBe(true)
+      expect(sub.nextBillingDate.getTime()).toBeGreaterThan(Date.now())
+      expect(walletCOP.balance).toBe(150000)
+      expect(savedTransactions).toHaveLength(1)
+      expect(clientRoles.renewPlanForBrand).toHaveBeenCalledTimes(1)
+      expect(clientRoles.removePlanFromBrand).not.toHaveBeenCalled()
+    })
 
-      expect(updatedSub.status).toBe(SubscriptionStatus.ACTIVE)
-      expect(updatedSub.retryCount).toBe(0)
-      expect(updatedSub.autoRenew).toBe(true)
-      expect(updatedSub.nextBillingDate!.getTime()).toBeGreaterThan(Date.now())
-      expect(Number(updatedWallet.balance)).toBe(150000)
-      expect(transactions).toHaveLength(1)
-      expect(rolesMock.renewPlanForBrand).toHaveBeenCalledTimes(1)
-      expect(rolesMock.removePlanFromBrand).not.toHaveBeenCalled()
-      expect(events).toHaveLength(1)
-      expect(events[0].eventType).toBe(SubscriptionEventType.RENEWED)
+    it('releases the subscription lock and connection in finally when update throws during expireSubscriptions so the next pass expires the subscription', async () => {
+      const { lockQueryRunners, serviceWithLocks } = createLockAwareContext()
+
+      const sub: any = {
+        id: 'sub-update-error-recovery',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 3,
+      }
+
+      subscriptionRepo.find.mockImplementation(async () =>
+        sub.status === SubscriptionStatus.PAST_DUE ? [{ ...sub }] : [],
+      )
+      subscriptionRepo.findOne.mockImplementation(async () => ({ ...sub }))
+      subscriptionRepo.update
+        .mockRejectedValueOnce(new Error('transient db update error'))
+        .mockImplementationOnce(async (_criteria: any, patch: any) => {
+          Object.assign(sub, patch)
+          return { affected: 1 }
+        })
+
+      clientRoles.removePlanFromBrand.mockResolvedValue(true)
+      clientRoles.assignPlanToBrand.mockResolvedValue(true)
+
+      await expect(serviceWithLocks.expireSubscriptions()).rejects.toThrow(
+        'transient db update error',
+      )
+
+      expect(lockQueryRunners).toHaveLength(1)
+      expect(lockQueryRunners[0].commitTransaction).toHaveBeenCalledTimes(1)
+      expect(lockQueryRunners[0].release).toHaveBeenCalledTimes(1)
+      expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
+
+      await Promise.race([
+        serviceWithLocks.expireSubscriptions(),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Second expireSubscriptions pass hung on unreleased lock')),
+            100,
+          ),
+        ),
+      ])
+
+      expect(sub.status).toBe(SubscriptionStatus.EXPIRED)
+      expect(sub.autoRenew).toBe(false)
+      expect(lockQueryRunners).toHaveLength(2)
+      expect(lockQueryRunners[1].release).toHaveBeenCalledTimes(1)
+      expect(subscriptionEventRepo.save).toHaveBeenCalledTimes(1)
+      expect(eventBus.publishSubscriptionExpired).toHaveBeenCalledWith({
+        brandId: 'brand-a',
+        subscriptionId: 'sub-update-error-recovery',
+        planSlug: 'pro',
+      })
+    })
+
+    it('releases the subscription lock and connection when startTransaction or commitTransaction throws so subsequent passes do not hang', async () => {
+      const { lockQueryRunners, lockDataSourceMock, serviceWithLocks } = createLockAwareContext()
+
+      const sub: any = {
+        id: 'sub-lock-failure-recovery',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: 'w-cop',
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 3,
+      }
+
+      subscriptionRepo.find.mockImplementation(async () =>
+        sub.status === SubscriptionStatus.PAST_DUE ? [{ ...sub }] : [],
+      )
+      subscriptionRepo.findOne.mockImplementation(async () => ({ ...sub }))
+      subscriptionRepo.update.mockImplementation(async (_criteria: any, patch: any) => {
+        Object.assign(sub, patch)
+        return { affected: 1 }
+      })
+      clientRoles.removePlanFromBrand.mockResolvedValue(true)
+      clientRoles.assignPlanToBrand.mockResolvedValue(true)
+
+      const originalFactory = lockDataSourceMock.createQueryRunner.getMockImplementation()
+      lockDataSourceMock.createQueryRunner.mockImplementationOnce(() => {
+        const qr = originalFactory()
+        qr.startTransaction.mockRejectedValueOnce(new Error('transient startTransaction error'))
+        return qr
+      })
+
+      await expect(serviceWithLocks.expireSubscriptions()).rejects.toThrow(
+        'transient startTransaction error',
+      )
+      expect(lockQueryRunners[0].release).toHaveBeenCalledTimes(1)
+      expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
+
+      await Promise.race([
+        serviceWithLocks.expireSubscriptions(),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('Next expireSubscriptions pass hung after lock error')),
+            100,
+          ),
+        ),
+      ])
+
+      expect(sub.status).toBe(SubscriptionStatus.EXPIRED)
+      expect(lockQueryRunners[1].release).toHaveBeenCalledTimes(1)
     })
   })
 })

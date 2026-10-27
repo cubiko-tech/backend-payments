@@ -442,8 +442,9 @@ export class TasksService {
     let processed = 0
     for (const sub of dueSubscriptions) {
       if (!this.hasAvailableRetries(sub)) continue
-      const releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+      let releaseSubscriptionLock: (() => Promise<void>) | null = null
       try {
+        releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
         const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
         if (fresh) {
           Object.assign(sub, fresh)
@@ -486,7 +487,7 @@ export class TasksService {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
       } finally {
-        await releaseSubscriptionLock()
+        await releaseSubscriptionLock?.()
       }
     }
 
@@ -620,27 +621,18 @@ export class TasksService {
   // =============================================================
   // 4. Expirar suscripciones con reintentos agotados (cada hora)
   // =============================================================
-  @Cron(CronExpression.EVERY_HOUR)
-  async expireSubscriptions() {
-    const expired = await this.subscriptionRepo.find({
-      where: {
-        status: SubscriptionStatus.PAST_DUE,
-      },
-    })
-
-    let count = 0
-    let rechazadas = 0
-    for (const sub of expired) {
-      if (sub.retryCount < this.MAX_RETRY) continue
-
-      const releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+  private async expireLockedSubscription(
+    sub: Subscription,
+  ): Promise<'expired' | 'rejected' | 'skipped'> {
+    let releaseSubscriptionLock: (() => Promise<void>) | null = null
+    try {
+      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
       const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
       if (fresh) {
         Object.assign(sub, fresh)
       }
       if (sub.status !== SubscriptionStatus.PAST_DUE || sub.retryCount < this.MAX_RETRY) {
-        await releaseSubscriptionLock()
-        continue
+        return 'skipped'
       }
 
       // La degradación va PRIMERO y nada se vence si roles la rechaza: marcar la
@@ -651,9 +643,7 @@ export class TasksService {
       // cron la vuelve a tomar (retirar y asignar son idempotentes del otro lado).
       if (!(await this.degradarEnRoles(sub))) {
         await this.detenerCobroRecurrente(sub)
-        rechazadas++
-        await releaseSubscriptionLock()
-        continue
+        return 'rejected'
       }
 
       // Compare-and-set: sólo vence la fila que TODAVÍA está en `past_due`. Los
@@ -680,8 +670,7 @@ export class TasksService {
           'info',
           `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
         )
-        await releaseSubscriptionLock()
-        continue
+        return 'skipped'
       }
 
       await this.subscriptionEventRepo.save(
@@ -703,8 +692,30 @@ export class TasksService {
       })
 
       logger.log('info', `[CRON] Suscripción expirada: brandId=${sub.brandId}`)
-      count++
-      await releaseSubscriptionLock()
+      return 'expired'
+    } finally {
+      await releaseSubscriptionLock?.()
+    }
+  }
+
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireSubscriptions() {
+    const expired = await this.subscriptionRepo.find({
+      where: {
+        status: SubscriptionStatus.PAST_DUE,
+      },
+    })
+
+    let count = 0
+    let rechazadas = 0
+    for (const sub of expired) {
+      if (sub.retryCount < this.MAX_RETRY) continue
+      const outcome = await this.expireLockedSubscription(sub)
+      if (outcome === 'expired') {
+        count++
+      } else if (outcome === 'rejected') {
+        rechazadas++
+      }
     }
 
     if (count > 0) {
@@ -1468,39 +1479,54 @@ export class TasksService {
     const tail = previous.then(() => current)
     this.subscriptionLocks.set(subId, tail)
 
-    await previous
     let queryRunner: QueryRunner | null = null
-    if (typeof (this.dataSource as any)?.createQueryRunner === 'function') {
-      const candidate = this.dataSource.createQueryRunner()
-      if (typeof candidate?.query === 'function') {
-        queryRunner = candidate
-        await queryRunner.connect()
-        await queryRunner.startTransaction()
-        await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-          `subscription:${subId}`,
-        ])
-      }
-    }
-
     let released = false
-    return async () => {
+    const release = async (commit = true) => {
       if (released) {
         return
       }
       released = true
-      if (queryRunner) {
-        try {
-          if (queryRunner.isTransactionActive) {
-            await queryRunner.commitTransaction()
+      try {
+        if (queryRunner) {
+          try {
+            if (queryRunner.isTransactionActive) {
+              if (commit) {
+                await queryRunner.commitTransaction()
+              } else {
+                await queryRunner.rollbackTransaction()
+              }
+            }
+          } finally {
+            if (!queryRunner.isReleased) {
+              await queryRunner.release()
+            }
           }
-        } finally {
-          await queryRunner.release()
+        }
+      } finally {
+        releaseLock()
+        if (this.subscriptionLocks.get(subId) === tail) {
+          this.subscriptionLocks.delete(subId)
         }
       }
-      releaseLock()
-      if (this.subscriptionLocks.get(subId) === tail) {
-        this.subscriptionLocks.delete(subId)
+    }
+
+    try {
+      await previous
+      if (typeof (this.dataSource as any)?.createQueryRunner === 'function') {
+        const candidate = this.dataSource.createQueryRunner()
+        if (typeof candidate?.query === 'function') {
+          queryRunner = candidate
+          await queryRunner.connect()
+          await queryRunner.startTransaction()
+          await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+            `subscription:${subId}`,
+          ])
+        }
       }
+      return () => release(true)
+    } catch (error) {
+      await release(false).catch(() => undefined)
+      throw error
     }
   }
 
