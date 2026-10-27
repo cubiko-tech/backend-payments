@@ -1,3 +1,4 @@
+// R6: End-to-end checkout suite keeps all real-Postgres concurrency, idempotency, and retry scenarios together sharing one DataSource lifecycle.
 import { HttpException, HttpStatus } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
@@ -53,6 +54,8 @@ describe('CheckoutService external payment completion concurrency (real database
   let realTransactionRepo: Repository<Transaction>
   let realInvoiceRepo: Repository<Invoice>
   let realInvoiceItemRepo: Repository<InvoiceItem>
+  let realSubscriptionRepo: Repository<Subscription>
+  let realSubscriptionEventRepo: Repository<SubscriptionEvent>
   let realService: CheckoutService
   let controller: CheckoutController
   let debitMock: jest.Mock
@@ -60,6 +63,7 @@ describe('CheckoutService external payment completion concurrency (real database
   let createInvoiceMock: jest.Mock
   const createdPaymentIds: string[] = []
   const createdWalletIds: string[] = []
+  const createdSubscriptionIds: string[] = []
 
   beforeAll(async () => {
     dotenvConfig({ path: '.env' })
@@ -70,7 +74,16 @@ describe('CheckoutService external payment completion concurrency (real database
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Payment, BillingProfile, Wallet, Transaction, Invoice, InvoiceItem],
+      entities: [
+        Payment,
+        BillingProfile,
+        Wallet,
+        Transaction,
+        Invoice,
+        InvoiceItem,
+        Subscription,
+        SubscriptionEvent,
+      ],
       synchronize: false,
       ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
     })
@@ -81,6 +94,8 @@ describe('CheckoutService external payment completion concurrency (real database
     realTransactionRepo = realDataSource.getRepository(Transaction)
     realInvoiceRepo = realDataSource.getRepository(Invoice)
     realInvoiceItemRepo = realDataSource.getRepository(InvoiceItem)
+    realSubscriptionRepo = realDataSource.getRepository(Subscription)
+    realSubscriptionEventRepo = realDataSource.getRepository(SubscriptionEvent)
   })
 
   afterAll(async () => {
@@ -94,6 +109,11 @@ describe('CheckoutService external payment completion concurrency (real database
           await realInvoiceItemRepo.delete({ invoiceId: In(invoiceIds) })
           await realInvoiceRepo.delete({ id: In(invoiceIds) })
         }
+        await realSubscriptionEventRepo.delete({ paymentId: In(createdPaymentIds) })
+      }
+      if (createdSubscriptionIds.length > 0) {
+        await realSubscriptionEventRepo.delete({ subscriptionId: In(createdSubscriptionIds) })
+        await realSubscriptionRepo.delete({ id: In(createdSubscriptionIds) })
       }
       if (createdWalletIds.length > 0) {
         await realTransactionRepo.delete({ walletId: In(createdWalletIds) })
@@ -408,6 +428,8 @@ describe('CheckoutService external payment completion concurrency (real database
 
   describe('External payment completion intermediate status and retry (Postgres)', () => {
     let checkoutWithRealPersistence: CheckoutService
+    let realInvoiceService: InvoiceService
+    let dianServiceMock: { isConfigured: jest.Mock; sendInvoice: jest.Mock }
     let failNextTransactionSaveReason: string | null = null
     let failNextInvoiceSaveReason: string | null = null
 
@@ -449,22 +471,27 @@ describe('CheckoutService external payment completion concurrency (real database
         wrappedDataSource,
       )
 
-      const realInvoiceService = new InvoiceService(
+      realInvoiceService = new InvoiceService(
         realInvoiceRepo,
         realInvoiceRepo,
         realInvoiceItemRepo,
         wrappedDataSource,
       )
 
+      dianServiceMock = {
+        isConfigured: jest.fn().mockReturnValue(false),
+        sendInvoice: jest.fn().mockResolvedValue({ success: true }),
+      }
+
       const module: TestingModule = await Test.createTestingModule({
         providers: [
           CheckoutService,
           { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: realPaymentRepo },
           { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
-          { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
+          { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: realSubscriptionRepo },
           {
             provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
-            useValue: createMockRepo(),
+            useValue: realSubscriptionEventRepo,
           },
           {
             provide: getRepositoryToken(BillingProfile, 'DBRead'),
@@ -485,10 +512,7 @@ describe('CheckoutService external payment completion concurrency (real database
           },
           {
             provide: DianService,
-            useValue: {
-              isConfigured: jest.fn().mockReturnValue(false),
-              sendInvoice: jest.fn().mockResolvedValue({ success: true }),
-            },
+            useValue: dianServiceMock,
           },
           {
             provide: ProviderFactory,
@@ -720,6 +744,136 @@ describe('CheckoutService external payment completion concurrency (real database
 
       const invoices = await realInvoiceRepo.find({ where: { paymentId: payment.id } })
       expect(invoices).toHaveLength(1)
+    })
+
+    it('issues one invoice and one DIAN send when two simultaneous completions run on a processing payment', async () => {
+      const { wallet, payment } = await seedWalletAndPendingRecharge()
+      await realPaymentRepo.update({ id: payment.id }, { status: PaymentStatus.PROCESSING })
+      dianServiceMock.isConfigured.mockReturnValue(true)
+      const createInvoiceSpy = jest.spyOn(realInvoiceService, 'create')
+
+      await Promise.all([
+        checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+          source: 'return-page',
+        }),
+        checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+          source: 'reconcile',
+        }),
+      ])
+
+      expect(createInvoiceSpy).toHaveBeenCalledTimes(1)
+      createInvoiceSpy.mockRestore()
+
+      const storedPayment = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(storedPayment?.status).toBe(PaymentStatus.COMPLETED)
+      expect(storedPayment?.paidAt).toBeInstanceOf(Date)
+
+      const transactions = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactions).toHaveLength(1)
+
+      const invoices = await realInvoiceRepo.find({ where: { paymentId: payment.id } })
+      expect(invoices).toHaveLength(1)
+      expect(dianServiceMock.sendInvoice).toHaveBeenCalledTimes(1)
+
+      const { payment: secondPayment } = await seedWalletAndPendingRecharge()
+      const baseInvoicePayload = {
+        paymentId: secondPayment.id,
+        brandId: secondPayment.brandId,
+        invoiceNumber: `CK-RACE-A-${Date.now()}`,
+        subtotal: 100000,
+        taxTotal: 19000,
+        total: 119000,
+        currency: 'COP',
+        items: [
+          {
+            description: 'Wallet recharge',
+            quantity: 1,
+            unitPrice: 100000,
+            subtotal: 100000,
+            taxRate: 0.19,
+            taxAmount: 19000,
+            total: 119000,
+          },
+        ],
+      }
+
+      const [firstInvoiceRes, secondInvoiceRes] = await Promise.all([
+        realInvoiceService.create(baseInvoicePayload),
+        realInvoiceService.create({
+          ...baseInvoicePayload,
+          invoiceNumber: `CK-RACE-B-${Date.now()}`,
+        }),
+      ])
+      expect(firstInvoiceRes.data.id).toBe(secondInvoiceRes.data.id)
+      const secondPaymentInvoices = await realInvoiceRepo.find({
+        where: { paymentId: secondPayment.id },
+      })
+      expect(secondPaymentInvoices).toHaveLength(1)
+    })
+
+    it('applies subscription renewal only once when a plan purchase fails invoice creation and is retried', async () => {
+      const uniqueBrandId = `brand-loc32-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const payment = await realPaymentRepo.save(
+        realPaymentRepo.create({
+          brandId: uniqueBrandId,
+          userId: 'u-loc32-plan',
+          provider: PaymentProvider.CONFIO,
+          providerPaymentId: `confio-plan-${Date.now()}`,
+          amount: 119000,
+          currency: 'COP',
+          status: PaymentStatus.PENDING,
+          purpose: PaymentPurpose.PLAN_PURCHASE,
+          purposeId: 'pro',
+          metadata: { country: 'CO' },
+        }),
+      )
+      createdPaymentIds.push(payment.id)
+
+      failNextInvoiceSaveReason = 'Simulated transient invoice DB failure on plan purchase'
+
+      await expect(
+        checkoutWithRealPersistence.completeExternalPayment(payment.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient invoice DB failure on plan purchase')
+
+      const subAfterFailure = await realSubscriptionRepo.findOne({
+        where: { brandId: uniqueBrandId },
+      })
+      expect(subAfterFailure).not.toBeNull()
+      if (subAfterFailure) {
+        createdSubscriptionIds.push(subAfterFailure.id)
+      }
+      expect(subAfterFailure?.lastPaymentId).toBe(payment.id)
+      const firstPeriodStart = subAfterFailure?.currentPeriodStart.getTime()
+      const firstPeriodEnd = subAfterFailure?.currentPeriodEnd.getTime()
+
+      const eventsAfterFailure = await realSubscriptionEventRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(eventsAfterFailure).toHaveLength(1)
+
+      await new Promise((resolve) => setTimeout(resolve, 15))
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'reconcile',
+      })
+
+      const subAfterRetry = await realSubscriptionRepo.findOne({
+        where: { brandId: uniqueBrandId },
+      })
+      expect(subAfterRetry?.currentPeriodStart.getTime()).toBe(firstPeriodStart)
+      expect(subAfterRetry?.currentPeriodEnd.getTime()).toBe(firstPeriodEnd)
+
+      const eventsAfterRetry = await realSubscriptionEventRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(eventsAfterRetry).toHaveLength(1)
+
+      const invoicesAfterRetry = await realInvoiceRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(invoicesAfterRetry).toHaveLength(1)
     })
   })
 })

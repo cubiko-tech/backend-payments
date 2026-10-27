@@ -530,21 +530,21 @@ export class CheckoutService implements OnModuleInit {
    */
   async completeExternalPayment(paymentId: string, providerData?: any): Promise<void> {
     if (this.inFlightCompletions.has(paymentId)) return
-    const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
-    if (!payment || payment.status === PaymentStatus.COMPLETED) return
-
-    const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
-    const claimed = await this.paymentRepo.update(
-      { id: paymentId, status: payment.status },
-      {
-        status: PaymentStatus.PROCESSING,
-        ...(providerData ? { metadata } : {}),
-      },
-    )
-    if (!claimed.affected) return
-
     this.inFlightCompletions.add(paymentId)
     try {
+      const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
+      if (!payment || payment.status === PaymentStatus.COMPLETED) return
+
+      const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
+      const claimed = await this.paymentRepo.update(
+        { id: paymentId, status: payment.status },
+        {
+          status: PaymentStatus.PROCESSING,
+          ...(providerData ? { metadata } : {}),
+        },
+      )
+      if (!claimed.affected) return
+
       await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
     } finally {
       this.inFlightCompletions.delete(paymentId)
@@ -576,7 +576,7 @@ export class CheckoutService implements OnModuleInit {
 
     // Si es compra de plan → crear/renovar suscripción
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      await this.createOrRenewSubscription(
+      const subscription = await this.createOrRenewSubscription(
         {
           brandId: payment.brandId,
           userId: payment.userId,
@@ -587,7 +587,7 @@ export class CheckoutService implements OnModuleInit {
         },
         payment,
       )
-      await this.assignPlanInRoles(payment.brandId, payment.purposeId)
+      await this.assignPlanInRoles(payment.brandId, subscription?.planSlug || payment.purposeId)
     }
 
     // Si es recarga de wallet → acreditar
@@ -1148,6 +1148,17 @@ export class CheckoutService implements OnModuleInit {
     })
 
     if (subscription) {
+      if (payment?.id) {
+        if (subscription.lastPaymentId === payment.id) {
+          return subscription
+        }
+        const existingEvent = await this.subscriptionEventRepo.findOne({
+          where: { paymentId: payment.id },
+        })
+        if (existingEvent) {
+          return subscription
+        }
+      }
       // Renovar/cambiar plan
       const fromPlan = subscription.planSlug
       const fromStatus = subscription.status

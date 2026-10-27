@@ -1751,5 +1751,84 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(invoiceService.create).not.toHaveBeenCalled()
       expect(paymentRepo.update).not.toHaveBeenCalled()
     })
+
+    it('issues one invoice and one DIAN send when two simultaneous completions run on a processing payment', async () => {
+      paymentRow.status = PaymentStatus.PROCESSING
+      dianService.isConfigured.mockReturnValue(true)
+
+      await Promise.all([
+        service.completeExternalPayment(paymentRow.id, { source: 'reconcile' }),
+        service.completeExternalPayment(paymentRow.id, { source: 'cron-reconcile' }),
+      ])
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(dianService.sendInvoice).toHaveBeenCalledTimes(1)
+    })
+
+    it('applies subscription renewal only once when a plan purchase fails invoice creation and is retried', async () => {
+      paymentRow = {
+        ...paymentRow,
+        purpose: PaymentPurpose.PLAN_PURCHASE,
+        purposeId: 'pro',
+        walletId: null,
+      }
+
+      let storedSub: any = {
+        id: 'sub-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        planSlug: 'starter',
+        status: 'active',
+        provider: 'confio',
+        lastPaymentId: 'pay-prev',
+        currentPeriodStart: new Date('2026-01-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-01-31T00:00:00.000Z'),
+      }
+      const savedEvents: any[] = []
+      const subscriptionEventRepo = (service as any).subscriptionEventRepo
+
+      subscriptionRepo.findOne.mockImplementation(async () => (storedSub ? { ...storedSub } : null))
+      subscriptionRepo.save.mockImplementation(async (sub: any) => {
+        storedSub = { ...sub }
+        return storedSub
+      })
+      subscriptionEventRepo.create.mockImplementation((data: any) => ({ id: 'evt-1', ...data }))
+      subscriptionEventRepo.save.mockImplementation(async (evt: any) => {
+        savedEvents.push(evt)
+        return evt
+      })
+      subscriptionEventRepo.findOne.mockImplementation(async ({ where }: any) => {
+        return savedEvents.find((e) => e.paymentId === where?.paymentId) || null
+      })
+
+      let invoiceCalls = 0
+      invoiceService.create.mockImplementation(async () => {
+        invoiceCalls++
+        if (invoiceCalls === 1) {
+          return { error: 'Simulated transient invoice failure' }
+        }
+        return { data: { id: 'inv-plan-1', invoiceNumber: 'CK-PLAN-1' } }
+      })
+
+      await expect(
+        service.completeExternalPayment(paymentRow.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient invoice failure')
+
+      expect(paymentRow.status).toBe(PaymentStatus.PROCESSING)
+      expect(subscriptionRepo.save).toHaveBeenCalledTimes(1)
+      expect(savedEvents).toHaveLength(1)
+      const periodStartAfterFirstAttempt = storedSub.currentPeriodStart.getTime()
+      const periodEndAfterFirstAttempt = storedSub.currentPeriodEnd.getTime()
+
+      await new Promise((r) => setTimeout(r, 10))
+      await service.completeExternalPayment(paymentRow.id, { source: 'reconcile' })
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(subscriptionRepo.save).toHaveBeenCalledTimes(1)
+      expect(savedEvents).toHaveLength(1)
+      expect(storedSub.currentPeriodStart.getTime()).toBe(periodStartAfterFirstAttempt)
+      expect(storedSub.currentPeriodEnd.getTime()).toBe(periodEndAfterFirstAttempt)
+    })
   })
 })
