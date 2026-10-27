@@ -1,13 +1,25 @@
-import { In } from 'typeorm'
+import { randomUUID } from 'crypto'
+import { config as dotenvConfig } from 'dotenv'
+import { DataSource, In } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
-import { PaymentStatus } from '../payment/entities/payment.entity'
-import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
-import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
-import { WalletStatus } from '../wallet/entities/wallet.entity'
+import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
+import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
+import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
+import { logger } from '../shared/logger/logger'
 
 const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -1891,7 +1903,7 @@ describe('TasksService — processTrialConversions', () => {
           .fn()
           .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
 
-        const originalBillingDate = new Date('2026-08-01T00:00:00.000Z')
+        const originalBillingDate = new Date(Date.now() - 60 * 60 * 1000)
         const sub: any = {
           id: 'sub-roles-down-before-charge',
           brandId: 'brand-a',
@@ -1916,6 +1928,89 @@ describe('TasksService — processTrialConversions', () => {
         expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
         expect(subscriptionEventRepo.create).not.toHaveBeenCalled()
         expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+      })
+
+      it('logs an error with the subscription id and does not create a new debit when backend-roles returns false', async () => {
+        const { walletCOP, savedTransactions } = setupRealWalletPersistence()
+        const logSpy = jest.spyOn(logger, 'log')
+
+        clientRoles.getPlanPrice.mockResolvedValue(50000)
+        clientRoles.renewPlanForBrand.mockResolvedValue(false)
+
+        const originalBillingDate = new Date(Date.now() - 60 * 60 * 1000)
+        const sub: any = {
+          id: 'sub-roles-false-log',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-cop',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+          currentPeriodEnd: originalBillingDate,
+          nextBillingDate: originalBillingDate,
+        }
+        subscriptionRepo.find.mockResolvedValue([sub])
+
+        await serviceWithRealWallet.processSubscriptionRenewals()
+        await serviceWithRealWallet.processSubscriptionRenewals()
+
+        expect(savedTransactions).toHaveLength(1)
+        expect(walletCOP.balance).toBe(150000)
+        expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('sub-roles-false-log'))
+
+        logSpy.mockRestore()
+      })
+
+      it('transitions the subscription to past_due with its reason when the price cache is cold and backend-roles is down past the postponement grace window', async () => {
+        const { walletCOP, savedTransactions } = setupRealWalletPersistence()
+        const logSpy = jest.spyOn(logger, 'log')
+
+        realClientRoles.invalidateCache()
+        global.fetch = jest
+          .fn()
+          .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
+
+        const overdueBeyondGrace = new Date(Date.now() - 48 * 60 * 60 * 1000)
+        const sub: any = {
+          id: 'sub-postponement-cap',
+          brandId: 'brand-a',
+          planSlug: 'pro',
+          provider: 'wallet',
+          walletId: 'w-cop',
+          status: SubscriptionStatus.ACTIVE,
+          autoRenew: true,
+          retryCount: 0,
+          currentPeriodEnd: overdueBeyondGrace,
+          nextBillingDate: overdueBeyondGrace,
+        }
+        subscriptionRepo.find.mockResolvedValue([sub])
+
+        await serviceWithRealRoles.processSubscriptionRenewals()
+
+        expect(savedTransactions).toHaveLength(0)
+        expect(walletCOP.balance).toBe(200000)
+        expect(logSpy).toHaveBeenCalledWith(
+          'error',
+          expect.stringContaining('sub-postponement-cap'),
+        )
+        expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
+        expect(sub.retryCount).toBe(1)
+        expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            subscriptionId: 'sub-postponement-cap',
+            eventType: SubscriptionEventType.PAYMENT_FAILED,
+            toStatus: SubscriptionStatus.PAST_DUE,
+            reason: expect.stringMatching(/grace period exceeded|price unavailable/i),
+          }),
+        )
+        expect(eventBus.notifyPaymentFailed).toHaveBeenCalledWith(
+          'brand-a',
+          'sub-postponement-cap',
+          expect.any(String),
+        )
+
+        logSpy.mockRestore()
       })
 
       it('marks the subscription past_due and increments retryCount when roles is up and the plan has no price in the wallet currency', async () => {
@@ -2022,6 +2117,256 @@ describe('TasksService — processTrialConversions', () => {
       expect(checkoutService.completeExternalPayment).toHaveBeenCalledWith('pay-proc-1', {
         source: 'cron-reconcile',
       })
+    })
+  })
+
+  describe('renewal and expiration coordination and Postgres concurrency (LOC-33)', () => {
+    const testSchema = `loc33_test_${Date.now()}`
+    let adminDataSource: DataSource
+    let pgDataSource: DataSource
+
+    beforeAll(async () => {
+      dotenvConfig({ path: '.env' })
+      const baseConnection = {
+        type: 'postgres' as const,
+        host: process.env.POSTGRES_HOST,
+        port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
+        username: process.env.POSTGRES_USER,
+        password: process.env.POSTGRES_PASSWORD,
+        database: process.env.POSTGRES_DB,
+        ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
+      }
+
+      adminDataSource = new DataSource(baseConnection)
+      await adminDataSource.initialize()
+      await adminDataSource.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`)
+
+      pgDataSource = new DataSource({
+        ...baseConnection,
+        schema: testSchema,
+        entities: [
+          Wallet,
+          WalletBalanceSnapshot,
+          Transaction,
+          Payment,
+          Subscription,
+          SubscriptionEvent,
+          WebhookEvent,
+        ],
+        synchronize: true,
+      })
+      await pgDataSource.initialize()
+    })
+
+    afterAll(async () => {
+      if (pgDataSource?.isInitialized) {
+        await pgDataSource.destroy()
+      }
+      if (adminDataSource?.isInitialized) {
+        await adminDataSource.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`)
+        await adminDataSource.destroy()
+      }
+    })
+
+    beforeEach(async () => {
+      await pgDataSource.query(
+        `TRUNCATE TABLE "${testSchema}"."subscription_events", "${testSchema}"."subscriptions", "${testSchema}"."transactions", "${testSchema}"."wallets" CASCADE`,
+      )
+    })
+
+    const createPgTasksService = (rolesOverrides: Partial<Record<string, any>> = {}) => {
+      const walletRepo = pgDataSource.getRepository(Wallet)
+      const snapshotRepo = pgDataSource.getRepository(WalletBalanceSnapshot)
+      const transactionRepo = pgDataSource.getRepository(Transaction)
+      const paymentRepoPg = pgDataSource.getRepository(Payment)
+      const subscriptionRepoPg = pgDataSource.getRepository(Subscription)
+      const subscriptionEventRepoPg = pgDataSource.getRepository(SubscriptionEvent)
+      const webhookEventRepoPg = pgDataSource.getRepository(WebhookEvent)
+
+      const auditServicePg = {
+        log: jest.fn(),
+        logTransactionCreated: jest.fn(),
+      }
+
+      const walletServicePg = new WalletService(
+        walletRepo,
+        walletRepo,
+        transactionRepo,
+        transactionRepo,
+        pgDataSource,
+      )
+
+      const rolesMock = {
+        removePlanFromBrand: jest.fn().mockResolvedValue(true),
+        assignPlanToBrand: jest.fn().mockResolvedValue(true),
+        renewPlanForBrand: jest.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+          return true
+        }),
+        getPlanPrice: jest.fn().mockResolvedValue(50000),
+        hasCachedPrices: jest.fn().mockReturnValue(true),
+        ...rolesOverrides,
+      }
+
+      const eventBusPg = {
+        publishSubscriptionExpired: jest.fn(),
+        notifySubscriptionExpired: jest.fn().mockResolvedValue(null),
+        publishSubscriptionRenewed: jest.fn(),
+        notifyPaymentFailed: jest.fn().mockResolvedValue(null),
+        publishNotification: jest.fn().mockResolvedValue(null),
+      }
+
+      const tasksServicePg = new TasksService(
+        walletRepo,
+        snapshotRepo,
+        transactionRepo,
+        paymentRepoPg,
+        subscriptionRepoPg,
+        subscriptionEventRepoPg,
+        webhookEventRepoPg,
+        pgDataSource,
+        walletServicePg,
+        auditServicePg as any,
+        { getProvider: jest.fn() } as any,
+        eventBusPg as any,
+        rolesMock as any,
+        { processCheckout: jest.fn(), completeExternalPayment: jest.fn() } as any,
+        { confirmarContraElProveedor: jest.fn() } as any,
+      )
+
+      return {
+        tasksServicePg,
+        rolesMock,
+        eventBusPg,
+        walletRepo,
+        transactionRepo,
+        subscriptionRepoPg,
+        subscriptionEventRepoPg,
+      }
+    }
+
+    it('lets only expireSubscriptions expire a PAST_DUE subscription with exhausted retries without debiting the wallet', async () => {
+      const {
+        tasksServicePg,
+        rolesMock,
+        walletRepo,
+        transactionRepo,
+        subscriptionRepoPg,
+        subscriptionEventRepoPg,
+      } = createPgTasksService()
+
+      const brandId = `brand-exhausted-${randomUUID()}`
+      const userId = randomUUID()
+      const wallet = await walletRepo.save(
+        walletRepo.create({
+          userId,
+          brandId,
+          provider: 'internal',
+          currency: 'COP',
+          balance: 200000,
+          status: WalletStatus.ACTIVE,
+        }),
+      )
+
+      const pastDate = new Date(Date.now() - 2 * 60 * 60 * 1000)
+      const sub = await subscriptionRepoPg.save(
+        subscriptionRepoPg.create({
+          userId,
+          brandId,
+          planSlug: 'pro',
+          status: SubscriptionStatus.PAST_DUE,
+          provider: SubscriptionProvider.WALLET,
+          walletId: wallet.id,
+          autoRenew: true,
+          retryCount: 3,
+          currentPeriodStart: new Date(pastDate.getTime() - 30 * 24 * 60 * 60 * 1000),
+          currentPeriodEnd: pastDate,
+          nextBillingDate: pastDate,
+        }),
+      )
+
+      await Promise.all([
+        tasksServicePg.processSubscriptionRenewals(),
+        tasksServicePg.expireSubscriptions(),
+      ])
+
+      const updatedSub = await subscriptionRepoPg.findOneByOrFail({ id: sub.id })
+      const updatedWallet = await walletRepo.findOneByOrFail({ id: wallet.id })
+      const transactions = await transactionRepo.find({ where: { walletId: wallet.id } })
+      const events = await subscriptionEventRepoPg.find({ where: { subscriptionId: sub.id } })
+
+      expect(updatedSub.status).toBe(SubscriptionStatus.EXPIRED)
+      expect(updatedSub.autoRenew).toBe(false)
+      expect(Number(updatedWallet.balance)).toBe(200000)
+      expect(transactions).toHaveLength(0)
+      expect(rolesMock.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(rolesMock.removePlanFromBrand).toHaveBeenCalledWith(brandId, 'pro')
+      expect(rolesMock.assignPlanToBrand).toHaveBeenCalledWith(brandId, 'free')
+      expect(events).toHaveLength(1)
+      expect(events[0].eventType).toBe(SubscriptionEventType.EXPIRED)
+    })
+
+    it('produces a coherent final state and a single wallet debit when renewal and expiration passes run concurrently on a due subscription', async () => {
+      const {
+        tasksServicePg,
+        rolesMock,
+        walletRepo,
+        transactionRepo,
+        subscriptionRepoPg,
+        subscriptionEventRepoPg,
+      } = createPgTasksService()
+
+      const brandId = `brand-concurrent-${randomUUID()}`
+      const userId = randomUUID()
+      const wallet = await walletRepo.save(
+        walletRepo.create({
+          userId,
+          brandId,
+          provider: 'internal',
+          currency: 'COP',
+          balance: 200000,
+          status: WalletStatus.ACTIVE,
+        }),
+      )
+
+      const pastDate = new Date(Date.now() - 2 * 60 * 60 * 1000)
+      const sub = await subscriptionRepoPg.save(
+        subscriptionRepoPg.create({
+          userId,
+          brandId,
+          planSlug: 'pro',
+          status: SubscriptionStatus.PAST_DUE,
+          provider: SubscriptionProvider.WALLET,
+          walletId: wallet.id,
+          autoRenew: true,
+          retryCount: 2,
+          currentPeriodStart: new Date(pastDate.getTime() - 30 * 24 * 60 * 60 * 1000),
+          currentPeriodEnd: pastDate,
+          nextBillingDate: pastDate,
+        }),
+      )
+
+      await Promise.all([
+        tasksServicePg.processSubscriptionRenewals(),
+        tasksServicePg.processSubscriptionRenewals(),
+        tasksServicePg.expireSubscriptions(),
+      ])
+
+      const updatedSub = await subscriptionRepoPg.findOneByOrFail({ id: sub.id })
+      const updatedWallet = await walletRepo.findOneByOrFail({ id: wallet.id })
+      const transactions = await transactionRepo.find({ where: { walletId: wallet.id } })
+      const events = await subscriptionEventRepoPg.find({ where: { subscriptionId: sub.id } })
+
+      expect(updatedSub.status).toBe(SubscriptionStatus.ACTIVE)
+      expect(updatedSub.retryCount).toBe(0)
+      expect(updatedSub.autoRenew).toBe(true)
+      expect(updatedSub.nextBillingDate!.getTime()).toBeGreaterThan(Date.now())
+      expect(Number(updatedWallet.balance)).toBe(150000)
+      expect(transactions).toHaveLength(1)
+      expect(rolesMock.renewPlanForBrand).toHaveBeenCalledTimes(1)
+      expect(rolesMock.removePlanFromBrand).not.toHaveBeenCalled()
+      expect(events).toHaveLength(1)
+      expect(events[0].eventType).toBe(SubscriptionEventType.RENEWED)
     })
   })
 })
