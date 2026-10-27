@@ -17,6 +17,10 @@ import { PaymentAttempt } from '../src/payment/entities/paymentAttempt.entity'
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { BillingProfile } from '../src/billing-profile/entities/billingProfile.entity'
+import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
+import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { Invoice } from '../src/invoice/entities/invoice.entity'
+import { InvoiceItem } from '../src/invoice/entities/invoiceItem.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import { SubscriptionService } from '../src/subscription/subscription.service'
@@ -45,12 +49,17 @@ const createMockRepo = () => ({
 describe('CheckoutService external payment completion concurrency (real database)', () => {
   let realDataSource: DataSource
   let realPaymentRepo: Repository<Payment>
+  let realWalletRepo: Repository<Wallet>
+  let realTransactionRepo: Repository<Transaction>
+  let realInvoiceRepo: Repository<Invoice>
+  let realInvoiceItemRepo: Repository<InvoiceItem>
   let realService: CheckoutService
   let controller: CheckoutController
   let debitMock: jest.Mock
   let creditMock: jest.Mock
   let createInvoiceMock: jest.Mock
   const createdPaymentIds: string[] = []
+  const createdWalletIds: string[] = []
 
   beforeAll(async () => {
     dotenvConfig({ path: '.env' })
@@ -61,17 +70,35 @@ describe('CheckoutService external payment completion concurrency (real database
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Payment, BillingProfile],
+      entities: [Payment, BillingProfile, Wallet, Transaction, Invoice, InvoiceItem],
       synchronize: false,
       ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
     })
     await realDataSource.initialize()
     await Promise.all([realDataSource.query('SELECT 1'), realDataSource.query('SELECT 1')])
     realPaymentRepo = realDataSource.getRepository(Payment)
+    realWalletRepo = realDataSource.getRepository(Wallet)
+    realTransactionRepo = realDataSource.getRepository(Transaction)
+    realInvoiceRepo = realDataSource.getRepository(Invoice)
+    realInvoiceItemRepo = realDataSource.getRepository(InvoiceItem)
   })
 
   afterAll(async () => {
     if (realDataSource?.isInitialized) {
+      if (createdPaymentIds.length > 0) {
+        const invoices = await realInvoiceRepo.find({
+          where: { paymentId: In(createdPaymentIds) },
+        })
+        if (invoices.length > 0) {
+          const invoiceIds = invoices.map((inv) => inv.id)
+          await realInvoiceItemRepo.delete({ invoiceId: In(invoiceIds) })
+          await realInvoiceRepo.delete({ id: In(invoiceIds) })
+        }
+      }
+      if (createdWalletIds.length > 0) {
+        await realTransactionRepo.delete({ walletId: In(createdWalletIds) })
+        await realWalletRepo.delete({ id: In(createdWalletIds) })
+      }
       if (createdPaymentIds.length > 0) {
         await realPaymentRepo.delete({ id: In(createdPaymentIds) })
       }
@@ -376,6 +403,323 @@ describe('CheckoutService external payment completion concurrency (real database
       expect(second.status).toBe(201)
       expect(second.body.data.paymentId).not.toBe(first.body.data.paymentId)
       expect(debitMock).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  describe('External payment completion intermediate status and retry (Postgres)', () => {
+    let checkoutWithRealPersistence: CheckoutService
+    let failNextTransactionSaveReason: string | null = null
+    let failNextInvoiceSaveReason: string | null = null
+
+    beforeEach(async () => {
+      failNextTransactionSaveReason = null
+      failNextInvoiceSaveReason = null
+
+      // R17 test double over realDataSource.createQueryRunner that delegates to Postgres
+      // and injects a single transient write failure when configured by a test case.
+      const wrappedDataSource = {
+        createQueryRunner: () => {
+          const qr = realDataSource.createQueryRunner()
+          const originalSave = qr.manager.save.bind(qr.manager)
+          qr.manager.save = (async (entityOrTarget: any, maybeEntities?: any) => {
+            if (failNextTransactionSaveReason && entityOrTarget === Transaction) {
+              const reason = failNextTransactionSaveReason
+              failNextTransactionSaveReason = null
+              throw new Error(reason)
+            }
+            if (failNextInvoiceSaveReason && entityOrTarget === Invoice) {
+              const reason = failNextInvoiceSaveReason
+              failNextInvoiceSaveReason = null
+              throw new Error(reason)
+            }
+            if (maybeEntities !== undefined) {
+              return originalSave(entityOrTarget, maybeEntities)
+            }
+            return originalSave(entityOrTarget)
+          }) as typeof qr.manager.save
+          return qr
+        },
+      } as unknown as DataSource
+
+      const realWalletService = new WalletService(
+        realWalletRepo,
+        realWalletRepo,
+        realTransactionRepo,
+        realTransactionRepo,
+        wrappedDataSource,
+      )
+
+      const realInvoiceService = new InvoiceService(
+        realInvoiceRepo,
+        realInvoiceRepo,
+        realInvoiceItemRepo,
+        wrappedDataSource,
+      )
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          CheckoutService,
+          { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: realPaymentRepo },
+          { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
+          { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
+          {
+            provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
+            useValue: createMockRepo(),
+          },
+          {
+            provide: getRepositoryToken(BillingProfile, 'DBRead'),
+            useValue: realDataSource.getRepository(BillingProfile),
+          },
+          { provide: getDataSourceToken('DBWrite'), useValue: realDataSource },
+          { provide: WalletService, useValue: realWalletService },
+          { provide: InvoiceService, useValue: realInvoiceService },
+          { provide: SubscriptionService, useValue: {} },
+          { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(null) } },
+          {
+            provide: TaxService,
+            useValue: {
+              getTaxForCountry: jest
+                .fn()
+                .mockResolvedValue({ taxName: 'IVA', taxRate: 0.19, isInclusive: false }),
+            },
+          },
+          {
+            provide: DianService,
+            useValue: {
+              isConfigured: jest.fn().mockReturnValue(false),
+              sendInvoice: jest.fn().mockResolvedValue({ success: true }),
+            },
+          },
+          {
+            provide: ProviderFactory,
+            useValue: {
+              getProvider: jest.fn(() => ({
+                getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
+              })),
+            },
+          },
+          {
+            provide: EventBusService,
+            useValue: {
+              publishPaymentCompleted: jest.fn(),
+              notifyPaymentSuccess: jest.fn(),
+              notifyInvoiceReady: jest.fn(),
+            },
+          },
+          {
+            provide: ClientRolesService,
+            useValue: {
+              getPlanPrice: jest.fn().mockResolvedValue(777777),
+              resolvePriceForCountry: jest.fn(),
+              assignPlanToBrand: jest.fn().mockResolvedValue(true),
+            },
+          },
+          {
+            provide: ClientPlatformService,
+            useValue: {
+              resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
+              getBrandCountry: jest.fn().mockResolvedValue('CO'),
+              canViewBrandCredit: jest.fn().mockResolvedValue(true),
+            },
+          },
+          {
+            provide: EnterprisePricingService,
+            useValue: { getForBrand: jest.fn().mockResolvedValue(null) },
+          },
+          {
+            provide: ProviderConfigService,
+            useValue: { isProviderAvailable: jest.fn().mockResolvedValue(true) },
+          },
+          { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
+        ],
+      }).compile()
+
+      checkoutWithRealPersistence = module.get<CheckoutService>(CheckoutService)
+    })
+
+    const seedWalletAndPendingRecharge = async () => {
+      const uniqueBrandId = `brand-loc32-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const wallet = await realWalletRepo.save(
+        realWalletRepo.create({
+          brandId: uniqueBrandId,
+          userId: 'u-loc32',
+          provider: 'internal',
+          currency: 'COP',
+          balance: 0,
+          status: WalletStatus.ACTIVE,
+        }),
+      )
+      createdWalletIds.push(wallet.id)
+
+      const payment = await realPaymentRepo.save(
+        realPaymentRepo.create({
+          brandId: uniqueBrandId,
+          userId: 'u-loc32',
+          walletId: wallet.id,
+          provider: PaymentProvider.CONFIO,
+          providerPaymentId: `confio-${Date.now()}`,
+          amount: 119000,
+          currency: 'COP',
+          status: PaymentStatus.PENDING,
+          purpose: PaymentPurpose.WALLET_RECHARGE,
+          metadata: { country: 'CO' },
+        }),
+      )
+      createdPaymentIds.push(payment.id)
+
+      return { wallet, payment }
+    }
+
+    it('completes a pending external recharge with completed status, one wallet credit, and one invoice (happy path)', async () => {
+      const { wallet, payment } = await seedWalletAndPendingRecharge()
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'webhook',
+      })
+
+      const storedPayment = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(storedPayment?.status).toBe(PaymentStatus.COMPLETED)
+      expect(storedPayment?.paidAt).toBeInstanceOf(Date)
+
+      const transactions = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactions).toHaveLength(1)
+      expect(Number(transactions[0].amount)).toBe(100000)
+      expect(transactions[0].idempotencyKey).toBe(`payment:${payment.id}:credit`)
+
+      const updatedWallet = await realWalletRepo.findOne({ where: { id: wallet.id } })
+      expect(Number(updatedWallet?.balance)).toBe(100000)
+
+      const invoices = await realInvoiceRepo.find({ where: { paymentId: payment.id } })
+      expect(invoices).toHaveLength(1)
+      expect(Number(invoices[0].subtotal)).toBe(100000)
+      expect(Number(invoices[0].taxTotal)).toBe(19000)
+      expect(Number(invoices[0].total)).toBe(119000)
+    })
+
+    it('keeps the payment in processing when the credit database write rejects once, and on retry credits once and transitions to completed', async () => {
+      const { wallet, payment } = await seedWalletAndPendingRecharge()
+      failNextTransactionSaveReason = 'Simulated transient credit DB failure'
+
+      await expect(
+        checkoutWithRealPersistence.completeExternalPayment(payment.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient credit DB failure')
+
+      const afterFailure = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(afterFailure?.status).toBe(PaymentStatus.PROCESSING)
+      expect(afterFailure?.paidAt).toBeNull()
+
+      const transactionsAfterFailure = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactionsAfterFailure).toHaveLength(0)
+
+      const invoicesAfterFailure = await realInvoiceRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(invoicesAfterFailure).toHaveLength(0)
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'reconcile',
+      })
+
+      const afterRetry = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(afterRetry?.status).toBe(PaymentStatus.COMPLETED)
+      expect(afterRetry?.paidAt).toBeInstanceOf(Date)
+
+      const transactionsAfterRetry = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactionsAfterRetry).toHaveLength(1)
+      expect(Number(transactionsAfterRetry[0].amount)).toBe(100000)
+
+      const updatedWallet = await realWalletRepo.findOne({ where: { id: wallet.id } })
+      expect(Number(updatedWallet?.balance)).toBe(100000)
+
+      const invoicesAfterRetry = await realInvoiceRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(invoicesAfterRetry).toHaveLength(1)
+    })
+
+    it('keeps the payment in processing when invoice creation fails once, and on retry creates a single invoice without duplicating the credit', async () => {
+      const { wallet, payment } = await seedWalletAndPendingRecharge()
+      failNextInvoiceSaveReason = 'Simulated transient invoice DB failure'
+
+      await expect(
+        checkoutWithRealPersistence.completeExternalPayment(payment.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient invoice DB failure')
+
+      const afterFailure = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(afterFailure?.status).toBe(PaymentStatus.PROCESSING)
+      expect(afterFailure?.paidAt).toBeNull()
+
+      const transactionsAfterFailure = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactionsAfterFailure).toHaveLength(1)
+
+      const invoicesAfterFailure = await realInvoiceRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(invoicesAfterFailure).toHaveLength(0)
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'reconcile',
+      })
+
+      const afterRetry = await realPaymentRepo.findOne({ where: { id: payment.id } })
+      expect(afterRetry?.status).toBe(PaymentStatus.COMPLETED)
+      expect(afterRetry?.paidAt).toBeInstanceOf(Date)
+
+      const transactionsAfterRetry = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactionsAfterRetry).toHaveLength(1)
+
+      const updatedWallet = await realWalletRepo.findOne({ where: { id: wallet.id } })
+      expect(Number(updatedWallet?.balance)).toBe(100000)
+
+      const invoicesAfterRetry = await realInvoiceRepo.find({
+        where: { paymentId: payment.id },
+      })
+      expect(invoicesAfterRetry).toHaveLength(1)
+    })
+
+    it('does not change the payment, credit, or invoice when a duplicate webhook arrives for an already completed payment', async () => {
+      const { wallet, payment } = await seedWalletAndPendingRecharge()
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'webhook',
+      })
+
+      const completedBeforeDuplicate = await realPaymentRepo.findOne({
+        where: { id: payment.id },
+      })
+      expect(completedBeforeDuplicate?.status).toBe(PaymentStatus.COMPLETED)
+      const originalPaidAt = completedBeforeDuplicate?.paidAt?.getTime()
+
+      await checkoutWithRealPersistence.completeExternalPayment(payment.id, {
+        source: 'duplicate-webhook',
+      })
+
+      const completedAfterDuplicate = await realPaymentRepo.findOne({
+        where: { id: payment.id },
+      })
+      expect(completedAfterDuplicate?.status).toBe(PaymentStatus.COMPLETED)
+      expect(completedAfterDuplicate?.paidAt?.getTime()).toBe(originalPaidAt)
+
+      const transactions = await realTransactionRepo.find({
+        where: { walletId: wallet.id },
+      })
+      expect(transactions).toHaveLength(1)
+
+      const updatedWallet = await realWalletRepo.findOne({ where: { id: wallet.id } })
+      expect(Number(updatedWallet?.balance)).toBe(100000)
+
+      const invoices = await realInvoiceRepo.find({ where: { paymentId: payment.id } })
+      expect(invoices).toHaveLength(1)
     })
   })
 })

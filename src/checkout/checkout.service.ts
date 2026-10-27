@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource, Not } from 'typeorm'
+import { Repository, DataSource } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -122,6 +122,7 @@ export class CheckoutService implements OnModuleInit {
     string,
     { fingerprint: string; promise: Promise<CheckoutResult> }
   >()
+  private readonly inFlightCompletions = new Set<string>()
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -528,23 +529,35 @@ export class CheckoutService implements OnModuleInit {
    * Este es el flujo que ejecuta el webhook cuando Stripe/MP/Dropi confirma el pago.
    */
   async completeExternalPayment(paymentId: string, providerData?: any): Promise<void> {
+    if (this.inFlightCompletions.has(paymentId)) return
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment || payment.status === PaymentStatus.COMPLETED) return
 
-    const paidAt = new Date()
     const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
     const claimed = await this.paymentRepo.update(
-      { id: paymentId, status: Not(PaymentStatus.COMPLETED) },
+      { id: paymentId, status: payment.status },
       {
-        status: PaymentStatus.COMPLETED,
-        paidAt,
+        status: PaymentStatus.PROCESSING,
         ...(providerData ? { metadata } : {}),
       },
     )
     if (!claimed.affected) return
 
-    payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = paidAt
+    this.inFlightCompletions.add(paymentId)
+    try {
+      await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
+    } finally {
+      this.inFlightCompletions.delete(paymentId)
+    }
+  }
+
+  private async finalizeProcessingPayment(
+    payment: Payment,
+    paymentId: string,
+    providerData?: any,
+    metadata?: any,
+  ): Promise<void> {
+    payment.status = PaymentStatus.PROCESSING
     if (providerData) {
       payment.metadata = metadata
     }
@@ -579,7 +592,7 @@ export class CheckoutService implements OnModuleInit {
 
     // Si es recarga de wallet → acreditar
     if (payment.purpose === PaymentPurpose.WALLET_RECHARGE && payment.walletId) {
-      await this.walletService.credit(payment.walletId, subtotal, {
+      const creditResult = await this.walletService.credit(payment.walletId, subtotal, {
         brandId: payment.brandId,
         category: 'recharge',
         description: `Recarga via ${payment.provider}`,
@@ -587,6 +600,14 @@ export class CheckoutService implements OnModuleInit {
         referenceId: payment.id,
         idempotencyKey: `payment:${payment.id}:credit`,
       })
+      if (
+        creditResult &&
+        typeof creditResult === 'object' &&
+        'error' in creditResult &&
+        (creditResult as any).error
+      ) {
+        throw new Error((creditResult as any).error)
+      }
     }
 
     // Generar factura
@@ -604,6 +625,19 @@ export class CheckoutService implements OnModuleInit {
       payment.currency,
       tax,
     )
+
+    const paidAt = new Date()
+    const completed = await this.paymentRepo.update(
+      { id: paymentId, status: PaymentStatus.PROCESSING },
+      {
+        status: PaymentStatus.COMPLETED,
+        paidAt,
+      },
+    )
+    if (!completed.affected) return
+
+    payment.status = PaymentStatus.COMPLETED
+    payment.paidAt = paidAt
 
     this.sendToDianAsync(invoice.id, payment.currency)
 
@@ -660,6 +694,18 @@ export class CheckoutService implements OnModuleInit {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
+      if (payment.status === PaymentStatus.PROCESSING) {
+        try {
+          await this.completeExternalPayment(paymentId, { source: 'reconcile' })
+          return { status: 'completed', planSlug: payment.purposeId || undefined }
+        } catch (error) {
+          this.log.warn(
+            `reconcilePayment: error completing processing payment ${paymentId}: ${error.message}`,
+          )
+          const current = await this.paymentRepo.findOne({ where: { id: paymentId } })
+          return { status: current?.status ?? payment.status }
+        }
+      }
       return { status: payment.status }
     }
 
@@ -680,7 +726,8 @@ export class CheckoutService implements OnModuleInit {
       this.log.warn(
         `reconcilePayment: error consultando ${payment.provider} para ${paymentId}: ${error.message}`,
       )
-      return { status: payment.status }
+      const current = await this.paymentRepo.findOne({ where: { id: paymentId } })
+      return { status: current?.status ?? payment.status }
     }
   }
 
@@ -1193,7 +1240,10 @@ export class CheckoutService implements OnModuleInit {
       where: { brandId: payment.brandId },
     })
 
-    const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`
+    const suffix = payment?.id
+      ? `-${String(payment.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
+      : ''
+    const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}${suffix}`
 
     const items = []
 
@@ -1252,6 +1302,13 @@ export class CheckoutService implements OnModuleInit {
       paidAt: new Date(),
       items,
     })
+
+    if (result && typeof result === 'object' && 'error' in result && (result as any).error) {
+      throw new Error((result as any).error)
+    }
+    if (!result?.data) {
+      throw new Error('Failed to create invoice')
+    }
 
     return result.data
   }

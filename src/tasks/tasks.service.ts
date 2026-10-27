@@ -540,7 +540,7 @@ export class TasksService {
     const pending = await this.paymentRepo.find({
       where: {
         provider: 'confio' as any,
-        status: PaymentStatus.PENDING,
+        status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         createdAt: LessThan(cutoff),
       },
     })
@@ -549,8 +549,14 @@ export class TasksService {
 
     let completed = 0
     for (const p of pending) {
-      if (!p.providerPaymentId) continue
       try {
+        if (!p.providerPaymentId) {
+          if (p.status === PaymentStatus.PROCESSING) {
+            await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+            completed++
+          }
+          continue
+        }
         const real = await this.providerFactory
           .getProvider('confio')
           .getPaymentStatus(p.providerPaymentId)

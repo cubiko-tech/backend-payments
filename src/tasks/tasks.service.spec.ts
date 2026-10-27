@@ -1,6 +1,7 @@
 import { In } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
+import { PaymentStatus } from '../payment/entities/payment.entity'
 import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
@@ -1992,6 +1993,34 @@ describe('TasksService — processTrialConversions', () => {
           }),
         )
         expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe('reconcileExternalPayments', () => {
+    it('queries both pending and processing Confio payments and retries a processing payment via completeExternalPayment', async () => {
+      providerFactory.getProvider.mockReturnValue({
+        getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
+      })
+      paymentRepo.find.mockResolvedValue([
+        {
+          id: 'pay-proc-1',
+          provider: 'confio',
+          providerPaymentId: 'confio-123',
+          status: PaymentStatus.PROCESSING,
+        },
+      ])
+
+      await service.reconcileExternalPayments()
+
+      expect(paymentRepo.find).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          provider: 'confio',
+          status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
+        }),
+      })
+      expect(checkoutService.completeExternalPayment).toHaveBeenCalledWith('pay-proc-1', {
+        source: 'cron-reconcile',
       })
     })
   })

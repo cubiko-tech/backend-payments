@@ -3,7 +3,7 @@ import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { HttpStatus } from '@nestjs/common'
 
 import { CheckoutService, CheckoutRequest } from './checkout.service'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentPurpose, PaymentStatus } from '../payment/entities/payment.entity'
 import { PaymentAttempt } from '../payment/entities/paymentAttempt.entity'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
@@ -1620,6 +1620,136 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(first.paymentId).not.toBe(second.paymentId)
       expect(walletService.debit).toHaveBeenCalledTimes(2)
       expect(storedPayments.size).toBe(2)
+    })
+  })
+
+  describe('completeExternalPayment intermediate status and retry', () => {
+    let paymentRow: any
+
+    beforeEach(() => {
+      paymentRow = {
+        id: 'pay-ext-1',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-1',
+        provider: 'confio',
+        providerPaymentId: 'confio-ext-1',
+        amount: 119000,
+        currency: 'COP',
+        status: PaymentStatus.PENDING,
+        purpose: PaymentPurpose.WALLET_RECHARGE,
+        paidAt: null,
+        metadata: { country: 'CO' },
+      }
+
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id === paymentRow.id) {
+          return { ...paymentRow }
+        }
+        return null
+      })
+
+      paymentRepo.update.mockImplementation(async (criteria: any, partial: any) => {
+        if (criteria.id === paymentRow.id && criteria.status === paymentRow.status) {
+          paymentRow = { ...paymentRow, ...partial }
+          return { affected: 1 }
+        }
+        return { affected: 0 }
+      })
+    })
+
+    it('transitions pending -> processing -> completed when credit and invoice succeed', async () => {
+      const observedStatusesDuringCredit: string[] = []
+      walletService.credit.mockImplementation(async () => {
+        observedStatusesDuringCredit.push(paymentRow.status)
+        return { data: { transaction: { id: 'tx-1' } } }
+      })
+
+      await service.completeExternalPayment(paymentRow.id, { source: 'webhook' })
+
+      expect(observedStatusesDuringCredit).toEqual([PaymentStatus.PROCESSING])
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(paymentRow.paidAt).toBeInstanceOf(Date)
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps payment in processing when credit fails once and completes on retry with one credit and one invoice', async () => {
+      let creditCalls = 0
+      walletService.credit.mockImplementation(async () => {
+        creditCalls++
+        if (creditCalls === 1) {
+          return { error: 'Simulated transient credit DB failure' }
+        }
+        return { data: { transaction: { id: 'tx-1' } } }
+      })
+
+      await expect(
+        service.completeExternalPayment(paymentRow.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient credit DB failure')
+
+      expect(paymentRow.status).toBe(PaymentStatus.PROCESSING)
+      expect(paymentRow.paidAt).toBeNull()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+
+      await service.completeExternalPayment(paymentRow.id, { source: 'reconcile' })
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(paymentRow.paidAt).toBeInstanceOf(Date)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps payment in processing when invoice fails once and completes on retry with one invoice', async () => {
+      let invoiceCalls = 0
+      invoiceService.create.mockImplementation(async () => {
+        invoiceCalls++
+        if (invoiceCalls === 1) {
+          return { error: 'Simulated transient invoice failure' }
+        }
+        return { data: { id: 'inv-1', invoiceNumber: 'CK-1' } }
+      })
+
+      await expect(
+        service.completeExternalPayment(paymentRow.id, { source: 'webhook' }),
+      ).rejects.toThrow('Simulated transient invoice failure')
+
+      expect(paymentRow.status).toBe(PaymentStatus.PROCESSING)
+      expect(paymentRow.paidAt).toBeNull()
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+
+      await service.completeExternalPayment(paymentRow.id, { source: 'reconcile' })
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(paymentRow.paidAt).toBeInstanceOf(Date)
+      expect(walletService.credit).toHaveBeenCalledTimes(2)
+      expect(walletService.credit).toHaveBeenNthCalledWith(
+        2,
+        'w-1',
+        100000,
+        expect.objectContaining({ idempotencyKey: `payment:${paymentRow.id}:credit` }),
+      )
+    })
+
+    it('changes nothing when a repeated webhook arrives for an already completed payment', async () => {
+      await service.completeExternalPayment(paymentRow.id, { source: 'webhook' })
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      walletService.credit.mockClear()
+      invoiceService.create.mockClear()
+      paymentRepo.update.mockClear()
+
+      await service.completeExternalPayment(paymentRow.id, { source: 'duplicate-webhook' })
+
+      expect(paymentRow.status).toBe(PaymentStatus.COMPLETED)
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(paymentRepo.update).not.toHaveBeenCalled()
     })
   })
 })

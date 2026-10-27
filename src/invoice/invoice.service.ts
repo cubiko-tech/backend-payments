@@ -29,6 +29,17 @@ export class InvoiceService {
     await queryRunner.startTransaction()
 
     try {
+      if (data.paymentId && typeof queryRunner.manager.findOne === 'function') {
+        const existing = await queryRunner.manager.findOne(Invoice, {
+          where: { paymentId: data.paymentId },
+          relations: ['items'],
+        })
+        if (existing) {
+          await queryRunner.rollbackTransaction()
+          return { data: existing }
+        }
+      }
+
       const { items, ...invoiceData } = data
       const invoice = queryRunner.manager.create(Invoice, invoiceData)
       const savedInvoice = await queryRunner.manager.save(Invoice, invoice)
@@ -52,7 +63,7 @@ export class InvoiceService {
       })
 
       this.logger.log(`Factura creada: ${savedInvoice.id} (${savedInvoice.invoiceNumber})`)
-      return { data: result }
+      return { data: result || savedInvoice }
     } catch (error) {
       await queryRunner.rollbackTransaction()
       this.logger.error(`Error al crear factura: ${error.message}`)
