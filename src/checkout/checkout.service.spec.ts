@@ -1510,4 +1510,116 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(invoiceService.create).toHaveBeenCalledTimes(1)
     })
   })
+
+  describe('checkout idempotency (Idempotency-Key)', () => {
+    let storedPayments: Map<string, any>
+    let seqId: number
+
+    beforeEach(() => {
+      storedPayments = new Map()
+      seqId = 0
+
+      paymentRepo.create.mockImplementation((data: any) => ({
+        id: `pay-${++seqId}`,
+        ...data,
+      }))
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.brandId && where?.idempotencyKey) {
+          for (const p of storedPayments.values()) {
+            if (p.brandId === where.brandId && p.idempotencyKey === where.idempotencyKey) {
+              return p
+            }
+          }
+          return null
+        }
+        if (where?.id) {
+          return storedPayments.get(where.id) || null
+        }
+        return null
+      })
+      paymentRepo.save.mockImplementation(async (payment: any) => {
+        if (payment.idempotencyKey) {
+          for (const existing of storedPayments.values()) {
+            if (
+              existing.id !== payment.id &&
+              existing.brandId === payment.brandId &&
+              existing.idempotencyKey === payment.idempotencyKey
+            ) {
+              const err: any = new Error('duplicate key value violates unique constraint')
+              err.code = '23505'
+              throw err
+            }
+          }
+        }
+        storedPayments.set(payment.id, { ...payment })
+        return payment
+      })
+    })
+
+    it('returns the same paymentId and performs a single wallet debit on duplicate calls with the same idempotencyKey and body', async () => {
+      const req = altaConWallet({ idempotencyKey: 'k1' })
+
+      const first = await service.processCheckout(req)
+      const second = await service.processCheckout(req)
+
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(first.paymentId).toBe('pay-1')
+      expect(second.paymentId).toBe('pay-1')
+      expect(second).toEqual(first)
+      expect(storedPayments.size).toBe(1)
+    })
+
+    it('deduplicates simultaneous calls with the same idempotencyKey and body into a single payment and a single debit', async () => {
+      const req = altaConWallet({ idempotencyKey: 'k-simul' })
+
+      const [first, second] = await Promise.all([
+        service.processCheckout(req),
+        service.processCheckout(req),
+      ])
+
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(first.paymentId).toBe(second.paymentId)
+      expect(storedPayments.size).toBe(1)
+    })
+
+    it('rejects with 409 IDEMPOTENCY_KEY_CONFLICT and no new debit when the same idempotencyKey is sent with a different body', async () => {
+      await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-1',
+        amount: 10000,
+        currency: 'COP',
+        idempotencyKey: 'k1',
+      })
+
+      await expect(
+        service.processCheckout({
+          brandId: BRAND_ID,
+          userId: 'u-1',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: 'w-1',
+          amount: 20000,
+          currency: 'COP',
+          idempotencyKey: 'k1',
+        }),
+      ).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+      })
+
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(storedPayments.size).toBe(1)
+    })
+
+    it('creates two payments and two debits as today when idempotencyKey is omitted', async () => {
+      const first = await service.processCheckout(altaConWallet())
+      const second = await service.processCheckout(altaConWallet())
+
+      expect(first.paymentId).not.toBe(second.paymentId)
+      expect(walletService.debit).toHaveBeenCalledTimes(2)
+      expect(storedPayments.size).toBe(2)
+    })
+  })
 })

@@ -80,6 +80,7 @@ export interface CheckoutRequest {
   cancelUrl?: string
   // Datos del comprador (requeridos por ConfioPagos: email + teléfono E.164)
   buyer?: { firstName?: string; lastName?: string; email?: string; phoneNumber?: string }
+  idempotencyKey?: string
   /**
    * Renovación emitida por el cron (`TasksService.issueExternalCharge`), NO un alta.
    * Es una bandera EXPLÍCITA del llamador: nunca se deduce de los datos y nunca se
@@ -117,6 +118,10 @@ export interface CheckoutResult {
 export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly inFlightCheckouts = new Map<
+    string,
+    { fingerprint: string; promise: Promise<CheckoutResult> }
+  >()
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -165,6 +170,18 @@ export class CheckoutService implements OnModuleInit {
     // mutar la request del llamador escondía el efecto y le reescribía el objeto al
     // cron, que nos pasa datos derivados de una fila viva de `subscriptions`.
     const req = this.normalizeRequest(request)
+    const idempotencyFingerprint = req.idempotencyKey
+      ? this.buildIdempotencyFingerprint(req)
+      : undefined
+
+    if (req.idempotencyKey) {
+      const existing = await this.paymentRepo.findOne({
+        where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+      })
+      if (existing) {
+        return this.resolveExistingIdempotentPayment(existing, req, idempotencyFingerprint)
+      }
+    }
 
     // 1. Precio y moneda. En `plan_purchase` los decide el país REGISTRADO de la
     // marca; `country` viene informado SÓLO cuando el precio salió del catálogo por
@@ -215,6 +232,7 @@ export class CheckoutService implements OnModuleInit {
     const payment = this.paymentRepo.create({
       brandId: req.brandId,
       userId: req.userId,
+      ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}),
       walletId: req.walletId || null,
       provider: req.provider as PaymentProvider,
       amount: totalAmount,
@@ -228,16 +246,61 @@ export class CheckoutService implements OnModuleInit {
       // perfil cae al 19% colombiano — el bug que esta tarea cierra. Va en `metadata` y no
       // en una columna nueva: es un dato del checkout, no del dominio del pago, y no
       // necesita migración.
-      metadata: { country: taxCountry },
+      metadata: req.idempotencyKey
+        ? { country: taxCountry, idempotencyFingerprint }
+        : { country: taxCountry },
     })
-    await this.paymentRepo.save(payment)
 
-    // 3. Procesar según provider
+    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
+    try {
+      const savedPayment = await this.paymentRepo.save(payment)
+      if (savedPayment?.id && !payment.id) {
+        payment.id = savedPayment.id
+      }
+    } catch (error) {
+      if (req.idempotencyKey && this.isUniqueConstraintViolation(error)) {
+        return this.handleConcurrentIdempotentCheckout(req, idempotencyFingerprint, inFlightKey)
+      }
+      throw error
+    }
+
+    if (inFlightKey) {
+      const executionPromise = this.executeCheckoutPayment(
+        payment,
+        req,
+        amount,
+        taxAmount,
+        totalAmount,
+        currency,
+        tax,
+      )
+      this.inFlightCheckouts.set(inFlightKey, {
+        fingerprint: idempotencyFingerprint,
+        promise: executionPromise,
+      })
+      try {
+        return await executionPromise
+      } finally {
+        this.inFlightCheckouts.delete(inFlightKey)
+      }
+    }
+
+    return this.executeCheckoutPayment(payment, req, amount, taxAmount, totalAmount, currency, tax)
+  }
+
+  private executeCheckoutPayment(
+    payment: Payment,
+    req: CheckoutRequest,
+    amount: number,
+    taxAmount: number,
+    totalAmount: number,
+    currency: string,
+    tax: any,
+  ): Promise<CheckoutResult> {
     if (req.provider === 'wallet') {
       return this.processWalletPayment(payment, req, amount, taxAmount, currency, tax)
-    } else {
-      return this.processExternalPayment(payment, req, totalAmount, currency)
     }
+    return this.processExternalPayment(payment, req, totalAmount, currency)
   }
 
   /**
@@ -375,6 +438,14 @@ export class CheckoutService implements OnModuleInit {
       this.eventBus.notifyInvoiceReady(req.brandId, invoice.id, invoice.invoiceNumber)
     }
 
+    if (req.idempotencyKey) {
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        checkoutResult: result,
+      }
+      await this.paymentRepo.save(payment)
+    }
+
     this.log.log(
       `Checkout completado: payment=${payment.id} brand=${req.brandId} plan=${req.planSlug}`,
     )
@@ -404,12 +475,24 @@ export class CheckoutService implements OnModuleInit {
         metadata: { paymentId: payment.id, buyer: req.buyer },
       })
 
+      const result: CheckoutResult = {
+        paymentId: payment.id,
+        status: 'pending',
+        checkoutUrl: checkout.checkoutUrl,
+      }
+
       // Actualizar pago con datos del provider
       payment.providerPaymentId = checkout.providerPaymentId
       payment.checkoutUrl = checkout.checkoutUrl
       payment.expiresAt = new Date(
         Date.now() + parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24') * 3600000,
       )
+      if (req.idempotencyKey) {
+        payment.metadata = {
+          ...(payment.metadata || {}),
+          checkoutResult: result,
+        }
+      }
       await this.paymentRepo.save(payment)
 
       // Registrar intento
@@ -427,11 +510,7 @@ export class CheckoutService implements OnModuleInit {
 
       this.log.log(`Checkout externo creado: payment=${payment.id} provider=${req.provider}`)
 
-      return {
-        paymentId: payment.id,
-        status: 'pending',
-        checkoutUrl: checkout.checkoutUrl,
-      }
+      return result
     } catch (error) {
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
@@ -816,11 +895,23 @@ export class CheckoutService implements OnModuleInit {
    * comportamiento de hoy — endurecerlos es otra tarea, con sus propios clientes.
    */
   private normalizeRequest(req: CheckoutRequest): CheckoutRequest {
-    if (req.purpose === 'plan_purchase' && !req.renewal) {
-      return { ...req, brandId: this.assertUsableBrandId(req.brandId) }
+    const brandId =
+      req.purpose === 'plan_purchase' && !req.renewal
+        ? this.assertUsableBrandId(req.brandId)
+        : typeof req.brandId === 'string'
+          ? req.brandId.trim()
+          : req.brandId
+
+    if (req.idempotencyKey === undefined) {
+      return { ...req, brandId }
     }
-    const trimmed = typeof req.brandId === 'string' ? req.brandId.trim() : req.brandId
-    return { ...req, brandId: trimmed }
+
+    const idempotencyKey =
+      typeof req.idempotencyKey === 'string' && req.idempotencyKey.trim().length > 0
+        ? req.idempotencyKey.trim()
+        : undefined
+
+    return { ...req, brandId, idempotencyKey }
   }
 
   /** UUID canónico: el formato con el que platform indexa `brand.id`. */
@@ -1210,5 +1301,153 @@ export class CheckoutService implements OnModuleInit {
       where: { brandId },
     })
     return profile?.country || 'CO' // Default Colombia
+  }
+
+  private isUniqueConstraintViolation(error: any): boolean {
+    return error?.code === '23505' || error?.driverError?.code === '23505'
+  }
+
+  private createIdempotencyConflictException(): RequestException {
+    return new RequestException(
+      {
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+        message: 'Idempotency-Key was already used with a different checkout request body',
+      },
+      HttpStatus.CONFLICT,
+    )
+  }
+
+  private buildIdempotencyFingerprint(req: CheckoutRequest): string {
+    return JSON.stringify({
+      userId: req.userId || null,
+      purpose: req.purpose || null,
+      provider: req.provider || null,
+      planSlug: req.planSlug || null,
+      amount: req.amount !== undefined && req.amount !== null ? Number(req.amount) : null,
+      currency: req.currency ? String(req.currency).toUpperCase() : null,
+      walletId: req.walletId || null,
+      successUrl: req.successUrl || null,
+      cancelUrl: req.cancelUrl || null,
+      buyer: req.buyer
+        ? {
+            firstName: req.buyer.firstName || null,
+            lastName: req.buyer.lastName || null,
+            email: req.buyer.email || null,
+            phoneNumber: req.buyer.phoneNumber || null,
+          }
+        : null,
+      renewal: Boolean(req.renewal),
+    })
+  }
+
+  private assertMatchingIdempotencyPayload(
+    existing: Payment,
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+  ): void {
+    const storedFingerprint = existing.metadata?.idempotencyFingerprint
+    if (typeof storedFingerprint === 'string' && incomingFingerprint) {
+      if (storedFingerprint !== incomingFingerprint) {
+        throw this.createIdempotencyConflictException()
+      }
+      return
+    }
+
+    if (existing.purpose && req.purpose && String(existing.purpose) !== String(req.purpose)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (existing.provider && req.provider && String(existing.provider) !== String(req.provider)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if ((existing.purposeId || null) !== (req.planSlug || null)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if ((existing.walletId || null) !== (req.walletId || null)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (
+      req.amount !== undefined &&
+      existing.amount !== undefined &&
+      Number(existing.amount) !== Number(req.amount)
+    ) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (
+      req.currency !== undefined &&
+      existing.currency !== undefined &&
+      String(existing.currency).toUpperCase() !== String(req.currency).toUpperCase()
+    ) {
+      throw this.createIdempotencyConflictException()
+    }
+  }
+
+  private async resolveExistingIdempotentPayment(
+    existing: Payment,
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+  ): Promise<CheckoutResult> {
+    this.assertMatchingIdempotencyPayload(existing, req, incomingFingerprint)
+
+    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
+    if (inFlightKey) {
+      const active = this.inFlightCheckouts.get(inFlightKey)
+      if (active) {
+        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
+          throw this.createIdempotencyConflictException()
+        }
+        return active.promise
+      }
+    }
+
+    if (existing.metadata?.checkoutResult) {
+      return existing.metadata.checkoutResult as CheckoutResult
+    }
+
+    if (existing.status === PaymentStatus.PENDING && req.idempotencyKey) {
+      const refreshed = await this.paymentRepo.findOne({
+        where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+      })
+      if (refreshed?.metadata?.checkoutResult) {
+        return refreshed.metadata.checkoutResult as CheckoutResult
+      }
+      if (refreshed) {
+        return {
+          paymentId: refreshed.id,
+          status: refreshed.status,
+          ...(refreshed.checkoutUrl ? { checkoutUrl: refreshed.checkoutUrl } : {}),
+        }
+      }
+    }
+
+    return {
+      paymentId: existing.id,
+      status: existing.status,
+      ...(existing.checkoutUrl ? { checkoutUrl: existing.checkoutUrl } : {}),
+    }
+  }
+
+  private async handleConcurrentIdempotentCheckout(
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+    inFlightKey?: string,
+  ): Promise<CheckoutResult> {
+    if (inFlightKey) {
+      const active = this.inFlightCheckouts.get(inFlightKey)
+      if (active) {
+        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
+          throw this.createIdempotencyConflictException()
+        }
+        return active.promise
+      }
+    }
+
+    const existing = await this.paymentRepo.findOne({
+      where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+    })
+    if (existing) {
+      return this.resolveExistingIdempotentPayment(existing, req, incomingFingerprint)
+    }
+
+    throw this.createIdempotencyConflictException()
   }
 }

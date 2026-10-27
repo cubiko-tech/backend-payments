@@ -82,6 +82,27 @@ describe('CheckoutController', () => {
       }),
     )
   })
+
+  it('forwards the Idempotency-Key HTTP header to CheckoutService.processCheckout', async () => {
+    await controller.processCheckout(
+      {
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        userId: 'u-1',
+        purpose: 'plan_purchase',
+        provider: 'wallet',
+        planSlug: 'dropi-roax',
+      },
+      { headers: { 'Idempotency-Key': 'idem-key-123' } },
+    )
+
+    expect(checkoutService.processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: 'idem-key-123',
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        planSlug: 'dropi-roax',
+      }),
+    )
+  })
 })
 
 describe('POST /checkout brand membership gate', () => {
@@ -515,6 +536,146 @@ describe('POST /checkout brand membership gate', () => {
       expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
       expect(invoiceService.create).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('idempotency via Idempotency-Key header', () => {
+    let storedPayments: Map<string, any>
+    let seqId: number
+
+    beforeEach(() => {
+      mockPlatformResponses([{ userId: 'user-owner-b', roleName: 'superuser' }])
+      storedPayments = new Map()
+      seqId = 0
+
+      paymentRepo.create.mockImplementation((data: any) => ({
+        id: `pay-${++seqId}`,
+        ...data,
+      }))
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.brandId && where?.idempotencyKey) {
+          for (const p of storedPayments.values()) {
+            if (p.brandId === where.brandId && p.idempotencyKey === where.idempotencyKey) {
+              return p
+            }
+          }
+          return null
+        }
+        if (where?.id) {
+          return storedPayments.get(where.id) || null
+        }
+        return null
+      })
+      paymentRepo.save.mockImplementation(async (payment: any) => {
+        if (payment.idempotencyKey) {
+          for (const existing of storedPayments.values()) {
+            if (
+              existing.id !== payment.id &&
+              existing.brandId === payment.brandId &&
+              existing.idempotencyKey === payment.idempotencyKey
+            ) {
+              const err: any = new Error('duplicate key value violates unique constraint')
+              err.code = '23505'
+              throw err
+            }
+          }
+        }
+        storedPayments.set(payment.id, { ...payment })
+        return payment
+      })
+    })
+
+    it('returns 201 with the same paymentId and debits the wallet once on duplicate POST /checkout with the same Idempotency-Key and body', async () => {
+      const headers = {
+        'authorization': `Bearer ${ACCESS_SERVER}`,
+        'Idempotency-Key': 'k1',
+      }
+      const body: CheckoutRequest = {
+        brandId: BRAND_B_ID,
+        userId: 'user-owner-b',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: WALLET_B_ID,
+        amount: 10000,
+        currency: 'COP',
+      }
+
+      const first = await postCheckout({ headers }, body)
+      const second = await postCheckout({ headers }, body)
+
+      expect(first.status).toBe(201)
+      expect(second.status).toBe(201)
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(second.body.data.paymentId).toBe(first.body.data.paymentId)
+      expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - 10000)
+      expect(storedPayments.size).toBe(1)
+    })
+
+    it('responds 409 IDEMPOTENCY_KEY_CONFLICT without a new debit when the same Idempotency-Key is sent with a different body', async () => {
+      const headers = {
+        'authorization': `Bearer ${ACCESS_SERVER}`,
+        'Idempotency-Key': 'k1',
+      }
+
+      const first = await postCheckout(
+        { headers },
+        {
+          brandId: BRAND_B_ID,
+          userId: 'user-owner-b',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: WALLET_B_ID,
+          amount: 10000,
+          currency: 'COP',
+        },
+      )
+
+      const conflict = await postCheckout(
+        { headers },
+        {
+          brandId: BRAND_B_ID,
+          userId: 'user-owner-b',
+          purpose: 'service_payment',
+          provider: 'wallet',
+          walletId: WALLET_B_ID,
+          amount: 25000,
+          currency: 'COP',
+        },
+      )
+
+      expect(first.status).toBe(201)
+      expect(conflict.status).toBe(409)
+      expect(conflict.body).toEqual(
+        expect.objectContaining({
+          code: 'IDEMPOTENCY_KEY_CONFLICT',
+        }),
+      )
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - 10000)
+    })
+
+    it('charges each POST /checkout as today when no Idempotency-Key header is provided', async () => {
+      const headers = {
+        authorization: `Bearer ${ACCESS_SERVER}`,
+      }
+      const body: CheckoutRequest = {
+        brandId: BRAND_B_ID,
+        userId: 'user-owner-b',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: WALLET_B_ID,
+        amount: 10000,
+        currency: 'COP',
+      }
+
+      const first = await postCheckout({ headers }, body)
+      const second = await postCheckout({ headers }, body)
+
+      expect(first.status).toBe(201)
+      expect(second.status).toBe(201)
+      expect(second.body.data.paymentId).not.toBe(first.body.data.paymentId)
+      expect(walletService.debit).toHaveBeenCalledTimes(2)
+      expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - 20000)
     })
   })
 })
