@@ -232,7 +232,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       })
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('route=PATCH /billing-profile'))
 
-      await expect(denied.create({ brandId: FOREIGN_BRAND_ID }, userReq)).rejects.toMatchObject({
+      await expect(denied.create({} as any, userReq, FOREIGN_BRAND_ID)).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
 
@@ -377,9 +377,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       await expect(controller.findByBrand(FOREIGN_BRAND_ID, {}, userReq)).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
-      await expect(
-        controller.request({ brandId: FOREIGN_BRAND_ID }, userReq),
-      ).rejects.toMatchObject({
+      await expect(controller.request({} as any, userReq, FOREIGN_BRAND_ID)).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
       expect(refundService.findByBrand).not.toHaveBeenCalled()
@@ -440,7 +438,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
         status: HttpStatus.FORBIDDEN,
       })
       await expect(
-        controller.createCheckout({ brandId: FOREIGN_BRAND_ID, amount: 100 }, userReq),
+        controller.createCheckout({ amount: 100 } as any, userReq, FOREIGN_BRAND_ID),
       ).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
@@ -499,11 +497,9 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       await expect(controller.findByBrand(FOREIGN_BRAND_ID, userReq)).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
-      await expect(controller.create({ brandId: FOREIGN_BRAND_ID }, userReq)).rejects.toMatchObject(
-        {
-          status: HttpStatus.FORBIDDEN,
-        },
-      )
+      await expect(controller.create({} as any, userReq, FOREIGN_BRAND_ID)).rejects.toMatchObject({
+        status: HttpStatus.FORBIDDEN,
+      })
       expect(paymentMethodService.findByBrand).not.toHaveBeenCalled()
       expect(paymentMethodService.create).not.toHaveBeenCalled()
 
@@ -528,7 +524,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       const { controller, paymentMethodService } = buildSubject(true)
 
       await controller.findByBrand(OWN_BRAND_ID, userReq)
-      await controller.create({ brandId: OWN_BRAND_ID }, userReq)
+      await controller.create({} as any, userReq)
       await controller.remove(RESOURCE_ID, userReq)
       await controller.setDefault(RESOURCE_ID, userReq)
 

@@ -21,7 +21,15 @@ export class RefundService {
   async request(data: Partial<Refund>) {
     try {
       const refund = this.refundRepository.create({
-        ...data,
+        brandId: data.brandId,
+        paymentId: data.paymentId,
+        amount: data.amount,
+        currency: data.currency,
+        reason: data.reason,
+        provider: data.provider,
+        requestedBy: data.requestedBy,
+        description: data.description,
+        metadata: data.metadata,
         status: RefundStatus.PENDING,
       })
       const saved = await this.refundRepository.save(refund)

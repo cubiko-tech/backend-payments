@@ -80,7 +80,7 @@ export class WalletService {
         )
       }
 
-      const wallet = this.walletRepository.create(data)
+      const wallet = this.walletRepository.create(this.sanitizeNewWallet(data))
       const saved = await this.walletRepository.save(wallet)
       this.logger.log(`Wallet creada: ${saved.id} para marca ${saved.brandId}`)
       return { data: saved }
@@ -723,6 +723,20 @@ export class WalletService {
       return { error: error.message }
     } finally {
       await queryRunner.release()
+    }
+  }
+
+  private sanitizeNewWallet(data: Partial<Wallet>): Partial<Wallet> {
+    return {
+      brandId: data.brandId,
+      userId: data.userId,
+      provider: data.provider,
+      providerWalletId: data.providerWalletId,
+      currency: data.currency,
+      label: data.label,
+      metadata: data.metadata,
+      balance: 0,
+      status: WalletStatus.ACTIVE,
     }
   }
 }

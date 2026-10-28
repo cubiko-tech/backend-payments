@@ -12,12 +12,14 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { PaymentService } from './payment.service'
+import { CreatePaymentCheckoutDto } from './dto/create-payment-checkout.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
   isPrivilegedCaller,
+  resolveRequestBrandId,
 } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Payment')
@@ -42,12 +44,16 @@ export class PaymentController {
   @Post('checkout')
   @ApiOperation({ summary: 'Crear un checkout de pago' })
   @ApiResponse({ status: 201, description: 'Checkout creado correctamente' })
-  async createCheckout(@Body() data: any, @Req() req?: any) {
+  async createCheckout(
+    @Body() data: CreatePaymentCheckoutDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
       req,
-      data?.brandId,
+      resolveRequestBrandId(req, brandId),
       'POST /payment/checkout',
     )
     return this.paymentService.createCheckout({ ...data, brandId: validBrandId })

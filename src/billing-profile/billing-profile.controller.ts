@@ -13,9 +13,11 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
+import { CreateBillingProfileDto } from './dto/create-billing-profile.dto'
+import { UpdateBillingProfileDto } from './dto/update-billing-profile.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
-import { assertBrandAccess } from '../shared/auth/brand-scope.util'
+import { assertBrandAccess, resolveRequestBrandId } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Billing Profile')
 @Controller('billing-profile')
@@ -54,12 +56,16 @@ export class BillingProfileController {
   @Post()
   @ApiOperation({ summary: 'Crear perfil de facturación (valida según país)' })
   @ApiResponse({ status: 201, description: 'Perfil de facturación creado correctamente' })
-  async create(@Body() data: any, @Req() req?: any) {
+  async create(
+    @Body() data: CreateBillingProfileDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
       req,
-      data?.brandId,
+      resolveRequestBrandId(req, brandId),
       'POST /billing-profile',
     )
     return this.billingProfileService.create({ ...data, brandId: validBrandId })
@@ -68,7 +74,11 @@ export class BillingProfileController {
   @Patch()
   @ApiOperation({ summary: 'Actualizar perfil de facturación (valida según país)' })
   @ApiResponse({ status: 200, description: 'Perfil de facturación actualizado correctamente' })
-  async update(@Query('brandId') brandId: string, @Body() data: any, @Req() req?: any) {
+  async update(
+    @Query('brandId') brandId: string,
+    @Body() data: UpdateBillingProfileDto,
+    @Req() req?: any,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,

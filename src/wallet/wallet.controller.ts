@@ -12,12 +12,15 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { WalletService } from './wallet.service'
+import { CreateWalletDto } from './dto/create-wallet.dto'
+import { TransferWalletDto } from './dto/transfer-wallet.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
   isPrivilegedCaller,
+  resolveRequestBrandId,
 } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Wallet')
@@ -85,15 +88,23 @@ export class WalletController {
   @Post()
   @ApiOperation({ summary: 'Crear una wallet (máx 10 por marca)' })
   @ApiResponse({ status: 201, description: 'Wallet creada correctamente' })
-  async create(@Body() data: any, @Req() req?: any) {
+  async create(
+    @Body() data: CreateWalletDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
       req,
-      data?.brandId,
+      resolveRequestBrandId(req, brandId),
       'POST /wallet',
     )
-    return this.walletService.create({ ...data, brandId: validBrandId })
+    return this.walletService.create({
+      ...data,
+      userId: data.userId ?? req?.user?.id,
+      brandId: validBrandId,
+    })
   }
 
   @Get(':id/transactions')
@@ -142,16 +153,7 @@ export class WalletController {
   @Post('transfer')
   @ApiOperation({ summary: 'Transferir fondos entre wallets (misma marca y moneda)' })
   @ApiResponse({ status: 200, description: 'Transferencia realizada' })
-  async transfer(
-    @Body()
-    data: {
-      fromWalletId: string
-      toWalletId: string
-      amount: number
-      description?: string
-    },
-    @Req() req?: any,
-  ) {
+  async transfer(@Body() data: TransferWalletDto, @Req() req?: any) {
     if (!isPrivilegedCaller(req)) {
       const fromWallet = await this.walletService.findById(data?.fromWalletId)
       await assertResourceBrandAccess(

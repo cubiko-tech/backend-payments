@@ -49,7 +49,20 @@ export class PaymentMethodService {
    */
   async create(data: Partial<PaymentMethod>) {
     try {
-      const method = this.paymentMethodRepository.create(data)
+      const method = this.paymentMethodRepository.create({
+        brandId: data.brandId,
+        userId: data.userId,
+        provider: data.provider,
+        providerMethodId: data.providerMethodId,
+        type: data.type,
+        last4: data.last4,
+        brand: data.brand,
+        expiryMonth: data.expiryMonth,
+        expiryYear: data.expiryYear,
+        isDefault: data.isDefault ?? false,
+        metadata: data.metadata,
+        status: PaymentMethodStatus.ACTIVE,
+      })
       const saved = await this.paymentMethodRepository.save(method)
       this.logger.log(`Método de pago creado: ${saved.id} para marca ${saved.brandId}`)
       return { data: saved }

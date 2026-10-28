@@ -18,6 +18,23 @@ export function isPrivilegedCaller(req: any): boolean {
   return Boolean(req?.user?.isSuperAdmin || req?.user?.id === 'server')
 }
 
+export function resolveRequestBrandId(req: any, explicitBrandId?: unknown): unknown {
+  if (typeof explicitBrandId === 'string' && explicitBrandId.trim().length > 0) {
+    return explicitBrandId.trim()
+  }
+  const userBrand = req?.user?.brand
+  if (typeof userBrand === 'string' && userBrand.trim().length > 0) {
+    return userBrand.trim()
+  }
+  if (userBrand && typeof userBrand === 'object' && typeof userBrand.id === 'string') {
+    return userBrand.id.trim()
+  }
+  if (typeof req?.user?.brandId === 'string' && req.user.brandId.trim().length > 0) {
+    return req.user.brandId.trim()
+  }
+  return explicitBrandId
+}
+
 export async function assertBrandAccess(
   platformClient: ClientPlatformService,
   logger: Logger,

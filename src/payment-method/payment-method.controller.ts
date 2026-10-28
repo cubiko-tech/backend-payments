@@ -14,12 +14,14 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { PaymentMethodService } from './payment-method.service'
+import { CreatePaymentMethodDto } from './dto/create-payment-method.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
   isPrivilegedCaller,
+  resolveRequestBrandId,
 } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Payment Method')
@@ -58,12 +60,16 @@ export class PaymentMethodController {
   @Post()
   @ApiOperation({ summary: 'Crear un método de pago' })
   @ApiResponse({ status: 201, description: 'Método de pago creado correctamente' })
-  async create(@Body() data: any, @Req() req?: any) {
+  async create(
+    @Body() data: CreatePaymentMethodDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
       req,
-      data?.brandId,
+      resolveRequestBrandId(req, brandId),
       'POST /payment-method',
     )
     return this.paymentMethodService.create({ ...data, brandId: validBrandId })

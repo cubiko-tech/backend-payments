@@ -12,12 +12,15 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
+import { RequestRefundDto } from './dto/request-refund.dto'
+import { ApproveRefundDto } from './dto/approve-refund.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
   isPrivilegedCaller,
+  resolveRequestBrandId,
 } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Refund')
@@ -42,12 +45,16 @@ export class RefundController {
   @Post()
   @ApiOperation({ summary: 'Solicitar un reembolso' })
   @ApiResponse({ status: 201, description: 'Reembolso solicitado correctamente' })
-  async request(@Body() data: any, @Req() req?: any) {
+  async request(
+    @Body() data: RequestRefundDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
       req,
-      data?.brandId,
+      resolveRequestBrandId(req, brandId),
       'POST /refund',
     )
     return this.refundService.request({ ...data, brandId: validBrandId })
@@ -91,7 +98,7 @@ export class RefundController {
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
   async approve(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() data: { approvedBy: string },
+    @Body() data: ApproveRefundDto,
     @Req() req?: any,
   ) {
     if (!isPrivilegedCaller(req)) {
