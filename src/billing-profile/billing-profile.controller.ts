@@ -1,8 +1,21 @@
-import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards } from '@nestjs/common'
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  Req,
+  UseGuards,
+  Logger,
+} from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { assertBrandAccess } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Billing Profile')
 @Controller('billing-profile')
@@ -16,30 +29,54 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  */
 @UseGuards(ApiAuthGuard)
 export class BillingProfileController {
+  private readonly logger = new Logger(BillingProfileController.name)
+
   constructor(
     private readonly billingProfileService: BillingProfileService,
     private readonly legalDocumentService: LegalDocumentService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Get()
   @ApiOperation({ summary: 'Obtener perfil de facturación de una marca' })
   @ApiResponse({ status: 200, description: 'Perfil de facturación obtenido correctamente' })
-  async get(@Query('brandId') brandId: string) {
-    return this.billingProfileService.get(brandId)
+  async get(@Query('brandId') brandId: string, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /billing-profile',
+    )
+    return this.billingProfileService.get(validBrandId)
   }
 
   @Post()
   @ApiOperation({ summary: 'Crear perfil de facturación (valida según país)' })
   @ApiResponse({ status: 201, description: 'Perfil de facturación creado correctamente' })
-  async create(@Body() data: any) {
-    return this.billingProfileService.create(data)
+  async create(@Body() data: any, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      data?.brandId,
+      'POST /billing-profile',
+    )
+    return this.billingProfileService.create({ ...data, brandId: validBrandId })
   }
 
   @Patch()
   @ApiOperation({ summary: 'Actualizar perfil de facturación (valida según país)' })
   @ApiResponse({ status: 200, description: 'Perfil de facturación actualizado correctamente' })
-  async update(@Query('brandId') brandId: string, @Body() data: any) {
-    return this.billingProfileService.update(brandId, data)
+  async update(@Query('brandId') brandId: string, @Body() data: any, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'PATCH /billing-profile',
+    )
+    return this.billingProfileService.update(validBrandId, data)
   }
 
   @Get('requirements')
@@ -56,8 +93,15 @@ export class BillingProfileController {
   @Get(':brandId/documents')
   @ApiOperation({ summary: 'Listar documentos legales de una marca' })
   @ApiResponse({ status: 200, description: 'Documentos obtenidos' })
-  async getDocuments(@Param('brandId') brandId: string) {
-    return this.legalDocumentService.findByBrand(brandId)
+  async getDocuments(@Param('brandId') brandId: string, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /billing-profile/:brandId/documents',
+    )
+    return this.legalDocumentService.findByBrand(validBrandId)
   }
 
   @Post(':brandId/documents')
@@ -66,8 +110,16 @@ export class BillingProfileController {
   async uploadDocument(
     @Param('brandId') brandId: string,
     @Body() data: { country: string; documentType: string; documentUrl: string },
+    @Req() req?: any,
   ) {
-    return this.legalDocumentService.upsert({ brandId, ...data })
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'POST /billing-profile/:brandId/documents',
+    )
+    return this.legalDocumentService.upsert({ ...data, brandId: validBrandId })
   }
 
   // Admin: verificar/rechazar documentos

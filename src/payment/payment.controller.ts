@@ -1,7 +1,24 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common'
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  Req,
+  UseGuards,
+  ParseUUIDPipe,
+  Logger,
+} from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { PaymentService } from './payment.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { ClientPlatformService } from '../client/client-platform.service'
+import {
+  assertBrandAccess,
+  assertResourceBrandAccess,
+  isPrivilegedCaller,
+} from '../shared/auth/brand-scope.util'
 
 @ApiTags('Payment')
 @Controller('payment')
@@ -15,20 +32,40 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  */
 @UseGuards(ApiAuthGuard)
 export class PaymentController {
-  constructor(private readonly paymentService: PaymentService) {}
+  private readonly logger = new Logger(PaymentController.name)
+
+  constructor(
+    private readonly paymentService: PaymentService,
+    private readonly platformClient: ClientPlatformService,
+  ) {}
 
   @Post('checkout')
   @ApiOperation({ summary: 'Crear un checkout de pago' })
   @ApiResponse({ status: 201, description: 'Checkout creado correctamente' })
-  async createCheckout(@Body() data: any) {
-    return this.paymentService.createCheckout(data)
+  async createCheckout(@Body() data: any, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      data?.brandId,
+      'POST /payment/checkout',
+    )
+    return this.paymentService.createCheckout({ ...data, brandId: validBrandId })
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener detalle de un pago' })
   @ApiResponse({ status: 200, description: 'Pago obtenido correctamente' })
-  async getPaymentById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.paymentService.getPaymentById(id)
+  async getPaymentById(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
+    const result = await this.paymentService.getPaymentById(id)
+    await assertResourceBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      result?.data?.brandId,
+      'GET /payment/:id',
+    )
+    return result
   }
 
   @Get()
@@ -37,14 +74,32 @@ export class PaymentController {
   async getPaymentsByBrand(
     @Query('brandId') brandId: string,
     @Query() filters: { page?: number; limit?: number; status?: string },
+    @Req() req?: any,
   ) {
-    return this.paymentService.getPaymentsByBrand(brandId, filters)
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /payment',
+    )
+    return this.paymentService.getPaymentsByBrand(validBrandId, filters)
   }
 
   @Post(':id/cancel')
   @ApiOperation({ summary: 'Cancelar un pago pendiente' })
   @ApiResponse({ status: 200, description: 'Pago cancelado correctamente' })
-  async cancelPayment(@Param('id', ParseUUIDPipe) id: string) {
+  async cancelPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
+    if (!isPrivilegedCaller(req)) {
+      const payment = await this.paymentService.getPaymentById(id)
+      await assertResourceBrandAccess(
+        this.platformClient,
+        this.logger,
+        req,
+        payment?.data?.brandId,
+        'POST /payment/:id/cancel',
+      )
+    }
     return this.paymentService.cancelPayment(id)
   }
 }

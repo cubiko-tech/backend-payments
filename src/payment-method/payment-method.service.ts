@@ -33,6 +33,17 @@ export class PaymentMethodService {
     }
   }
 
+  async findById(id: string) {
+    const method = await this.paymentMethodReadRepository.findOne({ where: { id } })
+    if (!method) {
+      throw new RequestException(
+        { code: 'PAYMENT_METHOD_NOT_FOUND', message: 'Payment method not found' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+    return { data: method }
+  }
+
   /**
    * Crear un método de pago
    */

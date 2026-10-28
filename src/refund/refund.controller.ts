@@ -1,7 +1,24 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common'
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  Req,
+  UseGuards,
+  ParseUUIDPipe,
+  Logger,
+} from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { ClientPlatformService } from '../client/client-platform.service'
+import {
+  assertBrandAccess,
+  assertResourceBrandAccess,
+  isPrivilegedCaller,
+} from '../shared/auth/brand-scope.util'
 
 @ApiTags('Refund')
 @Controller('refund')
@@ -15,13 +32,25 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  */
 @UseGuards(ApiAuthGuard)
 export class RefundController {
-  constructor(private readonly refundService: RefundService) {}
+  private readonly logger = new Logger(RefundController.name)
+
+  constructor(
+    private readonly refundService: RefundService,
+    private readonly platformClient: ClientPlatformService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Solicitar un reembolso' })
   @ApiResponse({ status: 201, description: 'Reembolso solicitado correctamente' })
-  async request(@Body() data: any) {
-    return this.refundService.request(data)
+  async request(@Body() data: any, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      data?.brandId,
+      'POST /refund',
+    )
+    return this.refundService.request({ ...data, brandId: validBrandId })
   }
 
   @Get()
@@ -30,21 +59,51 @@ export class RefundController {
   async findByBrand(
     @Query('brandId') brandId: string,
     @Query() filters: { page?: number; limit?: number; status?: string },
+    @Req() req?: any,
   ) {
-    return this.refundService.findByBrand(brandId, filters)
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /refund',
+    )
+    return this.refundService.findByBrand(validBrandId, filters)
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener detalle de un reembolso' })
   @ApiResponse({ status: 200, description: 'Reembolso obtenido correctamente' })
-  async findById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.refundService.findById(id)
+  async findById(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
+    const result = await this.refundService.findById(id)
+    await assertResourceBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      result?.data?.brandId,
+      'GET /refund/:id',
+    )
+    return result
   }
 
   @Post(':id/approve')
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
-  async approve(@Param('id', ParseUUIDPipe) id: string, @Body() data: { approvedBy: string }) {
+  async approve(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() data: { approvedBy: string },
+    @Req() req?: any,
+  ) {
+    if (!isPrivilegedCaller(req)) {
+      const refund = await this.refundService.findById(id)
+      await assertResourceBrandAccess(
+        this.platformClient,
+        this.logger,
+        req,
+        refund?.data?.brandId,
+        'POST /refund/:id/approve',
+      )
+    }
     return this.refundService.approve(id, data.approvedBy)
   }
 }
