@@ -43,6 +43,9 @@ export class TaxService {
   /**
    * Obtener configuración de impuestos por país.
    * Uso interno — no expone controller.
+   *
+   * `isInclusive` is returned for schema compatibility only; `CheckoutService`
+   * treats all published prices as final tax-inclusive amounts.
    */
   async getTaxForCountry(
     country: string,

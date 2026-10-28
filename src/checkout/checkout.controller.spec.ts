@@ -535,7 +535,7 @@ describe('POST /checkout brand membership gate', () => {
       expect(paymentRepo.save).toHaveBeenCalled()
       expect(mockQueryRunner.startTransaction).toHaveBeenCalledTimes(1)
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
-      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).not.toHaveBeenCalled()
     })
   })
 

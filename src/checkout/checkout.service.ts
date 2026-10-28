@@ -225,19 +225,16 @@ export class CheckoutService implements OnModuleInit {
     // nuevo sobre un endpoint de plata.
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
     const isWalletRecharge = req.purpose === 'wallet_recharge'
+    const isWalletConsumption = req.provider === 'wallet' && !isWalletRecharge
     const tax = isWalletRecharge
       ? await this.resolveRechargeTax(taxCountry)
       : await this.taxService.getTaxForCountry(taxCountry)
-    const rechargeBreakdown = isWalletRecharge
-      ? this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
-      : null
-    const subtotalAmount = rechargeBreakdown ? rechargeBreakdown.subtotal : amount
-    const taxAmount = rechargeBreakdown
-      ? rechargeBreakdown.taxAmount
-      : tax.taxRate > 0 && !tax.isInclusive
-        ? Math.round(amount * tax.taxRate * 100) / 100
-        : 0
-    const totalAmount = rechargeBreakdown ? rechargeBreakdown.totalAmount : amount + taxAmount
+    const directTaxBreakdown = isWalletConsumption
+      ? null
+      : this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
+    const subtotalAmount = directTaxBreakdown ? directTaxBreakdown.subtotal : amount
+    const taxAmount = directTaxBreakdown ? directTaxBreakdown.taxAmount : 0
+    const totalAmount = directTaxBreakdown ? directTaxBreakdown.totalAmount : amount
 
     // 2. Crear registro de pago
     const payment = this.paymentRepo.create({
@@ -259,7 +256,7 @@ export class CheckoutService implements OnModuleInit {
       // necesita migración.
       metadata: {
         country: taxCountry,
-        ...(isWalletRecharge
+        ...(!isWalletConsumption
           ? {
               taxRate: tax.taxRate,
               taxName: tax.taxName,
@@ -334,6 +331,9 @@ export class CheckoutService implements OnModuleInit {
 
   /**
    * Pago con wallet interna — inmediato.
+   *
+   * Wallet consumptions debit the published price (`taxAmount = 0`) and do not emit
+   * a tax invoice because VAT was already caused and invoiced on the wallet recharge.
    */
   private async processWalletPayment(
     payment: Payment,
@@ -341,7 +341,7 @@ export class CheckoutService implements OnModuleInit {
     subtotal: number,
     taxAmount: number,
     currency: string,
-    tax: any,
+    _tax?: any,
   ): Promise<CheckoutResult> {
     const totalAmount = Math.round((subtotal + taxAmount) * 100) / 100
 
@@ -420,8 +420,6 @@ export class CheckoutService implements OnModuleInit {
       status: 'completed',
     }
 
-    let extendedUntil: Date | undefined
-
     // Si es compra de plan → crear/renovar suscripción
     if (req.purpose === 'plan_purchase' && req.planSlug) {
       const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
@@ -429,27 +427,11 @@ export class CheckoutService implements OnModuleInit {
       if (extended && sub.currentPeriodEnd) {
         result.renewal = 'extended'
         result.currentPeriodEnd = sub.currentPeriodEnd
-        extendedUntil = sub.currentPeriodEnd
       }
 
       // Asignar plan en backend-roles
       await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
     }
-
-    // Generar factura
-    const invoice = await this.generateInvoice(
-      payment,
-      req,
-      subtotal,
-      taxAmount,
-      currency,
-      tax,
-      extendedUntil,
-    )
-    result.invoiceId = invoice.id
-
-    // Enviar a DIAN (async, no bloquea)
-    this.sendToDianAsync(invoice.id, currency)
 
     // Audit
     await this.auditService.log(
@@ -478,9 +460,6 @@ export class CheckoutService implements OnModuleInit {
       String(subtotal + taxAmount),
       currency,
     )
-    if (invoice) {
-      this.eventBus.notifyInvoiceReady(req.brandId, invoice.id, invoice.invoiceNumber)
-    }
 
     if (req.idempotencyKey) {
       payment.metadata = {
@@ -619,14 +598,15 @@ export class CheckoutService implements OnModuleInit {
     // los pagos anteriores a este cambio, que no lo llevan.
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
     const isWalletRecharge = payment.purpose === PaymentPurpose.WALLET_RECHARGE
-    const hasSavedRechargeTaxRate =
-      isWalletRecharge &&
+    const hasSavedTaxRate =
       payment.metadata &&
       payment.metadata.taxRate !== undefined &&
-      payment.metadata.taxRate !== null
+      payment.metadata.taxRate !== null &&
+      Number.isFinite(Number(payment.metadata.taxRate)) &&
+      Number(payment.metadata.taxRate) >= 0
 
     let tax: { taxName: string; taxRate: number; isInclusive: boolean }
-    if (hasSavedRechargeTaxRate) {
+    if (isWalletRecharge && hasSavedTaxRate) {
       tax = this.validateRechargeTaxConfig(country, {
         taxName: String(payment.metadata.taxName || ''),
         taxRate: Number(payment.metadata.taxRate),
@@ -634,23 +614,17 @@ export class CheckoutService implements OnModuleInit {
       })
     } else if (isWalletRecharge) {
       tax = await this.resolveRechargeTax(country)
+    } else if (hasSavedTaxRate) {
+      tax = {
+        taxName: String(payment.metadata.taxName || 'N/A'),
+        taxRate: Number(payment.metadata.taxRate),
+        isInclusive: true,
+      }
     } else {
       tax = await this.taxService.getTaxForCountry(country)
     }
 
-    let subtotal: number
-    let taxAmount: number
-    if (isWalletRecharge) {
-      const breakdown = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
-      subtotal = breakdown.subtotal
-      taxAmount = breakdown.taxAmount
-    } else {
-      taxAmount =
-        tax.taxRate > 0 && !tax.isInclusive
-          ? Math.round(((totalAmount * tax.taxRate) / (1 + tax.taxRate)) * 100) / 100
-          : 0
-      subtotal = totalAmount - taxAmount
-    }
+    const { subtotal, taxAmount } = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
 
     let extendedUntil: Date | undefined
 
@@ -1398,7 +1372,7 @@ export class CheckoutService implements OnModuleInit {
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
         total: invoiceTotal,
         productType: 'plan',
@@ -1424,7 +1398,7 @@ export class CheckoutService implements OnModuleInit {
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
         total: invoiceTotal,
         productType: 'service',
@@ -1558,6 +1532,11 @@ export class CheckoutService implements OnModuleInit {
     }
   }
 
+  /**
+   * Shared tax breakdown rule for `processCheckout` and `completeExternalPayment`:
+   * all published prices are final tax-inclusive amounts and ignore `tax_config.isInclusive`,
+   * extracting `subtotal = round(total / (1 + rate))` and `taxAmount = round(total - subtotal)`.
+   */
   private breakDownTaxInclusiveAmount(
     totalAmount: number,
     taxRate: number,

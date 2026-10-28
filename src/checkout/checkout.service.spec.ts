@@ -888,7 +888,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       },
     )
 
-    it('debits the wallet, creates the invoice, and assigns the plan on a plan_purchase in the wallet currency', async () => {
+    it('debits the wallet without creating an invoice and assigns the plan on a plan_purchase in the wallet currency', async () => {
       marcaUS()
       walletService.findById.mockResolvedValue(walletEn('USD'))
 
@@ -904,14 +904,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         }),
         'USD',
       )
-      expect(invoiceService.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          brandId: BRAND_ID,
-          subtotal: 6.99,
-          total: 6.99,
-          currency: 'USD',
-        }),
-      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
       expect(clientRoles.assignPlanToBrand).toHaveBeenCalled()
     })
   })
@@ -1052,19 +1045,39 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
 
     it('factura en USD → no se manda a la DIAN aunque esté configurada', async () => {
-      marcaUS()
-      walletService.findById.mockResolvedValue(walletEn('USD'))
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-usd-dian',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        amount: '6.99',
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'plan_purchase',
+        purposeId: 'dropi-roax',
+        metadata: { country: 'US' },
+      })
       dianService.isConfigured.mockReturnValue(true)
 
-      await service.processCheckout(altaConWallet())
+      await service.completeExternalPayment('pay-usd-dian')
 
       expect(dianService.sendInvoice).not.toHaveBeenCalled()
     })
 
     it('factura en COP → se manda a la DIAN como hasta hoy', async () => {
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-cop-dian',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        amount: '19900',
+        currency: 'COP',
+        status: 'pending',
+        purpose: 'plan_purchase',
+        purposeId: 'dropi-roax',
+        metadata: { country: 'CO' },
+      })
       dianService.isConfigured.mockReturnValue(true)
 
-      await service.processCheckout(altaConWallet())
+      await service.completeExternalPayment('pay-cop-dian')
 
       expect(dianService.sendInvoice).toHaveBeenCalledWith('inv-1')
     })
@@ -1958,7 +1971,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         expect.objectContaining({ amount: 100, currency: 'COP', purpose: 'service_payment' }),
       )
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalledTimes(1)
-      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).not.toHaveBeenCalled()
     })
   })
 
@@ -2334,14 +2347,26 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       )
     })
 
-    it('sets the invoice item description to state the plan extension and the new expiration date', async () => {
+    it('sets the invoice item description to state the plan extension and the new expiration date on direct payment completion', async () => {
       const activeUntil = new Date(Date.now() + 15 * DAY_MS)
       const expectedExtendedEnd = new Date(activeUntil.getTime())
       expectedExtendedEnd.setDate(expectedExtendedEnd.getDate() + 30)
 
       subscriptionRepo.findOne.mockResolvedValue(buildActiveSubscription(activeUntil))
+      paymentRepo.findOne.mockResolvedValue({
+        id: 'pay-ext-extend',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        provider: 'confio',
+        amount: 19900,
+        currency: 'COP',
+        status: PaymentStatus.PENDING,
+        purpose: PaymentPurpose.PLAN_PURCHASE,
+        purposeId: 'dropi-roax',
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      })
 
-      await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+      await service.completeExternalPayment('pay-ext-extend')
 
       expect(invoiceService.create).toHaveBeenCalledTimes(1)
       const invoicePayload = invoiceService.create.mock.calls[0][0]
@@ -2376,12 +2401,9 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       )
       expect(expiredResult.renewal).toBeUndefined()
       expect(expiredResult.currentPeriodEnd).toBeUndefined()
-      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
-        'Plan dropi-roax — Suscripción mensual Cubiko',
-      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
 
       subscriptionRepo.save.mockClear()
-      invoiceService.create.mockClear()
 
       const futureEnd = new Date(Date.now() + 15 * DAY_MS)
       subscriptionRepo.findOne.mockResolvedValue(
@@ -2401,12 +2423,9 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         futureEnd.getTime() + 20 * DAY_MS,
       )
       expect(cancelledResult.renewal).toBeUndefined()
-      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
-        'Plan dropi-roax — Suscripción mensual Cubiko',
-      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
 
       subscriptionRepo.save.mockClear()
-      invoiceService.create.mockClear()
 
       subscriptionRepo.findOne.mockResolvedValue(
         buildActiveSubscription(futureEnd, {
@@ -2423,9 +2442,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         futureEnd.getTime() + 20 * DAY_MS,
       )
       expect(differentPlanResult.renewal).toBeUndefined()
-      expect(invoiceService.create.mock.calls[0][0].items[0].description).toBe(
-        'Plan dropi-roax — Suscripción mensual Cubiko',
-      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
     })
 
     it('sends the extended expiration date D + 1 period to backend-roles when extending an active plan', async () => {
@@ -2443,6 +2460,286 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         'dropi-roax',
         expectedExtendedEnd,
       )
+    })
+  })
+
+  describe('VAT once and included inside published prices', () => {
+    it('debits 10000 COP without charging VAT again or creating an invoice when a 10000 COP service_payment is paid with wallet', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+      dianService.isConfigured.mockReturnValue(true)
+
+      const result = await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-1',
+        amount: 10000,
+        currency: 'COP',
+      })
+
+      expect(result.status).toBe('completed')
+      expect(result.invoiceId).toBeUndefined()
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 10000,
+          currency: 'COP',
+          purpose: 'service_payment',
+          provider: 'wallet',
+        }),
+      )
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        10000,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'service_payment',
+          referenceType: 'payment',
+          referenceId: 'mock-id',
+        }),
+        'COP',
+      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(dianService.sendInvoice).not.toHaveBeenCalled()
+      expect((service as any).eventBus.notifyInvoiceReady).not.toHaveBeenCalled()
+    })
+
+    it('debits 19900 COP without charging VAT again or creating an invoice when a 19900 COP plan_purchase is paid with wallet', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+      dianService.isConfigured.mockReturnValue(true)
+
+      const result = await service.processCheckout(altaConWallet({ planSlug: 'dropi-roax' }))
+
+      expect(result.status).toBe('completed')
+      expect(result.invoiceId).toBeUndefined()
+      expect(paymentRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 19900,
+          currency: 'COP',
+          purpose: 'plan_purchase',
+          purposeId: 'dropi-roax',
+          provider: 'wallet',
+        }),
+      )
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-1',
+        19900,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'plan_payment',
+          referenceType: 'payment',
+          referenceId: 'mock-id',
+        }),
+        'COP',
+      )
+      expect(clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).not.toHaveBeenCalled()
+      expect(dianService.sendInvoice).not.toHaveBeenCalled()
+      expect((service as any).eventBus.notifyInvoiceReady).not.toHaveBeenCalled()
+    })
+
+    it('charges 19900 COP and invoices 16722.69 subtotal + 3177.31 VAT with taxRate saved on the item when a 19900 COP plan_purchase is paid directly via Confio', async () => {
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+
+      let createdPayment: any = null
+      paymentRepo.create.mockImplementation((data: any) => {
+        createdPayment = { id: 'pay-direct-plan-19900', ...data }
+        return createdPayment
+      })
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id === 'pay-direct-plan-19900' && createdPayment) {
+          return { ...createdPayment }
+        }
+        return null
+      })
+
+      const checkoutResult = await service.processCheckout(
+        altaConWallet({
+          provider: 'confio',
+          walletId: undefined,
+          planSlug: 'dropi-roax',
+        }),
+      )
+
+      expect(checkoutResult.status).toBe('pending')
+      expect(createCheckout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 19900,
+          currency: 'COP',
+          purpose: 'plan_purchase',
+          purposeId: 'dropi-roax',
+        }),
+      )
+      expect(createdPayment.amount).toBe(19900)
+      expect(createdPayment.metadata).toEqual(
+        expect.objectContaining({
+          country: 'CO',
+          taxRate: 0.19,
+          taxName: 'IVA',
+          subtotal: 16722.69,
+          taxAmount: 3177.31,
+        }),
+      )
+
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.25,
+        isInclusive: false,
+      })
+
+      await service.completeExternalPayment('pay-direct-plan-19900', {
+        data: {
+          status: 'Pagado',
+          amountCents: 1990000,
+        },
+      })
+
+      expect(walletService.debit).not.toHaveBeenCalled()
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          paymentId: 'pay-direct-plan-19900',
+          subtotal: 16722.69,
+          taxTotal: 3177.31,
+          total: 19900,
+          currency: 'COP',
+          items: [
+            expect.objectContaining({
+              productType: 'plan',
+              referenceType: 'subscription',
+              referenceId: 'dropi-roax',
+              unitPrice: 16722.69,
+              subtotal: 16722.69,
+              taxRate: 0.19,
+              taxAmount: 3177.31,
+              total: 19900,
+            }),
+          ],
+        }),
+      )
+    })
+
+    it('debits the published price and emits no invoice when a brand in a zero-tax country (rate 0) pays a service_payment with wallet', async () => {
+      clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'US' })
+      ;(service as any).billingProfileRepo.findOne.mockResolvedValue({
+        id: 'bp-us',
+        brandId: BRAND_ID,
+        country: 'US',
+      })
+      taxService.getTaxForCountry.mockResolvedValue({
+        taxName: 'Sales Tax',
+        taxRate: 0,
+        isInclusive: false,
+      })
+      walletService.findById.mockResolvedValue({
+        data: {
+          id: 'w-usd',
+          brandId: BRAND_ID,
+          currency: 'USD',
+          balance: 500,
+          status: 'active',
+        },
+      })
+
+      const result = await service.processCheckout({
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        purpose: 'service_payment',
+        provider: 'wallet',
+        walletId: 'w-usd',
+        amount: 25,
+        currency: 'USD',
+      })
+
+      expect(result.status).toBe('completed')
+      expect(result.invoiceId).toBeUndefined()
+      expect(walletService.debit).toHaveBeenCalledTimes(1)
+      expect(walletService.debit).toHaveBeenCalledWith(
+        'w-usd',
+        25,
+        expect.objectContaining({
+          brandId: BRAND_ID,
+          category: 'service_payment',
+          referenceType: 'payment',
+          referenceId: 'mock-id',
+        }),
+        'USD',
+      )
+      expect(invoiceService.create).not.toHaveBeenCalled()
+    })
+
+    it('applies the same tax-inclusive breakdown in processCheckout and completeExternalPayment regardless of tax_config.isInclusive and without cent drift', async () => {
+      for (const isInclusive of [false, true]) {
+        invoiceService.create.mockClear()
+        paymentRepo.create.mockClear()
+
+        taxService.getTaxForCountry.mockResolvedValue({
+          taxName: 'IVA',
+          taxRate: 0.19,
+          isInclusive,
+        })
+
+        let savedPayment: any = null
+        paymentRepo.create.mockImplementation((data: any) => {
+          savedPayment = { id: `pay-direct-${String(isInclusive)}`, ...data }
+          return savedPayment
+        })
+        paymentRepo.findOne.mockImplementation(async () => ({ ...savedPayment }))
+
+        await service.processCheckout({
+          brandId: BRAND_ID,
+          userId: 'u-1',
+          purpose: 'service_payment',
+          provider: 'confio',
+          amount: 10001,
+          currency: 'COP',
+        })
+
+        expect(savedPayment.amount).toBe(10001)
+        expect(savedPayment.metadata.subtotal).toBe(8404.2)
+        expect(savedPayment.metadata.taxAmount).toBe(1596.8)
+        expect(
+          Math.round((savedPayment.metadata.subtotal + savedPayment.metadata.taxAmount) * 100) /
+            100,
+        ).toBe(10001)
+
+        await service.completeExternalPayment(savedPayment.id)
+
+        expect(invoiceService.create).toHaveBeenCalledTimes(1)
+        const invoiceArg = invoiceService.create.mock.calls[0][0]
+        expect(invoiceArg.subtotal).toBe(8404.2)
+        expect(invoiceArg.taxTotal).toBe(1596.8)
+        expect(invoiceArg.total).toBe(10001)
+        expect(Math.round((invoiceArg.subtotal + invoiceArg.taxTotal) * 100) / 100).toBe(
+          invoiceArg.total,
+        )
+        expect(invoiceArg.items[0]).toEqual(
+          expect.objectContaining({
+            productType: 'service',
+            unitPrice: 8404.2,
+            subtotal: 8404.2,
+            taxRate: 0.19,
+            taxAmount: 1596.8,
+            total: 10001,
+          }),
+        )
+      }
     })
   })
 })
