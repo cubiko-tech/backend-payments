@@ -52,6 +52,10 @@ export class CheckoutController {
       '(la wallet no existe o no es de esa marca)',
   })
   @ApiResponse({
+    status: 409,
+    description: 'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body',
+  })
+  @ApiResponse({
     status: 422,
     description:
       'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o ' +
@@ -68,12 +72,35 @@ export class CheckoutController {
         throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
       }
     }
+    const idempotencyKey = this.extractIdempotencyKey(req)
     // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
     // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
     // global no tiene metatype contra el cual recortar y NO descarta claves
     // desconocidas: sin este borrado un llamador HTTP podría pedir el camino de
     // precios legacy y cobrarse en la moneda que él mande.
-    return { data: await this.checkoutService.processCheckout({ ...body, renewal: undefined }) }
+    return {
+      data: await this.checkoutService.processCheckout({
+        ...body,
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        renewal: undefined,
+      }),
+    }
+  }
+
+  private extractIdempotencyKey(req?: any): string | undefined {
+    const headers = req?.headers
+    if (!headers || typeof headers !== 'object') {
+      return undefined
+    }
+    const raw =
+      headers['idempotency-key'] ??
+      headers['Idempotency-Key'] ??
+      Object.entries(headers).find(([key]) => key.toLowerCase() === 'idempotency-key')?.[1]
+    if (typeof raw !== 'string') {
+      return undefined
+    }
+    const trimmed = raw.trim()
+    return trimmed.length > 0 ? trimmed : undefined
   }
 
   @Get('providers')

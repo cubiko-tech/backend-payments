@@ -29,7 +29,16 @@ export class PaymentService {
   async createCheckout(data: Partial<Payment>) {
     try {
       const payment = this.paymentRepository.create({
-        ...data,
+        brandId: data.brandId,
+        userId: data.userId,
+        idempotencyKey: data.idempotencyKey,
+        walletId: data.walletId,
+        provider: data.provider,
+        amount: data.amount,
+        currency: data.currency,
+        purpose: data.purpose,
+        purposeId: data.purposeId,
+        metadata: data.metadata,
         status: PaymentStatus.PENDING,
       })
       const saved = await this.paymentRepository.save(payment)

@@ -1,12 +1,12 @@
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource, Not } from 'typeorm'
+import { Repository, DataSource } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { AuditService } from '../audit/audit.service'
-import { TaxService } from '../tax/tax.service'
+import { TaxService, isVatCountry } from '../tax/tax.service'
 import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -80,6 +80,7 @@ export interface CheckoutRequest {
   cancelUrl?: string
   // Datos del comprador (requeridos por ConfioPagos: email + teléfono E.164)
   buyer?: { firstName?: string; lastName?: string; email?: string; phoneNumber?: string }
+  idempotencyKey?: string
   /**
    * Renovación emitida por el cron (`TasksService.issueExternalCharge`), NO un alta.
    * Es una bandera EXPLÍCITA del llamador: nunca se deduce de los datos y nunca se
@@ -111,12 +112,19 @@ export interface CheckoutResult {
   checkoutUrl?: string // Only when provider is Stripe/MP
   subscriptionId?: string // Only when purpose is plan_purchase
   invoiceId?: string // Only when payment was immediate
+  renewal?: 'extended'
+  currentPeriodEnd?: Date
 }
 
 @Injectable()
 export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly inFlightCheckouts = new Map<
+    string,
+    { fingerprint: string; promise: Promise<CheckoutResult> }
+  >()
+  private readonly inFlightCompletions = new Set<string>()
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -165,6 +173,18 @@ export class CheckoutService implements OnModuleInit {
     // mutar la request del llamador escondía el efecto y le reescribía el objeto al
     // cron, que nos pasa datos derivados de una fila viva de `subscriptions`.
     const req = this.normalizeRequest(request)
+    const idempotencyFingerprint = req.idempotencyKey
+      ? this.buildIdempotencyFingerprint(req)
+      : undefined
+
+    if (req.idempotencyKey) {
+      const existing = await this.paymentRepo.findOne({
+        where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+      })
+      if (existing) {
+        return this.resolveExistingIdempotentPayment(existing, req, idempotencyFingerprint)
+      }
+    }
 
     // 1. Precio y moneda. En `plan_purchase` los decide el país REGISTRADO de la
     // marca; `country` viene informado SÓLO cuando el precio salió del catálogo por
@@ -186,10 +206,8 @@ export class CheckoutService implements OnModuleInit {
       }
     }
 
-    // 3. Antes el precio salía de `req.currency` (COP por defecto) y coincidía con la
-    // wallet por construcción; ahora la moneda es un dato DERIVADO del país de la marca,
-    // así que hay que compararla contra la wallet ANTES de persistir y debitar. Acotado
-    // a `plan_purchase`: es el único camino cuya moneda dejó de ser la del llamador.
+    // 3. Pre-validate wallet ownership, non-TKN currency, and currency match
+    // before persisting the payment or debiting across any checkout purpose.
     if (req.provider === 'wallet' || req.walletId) {
       await this.assertWalletCurrency(req, currency)
     }
@@ -206,15 +224,23 @@ export class CheckoutService implements OnModuleInit {
     // lleva impuesto, o falla con un error que lo dice») se cumple sin inventar un error
     // nuevo sobre un endpoint de plata.
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
-    const tax = await this.taxService.getTaxForCountry(taxCountry)
-    const taxAmount =
-      tax.taxRate > 0 && !tax.isInclusive ? Math.round(amount * tax.taxRate * 100) / 100 : 0
-    const totalAmount = amount + taxAmount
+    const isWalletRecharge = req.purpose === 'wallet_recharge'
+    const isWalletConsumption = req.provider === 'wallet' && !isWalletRecharge
+    const tax = isWalletRecharge
+      ? await this.resolveRechargeTax(taxCountry)
+      : await this.taxService.getTaxForCountry(taxCountry)
+    const directTaxBreakdown = isWalletConsumption
+      ? null
+      : this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
+    const subtotalAmount = directTaxBreakdown ? directTaxBreakdown.subtotal : amount
+    const taxAmount = directTaxBreakdown ? directTaxBreakdown.taxAmount : 0
+    const totalAmount = directTaxBreakdown ? directTaxBreakdown.totalAmount : amount
 
     // 2. Crear registro de pago
     const payment = this.paymentRepo.create({
       brandId: req.brandId,
       userId: req.userId,
+      ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}),
       walletId: req.walletId || null,
       provider: req.provider as PaymentProvider,
       amount: totalAmount,
@@ -228,20 +254,86 @@ export class CheckoutService implements OnModuleInit {
       // perfil cae al 19% colombiano — el bug que esta tarea cierra. Va en `metadata` y no
       // en una columna nueva: es un dato del checkout, no del dominio del pago, y no
       // necesita migración.
-      metadata: { country: taxCountry },
+      metadata: {
+        country: taxCountry,
+        ...(!isWalletConsumption
+          ? {
+              taxRate: tax.taxRate,
+              taxName: tax.taxName,
+              subtotal: subtotalAmount,
+              taxAmount,
+              ...(req.buyer ? { buyer: req.buyer } : {}),
+            }
+          : {}),
+        ...(req.idempotencyKey ? { idempotencyFingerprint } : {}),
+      },
     })
-    await this.paymentRepo.save(payment)
 
-    // 3. Procesar según provider
+    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
+    try {
+      const savedPayment = await this.paymentRepo.save(payment)
+      if (savedPayment?.id && !payment.id) {
+        payment.id = savedPayment.id
+      }
+    } catch (error) {
+      if (req.idempotencyKey && this.isUniqueConstraintViolation(error)) {
+        return this.handleConcurrentIdempotentCheckout(req, idempotencyFingerprint, inFlightKey)
+      }
+      throw error
+    }
+
+    if (inFlightKey) {
+      const executionPromise = this.executeCheckoutPayment(
+        payment,
+        req,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        currency,
+        tax,
+      )
+      this.inFlightCheckouts.set(inFlightKey, {
+        fingerprint: idempotencyFingerprint,
+        promise: executionPromise,
+      })
+      try {
+        return await executionPromise
+      } finally {
+        this.inFlightCheckouts.delete(inFlightKey)
+      }
+    }
+
+    return this.executeCheckoutPayment(
+      payment,
+      req,
+      subtotalAmount,
+      taxAmount,
+      totalAmount,
+      currency,
+      tax,
+    )
+  }
+
+  private executeCheckoutPayment(
+    payment: Payment,
+    req: CheckoutRequest,
+    amount: number,
+    taxAmount: number,
+    totalAmount: number,
+    currency: string,
+    tax: any,
+  ): Promise<CheckoutResult> {
     if (req.provider === 'wallet') {
       return this.processWalletPayment(payment, req, amount, taxAmount, currency, tax)
-    } else {
-      return this.processExternalPayment(payment, req, totalAmount, currency)
     }
+    return this.processExternalPayment(payment, req, totalAmount, currency)
   }
 
   /**
    * Pago con wallet interna — inmediato.
+   *
+   * Wallet consumptions debit the published price (`taxAmount = 0`) and do not emit
+   * a tax invoice because VAT was already caused and invoiced on the wallet recharge.
    */
   private async processWalletPayment(
     payment: Payment,
@@ -249,9 +341,9 @@ export class CheckoutService implements OnModuleInit {
     subtotal: number,
     taxAmount: number,
     currency: string,
-    tax: any,
+    _tax?: any,
   ): Promise<CheckoutResult> {
-    const totalAmount = subtotal + taxAmount
+    const totalAmount = Math.round((subtotal + taxAmount) * 100) / 100
 
     // Registrar intento
     await this.attemptRepo.save(
@@ -330,19 +422,16 @@ export class CheckoutService implements OnModuleInit {
 
     // Si es compra de plan → crear/renovar suscripción
     if (req.purpose === 'plan_purchase' && req.planSlug) {
-      const sub = await this.createOrRenewSubscription(req, payment)
+      const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
       result.subscriptionId = sub.id
+      if (extended && sub.currentPeriodEnd) {
+        result.renewal = 'extended'
+        result.currentPeriodEnd = sub.currentPeriodEnd
+      }
 
       // Asignar plan en backend-roles
-      await this.assignPlanInRoles(req.brandId, req.planSlug)
+      await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
     }
-
-    // Generar factura
-    const invoice = await this.generateInvoice(payment, req, subtotal, taxAmount, currency, tax)
-    result.invoiceId = invoice.id
-
-    // Enviar a DIAN (async, no bloquea)
-    this.sendToDianAsync(invoice.id, currency)
 
     // Audit
     await this.auditService.log(
@@ -371,8 +460,13 @@ export class CheckoutService implements OnModuleInit {
       String(subtotal + taxAmount),
       currency,
     )
-    if (invoice) {
-      this.eventBus.notifyInvoiceReady(req.brandId, invoice.id, invoice.invoiceNumber)
+
+    if (req.idempotencyKey) {
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        checkoutResult: result,
+      }
+      await this.paymentRepo.save(payment)
     }
 
     this.log.log(
@@ -404,12 +498,24 @@ export class CheckoutService implements OnModuleInit {
         metadata: { paymentId: payment.id, buyer: req.buyer },
       })
 
+      const result: CheckoutResult = {
+        paymentId: payment.id,
+        status: 'pending',
+        checkoutUrl: checkout.checkoutUrl,
+      }
+
       // Actualizar pago con datos del provider
       payment.providerPaymentId = checkout.providerPaymentId
       payment.checkoutUrl = checkout.checkoutUrl
       payment.expiresAt = new Date(
         Date.now() + parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24') * 3600000,
       )
+      if (req.idempotencyKey) {
+        payment.metadata = {
+          ...(payment.metadata || {}),
+          checkoutResult: result,
+        }
+      }
       await this.paymentRepo.save(payment)
 
       // Registrar intento
@@ -427,11 +533,7 @@ export class CheckoutService implements OnModuleInit {
 
       this.log.log(`Checkout externo creado: payment=${payment.id} provider=${req.provider}`)
 
-      return {
-        paymentId: payment.id,
-        status: 'pending',
-        checkoutUrl: checkout.checkoutUrl,
-      }
+      return result
     } catch (error) {
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
@@ -449,42 +551,86 @@ export class CheckoutService implements OnModuleInit {
    * Este es el flujo que ejecuta el webhook cuando Stripe/MP/Dropi confirma el pago.
    */
   async completeExternalPayment(paymentId: string, providerData?: any): Promise<void> {
-    const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
-    if (!payment || payment.status === PaymentStatus.COMPLETED) return
+    if (this.inFlightCompletions.has(paymentId)) return
+    this.inFlightCompletions.add(paymentId)
+    try {
+      const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
+      if (
+        !payment ||
+        payment.status === PaymentStatus.COMPLETED ||
+        this.hasAmountMismatchMark(payment)
+      ) {
+        return
+      }
 
-    const paidAt = new Date()
-    const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
-    const claimed = await this.paymentRepo.update(
-      { id: paymentId, status: Not(PaymentStatus.COMPLETED) },
-      {
-        status: PaymentStatus.COMPLETED,
-        paidAt,
-        ...(providerData ? { metadata } : {}),
-      },
-    )
-    if (!claimed.affected) return
+      const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
+      const claimed = await this.paymentRepo.update(
+        { id: paymentId, status: payment.status },
+        {
+          status: PaymentStatus.PROCESSING,
+          ...(providerData ? { metadata } : {}),
+        },
+      )
+      if (!claimed.affected) return
 
-    payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = paidAt
+      await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
+    } finally {
+      this.inFlightCompletions.delete(paymentId)
+    }
+  }
+
+  private async finalizeProcessingPayment(
+    payment: Payment,
+    paymentId: string,
+    providerData?: any,
+    metadata?: any,
+  ): Promise<void> {
+    payment.status = PaymentStatus.PROCESSING
     if (providerData) {
       payment.metadata = metadata
     }
+
+    const totalAmount = parseFloat(String(payment.amount))
+    await this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
 
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
     // los pagos anteriores a este cambio, que no lo llevan.
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
-    const tax = await this.taxService.getTaxForCountry(country)
-    const totalAmount = parseFloat(String(payment.amount))
-    const taxAmount =
-      tax.taxRate > 0 && !tax.isInclusive
-        ? Math.round(((totalAmount * tax.taxRate) / (1 + tax.taxRate)) * 100) / 100
-        : 0
-    const subtotal = totalAmount - taxAmount
+    const isWalletRecharge = payment.purpose === PaymentPurpose.WALLET_RECHARGE
+    const hasSavedTaxRate =
+      payment.metadata &&
+      payment.metadata.taxRate !== undefined &&
+      payment.metadata.taxRate !== null &&
+      Number.isFinite(Number(payment.metadata.taxRate)) &&
+      Number(payment.metadata.taxRate) >= 0
+
+    let tax: { taxName: string; taxRate: number; isInclusive: boolean }
+    if (isWalletRecharge && hasSavedTaxRate) {
+      tax = this.validateRechargeTaxConfig(country, {
+        taxName: String(payment.metadata.taxName || ''),
+        taxRate: Number(payment.metadata.taxRate),
+        isInclusive: true,
+      })
+    } else if (isWalletRecharge) {
+      tax = await this.resolveRechargeTax(country)
+    } else if (hasSavedTaxRate) {
+      tax = {
+        taxName: String(payment.metadata.taxName || 'N/A'),
+        taxRate: Number(payment.metadata.taxRate),
+        isInclusive: true,
+      }
+    } else {
+      tax = await this.taxService.getTaxForCountry(country)
+    }
+
+    const { subtotal, taxAmount } = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
+
+    let extendedUntil: Date | undefined
 
     // Si es compra de plan → crear/renovar suscripción
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      await this.createOrRenewSubscription(
+      const { subscription, extended } = await this.createOrRenewSubscription(
         {
           brandId: payment.brandId,
           userId: payment.userId,
@@ -495,12 +641,18 @@ export class CheckoutService implements OnModuleInit {
         },
         payment,
       )
-      await this.assignPlanInRoles(payment.brandId, payment.purposeId)
+      if (extended && subscription?.currentPeriodEnd) {
+        extendedUntil = subscription.currentPeriodEnd
+      }
+      await this.assignPlanInRoles(
+        payment.brandId,
+        subscription?.planSlug || payment.purposeId,
+        subscription?.currentPeriodEnd,
+      )
     }
 
-    // Si es recarga de wallet → acreditar
-    if (payment.purpose === PaymentPurpose.WALLET_RECHARGE && payment.walletId) {
-      await this.walletService.credit(payment.walletId, subtotal, {
+    if (isWalletRecharge && payment.walletId) {
+      const creditResult = await this.walletService.credit(payment.walletId, totalAmount, {
         brandId: payment.brandId,
         category: 'recharge',
         description: `Recarga via ${payment.provider}`,
@@ -508,6 +660,14 @@ export class CheckoutService implements OnModuleInit {
         referenceId: payment.id,
         idempotencyKey: `payment:${payment.id}:credit`,
       })
+      if (
+        creditResult &&
+        typeof creditResult === 'object' &&
+        'error' in creditResult &&
+        (creditResult as any).error
+      ) {
+        throw new Error((creditResult as any).error)
+      }
     }
 
     // Generar factura
@@ -519,12 +679,27 @@ export class CheckoutService implements OnModuleInit {
         purpose: payment.purpose as any,
         planSlug: payment.purposeId,
         provider: payment.provider as any,
+        buyer: payment.metadata?.buyer,
       },
       subtotal,
       taxAmount,
       payment.currency,
       tax,
+      extendedUntil,
     )
+
+    const paidAt = new Date()
+    const completed = await this.paymentRepo.update(
+      { id: paymentId, status: PaymentStatus.PROCESSING },
+      {
+        status: PaymentStatus.COMPLETED,
+        paidAt,
+      },
+    )
+    if (!completed.affected) return
+
+    payment.status = PaymentStatus.COMPLETED
+    payment.paidAt = paidAt
 
     this.sendToDianAsync(invoice.id, payment.currency)
 
@@ -577,10 +752,30 @@ export class CheckoutService implements OnModuleInit {
     if (payment.status === PaymentStatus.COMPLETED) {
       return { status: 'completed', planSlug: payment.purposeId || undefined }
     }
-    if (payment.status === PaymentStatus.FAILED) {
+    if (payment.status === PaymentStatus.FAILED || this.hasAmountMismatchMark(payment)) {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
+      if (payment.status === PaymentStatus.PROCESSING) {
+        try {
+          await this.completeExternalPayment(paymentId, { source: 'reconcile' })
+          const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
+          if (
+            afterReconcile &&
+            (afterReconcile.status === PaymentStatus.FAILED ||
+              this.hasAmountMismatchMark(afterReconcile))
+          ) {
+            return { status: 'failed' }
+          }
+          return { status: 'completed', planSlug: payment.purposeId || undefined }
+        } catch (error) {
+          this.log.warn(
+            `reconcilePayment: error completing processing payment ${paymentId}: ${error.message}`,
+          )
+          const current = await this.paymentRepo.findOne({ where: { id: paymentId } })
+          return { status: current?.status ?? payment.status }
+        }
+      }
       return { status: payment.status }
     }
 
@@ -593,6 +788,14 @@ export class CheckoutService implements OnModuleInit {
           source: 'reconcile',
           providerStatus: real.metadata,
         })
+        const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
+        if (
+          afterReconcile &&
+          (afterReconcile.status === PaymentStatus.FAILED ||
+            this.hasAmountMismatchMark(afterReconcile))
+        ) {
+          return { status: 'failed' }
+        }
         return { status: 'completed', planSlug: payment.purposeId || undefined }
       }
 
@@ -601,7 +804,8 @@ export class CheckoutService implements OnModuleInit {
       this.log.warn(
         `reconcilePayment: error consultando ${payment.provider} para ${paymentId}: ${error.message}`,
       )
-      return { status: payment.status }
+      const current = await this.paymentRepo.findOne({ where: { id: paymentId } })
+      return { status: current?.status ?? payment.status }
     }
   }
 
@@ -816,11 +1020,23 @@ export class CheckoutService implements OnModuleInit {
    * comportamiento de hoy — endurecerlos es otra tarea, con sus propios clientes.
    */
   private normalizeRequest(req: CheckoutRequest): CheckoutRequest {
-    if (req.purpose === 'plan_purchase' && !req.renewal) {
-      return { ...req, brandId: this.assertUsableBrandId(req.brandId) }
+    const brandId =
+      req.purpose === 'plan_purchase' && !req.renewal
+        ? this.assertUsableBrandId(req.brandId)
+        : typeof req.brandId === 'string'
+          ? req.brandId.trim()
+          : req.brandId
+
+    if (req.idempotencyKey === undefined) {
+      return { ...req, brandId }
     }
-    const trimmed = typeof req.brandId === 'string' ? req.brandId.trim() : req.brandId
-    return { ...req, brandId: trimmed }
+
+    const idempotencyKey =
+      typeof req.idempotencyKey === 'string' && req.idempotencyKey.trim().length > 0
+        ? req.idempotencyKey.trim()
+        : undefined
+
+    return { ...req, brandId, idempotencyKey }
   }
 
   /** UUID canónico: el formato con el que platform indexa `brand.id`. */
@@ -879,25 +1095,18 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * La wallet con la que se paga el plan tiene que ser de la marca y estar en la
-   * moneda del precio resuelto.
+   * Validates that the wallet referenced by `req` can settle a checkout in `currency`
+   * before a `Payment` record is persisted.
    *
-   * `WalletService.debit` sólo mira existencia, estado y saldo —el que compara
-   * monedas es `transfer`—, así que sin esta guarda una marca US pagaría 6,99 USD
-   * debitando 6,99 COP, o al revés. Se valida acá y no en `wallet.service.ts`,
-   * que pertenece a la tarea hermana `guarda-de-moneda-en-wallet`.
+   * Rejects missing `req.walletId` (`MISSING_WALLET_ID`, 400) so `findById` is never
+   * called with `undefined`, rejects wallets owned by another brand with the generic
+   * `WALLET_NOT_FOUND` (404) response to avoid an existence oracle, and rejects
+   * `TKN` wallets or currency mismatches with `WALLET_CURRENCY_MISMATCH` (422).
+   * `WalletService.debit` re-enforces these invariants under the `pessimistic_write`
+   * row lock during the debit transaction.
    *
-   * El `walletId` se EXIGE: `findById(undefined)` no falla, porque TypeORM descarta
-   * las condiciones `undefined` (`invalidWhereValuesBehavior` por defecto) y la
-   * consulta degenera en "la primera wallet de la tabla". Sin este rechazo la guarda
-   * compararía la moneda de una wallet ajena —y filtraría cuál es en el mensaje—
-   * mientras el débito posterior toca otra.
-   *
-   * La pertenencia se responde con el mismo 404 genérico de `findById`: decirle al
-   * llamador "esa wallet existe pero no es tuya" convierte el error en un oráculo.
-   *
-   * Si la lectura de la wallet falla (no si no existe: eso ya lo rechaza `findById`
-   * con 404) se deja seguir: el débito volverá a fallar por su cuenta.
+   * @param req Checkout request containing `brandId` and `walletId`.
+   * @param currency Resolved ISO currency code for the checkout charge.
    */
   private async assertWalletCurrency(req: CheckoutRequest, currency: string) {
     if (!req.walletId) {
@@ -999,7 +1208,7 @@ export class CheckoutService implements OnModuleInit {
   private async createOrRenewSubscription(
     req: CheckoutRequest,
     payment: Payment,
-  ): Promise<Subscription> {
+  ): Promise<{ subscription: Subscription; extended: boolean }> {
     const now = new Date()
     const periodEnd = new Date()
     periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
@@ -1010,17 +1219,50 @@ export class CheckoutService implements OnModuleInit {
     })
 
     if (subscription) {
+      if (payment?.id) {
+        const existingEvent = await this.subscriptionEventRepo.findOne({
+          where: { paymentId: payment.id },
+        })
+        if (subscription.lastPaymentId === payment.id || existingEvent) {
+          return {
+            subscription,
+            extended: existingEvent?.metadata?.renewal === 'extended',
+          }
+        }
+      }
       // Renovar/cambiar plan
       const fromPlan = subscription.planSlug
       const fromStatus = subscription.status
+      const existingPeriodEnd =
+        subscription.currentPeriodEnd instanceof Date
+          ? subscription.currentPeriodEnd
+          : subscription.currentPeriodEnd
+            ? new Date(subscription.currentPeriodEnd)
+            : null
+      const isSameActivePlanExtension =
+        fromStatus === SubscriptionStatus.ACTIVE &&
+        !subscription.cancelledAt &&
+        fromPlan === req.planSlug &&
+        existingPeriodEnd !== null &&
+        !Number.isNaN(existingPeriodEnd.getTime()) &&
+        existingPeriodEnd.getTime() > now.getTime()
+
+      const targetPeriodEnd = isSameActivePlanExtension
+        ? new Date(existingPeriodEnd.getTime())
+        : periodEnd
+      if (isSameActivePlanExtension) {
+        targetPeriodEnd.setDate(targetPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
+      }
 
       subscription.planSlug = req.planSlug
       subscription.status = SubscriptionStatus.ACTIVE
       subscription.provider = req.provider as SubscriptionProvider
       subscription.walletId = req.walletId || subscription.walletId
-      subscription.currentPeriodStart = now
-      subscription.currentPeriodEnd = periodEnd
-      subscription.nextBillingDate = periodEnd
+      subscription.currentPeriodStart = isSameActivePlanExtension
+        ? subscription.currentPeriodStart || now
+        : now
+      subscription.currentPeriodEnd = targetPeriodEnd
+      subscription.nextBillingDate = targetPeriodEnd
       subscription.lastPaymentId = payment.id
       subscription.retryCount = 0
       subscription.cancelledAt = null
@@ -1053,8 +1295,18 @@ export class CheckoutService implements OnModuleInit {
             eventType === SubscriptionEventType.PLAN_CHANGED
               ? `Cambio de plan ${fromPlan} → ${req.planSlug}`
               : 'Renovación por pago',
+          ...(isSameActivePlanExtension
+            ? {
+                metadata: {
+                  renewal: 'extended',
+                  currentPeriodEnd: targetPeriodEnd.toISOString(),
+                },
+              }
+            : {}),
         }),
       )
+
+      return { subscription, extended: isSameActivePlanExtension }
     } else {
       // Crear nueva
       subscription = this.subscriptionRepo.create({
@@ -1084,7 +1336,7 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    return subscription
+    return { subscription, extended: false }
   }
 
   /**
@@ -1097,37 +1349,45 @@ export class CheckoutService implements OnModuleInit {
     taxAmount: number,
     currency: string,
     tax: any,
+    extendedUntil?: Date,
   ): Promise<any> {
     const billingProfile = await this.billingProfileRepo.findOne({
       where: { brandId: payment.brandId },
     })
 
-    const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`
+    const suffix = payment?.id
+      ? `-${String(payment.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
+      : ''
+    const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}${suffix}`
 
+    const invoiceTotal = Math.round((subtotal + taxAmount) * 100) / 100
     const items = []
 
     if (req.purpose === 'plan_purchase') {
+      const description = extendedUntil
+        ? `Extensión del plan ${req.planSlug} hasta ${extendedUntil.toISOString()}`
+        : `Plan ${req.planSlug} — Suscripción mensual Cubiko`
       items.push({
-        description: `Plan ${req.planSlug} — Suscripción mensual Cubiko`,
+        description,
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'plan',
         referenceType: 'subscription',
         referenceId: req.planSlug,
       })
     } else if (req.purpose === 'wallet_recharge') {
       items.push({
-        description: `Recarga de wallet via ${payment.provider}`,
+        description: 'Créditos de uso de la plataforma ROAX',
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'recharge',
         referenceType: 'payment',
         referenceId: payment.id,
@@ -1138,13 +1398,41 @@ export class CheckoutService implements OnModuleInit {
         quantity: 1,
         unitPrice: subtotal,
         subtotal,
-        taxRate: tax.taxRate || 0,
+        taxRate: tax.taxRate ?? 0,
         taxAmount,
-        total: subtotal + taxAmount,
+        total: invoiceTotal,
         productType: 'service',
         referenceType: 'payment',
         referenceId: payment.id,
       })
+    }
+
+    const requestBuyer = req?.buyer || payment.metadata?.buyer
+    const buyerIdentification = {
+      brandId: payment.brandId,
+      userId: payment.userId,
+      ...(billingProfile
+        ? {
+            billingProfileId: billingProfile.id,
+            legalName: billingProfile.legalName,
+            taxId: billingProfile.taxId,
+            taxIdType: billingProfile.taxIdType,
+            email: billingProfile.email,
+            country: billingProfile.country,
+          }
+        : {}),
+      ...(requestBuyer
+        ? {
+            firstName: requestBuyer.firstName,
+            lastName: requestBuyer.lastName,
+            name:
+              [requestBuyer.firstName, requestBuyer.lastName].filter(Boolean).join(' ') ||
+              billingProfile?.legalName ||
+              undefined,
+            email: requestBuyer.email || billingProfile?.email,
+            phoneNumber: requestBuyer.phoneNumber || billingProfile?.phone,
+          }
+        : {}),
     }
 
     const result = await this.invoiceService.create({
@@ -1154,15 +1442,260 @@ export class CheckoutService implements OnModuleInit {
       invoiceNumber,
       subtotal,
       taxTotal: taxAmount,
-      total: subtotal + taxAmount,
+      total: invoiceTotal,
       currency,
       status: InvoiceStatus.PAID,
       issuedAt: new Date(),
       paidAt: new Date(),
+      ...(req.purpose === 'wallet_recharge'
+        ? {
+            metadata: {
+              serviceDescription: 'Créditos de uso de la plataforma ROAX',
+              taxRate: tax.taxRate ?? 0,
+              taxName: tax.taxName || 'N/A',
+              buyer: buyerIdentification,
+            },
+          }
+        : {}),
       items,
     })
 
+    if (result && typeof result === 'object' && 'error' in result && (result as any).error) {
+      throw new Error((result as any).error)
+    }
+    if (!result?.data) {
+      throw new Error('Failed to create invoice')
+    }
+
     return result.data
+  }
+
+  private async resolveRechargeTax(
+    taxCountry: string,
+  ): Promise<{ taxName: string; taxRate: number; isInclusive: boolean }> {
+    const normalizedCountry = String(taxCountry || '')
+      .trim()
+      .toUpperCase()
+    let tax: { taxName: string; taxRate: number; isInclusive: boolean } | null = null
+    try {
+      tax = await this.taxService.getTaxForCountry(taxCountry)
+    } catch (error) {
+      this.log.error(
+        `Unable to read tax rate for country ${normalizedCountry || taxCountry}: ${error.message}`,
+      )
+      throw new RequestException(
+        {
+          code: 'TAX_RATE_UNAVAILABLE',
+          message: `Unable to read tax rate for country ${normalizedCountry || taxCountry}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    return this.validateRechargeTaxConfig(taxCountry, tax)
+  }
+
+  private validateRechargeTaxConfig(
+    taxCountry: string,
+    tax: { taxName: string; taxRate: number; isInclusive: boolean } | null | undefined,
+  ): { taxName: string; taxRate: number; isInclusive: boolean } {
+    const normalizedCountry = String(taxCountry || '')
+      .trim()
+      .toUpperCase()
+    const parsedRate =
+      tax && tax.taxRate !== null && tax.taxRate !== undefined ? Number(tax.taxRate) : NaN
+    const normalizedTaxName = String(tax?.taxName || '').trim()
+    const requiresVat = isVatCountry(normalizedCountry) || normalizedTaxName.toUpperCase() === 'IVA'
+    const isUnreadable =
+      !tax ||
+      !Number.isFinite(parsedRate) ||
+      parsedRate < 0 ||
+      (requiresVat && (normalizedTaxName === 'N/A' || parsedRate <= 0))
+
+    if (isUnreadable) {
+      this.log.error(
+        `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
+      )
+      throw new RequestException(
+        {
+          code: 'TAX_RATE_UNAVAILABLE',
+          message: `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    return {
+      taxName: normalizedTaxName || 'N/A',
+      taxRate: parsedRate,
+      isInclusive: true,
+    }
+  }
+
+  /**
+   * Shared tax breakdown rule for `processCheckout` and `completeExternalPayment`:
+   * all published prices are final tax-inclusive amounts and ignore `tax_config.isInclusive`,
+   * extracting `subtotal = round(total / (1 + rate))` and `taxAmount = round(total - subtotal)`.
+   */
+  private breakDownTaxInclusiveAmount(
+    totalAmount: number,
+    taxRate: number,
+  ): { subtotal: number; taxAmount: number; totalAmount: number } {
+    const normalizedTotal = Math.round(Number(totalAmount) * 100) / 100
+    const normalizedRate = Number(taxRate)
+    if (!Number.isFinite(normalizedRate) || normalizedRate <= 0) {
+      return {
+        subtotal: normalizedTotal,
+        taxAmount: 0,
+        totalAmount: normalizedTotal,
+      }
+    }
+    const subtotal = Math.round((normalizedTotal / (1 + normalizedRate)) * 100) / 100
+    const taxAmount = Math.round((normalizedTotal - subtotal) * 100) / 100
+    return {
+      subtotal,
+      taxAmount,
+      totalAmount: normalizedTotal,
+    }
+  }
+
+  private readonly providerConfirmedAmountSpecs: Record<
+    string,
+    | {
+        verifiesAmount: false
+        reason: 'provider_webhook_omits_confirmed_amount'
+      }
+    | {
+        verifiesAmount: true
+        unit: 'cents' | 'major'
+        extractConfirmedAmount: (providerData: any) => unknown
+      }
+  > = {
+    [PaymentProvider.STRIPE]: {
+      verifiesAmount: true,
+      unit: 'cents',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.amount ??
+        providerData?.amount_total ??
+        providerData?.amountTotal ??
+        providerData?.data?.object?.amount ??
+        providerData?.data?.object?.amount_total ??
+        providerData?.providerStatus?.amountTotal,
+    },
+    [PaymentProvider.CONFIO]: {
+      verifiesAmount: true,
+      unit: 'cents',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.data?.amountCents ??
+        providerData?.amountCents ??
+        providerData?.providerStatus?.amountCents,
+    },
+    [PaymentProvider.DROPI]: {
+      verifiesAmount: true,
+      unit: 'major',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.amount ?? providerData?.data?.amount,
+    },
+    [PaymentProvider.MERCADOPAGO]: {
+      verifiesAmount: false,
+      reason: 'provider_webhook_omits_confirmed_amount',
+    },
+  }
+
+  private hasAmountMismatchMark(payment?: Payment | null): boolean {
+    return Boolean(payment?.metadata && payment.metadata.amountMismatch)
+  }
+
+  private async markPaymentAmountMismatch(
+    payment: Payment,
+    providerData: any,
+    mismatch: {
+      code: 'PROVIDER_AMOUNT_MISMATCH'
+      paymentId: string
+      provider: string
+      unit: 'cents' | 'major'
+      expectedAmount: number
+      confirmedAmount: number
+      message: string
+    },
+  ): Promise<void> {
+    const updatedMetadata = {
+      ...(payment.metadata || {}),
+      ...(providerData ? { providerData } : {}),
+      amountMismatch: mismatch,
+    }
+    await this.paymentRepo.update(
+      { id: payment.id, status: payment.status },
+      {
+        status: PaymentStatus.FAILED,
+        failureReason: mismatch.message,
+        metadata: updatedMetadata,
+      },
+    )
+  }
+
+  private toConfirmedAmountUnit(amountInMajorUnits: number, unit: 'cents' | 'major'): number {
+    if (unit === 'cents') {
+      return Math.round(Number(amountInMajorUnits) * 100)
+    }
+    return Math.round(Number(amountInMajorUnits) * 100) / 100
+  }
+
+  private normalizeConfirmedAmountInUnit(rawAmount: number, unit: 'cents' | 'major'): number {
+    if (unit === 'cents') {
+      return Math.round(rawAmount)
+    }
+    return Math.round(rawAmount * 100) / 100
+  }
+
+  private async assertProviderConfirmedAmount(
+    payment: Payment,
+    expectedAmount: number,
+    providerData?: any,
+  ): Promise<void> {
+    const providerKey = String(payment.provider || '').toLowerCase()
+    const spec = this.providerConfirmedAmountSpecs[providerKey]
+    if (!spec || !spec.verifiesAmount) {
+      return
+    }
+    if (!providerData || typeof providerData !== 'object') {
+      return
+    }
+    const rawCandidate = spec.extractConfirmedAmount(providerData)
+    if (rawCandidate === undefined || rawCandidate === null || rawCandidate === '') {
+      return
+    }
+    const numericConfirmed = Number(rawCandidate)
+    if (!Number.isFinite(numericConfirmed)) {
+      return
+    }
+    const expectedInUnit = this.toConfirmedAmountUnit(expectedAmount, spec.unit)
+    const confirmedInUnit = this.normalizeConfirmedAmountInUnit(numericConfirmed, spec.unit)
+    if (expectedInUnit !== confirmedInUnit) {
+      const message =
+        `Provider confirmed gross amount (${confirmedInUnit} ${spec.unit}) does not match ` +
+        `payment.amount (${expectedInUnit} ${spec.unit}) for payment ${payment.id}`
+      const mismatch = {
+        code: 'PROVIDER_AMOUNT_MISMATCH' as const,
+        paymentId: payment.id,
+        provider: providerKey,
+        unit: spec.unit,
+        expectedAmount: expectedInUnit,
+        confirmedAmount: confirmedInUnit,
+        message,
+      }
+      this.log.error(message)
+      winstonLogger.log('error', message, mismatch)
+      await this.markPaymentAmountMismatch(payment, providerData, mismatch)
+      throw new RequestException(
+        {
+          code: 'PROVIDER_AMOUNT_MISMATCH',
+          paymentId: payment.id,
+          message,
+        },
+        HttpStatus.CONFLICT,
+      )
+    }
   }
 
   /**
@@ -1194,10 +1727,14 @@ export class CheckoutService implements OnModuleInit {
    * Asignar plan a la marca en backend-roles con expiresAt.
    * Calcula expiresAt = currentPeriodEnd de la suscripción (BILLING_PERIOD_DAYS).
    */
-  private async assignPlanInRoles(brandId: string, planSlug: string) {
-    const expiresAt = new Date()
-    expiresAt.setDate(expiresAt.getDate() + this.BILLING_PERIOD_DAYS)
-    await this.clientRoles.assignPlanToBrand(brandId, planSlug, expiresAt)
+  private async assignPlanInRoles(brandId: string, planSlug: string, expiresAt?: Date) {
+    let resolvedExpiresAt =
+      expiresAt instanceof Date && !Number.isNaN(expiresAt.getTime()) ? expiresAt : null
+    if (!resolvedExpiresAt) {
+      resolvedExpiresAt = new Date()
+      resolvedExpiresAt.setDate(resolvedExpiresAt.getDate() + this.BILLING_PERIOD_DAYS)
+    }
+    await this.clientRoles.assignPlanToBrand(brandId, planSlug, resolvedExpiresAt)
   }
 
   /**
@@ -1210,5 +1747,153 @@ export class CheckoutService implements OnModuleInit {
       where: { brandId },
     })
     return profile?.country || 'CO' // Default Colombia
+  }
+
+  private isUniqueConstraintViolation(error: any): boolean {
+    return error?.code === '23505' || error?.driverError?.code === '23505'
+  }
+
+  private createIdempotencyConflictException(): RequestException {
+    return new RequestException(
+      {
+        code: 'IDEMPOTENCY_KEY_CONFLICT',
+        message: 'Idempotency-Key was already used with a different checkout request body',
+      },
+      HttpStatus.CONFLICT,
+    )
+  }
+
+  private buildIdempotencyFingerprint(req: CheckoutRequest): string {
+    return JSON.stringify({
+      userId: req.userId || null,
+      purpose: req.purpose || null,
+      provider: req.provider || null,
+      planSlug: req.planSlug || null,
+      amount: req.amount !== undefined && req.amount !== null ? Number(req.amount) : null,
+      currency: req.currency ? String(req.currency).toUpperCase() : null,
+      walletId: req.walletId || null,
+      successUrl: req.successUrl || null,
+      cancelUrl: req.cancelUrl || null,
+      buyer: req.buyer
+        ? {
+            firstName: req.buyer.firstName || null,
+            lastName: req.buyer.lastName || null,
+            email: req.buyer.email || null,
+            phoneNumber: req.buyer.phoneNumber || null,
+          }
+        : null,
+      renewal: Boolean(req.renewal),
+    })
+  }
+
+  private assertMatchingIdempotencyPayload(
+    existing: Payment,
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+  ): void {
+    const storedFingerprint = existing.metadata?.idempotencyFingerprint
+    if (typeof storedFingerprint === 'string' && incomingFingerprint) {
+      if (storedFingerprint !== incomingFingerprint) {
+        throw this.createIdempotencyConflictException()
+      }
+      return
+    }
+
+    if (existing.purpose && req.purpose && String(existing.purpose) !== String(req.purpose)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (existing.provider && req.provider && String(existing.provider) !== String(req.provider)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if ((existing.purposeId || null) !== (req.planSlug || null)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if ((existing.walletId || null) !== (req.walletId || null)) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (
+      req.amount !== undefined &&
+      existing.amount !== undefined &&
+      Number(existing.amount) !== Number(req.amount)
+    ) {
+      throw this.createIdempotencyConflictException()
+    }
+    if (
+      req.currency !== undefined &&
+      existing.currency !== undefined &&
+      String(existing.currency).toUpperCase() !== String(req.currency).toUpperCase()
+    ) {
+      throw this.createIdempotencyConflictException()
+    }
+  }
+
+  private async resolveExistingIdempotentPayment(
+    existing: Payment,
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+  ): Promise<CheckoutResult> {
+    this.assertMatchingIdempotencyPayload(existing, req, incomingFingerprint)
+
+    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
+    if (inFlightKey) {
+      const active = this.inFlightCheckouts.get(inFlightKey)
+      if (active) {
+        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
+          throw this.createIdempotencyConflictException()
+        }
+        return active.promise
+      }
+    }
+
+    if (existing.metadata?.checkoutResult) {
+      return existing.metadata.checkoutResult as CheckoutResult
+    }
+
+    if (existing.status === PaymentStatus.PENDING && req.idempotencyKey) {
+      const refreshed = await this.paymentRepo.findOne({
+        where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+      })
+      if (refreshed?.metadata?.checkoutResult) {
+        return refreshed.metadata.checkoutResult as CheckoutResult
+      }
+      if (refreshed) {
+        return {
+          paymentId: refreshed.id,
+          status: refreshed.status,
+          ...(refreshed.checkoutUrl ? { checkoutUrl: refreshed.checkoutUrl } : {}),
+        }
+      }
+    }
+
+    return {
+      paymentId: existing.id,
+      status: existing.status,
+      ...(existing.checkoutUrl ? { checkoutUrl: existing.checkoutUrl } : {}),
+    }
+  }
+
+  private async handleConcurrentIdempotentCheckout(
+    req: CheckoutRequest,
+    incomingFingerprint?: string,
+    inFlightKey?: string,
+  ): Promise<CheckoutResult> {
+    if (inFlightKey) {
+      const active = this.inFlightCheckouts.get(inFlightKey)
+      if (active) {
+        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
+          throw this.createIdempotencyConflictException()
+        }
+        return active.promise
+      }
+    }
+
+    const existing = await this.paymentRepo.findOne({
+      where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+    })
+    if (existing) {
+      return this.resolveExistingIdempotentPayment(existing, req, incomingFingerprint)
+    }
+
+    throw this.createIdempotencyConflictException()
   }
 }

@@ -111,16 +111,44 @@ describe('WalletService', () => {
   })
 
   describe('create', () => {
-    it('crea una wallet nueva', async () => {
+    it('creates a new wallet with zero balance and active status', async () => {
       const data = { brandId: 'brand-1', userId: 'user-1', currency: 'USD' }
-      walletRepo.create.mockReturnValue(data)
-      walletRepo.save.mockResolvedValue({ id: 'w1', ...data })
+      const created = {
+        ...data,
+        provider: undefined,
+        providerWalletId: undefined,
+        label: undefined,
+        metadata: undefined,
+        balance: 0,
+        status: WalletStatus.ACTIVE,
+      }
+      walletRepo.create.mockReturnValue(created)
+      walletRepo.save.mockResolvedValue({ id: 'w1', ...created })
 
       const result = await service.create(data)
 
-      expect(result.data).toEqual({ id: 'w1', ...data })
-      expect(walletRepo.create).toHaveBeenCalledWith(data)
-      expect(walletRepo.save).toHaveBeenCalledWith(data)
+      expect(result.data).toEqual({ id: 'w1', ...created })
+      expect(walletRepo.create).toHaveBeenCalledWith(created)
+      expect(walletRepo.save).toHaveBeenCalledWith(created)
+    })
+
+    it('strips prohibited fields and forces balance to 0 when creating a wallet', async () => {
+      const data = {
+        id: 'injected-id',
+        brandId: 'brand-1',
+        userId: 'user-1',
+        currency: 'USD',
+        balance: 1000000,
+        status: WalletStatus.FROZEN,
+      } as Partial<Wallet>
+
+      const result = await service.create(data)
+
+      const passedToCreate = walletRepo.create.mock.calls[0][0]
+      expect(passedToCreate).not.toHaveProperty('id')
+      expect(passedToCreate.balance).toBe(0)
+      expect(passedToCreate.status).toBe(WalletStatus.ACTIVE)
+      expect(result.data?.balance).toBe(0)
     })
   })
 
