@@ -249,11 +249,17 @@ describe('CheckoutService external payment completion concurrency (real database
         userId: 'u-1',
         walletId: WALLET_ID,
         provider: PaymentProvider.STRIPE,
-        amount: 119000,
+        amount: 100000,
         currency: 'COP',
         status: PaymentStatus.PENDING,
         purpose: PaymentPurpose.WALLET_RECHARGE,
-        metadata: { country: 'CO' },
+        metadata: {
+          country: 'CO',
+          taxRate: 0.19,
+          taxName: 'IVA',
+          subtotal: 84033.61,
+          taxAmount: 15966.39,
+        },
       }),
     )
     createdPaymentIds.push(pendingPayment.id)
@@ -582,11 +588,17 @@ describe('CheckoutService external payment completion concurrency (real database
           walletId: wallet.id,
           provider: PaymentProvider.CONFIO,
           providerPaymentId: `confio-${Date.now()}`,
-          amount: 119000,
+          amount: 100000,
           currency: 'COP',
           status: PaymentStatus.PENDING,
           purpose: PaymentPurpose.WALLET_RECHARGE,
-          metadata: { country: 'CO' },
+          metadata: {
+            country: 'CO',
+            taxRate: 0.19,
+            taxName: 'IVA',
+            subtotal: 84033.61,
+            taxAmount: 15966.39,
+          },
         }),
       )
       createdPaymentIds.push(payment.id)
@@ -617,9 +629,9 @@ describe('CheckoutService external payment completion concurrency (real database
 
       const invoices = await realInvoiceRepo.find({ where: { paymentId: payment.id } })
       expect(invoices).toHaveLength(1)
-      expect(Number(invoices[0].subtotal)).toBe(100000)
-      expect(Number(invoices[0].taxTotal)).toBe(19000)
-      expect(Number(invoices[0].total)).toBe(119000)
+      expect(Number(invoices[0].subtotal)).toBe(84033.61)
+      expect(Number(invoices[0].taxTotal)).toBe(15966.39)
+      expect(Number(invoices[0].total)).toBe(100000)
     })
 
     it('keeps the payment in processing when the credit database write rejects once, and on retry credits once and transitions to completed', async () => {
