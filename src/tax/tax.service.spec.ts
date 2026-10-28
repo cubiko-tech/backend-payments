@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 
-import { TaxService } from './tax.service'
+import { TaxService, isVatCountry } from './tax.service'
 import { TaxConfig } from './entities/taxConfig.entity'
 
 /**
@@ -59,5 +59,21 @@ describe('TaxService', () => {
 
     expect(tax).toEqual({ taxName: 'N/A', taxRate: 0, isInclusive: false })
     expect(error).toHaveBeenCalled()
+  })
+
+  it('returns N/A and logs an error when taxRate is non-numeric or negative', async () => {
+    repo.findOne.mockResolvedValue({ taxName: 'IVA', taxRate: 'not-a-rate', isInclusive: true })
+    const error = jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined)
+
+    const tax = await service.getTaxForCountry('CO')
+
+    expect(tax).toEqual({ taxName: 'N/A', taxRate: 0, isInclusive: false })
+    expect(error).toHaveBeenCalledWith('Invalid tax rate for CO: not-a-rate')
+  })
+
+  it('identifies VAT countries accurately via isVatCountry', () => {
+    expect(isVatCountry('co')).toBe(true)
+    expect(isVatCountry(' MX ')).toBe(true)
+    expect(isVatCountry('US')).toBe(false)
   })
 })

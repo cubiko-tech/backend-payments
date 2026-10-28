@@ -2,7 +2,7 @@ import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, IsNull, Not, Repository } from 'typeorm'
+import { DataSource, LessThan, In, Between, IsNull, Not, QueryRunner, Repository } from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
@@ -150,6 +150,8 @@ export class TasksService {
   private repescaEnCurso = false
   private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
+  private readonly subscriptionLocks = new Map<string, Promise<void>>()
 
   constructor(
     @InjectRepository(Wallet, 'DBRead')
@@ -433,12 +435,24 @@ export class TasksService {
         status: In([SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]),
         autoRenew: true,
         nextBillingDate: LessThan(now),
+        retryCount: LessThan(this.MAX_RETRY),
       },
     })
 
     let processed = 0
     for (const sub of dueSubscriptions) {
+      if (!this.hasAvailableRetries(sub)) continue
+      let releaseSubscriptionLock: (() => Promise<void>) | null = null
       try {
+        releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+        const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
+        if (fresh) {
+          Object.assign(sub, fresh)
+        }
+        if (!this.isEligibleForRenewal(sub, now)) {
+          continue
+        }
+
         if (sub.provider === 'wallet') {
           if (await this.renewFromWallet(sub)) {
             processed++
@@ -472,6 +486,8 @@ export class TasksService {
       } catch (error) {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
+      } finally {
+        await releaseSubscriptionLock?.()
       }
     }
 
@@ -540,7 +556,7 @@ export class TasksService {
     const pending = await this.paymentRepo.find({
       where: {
         provider: 'confio' as any,
-        status: PaymentStatus.PENDING,
+        status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         createdAt: LessThan(cutoff),
       },
     })
@@ -549,8 +565,14 @@ export class TasksService {
 
     let completed = 0
     for (const p of pending) {
-      if (!p.providerPaymentId) continue
       try {
+        if (!p.providerPaymentId) {
+          if (p.status === PaymentStatus.PROCESSING) {
+            await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+            completed++
+          }
+          continue
+        }
         const real = await this.providerFactory
           .getProvider('confio')
           .getPaymentStatus(p.providerPaymentId)
@@ -599,18 +621,19 @@ export class TasksService {
   // =============================================================
   // 4. Expirar suscripciones con reintentos agotados (cada hora)
   // =============================================================
-  @Cron(CronExpression.EVERY_HOUR)
-  async expireSubscriptions() {
-    const expired = await this.subscriptionRepo.find({
-      where: {
-        status: SubscriptionStatus.PAST_DUE,
-      },
-    })
-
-    let count = 0
-    let rechazadas = 0
-    for (const sub of expired) {
-      if (sub.retryCount < this.MAX_RETRY) continue
+  private async expireLockedSubscription(
+    sub: Subscription,
+  ): Promise<'expired' | 'rejected' | 'skipped'> {
+    let releaseSubscriptionLock: (() => Promise<void>) | null = null
+    try {
+      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+      const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
+      if (fresh) {
+        Object.assign(sub, fresh)
+      }
+      if (sub.status !== SubscriptionStatus.PAST_DUE || sub.retryCount < this.MAX_RETRY) {
+        return 'skipped'
+      }
 
       // La degradación va PRIMERO y nada se vence si roles la rechaza: marcar la
       // fila vencida sin haber movido el acceso dejaría a la marca con el plan
@@ -620,8 +643,7 @@ export class TasksService {
       // cron la vuelve a tomar (retirar y asignar son idempotentes del otro lado).
       if (!(await this.degradarEnRoles(sub))) {
         await this.detenerCobroRecurrente(sub)
-        rechazadas++
-        continue
+        return 'rejected'
       }
 
       // Compare-and-set: sólo vence la fila que TODAVÍA está en `past_due`. Los
@@ -648,7 +670,7 @@ export class TasksService {
           'info',
           `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
         )
-        continue
+        return 'skipped'
       }
 
       await this.subscriptionEventRepo.save(
@@ -670,7 +692,30 @@ export class TasksService {
       })
 
       logger.log('info', `[CRON] Suscripción expirada: brandId=${sub.brandId}`)
-      count++
+      return 'expired'
+    } finally {
+      await releaseSubscriptionLock?.()
+    }
+  }
+
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireSubscriptions() {
+    const expired = await this.subscriptionRepo.find({
+      where: {
+        status: SubscriptionStatus.PAST_DUE,
+      },
+    })
+
+    let count = 0
+    let rechazadas = 0
+    for (const sub of expired) {
+      if (sub.retryCount < this.MAX_RETRY) continue
+      const outcome = await this.expireLockedSubscription(sub)
+      if (outcome === 'expired') {
+        count++
+      } else if (outcome === 'rejected') {
+        rechazadas++
+      }
     }
 
     if (count > 0) {
@@ -1100,6 +1145,15 @@ export class TasksService {
           typeof this.clientRoles.hasCachedPrices === 'function' &&
           !this.clientRoles.hasCachedPrices()
         ) {
+          logger.log(
+            'error',
+            `[CRON] Cannot resolve price for subscription ${sub.id} (brand=${sub.brandId}, plan=${sub.planSlug}): backend-roles unreachable with cold price cache`,
+          )
+          if (this.isPostponementGraceExceeded(sub)) {
+            throw new Error(
+              `Renewal postponement grace period exceeded for subscription ${sub.id}: backend-roles price unavailable for plan '${sub.planSlug}'`,
+            )
+          }
           return false
         }
         throw new RequestException(
@@ -1367,6 +1421,10 @@ export class TasksService {
       newPeriodEnd,
     )
     if (!renewed) {
+      logger.log(
+        'error',
+        `[CRON] backend-roles returned false when renewing subscription ${sub.id} (brand=${sub.brandId}, plan=${sub.planSlug})`,
+      )
       return false
     }
 
@@ -1378,6 +1436,98 @@ export class TasksService {
 
     await this.subscriptionRepo.save(sub)
     return true
+  }
+
+  private hasAvailableRetries(sub: Subscription): boolean {
+    return (sub.retryCount ?? 0) < this.MAX_RETRY
+  }
+
+  private isEligibleForRenewal(sub: Subscription, now: Date): boolean {
+    if (![SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE].includes(sub.status)) {
+      return false
+    }
+    if (!sub.autoRenew) {
+      return false
+    }
+    if (!this.hasAvailableRetries(sub)) {
+      return false
+    }
+    if (sub.nextBillingDate && new Date(sub.nextBillingDate) >= now) {
+      return false
+    }
+    return true
+  }
+
+  private isPostponementGraceExceeded(sub: Subscription, now = new Date()): boolean {
+    if (!sub.nextBillingDate) {
+      return false
+    }
+    const billingTime = new Date(sub.nextBillingDate).getTime()
+    if (!Number.isFinite(billingTime)) {
+      return false
+    }
+    const graceMs = this.RENEWAL_POSTPONEMENT_GRACE_HOURS * 60 * 60 * 1000
+    return now.getTime() - billingTime >= graceMs
+  }
+
+  private async acquireSubscriptionLock(subId: string): Promise<() => Promise<void>> {
+    const previous = this.subscriptionLocks.get(subId) ?? Promise.resolve()
+    let releaseLock!: () => void
+    const current = new Promise<void>((resolve) => {
+      releaseLock = resolve
+    })
+    const tail = previous.then(() => current)
+    this.subscriptionLocks.set(subId, tail)
+
+    let queryRunner: QueryRunner | null = null
+    let released = false
+    const release = async (commit = true) => {
+      if (released) {
+        return
+      }
+      released = true
+      try {
+        if (queryRunner) {
+          try {
+            if (queryRunner.isTransactionActive) {
+              if (commit) {
+                await queryRunner.commitTransaction()
+              } else {
+                await queryRunner.rollbackTransaction()
+              }
+            }
+          } finally {
+            if (!queryRunner.isReleased) {
+              await queryRunner.release()
+            }
+          }
+        }
+      } finally {
+        releaseLock()
+        if (this.subscriptionLocks.get(subId) === tail) {
+          this.subscriptionLocks.delete(subId)
+        }
+      }
+    }
+
+    try {
+      await previous
+      if (typeof (this.dataSource as any)?.createQueryRunner === 'function') {
+        const candidate = this.dataSource.createQueryRunner()
+        if (typeof candidate?.query === 'function') {
+          queryRunner = candidate
+          await queryRunner.connect()
+          await queryRunner.startTransaction()
+          await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+            `subscription:${subId}`,
+          ])
+        }
+      }
+      return () => release(true)
+    } catch (error) {
+      await release(false).catch(() => undefined)
+      throw error
+    }
   }
 
   /**

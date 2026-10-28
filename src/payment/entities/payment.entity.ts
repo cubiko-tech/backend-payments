@@ -25,9 +25,11 @@ export enum PaymentPurpose {
 @Entity('payments')
 @Index(['brandId', 'status', 'createdAt'])
 @Index(['providerPaymentId'])
+@Index(['brandId', 'idempotencyKey'], { unique: true })
 export class Payment extends Content {
   @Column() brandId: string
   @Column() userId: string
+  @Column({ nullable: true }) idempotencyKey: string
   @Column({ type: 'uuid', nullable: true }) walletId: string
   @Column({ type: 'enum', enum: PaymentProvider }) provider: PaymentProvider
   @Column({ nullable: true }) providerPaymentId: string

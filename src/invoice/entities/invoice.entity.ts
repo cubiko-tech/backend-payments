@@ -16,6 +16,7 @@ export enum InvoiceStatus {
 @Entity('invoices')
 @Index(['brandId', 'createdAt'])
 @Index(['invoiceNumber'], { unique: true })
+@Index('UQ_invoices_payment_id', ['paymentId'], { unique: true })
 export class Invoice extends Content {
   @Column() brandId: string
   @Column({ type: 'uuid', nullable: true }) paymentId: string

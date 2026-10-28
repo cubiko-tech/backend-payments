@@ -71,9 +71,17 @@ export class BillingProfileService {
    */
   async create(data: Partial<BillingProfile>) {
     try {
+      const sanitized: Partial<BillingProfile> = {
+        ...this.pickAllowedFields(data),
+        brandId: data.brandId,
+      }
+
       // Validar campos según país
-      if (data.country) {
-        const errors = await this.countryConfig.validateBillingProfile(data.country, data as any)
+      if (sanitized.country) {
+        const errors = await this.countryConfig.validateBillingProfile(
+          sanitized.country,
+          sanitized as any,
+        )
         if (errors.length > 0) {
           throw new RequestException(
             { code: 'VALIDATION_ERROR', message: errors.join('; ') },
@@ -82,7 +90,7 @@ export class BillingProfileService {
         }
       }
 
-      const profile = this.billingProfileRepository.create(data)
+      const profile = this.billingProfileRepository.create(sanitized)
       const saved = await this.billingProfileRepository.save(profile)
       this.logger.log(`Perfil de facturación creado: ${saved.id} para marca ${saved.brandId}`)
       return { data: saved }
@@ -108,8 +116,10 @@ export class BillingProfileService {
         )
       }
 
+      const sanitized = this.pickAllowedFields(data)
+
       // Merge y validar contra el país
-      const merged = { ...profile, ...data }
+      const merged = { ...profile, ...sanitized, brandId }
       const country = merged.country || profile.country
       if (country) {
         const errors = await this.countryConfig.validateBillingProfile(country, merged as any)
@@ -121,7 +131,8 @@ export class BillingProfileService {
         }
       }
 
-      Object.assign(profile, data)
+      Object.assign(profile, sanitized)
+      profile.brandId = brandId
       const saved = await this.billingProfileRepository.save(profile)
 
       this.logger.log(`Perfil de facturación actualizado para marca ${brandId}`)
@@ -133,5 +144,35 @@ export class BillingProfileService {
       )
       return { error: error.message }
     }
+  }
+
+  private pickAllowedFields(data: Partial<BillingProfile>): Partial<BillingProfile> {
+    const allowedKeys: ReadonlyArray<keyof BillingProfile> = [
+      'legalName',
+      'taxId',
+      'taxIdType',
+      'address',
+      'city',
+      'state',
+      'country',
+      'postalCode',
+      'email',
+      'phone',
+      'taxRegime',
+      'dianResolutionNumber',
+      'dianResolutionPrefix',
+      'dianResolutionRangeFrom',
+      'dianResolutionRangeTo',
+      'dianResolutionDate',
+      'dianResolutionExpiry',
+    ]
+
+    const result: Partial<BillingProfile> = {}
+    for (const key of allowedKeys) {
+      if (data && data[key] !== undefined) {
+        ;(result as Record<string, unknown>)[key] = data[key]
+      }
+    }
+    return result
   }
 }

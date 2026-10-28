@@ -23,12 +23,23 @@ export class InvoiceService {
   /**
    * Crear una factura con sus ítems
    */
-  async create(data: Partial<Invoice> & { items?: Partial<InvoiceItem>[] }) {
+  async create(data: Omit<Partial<Invoice>, 'items'> & { items?: Partial<InvoiceItem>[] }) {
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
 
     try {
+      if (data.paymentId && typeof queryRunner.manager.findOne === 'function') {
+        const existing = await queryRunner.manager.findOne(Invoice, {
+          where: { paymentId: data.paymentId },
+          relations: ['items'],
+        })
+        if (existing) {
+          await queryRunner.rollbackTransaction()
+          return { data: existing }
+        }
+      }
+
       const { items, ...invoiceData } = data
       const invoice = queryRunner.manager.create(Invoice, invoiceData)
       const savedInvoice = await queryRunner.manager.save(Invoice, invoice)
@@ -52,14 +63,48 @@ export class InvoiceService {
       })
 
       this.logger.log(`Factura creada: ${savedInvoice.id} (${savedInvoice.invoiceNumber})`)
-      return { data: result }
+      return { data: result || savedInvoice }
     } catch (error) {
       await queryRunner.rollbackTransaction()
+      if (data.paymentId && this.isUniqueConstraintViolation(error)) {
+        const existing = await this.findExistingByPaymentId(queryRunner, data.paymentId)
+        if (existing) {
+          return { data: existing }
+        }
+      }
       this.logger.error(`Error al crear factura: ${error.message}`)
       return { error: error.message }
     } finally {
       await queryRunner.release()
     }
+  }
+
+  private isUniqueConstraintViolation(error: any): boolean {
+    return error?.code === '23505' || error?.driverError?.code === '23505'
+  }
+
+  private async findExistingByPaymentId(
+    queryRunner: { manager: { findOne?: DataSource['manager']['findOne'] } },
+    paymentId: string,
+  ): Promise<Invoice | null> {
+    if (typeof queryRunner.manager.findOne === 'function') {
+      const match = await queryRunner.manager.findOne(Invoice, {
+        where: { paymentId },
+        relations: ['items'],
+      })
+      if (match) return match
+    }
+    const writeMatch = await this.invoiceRepository?.findOne({
+      where: { paymentId },
+      relations: ['items'],
+    })
+    if (writeMatch) return writeMatch
+    return (
+      (await this.invoiceReadRepository?.findOne({
+        where: { paymentId },
+        relations: ['items'],
+      })) ?? null
+    )
   }
 
   /**
