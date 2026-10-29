@@ -1,3 +1,4 @@
+// R6: End-to-end controller + CheckoutService integration matrix shares one Nest TestingModule fixture.
 import { ExecutionContext, HttpException } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
@@ -5,7 +6,11 @@ import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
-import { ALLOWED_BRAND_ROLES, ClientPlatformService } from '../client/client-platform.service'
+import {
+  ALLOWED_BRAND_ROLES,
+  BRAND_LOOKUP_UNAVAILABLE,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { DianService } from '../dian/dian.service'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -125,6 +130,7 @@ describe('POST /checkout brand membership gate', () => {
   let controller: CheckoutController
   let guard: ApiAuthGuard
   let jwtService: JwtService
+  let platformClient: ClientPlatformService
   let fetchMock: jest.Mock
   let brandBWallet: {
     id: string
@@ -299,6 +305,7 @@ describe('POST /checkout brand membership gate', () => {
     controller = module.get<CheckoutController>(CheckoutController)
     guard = module.get<ApiAuthGuard>(ApiAuthGuard)
     jwtService = module.get<JwtService>(JwtService)
+    platformClient = module.get<ClientPlatformService>(ClientPlatformService)
   })
 
   afterEach(() => {
@@ -418,7 +425,8 @@ describe('POST /checkout brand membership gate', () => {
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - PLAN_PRICE_COP)
   })
 
-  it('rejects a member session without moving Brand B wallet balance when backend-platform does not respond', async () => {
+  it('responds 503 BRAND_LOOKUP_UNAVAILABLE without moving Brand B wallet balance when backend-platform does not respond', async () => {
+    platformClient.invalidateCountryCache()
     fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:3010'))
 
     const response = await postCheckout(
@@ -426,7 +434,13 @@ describe('POST /checkout brand membership gate', () => {
       checkoutBody('user-member-b'),
     )
 
-    expect(response.status).toBe(403)
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        code: BRAND_LOOKUP_UNAVAILABLE,
+        status: 503,
+      }),
+    )
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE)
     expect(walletService.debit).not.toHaveBeenCalled()
   })
