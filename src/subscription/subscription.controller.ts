@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   HttpStatus,
+  Logger,
   Post,
   Patch,
   Delete,
@@ -12,7 +13,10 @@ import {
   UseGuards,
 } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { assertResourceBrandAccess } from '../shared/auth/brand-scope.util'
 import { RequestException } from '../shared/exception/request.exception'
+import { ClientPlatformService } from '../client/client-platform.service'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
@@ -32,10 +36,14 @@ import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
  * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
  * firmados con un `clientSecret` que rota y que payments no puede guardar).
  *
- * Es autenticación SOLA: ningún handler de acá declara `@RequirePermission`, así
- * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
- * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
- * si hacen falta, son una decisión aparte.
+ * Authorization coverage:
+ * - Class-level `ApiAuthGuard` authenticates every handler.
+ * - `GET /subscription/enterprise-pricing`, `POST /subscription/enterprise-pricing/:brandId`,
+ *   and `DELETE /subscription/enterprise-pricing/:brandId` require `@RequireSuperAdmin()`.
+ * - `GET /subscription/enterprise-pricing/:brandId` requires brand membership
+ *   (`assertResourceBrandAccess`) or an operator.
+ * - `GET /subscription`, `/acceptance-link`, `/history`, and `POST /confirm`
+ *   resolve the caller brand via `resolveBrandId`.
  *
  * ⚠️ CONSECUENCIA ABIERTA, YA NO ENTERA: las tres LECTURAS (`GET /subscription`,
  * `/acceptance-link` y `/history`) sí resuelven la marca contra `req.user` — la
@@ -54,9 +62,12 @@ import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
 @Controller('subscription')
 @UseGuards(ApiAuthGuard)
 export class SubscriptionController {
+  private readonly logger = new Logger(SubscriptionController.name)
+
   constructor(
     private readonly subscriptionService: SubscriptionService,
     private readonly enterprisePricingService: EnterprisePricingService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Get()
@@ -235,23 +246,35 @@ export class SubscriptionController {
   // ============================================
 
   @Get('enterprise-pricing')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar precios enterprise personalizados (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de precios enterprise' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async listEnterprisePricing() {
     return this.enterprisePricingService.findAll()
   }
 
   @Get('enterprise-pricing/:brandId')
-  @ApiOperation({ summary: 'Obtener precio enterprise de una marca (Admin)' })
+  @ApiOperation({ summary: 'Get enterprise pricing for a brand (member or operator)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise obtenido' })
-  async getEnterprisePricing(@Param('brandId') brandId: string) {
+  @ApiResponse({ status: 403, description: 'forbidden (not a brand member or operator)' })
+  async getEnterprisePricing(@Param('brandId') brandId: string, @Req() req?: any) {
+    await assertResourceBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/enterprise-pricing/:brandId',
+    )
     const pricing = await this.enterprisePricingService.getForBrand(brandId)
     return { data: pricing }
   }
 
   @Post('enterprise-pricing/:brandId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Crear/actualizar precio enterprise para marca (Admin)' })
   @ApiResponse({ status: 201, description: 'Precio enterprise guardado' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async upsertEnterprisePricing(
     @Param('brandId') brandId: string,
     @Body()
@@ -270,8 +293,10 @@ export class SubscriptionController {
   }
 
   @Delete('enterprise-pricing/:brandId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Eliminar precio enterprise (volver a estándar) (Admin)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise eliminado' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async removeEnterprisePricing(@Param('brandId') brandId: string) {
     return this.enterprisePricingService.remove(brandId)
   }

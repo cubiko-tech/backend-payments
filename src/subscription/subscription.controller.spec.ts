@@ -1,9 +1,14 @@
-import { HttpStatus } from '@nestjs/common'
+import { HttpStatus, INestApplication } from '@nestjs/common'
+import { Reflector } from '@nestjs/core'
+import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
+import * as request from 'supertest'
 
 import { SubscriptionController } from './subscription.controller'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { ClientRolesService } from '../client/client-roles.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequestException } from '../shared/exception/request.exception'
 
@@ -57,6 +62,7 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
           },
         },
         { provide: EnterprisePricingService, useValue: {} },
+        { provide: ClientPlatformService, useValue: { canViewBrandCredit: jest.fn() } },
       ],
     })
       // El controller está detrás de `ApiAuthGuard`, que inyecta `JwtService` y
@@ -136,6 +142,7 @@ describe('SubscriptionController — alta paga', () => {
           },
         },
         { provide: EnterprisePricingService, useValue: {} },
+        { provide: ClientPlatformService, useValue: { canViewBrandCredit: jest.fn() } },
       ],
     })
       .overrideGuard(ApiAuthGuard)
@@ -156,5 +163,198 @@ describe('SubscriptionController — alta paga', () => {
 
     expect(service.startPaid).toHaveBeenCalledWith(body)
     expect(result.acceptanceUrl).toBe('https://pay/x')
+  })
+})
+
+describe('SubscriptionController — enterprise pricing authorization (LOC-48)', () => {
+  const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
+  const FOREIGN_BRAND_ID = '22222222-2222-4222-8222-222222222222'
+  const USER_ID = '33333333-3333-4333-8333-333333333333'
+  const JWT_SECRET = 'loc48-test-jwt-secret'
+  const SERVER_SECRET = 'loc48-test-server-secret'
+
+  let app: INestApplication
+  let jwtService: JwtService
+  let userToken: string
+  let superAdminToken: string
+  let prevJwtSecret: string | undefined
+  let prevAccessServer: string | undefined
+
+  let enterprisePricingService: {
+    findAll: jest.Mock
+    getForBrand: jest.Mock
+    upsert: jest.Mock
+    remove: jest.Mock
+  }
+  let platformClient: { canViewBrandCredit: jest.Mock }
+
+  beforeAll(async () => {
+    prevJwtSecret = process.env.JWT_SECRET
+    prevAccessServer = process.env.ACCESS_SERVER
+    process.env.JWT_SECRET = JWT_SECRET
+    process.env.ACCESS_SERVER = SERVER_SECRET
+
+    jwtService = new JwtService({ secret: JWT_SECRET })
+    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
+
+    enterprisePricingService = {
+      findAll: jest.fn().mockResolvedValue({
+        data: [{ id: 'ep-1', brandId: OWN_BRAND_ID, monthlyPrice: 500000, currency: 'COP' }],
+      }),
+      getForBrand: jest.fn().mockImplementation(async (brandId: string) => ({
+        id: 'ep-1',
+        brandId,
+        monthlyPrice: 500000,
+        currency: 'COP',
+      })),
+      upsert: jest.fn().mockImplementation(async (brandId: string, data: any) => ({
+        data: { id: 'ep-1', brandId, ...data },
+      })),
+      remove: jest.fn().mockResolvedValue({ data: { success: true } }),
+    }
+    platformClient = {
+      canViewBrandCredit: jest.fn().mockImplementation(async (userId: string, brandId: string) => {
+        return userId === USER_ID && brandId === OWN_BRAND_ID
+      }),
+    }
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      controllers: [SubscriptionController],
+      providers: [
+        ApiAuthGuard,
+        Reflector,
+        { provide: JwtService, useValue: jwtService },
+        { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
+        { provide: SubscriptionService, useValue: {} },
+        { provide: EnterprisePricingService, useValue: enterprisePricingService },
+        { provide: ClientPlatformService, useValue: platformClient },
+      ],
+    }).compile()
+
+    app = moduleRef.createNestApplication()
+    await app.init()
+  })
+
+  afterAll(async () => {
+    try {
+      if (app) {
+        await app.close()
+      }
+    } finally {
+      process.env.JWT_SECRET = prevJwtSecret
+      process.env.ACCESS_SERVER = prevAccessServer
+    }
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('rejects GET /subscription/enterprise-pricing for a regular user and allows operator', async () => {
+    const forbiddenRes = await request(app.getHttpServer())
+      .get('/subscription/enterprise-pricing')
+      .set('Authorization', `Bearer ${userToken}`)
+
+    expect(forbiddenRes.status).toBe(403)
+    expect(forbiddenRes.body).toMatchObject({ code: 'forbidden' })
+    expect(enterprisePricingService.findAll).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .get('/subscription/enterprise-pricing')
+      .set('Authorization', `Bearer ${superAdminToken}`)
+
+    expect(superAdminRes.status).toBe(200)
+    expect(superAdminRes.body).toEqual({
+      data: [{ id: 'ep-1', brandId: OWN_BRAND_ID, monthlyPrice: 500000, currency: 'COP' }],
+    })
+    expect(enterprisePricingService.findAll).toHaveBeenCalledTimes(1)
+
+    const serverRes = await request(app.getHttpServer())
+      .get('/subscription/enterprise-pricing')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+
+    expect(serverRes.status).toBe(200)
+    expect(enterprisePricingService.findAll).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects GET /subscription/enterprise-pricing/:brandId for foreign brand', async () => {
+    const foreignRes = await request(app.getHttpServer())
+      .get(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${userToken}`)
+
+    expect(foreignRes.status).toBe(403)
+    expect(foreignRes.body).toMatchObject({ code: 'forbidden' })
+    expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, FOREIGN_BRAND_ID)
+    expect(enterprisePricingService.getForBrand).not.toHaveBeenCalled()
+
+    const ownRes = await request(app.getHttpServer())
+      .get(`/subscription/enterprise-pricing/${OWN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${userToken}`)
+
+    expect(ownRes.status).toBe(200)
+    expect(ownRes.body).toEqual({
+      data: { id: 'ep-1', brandId: OWN_BRAND_ID, monthlyPrice: 500000, currency: 'COP' },
+    })
+    expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, OWN_BRAND_ID)
+    expect(enterprisePricingService.getForBrand).toHaveBeenCalledWith(OWN_BRAND_ID)
+
+    platformClient.canViewBrandCredit.mockClear()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .get(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+
+    expect(superAdminRes.status).toBe(200)
+    expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+    expect(enterprisePricingService.getForBrand).toHaveBeenCalledWith(FOREIGN_BRAND_ID)
+  })
+
+  it('rejects POST /subscription/enterprise-pricing/:brandId for a regular user and allows operator', async () => {
+    const payload = {
+      monthlyPrice: 100,
+      currency: 'COP',
+      negotiatedBy: 'user-regular',
+      validUntil: '2027-01-01T00:00:00.000Z',
+      notes: 'unauthorized attempt',
+    }
+
+    const forbiddenRes = await request(app.getHttpServer())
+      .post(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${userToken}`)
+      .send(payload)
+
+    expect(forbiddenRes.status).toBe(403)
+    expect(forbiddenRes.body).toMatchObject({ code: 'forbidden' })
+    expect(enterprisePricingService.upsert).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .post(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send(payload)
+
+    expect(superAdminRes.status).toBe(201)
+    expect(enterprisePricingService.upsert).toHaveBeenCalledWith(FOREIGN_BRAND_ID, {
+      ...payload,
+      validUntil: new Date('2027-01-01T00:00:00.000Z'),
+    })
+  })
+
+  it('rejects DELETE /subscription/enterprise-pricing/:brandId for a regular user and allows operator', async () => {
+    const forbiddenRes = await request(app.getHttpServer())
+      .delete(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${userToken}`)
+
+    expect(forbiddenRes.status).toBe(403)
+    expect(forbiddenRes.body).toMatchObject({ code: 'forbidden' })
+    expect(enterprisePricingService.remove).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .delete(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+
+    expect(superAdminRes.status).toBe(200)
+    expect(superAdminRes.body).toEqual({ data: { success: true } })
+    expect(enterprisePricingService.remove).toHaveBeenCalledWith(FOREIGN_BRAND_ID)
   })
 })
