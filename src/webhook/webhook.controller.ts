@@ -16,6 +16,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Request } from 'express'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { WebhookService } from './webhook.service'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
@@ -352,6 +353,7 @@ export class WebhookController {
 
   @Get('admin/events')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar todos los webhooks con filtros (Admin)' })
   @ApiResponse({ status: 200, description: 'Webhooks con stats' })
   async getAllWebhooks(
@@ -364,6 +366,7 @@ export class WebhookController {
 
   @Get('admin/failed')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar webhooks fallidos (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de webhooks fallidos' })
   async getFailedWebhooks(@Query('limit') limit?: number) {
@@ -372,6 +375,7 @@ export class WebhookController {
 
   @Post('admin/:id/retry')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
   async retryWebhook(@Param('id') id: string) {

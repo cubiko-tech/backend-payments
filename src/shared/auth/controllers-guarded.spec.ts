@@ -123,4 +123,40 @@ describe('admin and metrics controllers require superadmin operator', () => {
       expect(Reflect.getMetadata(API_PERMISSION_KEY, handler as object)).toBe('credit:runs')
     },
   )
+
+  it.each(['getAllDocuments', 'getPendingDocuments', 'verifyDocument', 'rejectDocument'] as const)(
+    'BillingProfileController.%s declares @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(BillingProfileController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it.each([
+    'get',
+    'create',
+    'update',
+    'getRequirements',
+    'getDocuments',
+    'uploadDocument',
+  ] as const)(
+    'BillingProfileController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(BillingProfileController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
+
+  it.each(WEBHOOK_ADMIN)('WebhookController.%s declares @RequireSuperAdmin()', (handlerName) => {
+    const handler: unknown = Reflect.get(WebhookController.prototype, handlerName)
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
+
+  it.each(WEBHOOK_PROVEEDOR)(
+    'WebhookController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(WebhookController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
 })
