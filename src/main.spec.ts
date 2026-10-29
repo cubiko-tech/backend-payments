@@ -1,4 +1,7 @@
 import * as cookieParser from 'cookie-parser'
+import helmet from 'helmet'
+import * as request from 'supertest'
+import { INestApplication } from '@nestjs/common'
 import { NestFactory } from '@nestjs/core'
 import { SwaggerModule } from '@nestjs/swagger'
 import { bootstrap } from './main'
@@ -8,14 +11,19 @@ jest.mock('helmet', () => ({
   __esModule: true,
   default: jest.fn(() => 'helmet-middleware'),
 }))
-jest.mock('./app.module', () => ({
-  AppModule: class AppModule {},
-}))
+jest.mock('./app.module', () => {
+  const { Module } = jest.requireActual<typeof import('@nestjs/common')>('@nestjs/common')
+  @Module({})
+  class AppModule {}
+  return { AppModule }
+})
 jest.mock('./shared/logger/logger', () => ({
   logger: {
     log: jest.fn(),
   },
 }))
+
+const realNestCreate = NestFactory.create.bind(NestFactory)
 
 describe('bootstrap (JWT_SECRET requirement)', () => {
   const originalEnv = process.env
@@ -29,8 +37,11 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
   }
 
   beforeEach(() => {
+    jest.restoreAllMocks()
     jest.clearAllMocks()
     process.env = { ...originalEnv }
+    ;(cookieParser as unknown as jest.Mock).mockReturnValue('cookie-parser-middleware')
+    ;(helmet as unknown as jest.Mock).mockReturnValue('helmet-middleware')
 
     mockApp = {
       setGlobalPrefix: jest.fn(),
@@ -75,5 +86,120 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
     expect(cookieParser).toHaveBeenCalledWith('test-cookie-signing-secret')
     expect(mockApp.use).toHaveBeenCalledWith('cookie-parser-middleware')
     expect(mockApp.listen).toHaveBeenCalledWith(80)
+  })
+})
+
+describe('bootstrap (Swagger documentation exposure by environment)', () => {
+  const originalEnv = process.env
+  let createdApp: INestApplication | undefined
+
+  beforeEach(() => {
+    jest.restoreAllMocks()
+    jest.clearAllMocks()
+    process.env = { ...originalEnv, JWT_SECRET: 'test-cookie-signing-secret' }
+    delete process.env.ENV
+    delete process.env.GO_ENV
+    delete process.env.NODE_ENV
+    ;(cookieParser as unknown as jest.Mock).mockImplementation(
+      () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    )
+    ;(helmet as unknown as jest.Mock).mockImplementation(
+      () => (_req: unknown, _res: unknown, next: () => void) => next(),
+    )
+
+    jest.spyOn(NestFactory, 'create').mockImplementation(async (moduleCls, options) => {
+      const app = await realNestCreate(moduleCls, { ...(options as object), logger: false })
+      createdApp = app
+      app.listen = jest.fn(async () => {
+        await app.init()
+        return app.getHttpServer()
+      }) as never
+      return app
+    })
+  })
+
+  afterEach(async () => {
+    try {
+      if (createdApp) {
+        await createdApp.close()
+      }
+    } finally {
+      createdApp = undefined
+      process.env = originalEnv
+    }
+  })
+
+  it('returns 404 on GET /api and GET /api-json without session when NODE_ENV is production', async () => {
+    process.env.ENV = 'development'
+    process.env.NODE_ENV = 'production'
+
+    await bootstrap()
+
+    const httpServer = createdApp!.getHttpServer()
+    const apiResponse = await request(httpServer).get('/api')
+    const apiJsonResponse = await request(httpServer).get('/api-json')
+
+    expect(apiResponse.status).toBe(404)
+    expect(apiJsonResponse.status).toBe(404)
+  })
+
+  it.each(['staging', 'test'])(
+    'returns 404 on GET /api and GET /api-json when NODE_ENV is %s',
+    async (nonDevEnv) => {
+      process.env.NODE_ENV = nonDevEnv
+
+      await bootstrap()
+
+      const httpServer = createdApp!.getHttpServer()
+      const apiResponse = await request(httpServer).get('/api')
+      const apiJsonResponse = await request(httpServer).get('/api-json')
+
+      expect(apiResponse.status).toBe(404)
+      expect(apiJsonResponse.status).toBe(404)
+    },
+  )
+
+  it.each(['production', 'staging'])(
+    'returns 404 on GET /api and GET /api-json when NODE_ENV is unset and ENV is %s',
+    async (nonDevEnv) => {
+      process.env.ENV = nonDevEnv
+
+      await bootstrap()
+
+      const httpServer = createdApp!.getHttpServer()
+      const apiResponse = await request(httpServer).get('/api')
+      const apiJsonResponse = await request(httpServer).get('/api-json')
+
+      expect(apiResponse.status).toBe(404)
+      expect(apiJsonResponse.status).toBe(404)
+    },
+  )
+
+  it('serves Swagger on GET /api and GET /api-json with 200 when NODE_ENV is development', async () => {
+    process.env.NODE_ENV = 'development'
+
+    await bootstrap()
+
+    const httpServer = createdApp!.getHttpServer()
+    const apiResponse = await request(httpServer).get('/api')
+    const apiJsonResponse = await request(httpServer).get('/api-json')
+
+    expect(apiResponse.status).toBe(200)
+    expect(apiJsonResponse.status).toBe(200)
+    expect(apiJsonResponse.body?.info?.title).toBe('Backend Payments')
+  })
+
+  it('serves Swagger on GET /api and GET /api-json with 200 in local dev when ENV is development and NODE_ENV is unset', async () => {
+    process.env.ENV = 'development'
+
+    await bootstrap()
+
+    const httpServer = createdApp!.getHttpServer()
+    const apiResponse = await request(httpServer).get('/api')
+    const apiJsonResponse = await request(httpServer).get('/api-json')
+
+    expect(apiResponse.status).toBe(200)
+    expect(apiJsonResponse.status).toBe(200)
+    expect(apiJsonResponse.body?.info?.title).toBe('Backend Payments')
   })
 })
