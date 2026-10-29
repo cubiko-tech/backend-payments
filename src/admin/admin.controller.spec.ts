@@ -1,3 +1,8 @@
+/**
+ * R6: Shares a single Nest HTTP harness and mock repository graph across all
+ * 32 AdminController and MetricsController endpoints; splitting would duplicate
+ * the 200-line module bootstrap.
+ */
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
@@ -227,7 +232,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     subscriptionReadRepo.createQueryBuilder.mockImplementation(() => mockQueryBuilder())
     paymentReadRepo.createQueryBuilder.mockImplementation(() => mockQueryBuilder())
     walletReadRepo.createQueryBuilder.mockImplementation(() => mockQueryBuilder())
-    subscriptionWriteRepo.findOne.mockResolvedValue({
+    subscriptionWriteRepo.findOne.mockImplementation(async () => ({
       id: TEST_UUID,
       brandId: 'brand-1',
       status: SubscriptionStatus.ACTIVE,
@@ -235,29 +240,29 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
       accessEndsAt: null,
       retryCount: 0,
-    })
-    paymentWriteRepo.findOne.mockResolvedValue({
+    }))
+    paymentWriteRepo.findOne.mockImplementation(async () => ({
       id: TEST_UUID,
       status: PaymentStatus.FAILED,
-    })
+    }))
     walletReadRepo.findOne.mockResolvedValue(null)
-    walletWriteRepo.findOne.mockResolvedValue({
+    walletWriteRepo.findOne.mockImplementation(async () => ({
       id: TEST_UUID,
       brandId: 'brand-1',
       currency: 'COP',
       balance: 1000,
       status: WalletStatus.ACTIVE,
-    })
+    }))
     walletWriteRepo.save.mockImplementation((d: any) => Promise.resolve({ id: TEST_UUID, ...d }))
     transactionWriteRepo.save.mockImplementation((d: any) => Promise.resolve({ id: 'tx-1', ...d }))
     providerReadRepo.findOne.mockResolvedValue(null)
-    providerWriteRepo.findOne.mockResolvedValue({
+    providerWriteRepo.findOne.mockImplementation(async () => ({
       id: TEST_UUID,
       country: 'CO',
       provider: 'stripe',
       isActive: true,
       priority: 1,
-    })
+    }))
   })
 
   it('rejects POST /admin/wallets/:id/adjust with 403 for non-superadmin before looking up the wallet', async () => {
@@ -327,7 +332,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     ['metrics retention', 'get', '/admin/metrics/retention', undefined],
     ['metrics history', 'get', '/admin/metrics/history', undefined],
   ] as const)(
-    'returns 403 for non-superadmin without touching state and 2xx for superadmin on %s (%s %s)',
+    'returns 403 for non-superadmin without touching state and 2xx for superadmin and ACCESS_SERVER on %s (%s %s)',
     async (_group, method, path, body) => {
       const forbiddenRes = await (request(app.getHttpServer()) as any)
         [method](path)
@@ -355,10 +360,20 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
 
       expect(allowedRes.status).toBeGreaterThanOrEqual(200)
       expect(allowedRes.status).toBeLessThan(300)
+      expect(allowedRes.body).not.toHaveProperty('error')
+
+      const serverRes = await (request(app.getHttpServer()) as any)
+        [method](path)
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+        .send(body)
+
+      expect(serverRes.status).toBeGreaterThanOrEqual(200)
+      expect(serverRes.status).toBeLessThan(300)
+      expect(serverRes.body).not.toHaveProperty('error')
     },
   )
 
-  it('allows ACCESS_SERVER token on admin and metrics routes', async () => {
+  it('allows ACCESS_SERVER token on admin and metrics routes, including POST /admin/wallets (LOC-49)', async () => {
     for (const path of [
       '/admin/subscriptions',
       '/admin/wallets',
@@ -372,9 +387,42 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
 
       expect(res.status).toBe(200)
     }
+
+    const createWalletRes = await request(app.getHttpServer())
+      .post('/admin/wallets')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send({
+        brandId: 'brand-loc49',
+        provider: 'internal',
+        currency: 'cop',
+        label: 'Brand wallet',
+      })
+
+    expect(createWalletRes.status).toBe(201)
+    expect(walletWriteRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: 'brand-loc49',
+        userId: 'brand-loc49',
+        provider: 'internal',
+        currency: 'COP',
+        label: 'Brand wallet',
+        balance: 0,
+        status: WalletStatus.ACTIVE,
+      }),
+    )
+    expect(walletWriteRepo.save).toHaveBeenCalledTimes(1)
+    expect(createWalletRes.body).toEqual({
+      data: expect.objectContaining({
+        id: TEST_UUID,
+        brandId: 'brand-loc49',
+        provider: 'internal',
+        currency: 'COP',
+        status: WalletStatus.ACTIVE,
+      }),
+    })
   })
 
-  it('preserves credit:runs permission check on credit/activation-requests routes', async () => {
+  it('preserves credit:runs permission check and operator access on credit/activation-requests routes', async () => {
     rolesService.checkPermission.mockResolvedValue(false)
     const deniedRes = await request(app.getHttpServer())
       .get('/admin/credit/activation-requests')
@@ -387,6 +435,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       .get('/admin/credit/activation-requests')
       .set('Authorization', `Bearer ${userToken}`)
     expect(allowedGetRes.status).toBe(200)
+    expect(rolesService.checkPermission).toHaveBeenCalledWith('user-regular', 'credit:runs')
     expect(creditService.listActivationRequests).toHaveBeenCalledTimes(1)
 
     const allowedPatchRes = await request(app.getHttpServer())
@@ -395,5 +444,19 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       .send({ notes: 'reviewed' })
     expect(allowedPatchRes.status).toBe(200)
     expect(creditService.updateActivationRequest).toHaveBeenCalledTimes(1)
+
+    rolesService.checkPermission.mockClear()
+    rolesService.checkPermission.mockResolvedValue(false)
+
+    const superAdminGetRes = await request(app.getHttpServer())
+      .get('/admin/credit/activation-requests')
+      .set('Authorization', `Bearer ${superAdminToken}`)
+    expect(superAdminGetRes.status).toBe(200)
+
+    const serverGetRes = await request(app.getHttpServer())
+      .get('/admin/credit/activation-requests')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+    expect(serverGetRes.status).toBe(200)
+    expect(rolesService.checkPermission).not.toHaveBeenCalled()
   })
 })

@@ -167,9 +167,18 @@ describe('ApiAuthGuard', () => {
       if (key === API_SUPER_ADMIN_KEY && target === classTarget) return true
       return undefined
     })
-    const g = makeGuard(jest.fn().mockReturnValue({ id: 'admin-1', isSuperAdmin: true }))
+    const g = makeGuard(
+      jest
+        .fn()
+        .mockReturnValueOnce({ id: 'admin-1', isSuperAdmin: true })
+        .mockReturnValueOnce({ id: 'admin-role', role: 'superadmin' }),
+    )
     const superAdminCtx = {
       ...ctx({ authorization: 'Bearer valid-superadmin-jwt' }),
+      getClass: () => classTarget,
+    }
+    const roleSuperAdminCtx = {
+      ...ctx({ authorization: 'Bearer valid-role-superadmin-jwt' }),
       getClass: () => classTarget,
     }
     const serverCtx = {
@@ -178,6 +187,7 @@ describe('ApiAuthGuard', () => {
     }
 
     await expect(g.canActivate(superAdminCtx)).resolves.toBe(true)
+    await expect(g.canActivate(roleSuperAdminCtx)).resolves.toBe(true)
     await expect(g.canActivate(serverCtx)).resolves.toBe(true)
     expect(roles.checkPermission).not.toHaveBeenCalled()
   })

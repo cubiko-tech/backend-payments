@@ -308,6 +308,14 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
     expect(superAdminRes.status).toBe(200)
     expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
     expect(enterprisePricingService.getForBrand).toHaveBeenCalledWith(FOREIGN_BRAND_ID)
+
+    const serverRes = await request(app.getHttpServer())
+      .get(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+
+    expect(serverRes.status).toBe(200)
+    expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+    expect(enterprisePricingService.getForBrand).toHaveBeenCalledWith(FOREIGN_BRAND_ID)
   })
 
   it('rejects POST /subscription/enterprise-pricing/:brandId for a regular user and allows operator', async () => {
@@ -338,6 +346,14 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
       ...payload,
       validUntil: new Date('2027-01-01T00:00:00.000Z'),
     })
+
+    const serverRes = await request(app.getHttpServer())
+      .post(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send(payload)
+
+    expect(serverRes.status).toBe(201)
+    expect(enterprisePricingService.upsert).toHaveBeenCalledTimes(2)
   })
 
   it('rejects DELETE /subscription/enterprise-pricing/:brandId for a regular user and allows operator', async () => {
@@ -356,5 +372,13 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
     expect(superAdminRes.status).toBe(200)
     expect(superAdminRes.body).toEqual({ data: { success: true } })
     expect(enterprisePricingService.remove).toHaveBeenCalledWith(FOREIGN_BRAND_ID)
+
+    const serverRes = await request(app.getHttpServer())
+      .delete(`/subscription/enterprise-pricing/${FOREIGN_BRAND_ID}`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+
+    expect(serverRes.status).toBe(200)
+    expect(serverRes.body).toEqual({ data: { success: true } })
+    expect(enterprisePricingService.remove).toHaveBeenCalledTimes(2)
   })
 })

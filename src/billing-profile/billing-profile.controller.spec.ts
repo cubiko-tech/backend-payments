@@ -243,7 +243,7 @@ describe('BillingProfileController and WebhookController admin operator authoriz
     ['webhook admin failed', 'get', '/webhook/admin/failed', undefined],
     ['webhook admin retry', 'post', `/webhook/admin/${WEBHOOK_EVENT_ID}/retry`, {}],
   ] as const)(
-    'returns 403 for non-superadmin without invoking service and 2xx for superadmin on %s (%s %s)',
+    'returns 403 for non-superadmin without invoking service and 2xx for superadmin and ACCESS_SERVER on %s (%s %s)',
     async (_label, method, path, body) => {
       const forbiddenRes = await (request(app.getHttpServer()) as any)
         [method](path)
@@ -266,6 +266,14 @@ describe('BillingProfileController and WebhookController admin operator authoriz
 
       expect(allowedRes.status).toBeGreaterThanOrEqual(200)
       expect(allowedRes.status).toBeLessThan(300)
+
+      const serverRes = await (request(app.getHttpServer()) as any)
+        [method](path)
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+        .send(body)
+
+      expect(serverRes.status).toBeGreaterThanOrEqual(200)
+      expect(serverRes.status).toBeLessThan(300)
     },
   )
 
