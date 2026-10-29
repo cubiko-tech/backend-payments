@@ -6,7 +6,7 @@ import { Request } from 'express'
 
 import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
-import { API_PERMISSION_KEY } from './require-permission.decorator'
+import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 
 interface GuardUser {
   id: string
@@ -51,16 +51,29 @@ export class ApiAuthGuard implements CanActivate {
     }
     req.user = user
 
-    const required = this.reflector.get<string>(API_PERMISSION_KEY, context.getHandler())
-    if (!required) return true
-    if (user.isSuperAdmin) return true
+    const handler = context.getHandler()
+    const required = this.reflector.get<string>(API_PERMISSION_KEY, handler)
+    if (required) {
+      if (user.isSuperAdmin) return true
 
-    const allowed = await this.roles.checkPermission(user.id, required)
-    if (!allowed) {
-      throw new RequestException(
-        { error: 'forbidden', code: 'forbidden', permission: required },
-        HttpStatus.FORBIDDEN,
-      )
+      const allowed = await this.roles.checkPermission(user.id, required)
+      if (!allowed) {
+        throw new RequestException(
+          { error: 'forbidden', code: 'forbidden', permission: required },
+          HttpStatus.FORBIDDEN,
+        )
+      }
+      return true
+    }
+
+    const controllerClass = typeof context.getClass === 'function' ? context.getClass() : undefined
+    const requireSuperAdmin =
+      this.reflector.get<boolean>(API_SUPER_ADMIN_KEY, handler) ??
+      (controllerClass
+        ? this.reflector.get<boolean>(API_SUPER_ADMIN_KEY, controllerClass)
+        : undefined)
+    if (requireSuperAdmin && !user.isSuperAdmin) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
     return true
   }

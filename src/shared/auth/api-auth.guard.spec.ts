@@ -1,5 +1,6 @@
 import { HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from './api-auth.guard'
+import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 
 const b64u = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url')
 const tokenWith = (payload: any) => `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u(payload)}.sig`
@@ -141,4 +142,67 @@ describe('ApiAuthGuard', () => {
       expect(verify).not.toHaveBeenCalled()
     },
   )
+
+  it('rejects non-superadmin user with 403 when class requires superadmin', async () => {
+    const classTarget = class AdminStub {}
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if (key === API_SUPER_ADMIN_KEY && target === classTarget) return true
+      return undefined
+    })
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'u1', isSuperAdmin: false }))
+    const context = {
+      ...ctx({ authorization: 'Bearer valid-user-jwt' }),
+      getClass: () => classTarget,
+    }
+
+    await expect(g.canActivate(context)).rejects.toMatchObject({
+      status: HttpStatus.FORBIDDEN,
+    })
+    expect(roles.checkPermission).not.toHaveBeenCalled()
+  })
+
+  it('allows superadmin and server token when class requires superadmin', async () => {
+    const classTarget = class AdminStub {}
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if (key === API_SUPER_ADMIN_KEY && target === classTarget) return true
+      return undefined
+    })
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'admin-1', isSuperAdmin: true }))
+    const superAdminCtx = {
+      ...ctx({ authorization: 'Bearer valid-superadmin-jwt' }),
+      getClass: () => classTarget,
+    }
+    const serverCtx = {
+      ...ctx({ authorization: 'Bearer srv-secret' }),
+      getClass: () => classTarget,
+    }
+
+    await expect(g.canActivate(superAdminCtx)).resolves.toBe(true)
+    await expect(g.canActivate(serverCtx)).resolves.toBe(true)
+    expect(roles.checkPermission).not.toHaveBeenCalled()
+  })
+
+  it('evaluates handler @RequirePermission before class @RequireSuperAdmin', async () => {
+    const classTarget = class AdminStub {}
+    const handlerTarget = () => undefined
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if (key === API_PERMISSION_KEY && target === handlerTarget) return 'credit:runs'
+      if (key === API_SUPER_ADMIN_KEY && target === classTarget) return true
+      return undefined
+    })
+    roles.checkPermission.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'credit-op', isSuperAdmin: false }))
+    const makeHandlerCtx = () => ({
+      ...ctx({ authorization: 'Bearer credit-op-jwt' }),
+      getHandler: () => handlerTarget,
+      getClass: () => classTarget,
+    })
+
+    await expect(g.canActivate(makeHandlerCtx())).resolves.toBe(true)
+    expect(roles.checkPermission).toHaveBeenCalledWith('credit-op', 'credit:runs')
+
+    await expect(g.canActivate(makeHandlerCtx())).rejects.toMatchObject({
+      status: HttpStatus.FORBIDDEN,
+    })
+  })
 })
