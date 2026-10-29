@@ -90,13 +90,7 @@ export class ApiAuthGuard implements CanActivate {
       try {
         const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
         const id = payload.id || payload.user
-        if (id) {
-          return {
-            id,
-            isSuperAdmin: payload.role === 'superadmin' || !!payload.isSuperAdmin,
-            brand: payload.brand ?? null,
-          }
-        }
+        if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
       } catch {
         /* fall through to auth-service validation */
       }

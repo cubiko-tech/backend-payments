@@ -1,7 +1,8 @@
 /**
- * R6: Shares a single Nest HTTP harness and mock repository graph across all
- * 32 AdminController and MetricsController endpoints; splitting would duplicate
- * the 200-line module bootstrap.
+ * R6: Shares a single Nest HTTP harness and mock repository graph across the
+ * 30-route operator table and the 2 credit activation endpoints of
+ * AdminController and MetricsController; splitting would duplicate the
+ * 200-line module bootstrap.
  */
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
