@@ -39,7 +39,11 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
   beforeEach(() => {
     jest.restoreAllMocks()
     jest.clearAllMocks()
-    process.env = { ...originalEnv }
+    process.env = {
+      ...originalEnv,
+      JWT_SECRET: 'test-cookie-signing-secret',
+      ACCESS_SERVER: 'test-access-server-secret',
+    }
     ;(cookieParser as unknown as jest.Mock).mockReturnValue('cookie-parser-middleware')
     ;(helmet as unknown as jest.Mock).mockReturnValue('helmet-middleware')
 
@@ -78,14 +82,77 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
     },
   )
 
+  it.each(['CHANGEME', ' leading-secret', 'trailing-secret ', ' CHANGEME '])(
+    'refuses to start and names JWT_SECRET without exposing its value when set to %j',
+    async (invalidSecret) => {
+      process.env.JWT_SECRET = invalidSecret
+
+      let caughtError: Error | undefined
+      try {
+        await bootstrap()
+      } catch (err) {
+        caughtError = err as Error
+      }
+
+      expect(caughtError).toBeInstanceOf(Error)
+      expect(caughtError?.message).toMatch(/JWT_SECRET/)
+      expect(caughtError?.message).not.toContain(invalidSecret.trim())
+      expect(mockApp.listen).not.toHaveBeenCalled()
+    },
+  )
+
+  it('refuses to start and names ACCESS_SERVER when the variable is missing', async () => {
+    delete process.env.ACCESS_SERVER
+
+    await expect(bootstrap()).rejects.toThrow(/ACCESS_SERVER/)
+    expect(mockApp.listen).not.toHaveBeenCalled()
+  })
+
+  it.each(['', '   '])(
+    'refuses to start and names ACCESS_SERVER when the variable is blank (%j)',
+    async (blankValue) => {
+      process.env.ACCESS_SERVER = blankValue
+
+      await expect(bootstrap()).rejects.toThrow(/ACCESS_SERVER/)
+      expect(mockApp.listen).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['CHANGEME', ' leading-token', 'trailing-token ', ' CHANGEME '])(
+    'refuses to start and names ACCESS_SERVER without exposing its value when set to %j',
+    async (invalidSecret) => {
+      process.env.ACCESS_SERVER = invalidSecret
+
+      let caughtError: Error | undefined
+      try {
+        await bootstrap()
+      } catch (err) {
+        caughtError = err as Error
+      }
+
+      expect(caughtError).toBeInstanceOf(Error)
+      expect(caughtError?.message).toMatch(/ACCESS_SERVER/)
+      expect(caughtError?.message).not.toContain(invalidSecret.trim())
+      expect(mockApp.listen).not.toHaveBeenCalled()
+    },
+  )
+
   it('starts the service and signs cookies with JWT_SECRET when configured', async () => {
     process.env.JWT_SECRET = 'test-cookie-signing-secret'
+    process.env.ACCESS_SERVER = 'test-access-server-secret'
 
     await expect(bootstrap()).resolves.toBeUndefined()
 
     expect(cookieParser).toHaveBeenCalledWith('test-cookie-signing-secret')
     expect(mockApp.use).toHaveBeenCalledWith('cookie-parser-middleware')
     expect(mockApp.listen).toHaveBeenCalledWith(80)
+  })
+
+  it('starts the service with the local .env configuration of the line', async () => {
+    process.env = { ...originalEnv }
+
+    await expect(bootstrap()).resolves.toBeUndefined()
+    expect(mockApp.listen).toHaveBeenCalled()
   })
 })
 
@@ -96,7 +163,11 @@ describe('bootstrap (Swagger documentation exposure by environment)', () => {
   beforeEach(() => {
     jest.restoreAllMocks()
     jest.clearAllMocks()
-    process.env = { ...originalEnv, JWT_SECRET: 'test-cookie-signing-secret' }
+    process.env = {
+      ...originalEnv,
+      JWT_SECRET: 'test-cookie-signing-secret',
+      ACCESS_SERVER: 'test-access-server-secret',
+    }
     delete process.env.ENV
     delete process.env.GO_ENV
     delete process.env.NODE_ENV

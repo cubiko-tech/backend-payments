@@ -11,6 +11,7 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
 @Injectable()
 export class StripeProvider implements PaymentProvider {
@@ -197,7 +198,7 @@ export class StripeProvider implements PaymentProvider {
   }
 
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+    const webhookSecret = readWebhookSecret('STRIPE_WEBHOOK_SECRET')
     if (!webhookSecret || !this.stripe) return false
     try {
       this.stripe.webhooks.constructEvent(payload, signature, webhookSecret)
@@ -212,10 +213,10 @@ export class StripeProvider implements PaymentProvider {
    */
   constructWebhookEvent(payload: Buffer, signature: string): Stripe.Event {
     this.ensureConfigured()
-    return this.stripe.webhooks.constructEvent(
-      payload,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET,
-    )
+    const webhookSecret = readWebhookSecret('STRIPE_WEBHOOK_SECRET')
+    if (!webhookSecret) {
+      throw new Error('Stripe webhook secret is not configured')
+    }
+    return this.stripe.webhooks.constructEvent(payload, signature, webhookSecret)
   }
 }

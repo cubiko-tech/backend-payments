@@ -8,11 +8,20 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger'
 import { isProductionEnv } from './shared/env/is-production'
 import { logger } from './shared/logger/logger'
 
-export async function bootstrap() {
-  const jwtSecret = process.env.JWT_SECRET?.trim()
-  if (!jwtSecret) {
-    throw new Error('Missing required environment variable: JWT_SECRET')
+function requireStartupSecret(name: 'JWT_SECRET' | 'ACCESS_SERVER'): string {
+  const value = process.env[name]
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`)
   }
+  if (value !== value.trim() || value === 'CHANGEME') {
+    throw new Error(`Invalid required environment variable: ${name}`)
+  }
+  return value
+}
+
+export async function bootstrap() {
+  const jwtSecret = requireStartupSecret('JWT_SECRET')
+  requireStartupSecret('ACCESS_SERVER')
 
   const app = await NestFactory.create(AppModule, {
     // NO `cors: true` acá: registraría un CORS por defecto con `origin:'*'` que

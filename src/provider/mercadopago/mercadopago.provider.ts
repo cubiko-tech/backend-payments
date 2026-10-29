@@ -11,6 +11,7 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
 /**
  * Implementación de MercadoPago como proveedor de pagos.
@@ -222,7 +223,7 @@ export class MercadoPagoProvider implements PaymentProvider {
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
     // MercadoPago usa x-signature header con ts y v1
     // Formato: ts=TIMESTAMP,v1=HASH
-    const secret = process.env.MP_WEBHOOK_SECRET
+    const secret = readWebhookSecret('MP_WEBHOOK_SECRET')
     if (!secret) return false
 
     try {

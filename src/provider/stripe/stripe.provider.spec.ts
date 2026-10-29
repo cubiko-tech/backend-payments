@@ -83,6 +83,28 @@ describe('StripeProvider', () => {
       const result = provider.validateWebhookSignature(Buffer.from('payload'), 'sig_test')
       expect(result).toBe(false)
     })
+
+    it('rejects a webhook when STRIPE_WEBHOOK_SECRET is CHANGEME without calling constructEvent', () => {
+      process.env.STRIPE_SECRET_KEY = 'sk_test_real_key_123'
+      process.env.STRIPE_WEBHOOK_SECRET = 'CHANGEME'
+
+      const provider = new StripeProvider()
+      const result = provider.validateWebhookSignature(Buffer.from('payload'), 'sig_changeme')
+
+      expect(result).toBe(false)
+      expect((provider as any).stripe.webhooks.constructEvent).not.toHaveBeenCalled()
+    })
+
+    it('throws when constructWebhookEvent is called with STRIPE_WEBHOOK_SECRET set to CHANGEME', () => {
+      process.env.STRIPE_SECRET_KEY = 'sk_test_real_key_123'
+      process.env.STRIPE_WEBHOOK_SECRET = 'CHANGEME'
+
+      const provider = new StripeProvider()
+
+      expect(() => provider.constructWebhookEvent(Buffer.from('payload'), 'sig_changeme')).toThrow(
+        /webhook secret/i,
+      )
+    })
   })
 
   describe('createCheckout', () => {

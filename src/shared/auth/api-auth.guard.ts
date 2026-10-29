@@ -14,6 +14,13 @@ interface GuardUser {
   brand?: string | null
 }
 
+function readAuthSecret(value: string | undefined): string | null {
+  if (!value || !value.trim() || value !== value.trim() || value === 'CHANGEME') {
+    return null
+  }
+  return value
+}
+
 /**
  * Autentica al usuario (cookie de sesión o Bearer JWT, o el ACCESS_SERVER) y, si
  * el handler declara `@RequirePermission(slug)`, verifica el permiso efectivo
@@ -23,8 +30,8 @@ interface GuardUser {
 @Injectable()
 export class ApiAuthGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
-  private readonly ACCESS_SERVER = process.env.ACCESS_SERVER
-  private readonly JWT_SECRET = process.env.JWT_SECRET
+  private readonly ACCESS_SERVER = readAuthSecret(process.env.ACCESS_SERVER)
+  private readonly JWT_SECRET = readAuthSecret(process.env.JWT_SECRET)
   private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
 
   constructor(
@@ -66,12 +73,14 @@ export class ApiAuthGuard implements CanActivate {
     if (this.isServerToken(token)) return { id: 'server', isSuperAdmin: true, brand: null }
 
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
-    try {
-      const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
-      const id = payload.id || payload.user
-      if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
-    } catch {
-      /* sigue a la validación contra el auth-service */
+    if (this.JWT_SECRET) {
+      try {
+        const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
+        const id = payload.id || payload.user
+        if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
+      } catch {
+        /* fall through to auth-service validation */
+      }
     }
 
     // 2) Tokens de auto-login: firmados con el `clientSecret` del cliente (que

@@ -1,3 +1,4 @@
+import { HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from './api-auth.guard'
 
 const b64u = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url')
@@ -90,4 +91,54 @@ describe('ApiAuthGuard', () => {
     expect(await g.canActivate(ctx({ authorization: `Bearer ${t}` }))).toBe(true)
     expect(roles.checkPermission).not.toHaveBeenCalled()
   })
+
+  it('rejects Bearer CHANGEME with 401 when ACCESS_SERVER is CHANGEME', async () => {
+    process.env.ACCESS_SERVER = 'CHANGEME'
+    const g = makeGuard(
+      jest.fn(() => {
+        throw new Error('invalid signature')
+      }),
+    )
+
+    await expect(g.canActivate(ctx({ authorization: 'Bearer CHANGEME' }))).rejects.toMatchObject({
+      status: HttpStatus.UNAUTHORIZED,
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each(['', '   ', ' srv-secret', 'srv-secret '])(
+    'rejects server token with 401 when ACCESS_SERVER is blank or has edge whitespace (%j)',
+    async (invalidServerSecret) => {
+      process.env.ACCESS_SERVER = invalidServerSecret
+      const g = makeGuard(
+        jest.fn(() => {
+          throw new Error('invalid signature')
+        }),
+      )
+
+      await expect(
+        g.canActivate(
+          ctx({ authorization: `Bearer ${invalidServerSecret.trim() || 'srv-secret'}` }),
+        ),
+      ).rejects.toMatchObject({
+        status: HttpStatus.UNAUTHORIZED,
+      })
+    },
+  )
+
+  it.each(['CHANGEME', ' global', 'global '])(
+    'skips local JWT verification and rejects with 401 when JWT_SECRET is %j',
+    async (invalidJwtSecret) => {
+      process.env.JWT_SECRET = invalidJwtSecret
+      const verify = jest.fn().mockReturnValue({ id: 'u1' })
+      const g = makeGuard(verify)
+
+      await expect(
+        g.canActivate(ctx({ authorization: 'Bearer some-token' })),
+      ).rejects.toMatchObject({
+        status: HttpStatus.UNAUTHORIZED,
+      })
+      expect(verify).not.toHaveBeenCalled()
+    },
+  )
 })

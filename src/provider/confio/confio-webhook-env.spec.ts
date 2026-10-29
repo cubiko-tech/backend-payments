@@ -1,4 +1,4 @@
-import { isProductionEnv, readConfioWebhookKey } from './confio-webhook-env'
+import { isProductionEnv, readConfioWebhookKey, readWebhookSecret } from './confio-webhook-env'
 
 /**
  * Capa 1: las dos lecturas de entorno, puras y sin Nest.
@@ -23,6 +23,20 @@ describe('readConfioWebhookKey', () => {
 
   it('devuelve la clave tal cual cuando está configurada', () => {
     expect(readConfioWebhookKey({ CONFIO_WEBHOOK_KEY: 'abc123' })).toBe('abc123')
+  })
+})
+
+describe('readWebhookSecret', () => {
+  it.each([
+    'CONFIO_WEBHOOK_KEY',
+    'DROPI_WEBHOOK_SECRET',
+    'STRIPE_WEBHOOK_SECRET',
+    'MP_WEBHOOK_SECRET',
+  ] as const)('returns null for %s when unset, empty, or CHANGEME', (key) => {
+    expect(readWebhookSecret(key, {})).toBeNull()
+    expect(readWebhookSecret(key, { [key]: '' })).toBeNull()
+    expect(readWebhookSecret(key, { [key]: 'CHANGEME' })).toBeNull()
+    expect(readWebhookSecret(key, { [key]: 'real-webhook-secret' })).toBe('real-webhook-secret')
   })
 })
 
