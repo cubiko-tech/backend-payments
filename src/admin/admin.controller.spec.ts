@@ -1,8 +1,8 @@
 /**
  * R6: Shares a single Nest HTTP harness and mock repository graph across the
- * 30-route operator table and the 2 credit activation endpoints of
- * AdminController and MetricsController; splitting would duplicate the
- * 200-line module bootstrap.
+ * 30-route operator table, the 2 credit activation endpoints, and the 5
+ * session-audit mutation routes of AdminController and MetricsController;
+ * splitting would duplicate the 200-line module bootstrap.
  */
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -460,4 +460,129 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     expect(serverGetRes.status).toBe(200)
     expect(rolesService.checkPermission).not.toHaveBeenCalled()
   })
+
+  it.each([
+    [
+      'subscriptions/:id/extend',
+      `/admin/subscriptions/${TEST_UUID}/extend`,
+      { days: 5, adminUserId: 'otro' },
+      'subscription_extended',
+      'subscription',
+    ],
+    [
+      'payments/:id/retry',
+      `/admin/payments/${TEST_UUID}/retry`,
+      { adminUserId: 'otro' },
+      'payment_retry',
+      'payment',
+    ],
+    [
+      'wallets',
+      '/admin/wallets',
+      { brandId: 'brand-1', provider: 'internal', currency: 'COP', adminUserId: 'otro' },
+      'wallet_created',
+      'wallet',
+    ],
+    [
+      'wallets/:id/toggle-freeze',
+      `/admin/wallets/${TEST_UUID}/toggle-freeze`,
+      { adminUserId: 'otro' },
+      'wallet_frozen',
+      'wallet',
+    ],
+    [
+      'wallets/:id/adjust',
+      `/admin/wallets/${TEST_UUID}/adjust`,
+      { type: 'credit', amount: 100, adminUserId: 'otro' },
+      'wallet_credit',
+      'wallet',
+    ],
+  ] as const)(
+    'records session actor and ignores body.adminUserId on POST %s (LOC-50)',
+    async (routeName, path, body, expectedAction, expectedEntityType) => {
+      const auditEntries: Array<Record<string, any>> = []
+      auditService.log.mockImplementation(
+        async (userId, action, entityType, entityId, changes, description) => {
+          const entry = { userId, action, entityType, entityId, changes, description }
+          auditEntries.unshift(entry)
+          return { data: entry }
+        },
+      )
+      auditService.findPaginated.mockImplementation(async () => ({
+        data: [...auditEntries],
+        count: auditEntries.length,
+      }))
+
+      const superAdminRes = await request(app.getHttpServer())
+        .post(path)
+        .set('Authorization', `Bearer ${superAdminToken}`)
+        .send(body)
+
+      expect(superAdminRes.status).toBe(201)
+      expect(auditService.log).toHaveBeenCalledTimes(1)
+      expect(auditService.log).toHaveBeenCalledWith(
+        'user-superadmin',
+        expectedAction,
+        expectedEntityType,
+        TEST_UUID,
+        expect.any(Object),
+        expect.any(String),
+      )
+      if (routeName === 'wallets/:id/adjust') {
+        expect(transactionWriteRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({ referenceId: 'user-superadmin' }),
+        )
+      }
+
+      const superAdminAuditRes = await request(app.getHttpServer())
+        .get('/admin/audit-log')
+        .set('Authorization', `Bearer ${superAdminToken}`)
+      expect(superAdminAuditRes.status).toBe(200)
+      expect(superAdminAuditRes.body.data[0]).toEqual(
+        expect.objectContaining({
+          userId: 'user-superadmin',
+          action: expectedAction,
+          entityType: expectedEntityType,
+          entityId: TEST_UUID,
+        }),
+      )
+
+      auditService.log.mockClear()
+      transactionWriteRepo.create.mockClear()
+
+      const serverRes = await request(app.getHttpServer())
+        .post(path)
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+        .send(body)
+
+      expect(serverRes.status).toBe(201)
+      expect(auditService.log).toHaveBeenCalledTimes(1)
+      expect(auditService.log).toHaveBeenCalledWith(
+        'server',
+        expectedAction,
+        expectedEntityType,
+        TEST_UUID,
+        expect.any(Object),
+        expect.any(String),
+      )
+      if (routeName === 'wallets/:id/adjust') {
+        expect(transactionWriteRepo.create).toHaveBeenCalledWith(
+          expect.objectContaining({ referenceId: 'server' }),
+        )
+      }
+
+      const serverAuditRes = await request(app.getHttpServer())
+        .get('/admin/audit-log')
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      expect(serverAuditRes.status).toBe(200)
+      expect(serverAuditRes.body.data[0]).toEqual(
+        expect.objectContaining({
+          userId: 'server',
+          action: expectedAction,
+          entityType: expectedEntityType,
+          entityId: TEST_UUID,
+        }),
+      )
+    },
+  )
 })
