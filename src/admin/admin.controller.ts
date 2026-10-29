@@ -219,9 +219,8 @@ export class AdminController {
 
     await this.subscriptionWriteRepo.save(sub)
 
-    const actor = req?.user?.id || 'admin'
     await this.auditService.log(
-      actor,
+      req?.user?.id || 'admin',
       'subscription_extended',
       'subscription',
       id,
@@ -367,9 +366,8 @@ export class AdminController {
     payment.status = PaymentStatus.PENDING
     await this.paymentWriteRepo.save(payment)
 
-    const actor = req?.user?.id || 'admin'
     await this.auditService.log(
-      actor,
+      req?.user?.id || 'admin',
       'payment_retry',
       'payment',
       id,
@@ -545,9 +543,8 @@ export class AdminController {
 
     const saved = await this.walletWriteRepo.save(wallet)
 
-    const actor = req?.user?.id || 'admin'
     await this.auditService.log(
-      actor,
+      req?.user?.id || 'admin',
       'wallet_created',
       'wallet',
       saved.id,
@@ -579,9 +576,8 @@ export class AdminController {
 
     await this.walletWriteRepo.save(wallet)
 
-    const actor = req?.user?.id || 'admin'
     await this.auditService.log(
-      actor,
+      req?.user?.id || 'admin',
       wallet.status === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
       'wallet',
       id,
@@ -624,7 +620,6 @@ export class AdminController {
     }
 
     const actor = req?.user?.id || 'admin'
-
     // Crear transacción
     const transaction = this.transactionWriteRepo.create({
       walletId: id,
