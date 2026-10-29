@@ -1,3 +1,4 @@
+// R6: Unit suite for CheckoutService shares one mocked repository and provider graph across pricing, tax, wallet, and completion scenarios.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { HttpStatus } from '@nestjs/common'
@@ -1158,6 +1159,40 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
   })
 
   describe('wallet recharge completion (tax-inclusive VAT breakdown, saved taxRate, and provider amount check)', () => {
+    it.each([
+      ['omitted', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+    ])(
+      'rejects wallet_recharge via external provider with 400 MISSING_WALLET_ID when walletId is %s without creating a payment or calling the provider',
+      async (_label, walletId) => {
+        taxService.getTaxForCountry.mockResolvedValue({
+          taxName: 'IVA',
+          taxRate: 0.19,
+          isInclusive: false,
+        })
+        expect.assertions(6)
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            amount: 100000,
+            currency: 'COP',
+            walletId,
+          })
+        } catch (error) {
+          expect((error as RequestException).code).toBe('MISSING_WALLET_ID')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        }
+        expect(walletService.findById).not.toHaveBeenCalled()
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(createCheckout).not.toHaveBeenCalled()
+      },
+    )
+
     it('charges 100,000 COP via Confio, breaks down VAT inside 100,000 using the saved taxRate, identifies the digital service and buyer on the invoice, and credits 100,000 COP once', async () => {
       const billingProfileRepo = (service as any).billingProfileRepo
       billingProfileRepo.findOne.mockResolvedValue({

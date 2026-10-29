@@ -692,4 +692,145 @@ describe('POST /checkout brand membership gate', () => {
       expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - 20000)
     })
   })
+
+  describe('wallet_recharge walletId requirement (LOC-59)', () => {
+    let checkoutService: CheckoutService
+    let createCheckoutMock: jest.Mock
+    let getProviderMock: jest.Mock
+
+    beforeEach(() => {
+      mockPlatformResponses([{ userId: 'user-owner-b', roleName: 'superuser' }])
+      checkoutService = (controller as any).checkoutService as CheckoutService
+      createCheckoutMock = jest.fn().mockResolvedValue({
+        providerPaymentId: 'confio-order-1',
+        checkoutUrl: 'https://pay.confio.test/order-1',
+      })
+      getProviderMock = (checkoutService as any).providerFactory.getProvider as jest.Mock
+      getProviderMock.mockReturnValue({ createCheckout: createCheckoutMock })
+      ;((checkoutService as any).taxService.getTaxForCountry as jest.Mock).mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+      walletService.credit.mockImplementation(async (_walletId: string, amount: number) => {
+        brandBWallet.balance += amount
+        return { data: brandBWallet }
+      })
+    })
+
+    // Mutation: removing `req.purpose === 'wallet_recharge'` from the assertWalletCurrency gate returns 201 instead of 400.
+    it.each([
+      ['omitted', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+    ])(
+      'responds 400 MISSING_WALLET_ID on POST /checkout wallet_recharge via confio when walletId is %s without creating a payment or calling the provider',
+      async (_label, walletId) => {
+        const response = await postCheckout(
+          { cookies: signUserCookies('user-owner-b') },
+          {
+            brandId: BRAND_B_ID,
+            userId: 'user-owner-b',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            amount: 100000,
+            currency: 'COP',
+            walletId,
+          },
+        )
+
+        expect(response.status).toBe(400)
+        expect(response.body).toEqual(
+          expect.objectContaining({
+            code: 'MISSING_WALLET_ID',
+          }),
+        )
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(getProviderMock).not.toHaveBeenCalled()
+        expect(createCheckoutMock).not.toHaveBeenCalled()
+      },
+    )
+
+    it('responds 201 pending on POST /checkout wallet_recharge via confio with walletId and on completion marks completed, credits 100000 to the wallet, and invoices 84033.61 + 15966.39', async () => {
+      let persistedPayment: any = null
+      paymentRepo.create.mockImplementation((data: any) => {
+        persistedPayment = { id: 'pay-recharge-100k', ...data }
+        return persistedPayment
+      })
+      paymentRepo.save.mockImplementation(async (payment: any) => {
+        persistedPayment = { ...payment }
+        return persistedPayment
+      })
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id === 'pay-recharge-100k' && persistedPayment) {
+          return { ...persistedPayment }
+        }
+        return null
+      })
+      paymentRepo.update.mockImplementation(async (_where: any, partial: any) => {
+        persistedPayment = { ...persistedPayment, ...partial }
+        return { affected: 1 }
+      })
+
+      const response = await postCheckout(
+        { cookies: signUserCookies('user-owner-b') },
+        {
+          brandId: BRAND_B_ID,
+          userId: 'user-owner-b',
+          purpose: 'wallet_recharge',
+          provider: 'confio',
+          walletId: WALLET_B_ID,
+          amount: 100000,
+          currency: 'COP',
+        },
+      )
+
+      expect(response.status).toBe(201)
+      expect(response.body.data).toEqual(
+        expect.objectContaining({
+          paymentId: 'pay-recharge-100k',
+          status: 'pending',
+          checkoutUrl: 'https://pay.confio.test/order-1',
+        }),
+      )
+      expect(createCheckoutMock).toHaveBeenCalledTimes(1)
+      expect(createCheckoutMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 100000,
+          currency: 'COP',
+          purpose: 'wallet_recharge',
+        }),
+      )
+
+      await checkoutService.completeExternalPayment('pay-recharge-100k', {
+        data: { status: 'Pagado', amountCents: 10000000 },
+      })
+
+      expect(persistedPayment.status).toBe('completed')
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(walletService.credit).toHaveBeenCalledWith(
+        WALLET_B_ID,
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_B_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-recharge-100k',
+        }),
+      )
+      expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE + 100000)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_B_ID,
+          paymentId: 'pay-recharge-100k',
+          subtotal: 84033.61,
+          taxTotal: 15966.39,
+          total: 100000,
+          currency: 'COP',
+        }),
+      )
+    })
+  })
 })

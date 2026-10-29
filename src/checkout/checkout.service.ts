@@ -208,7 +208,7 @@ export class CheckoutService implements OnModuleInit {
 
     // 3. Pre-validate wallet ownership, non-TKN currency, and currency match
     // before persisting the payment or debiting across any checkout purpose.
-    if (req.provider === 'wallet' || req.walletId) {
+    if (req.provider === 'wallet' || req.purpose === 'wallet_recharge' || req.walletId) {
       await this.assertWalletCurrency(req, currency)
     }
 
@@ -1109,7 +1109,7 @@ export class CheckoutService implements OnModuleInit {
    * @param currency Resolved ISO currency code for the checkout charge.
    */
   private async assertWalletCurrency(req: CheckoutRequest, currency: string) {
-    if (!req.walletId) {
+    if (typeof req.walletId !== 'string' || !req.walletId.trim()) {
       throw new RequestException(
         { code: 'MISSING_WALLET_ID', message: 'walletId requerido para pagar con la wallet' },
         HttpStatus.BAD_REQUEST,

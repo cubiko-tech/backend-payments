@@ -39,7 +39,7 @@ export class CheckoutController {
     description:
       'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
       '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
-      '(pago con wallet sin walletId)',
+      '(pago con wallet o recarga sin walletId)',
   })
   @ApiResponse({
     status: 403,
