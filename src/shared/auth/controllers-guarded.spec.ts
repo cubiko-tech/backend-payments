@@ -184,4 +184,17 @@ describe('admin and metrics controllers require superadmin operator', () => {
     const handler: unknown = Reflect.get(SubscriptionController.prototype, handlerName)
     expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
   })
+
+  it('RefundController.approve declares @RequireSuperAdmin()', () => {
+    const handler: unknown = Reflect.get(RefundController.prototype, 'approve')
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
+
+  it.each(['request', 'findByBrand', 'findById'] as const)(
+    'RefundController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(RefundController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
 })

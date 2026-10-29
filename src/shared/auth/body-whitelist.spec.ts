@@ -302,7 +302,10 @@ describe('Body DTO whitelist and repository sanitization (LOC-44)', () => {
         create: jest.fn((d) => d),
         save: jest.fn((d) => Promise.resolve({ id: 'ref-1', ...d })),
       }
-      const refundService = new RefundService(refundRepo as any, {} as any)
+      const paymentReadRepo = {
+        findOne: jest.fn().mockResolvedValue({ id: VALID_UUID, brandId: OWN_BRAND_ID }),
+      }
+      const refundService = new RefundService(refundRepo as any, {} as any, paymentReadRepo as any)
       await refundService.request({
         ...validRefundBody,
         brandId: OWN_BRAND_ID,
