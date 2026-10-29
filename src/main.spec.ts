@@ -148,11 +148,20 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
     expect(mockApp.listen).toHaveBeenCalledWith(80)
   })
 
-  it('starts the service with the local .env configuration of the line', async () => {
-    process.env = { ...originalEnv }
+  it('starts the service with deterministic local-shaped secrets even when webhook secrets are CHANGEME', async () => {
+    process.env = {
+      ...originalEnv,
+      JWT_SECRET: 'localdevjwt',
+      ACCESS_SERVER: 'local_access_server_token_0123456789abcdef0123456789',
+      CONFIO_WEBHOOK_KEY: 'CHANGEME',
+      DROPI_WEBHOOK_SECRET: 'CHANGEME',
+      STRIPE_WEBHOOK_SECRET: 'CHANGEME',
+      MP_WEBHOOK_SECRET: 'CHANGEME',
+    }
 
     await expect(bootstrap()).resolves.toBeUndefined()
-    expect(mockApp.listen).toHaveBeenCalled()
+    expect(cookieParser).toHaveBeenCalledWith('localdevjwt')
+    expect(mockApp.listen).toHaveBeenCalledWith(80)
   })
 })
 
