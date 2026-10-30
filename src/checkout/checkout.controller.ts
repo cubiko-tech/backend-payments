@@ -39,7 +39,7 @@ export class CheckoutController {
     description:
       'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
       '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
-      '(pago con wallet sin walletId)',
+      '(pago con wallet o recarga sin walletId)',
   })
   @ApiResponse({
     status: 403,
@@ -73,6 +73,7 @@ export class CheckoutController {
       }
     }
     const idempotencyKey = this.extractIdempotencyKey(req)
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : body?.userId
     // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
     // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
     // global no tiene metatype contra el cual recortar y NO descarta claves
@@ -81,6 +82,7 @@ export class CheckoutController {
     return {
       data: await this.checkoutService.processCheckout({
         ...body,
+        userId,
         ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
         renewal: undefined,
       }),

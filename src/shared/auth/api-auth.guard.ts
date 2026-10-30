@@ -6,12 +6,19 @@ import { Request } from 'express'
 
 import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
-import { API_PERMISSION_KEY } from './require-permission.decorator'
+import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 
 interface GuardUser {
   id: string
   isSuperAdmin: boolean
   brand?: string | null
+}
+
+function readAuthSecret(value: string | undefined): string | null {
+  if (!value || !value.trim() || value !== value.trim() || value === 'CHANGEME') {
+    return null
+  }
+  return value
 }
 
 /**
@@ -23,8 +30,8 @@ interface GuardUser {
 @Injectable()
 export class ApiAuthGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
-  private readonly ACCESS_SERVER = process.env.ACCESS_SERVER
-  private readonly JWT_SECRET = process.env.JWT_SECRET
+  private readonly ACCESS_SERVER = readAuthSecret(process.env.ACCESS_SERVER)
+  private readonly JWT_SECRET = readAuthSecret(process.env.JWT_SECRET)
   private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
 
   constructor(
@@ -44,16 +51,29 @@ export class ApiAuthGuard implements CanActivate {
     }
     req.user = user
 
-    const required = this.reflector.get<string>(API_PERMISSION_KEY, context.getHandler())
-    if (!required) return true
-    if (user.isSuperAdmin) return true
+    const handler = context.getHandler()
+    const required = this.reflector.get<string>(API_PERMISSION_KEY, handler)
+    if (required) {
+      if (user.isSuperAdmin) return true
 
-    const allowed = await this.roles.checkPermission(user.id, required)
-    if (!allowed) {
-      throw new RequestException(
-        { error: 'forbidden', code: 'forbidden', permission: required },
-        HttpStatus.FORBIDDEN,
-      )
+      const allowed = await this.roles.checkPermission(user.id, required)
+      if (!allowed) {
+        throw new RequestException(
+          { error: 'forbidden', code: 'forbidden', permission: required },
+          HttpStatus.FORBIDDEN,
+        )
+      }
+      return true
+    }
+
+    const controllerClass = typeof context.getClass === 'function' ? context.getClass() : undefined
+    const requireSuperAdmin =
+      this.reflector.get<boolean>(API_SUPER_ADMIN_KEY, handler) ??
+      (controllerClass
+        ? this.reflector.get<boolean>(API_SUPER_ADMIN_KEY, controllerClass)
+        : undefined)
+    if (requireSuperAdmin && !user.isSuperAdmin) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
     return true
   }
@@ -66,12 +86,14 @@ export class ApiAuthGuard implements CanActivate {
     if (this.isServerToken(token)) return { id: 'server', isSuperAdmin: true, brand: null }
 
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
-    try {
-      const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
-      const id = payload.id || payload.user
-      if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
-    } catch {
-      /* sigue a la validación contra el auth-service */
+    if (this.JWT_SECRET) {
+      try {
+        const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
+        const id = payload.id || payload.user
+        if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
+      } catch {
+        /* fall through to auth-service validation */
+      }
     }
 
     // 2) Tokens de auto-login: firmados con el `clientSecret` del cliente (que

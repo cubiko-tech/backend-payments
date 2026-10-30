@@ -16,6 +16,7 @@ import { LegalDocumentService } from './legal-document.service'
 import { CreateBillingProfileDto } from './dto/create-billing-profile.dto'
 import { UpdateBillingProfileDto } from './dto/update-billing-profile.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { assertBrandAccess, resolveRequestBrandId } from '../shared/auth/brand-scope.util'
 
@@ -100,6 +101,55 @@ export class BillingProfileController {
   // Documentos legales
   // ============================================
 
+  // Static admin routes must be declared before `:brandId/documents` so Express
+  // does not capture `admin` as `:brandId`.
+  @Get('admin/documents')
+  @RequireSuperAdmin()
+  @ApiOperation({ summary: 'Listar todos los documentos legales paginados con filtros (Admin)' })
+  @ApiResponse({ status: 200, description: 'Documentos legales' })
+  async getAllDocuments(
+    @Query('status') status?: string,
+    @Query('country') country?: string,
+    @Query('documentType') documentType?: string,
+    @Query('page') page?: number,
+    @Query('perPage') perPage?: number,
+  ) {
+    return this.legalDocumentService.findAll({
+      status,
+      country,
+      documentType,
+      page: Number(page) || 1,
+      perPage: Number(perPage) || 20,
+    })
+  }
+
+  @Get('admin/documents/pending')
+  @RequireSuperAdmin()
+  @ApiOperation({ summary: 'Listar documentos pendientes de verificación (Admin)' })
+  @ApiResponse({ status: 200, description: 'Documentos pendientes' })
+  async getPendingDocuments(@Query('limit') limit?: number) {
+    return this.legalDocumentService.findPending(limit || 50)
+  }
+
+  @Post('admin/documents/:id/verify')
+  @RequireSuperAdmin()
+  @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
+  @ApiResponse({ status: 200, description: 'Documento verificado' })
+  async verifyDocument(@Param('id') id: string, @Body() data: { verifiedBy: string }) {
+    return this.legalDocumentService.verify(id, data.verifiedBy)
+  }
+
+  @Post('admin/documents/:id/reject')
+  @RequireSuperAdmin()
+  @ApiOperation({ summary: 'Rechazar documento legal (Admin)' })
+  @ApiResponse({ status: 200, description: 'Documento rechazado' })
+  async rejectDocument(
+    @Param('id') id: string,
+    @Body() data: { verifiedBy: string; reason: string },
+  ) {
+    return this.legalDocumentService.reject(id, data.verifiedBy, data.reason)
+  }
+
   @Get(':brandId/documents')
   @ApiOperation({ summary: 'Listar documentos legales de una marca' })
   @ApiResponse({ status: 200, description: 'Documentos obtenidos' })
@@ -130,50 +180,5 @@ export class BillingProfileController {
       'POST /billing-profile/:brandId/documents',
     )
     return this.legalDocumentService.upsert({ ...data, brandId: validBrandId })
-  }
-
-  // Admin: verificar/rechazar documentos
-
-  @Get('admin/documents')
-  @ApiOperation({ summary: 'Listar todos los documentos legales paginados con filtros (Admin)' })
-  @ApiResponse({ status: 200, description: 'Documentos legales' })
-  async getAllDocuments(
-    @Query('status') status?: string,
-    @Query('country') country?: string,
-    @Query('documentType') documentType?: string,
-    @Query('page') page?: number,
-    @Query('perPage') perPage?: number,
-  ) {
-    return this.legalDocumentService.findAll({
-      status,
-      country,
-      documentType,
-      page: Number(page) || 1,
-      perPage: Number(perPage) || 20,
-    })
-  }
-
-  @Get('admin/documents/pending')
-  @ApiOperation({ summary: 'Listar documentos pendientes de verificación (Admin)' })
-  @ApiResponse({ status: 200, description: 'Documentos pendientes' })
-  async getPendingDocuments(@Query('limit') limit?: number) {
-    return this.legalDocumentService.findPending(limit || 50)
-  }
-
-  @Post('admin/documents/:id/verify')
-  @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
-  @ApiResponse({ status: 200, description: 'Documento verificado' })
-  async verifyDocument(@Param('id') id: string, @Body() data: { verifiedBy: string }) {
-    return this.legalDocumentService.verify(id, data.verifiedBy)
-  }
-
-  @Post('admin/documents/:id/reject')
-  @ApiOperation({ summary: 'Rechazar documento legal (Admin)' })
-  @ApiResponse({ status: 200, description: 'Documento rechazado' })
-  async rejectDocument(
-    @Param('id') id: string,
-    @Body() data: { verifiedBy: string; reason: string },
-  ) {
-    return this.legalDocumentService.reject(id, data.verifiedBy, data.reason)
   }
 }

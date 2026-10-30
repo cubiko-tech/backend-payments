@@ -31,7 +31,7 @@ import {
   CreditActivationRequestStatus,
 } from '../credit/credit.types'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequirePermission } from '../shared/auth/require-permission.decorator'
+import { RequirePermission, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 
 /**
@@ -45,15 +45,8 @@ import { UpdateActivationRequestDto } from '../credit/dto/update-activation-requ
  */
 @ApiTags('Admin')
 @Controller('admin')
-/**
- * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
- * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
- * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
- * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
- * `@RequirePermission` por handler, así que esto no le agrega requisitos a
- * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
- */
 @UseGuards(ApiAuthGuard)
+@RequireSuperAdmin()
 export class AdminController {
   constructor(
     @InjectRepository(Subscription, 'DBRead')
@@ -196,7 +189,8 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Suscripción extendida' })
   async extendSubscription(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { days: number; reason?: string; adminUserId?: string },
+    @Body() body: { days: number; reason?: string },
+    @Req() req?: any,
   ) {
     const sub = await this.subscriptionWriteRepo.findOne({ where: { id } })
     if (!sub) {
@@ -226,7 +220,7 @@ export class AdminController {
     await this.subscriptionWriteRepo.save(sub)
 
     await this.auditService.log(
-      body.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'subscription_extended',
       'subscription',
       id,
@@ -360,10 +354,7 @@ export class AdminController {
   @Post('payments/:id/retry')
   @ApiOperation({ summary: 'Reintentar cobro de pago fallido manualmente (Admin)' })
   @ApiResponse({ status: 200, description: 'Pago marcado para reintento' })
-  async retryPayment(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body?: { adminUserId?: string },
-  ) {
+  async retryPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const payment = await this.paymentWriteRepo.findOne({ where: { id } })
     if (!payment) {
       return { error: 'Pago no encontrado' }
@@ -376,7 +367,7 @@ export class AdminController {
     await this.paymentWriteRepo.save(payment)
 
     await this.auditService.log(
-      body?.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'payment_retry',
       'payment',
       id,
@@ -529,8 +520,8 @@ export class AdminController {
       currency: string
       label?: string
       balance?: number
-      adminUserId?: string
     },
+    @Req() req?: any,
   ) {
     // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
@@ -553,7 +544,7 @@ export class AdminController {
     const saved = await this.walletWriteRepo.save(wallet)
 
     await this.auditService.log(
-      body.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'wallet_created',
       'wallet',
       saved.id,
@@ -573,10 +564,7 @@ export class AdminController {
   @Post('wallets/:id/toggle-freeze')
   @ApiOperation({ summary: 'Congelar o descongelar wallet (Admin)' })
   @ApiResponse({ status: 200, description: 'Estado de wallet actualizado' })
-  async toggleFreezeWallet(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body?: { adminUserId?: string },
-  ) {
+  async toggleFreezeWallet(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
     if (!wallet) return { error: 'Wallet no encontrada' }
     if (wallet.status === WalletStatus.CLOSED)
@@ -589,7 +577,7 @@ export class AdminController {
     await this.walletWriteRepo.save(wallet)
 
     await this.auditService.log(
-      body?.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       wallet.status === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
       'wallet',
       id,
@@ -611,8 +599,8 @@ export class AdminController {
       amount: number
       description?: string
       category?: string
-      adminUserId?: string
     },
+    @Req() req?: any,
   ) {
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
     if (!wallet) return { error: 'Wallet no encontrada' }
@@ -631,6 +619,7 @@ export class AdminController {
       return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
     }
 
+    const actor = req?.user?.id || 'admin'
     // Crear transacción
     const transaction = this.transactionWriteRepo.create({
       walletId: id,
@@ -643,7 +632,7 @@ export class AdminController {
       category: body.category || 'admin_adjustment',
       description: body.description || `Ajuste manual (${body.type})`,
       referenceType: 'admin',
-      referenceId: body.adminUserId || 'admin',
+      referenceId: actor,
     })
     await this.transactionWriteRepo.save(transaction)
 
@@ -652,7 +641,7 @@ export class AdminController {
     await this.walletWriteRepo.save(wallet)
 
     await this.auditService.log(
-      body.adminUserId || 'admin',
+      actor,
       body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
       'wallet',
       id,

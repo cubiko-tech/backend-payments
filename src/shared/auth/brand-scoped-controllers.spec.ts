@@ -1,4 +1,9 @@
+// R6: Cross-controller brand-ownership matrix covering all 6 brand-scoped user controllers in one suite.
 import { HttpStatus, Logger } from '@nestjs/common'
+import {
+  BRAND_LOOKUP_UNAVAILABLE,
+  ClientPlatformService,
+} from '../../client/client-platform.service'
 import { WalletController } from '../../wallet/wallet.controller'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
 import { InvoiceController } from '../../invoice/invoice.controller'
@@ -183,6 +188,53 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
       expect(walletService.findByBrand).toHaveBeenCalledTimes(2)
       expect(walletService.findById).toHaveBeenCalledTimes(2)
+    })
+
+    it('responds 503 BRAND_LOOKUP_UNAVAILABLE when backend-platform does not respond and keeps 403 for non-members', async () => {
+      const originalFetch = global.fetch
+      const originalPlatformUrl = process.env.SERVICE_PLATFORM
+      process.env.SERVICE_PLATFORM = 'http://platform.test'
+
+      try {
+        const { walletService } = buildSubject(false)
+        const platformClient = new ClientPlatformService()
+        platformClient.invalidateCountryCache()
+        const controller = new WalletController(walletService as any, platformClient)
+
+        global.fetch = jest
+          .fn()
+          .mockRejectedValue(
+            new Error('connect ECONNREFUSED 127.0.0.1:3010'),
+          ) as unknown as typeof fetch
+
+        await expect(controller.findByBrand(OWN_BRAND_ID, userReq)).rejects.toMatchObject({
+          status: HttpStatus.SERVICE_UNAVAILABLE,
+          code: BRAND_LOOKUP_UNAVAILABLE,
+        })
+        expect(walletService.findByBrand).not.toHaveBeenCalled()
+        expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('Forbidden brand access'))
+
+        await expect(controller.findById(RESOURCE_ID, userReq)).rejects.toMatchObject({
+          status: HttpStatus.SERVICE_UNAVAILABLE,
+          code: BRAND_LOOKUP_UNAVAILABLE,
+        })
+
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ user: { id: 'other-user' }, rol: { name: 'superuser' } }],
+          }),
+        }) as unknown as typeof fetch
+
+        await expect(controller.findByBrand(FOREIGN_BRAND_ID, userReq)).rejects.toMatchObject({
+          status: HttpStatus.FORBIDDEN,
+          code: 'forbidden',
+        })
+      } finally {
+        global.fetch = originalFetch
+        process.env.SERVICE_PLATFORM = originalPlatformUrl
+      }
     })
   })
 

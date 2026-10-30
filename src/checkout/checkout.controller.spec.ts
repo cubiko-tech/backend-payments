@@ -1,3 +1,4 @@
+// R6: End-to-end controller + CheckoutService integration matrix shares one Nest TestingModule fixture.
 import { ExecutionContext, HttpException } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
@@ -5,7 +6,11 @@ import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
-import { ALLOWED_BRAND_ROLES, ClientPlatformService } from '../client/client-platform.service'
+import {
+  ALLOWED_BRAND_ROLES,
+  BRAND_LOOKUP_UNAVAILABLE,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { DianService } from '../dian/dian.service'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -125,6 +130,7 @@ describe('POST /checkout brand membership gate', () => {
   let controller: CheckoutController
   let guard: ApiAuthGuard
   let jwtService: JwtService
+  let platformClient: ClientPlatformService
   let fetchMock: jest.Mock
   let brandBWallet: {
     id: string
@@ -135,6 +141,9 @@ describe('POST /checkout brand membership gate', () => {
   }
   let walletService: { debit: jest.Mock; credit: jest.Mock; findById: jest.Mock }
   let paymentRepo: ReturnType<typeof createMockRepo>
+  let subscriptionRepo: ReturnType<typeof createMockRepo>
+  let subscriptionEventRepo: ReturnType<typeof createMockRepo>
+  let auditService: { log: jest.Mock }
   let invoiceService: { create: jest.Mock }
 
   const createMockRepo = () => ({
@@ -213,6 +222,9 @@ describe('POST /checkout brand membership gate', () => {
     }
 
     paymentRepo = createMockRepo()
+    subscriptionRepo = createMockRepo()
+    subscriptionEventRepo = createMockRepo()
+    auditService = { log: jest.fn().mockResolvedValue(null) }
     invoiceService = {
       create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),
     }
@@ -226,8 +238,11 @@ describe('POST /checkout brand membership gate', () => {
         CheckoutService,
         { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: paymentRepo },
         { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
-        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
-        { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
+        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionRepo },
+        {
+          provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
+          useValue: subscriptionEventRepo,
+        },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
         { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
         { provide: WalletService, useValue: walletService },
@@ -236,7 +251,7 @@ describe('POST /checkout brand membership gate', () => {
           useValue: invoiceService,
         },
         { provide: SubscriptionService, useValue: {} },
-        { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(null) } },
+        { provide: AuditService, useValue: auditService },
         {
           provide: TaxService,
           useValue: {
@@ -299,6 +314,7 @@ describe('POST /checkout brand membership gate', () => {
     controller = module.get<CheckoutController>(CheckoutController)
     guard = module.get<ApiAuthGuard>(ApiAuthGuard)
     jwtService = module.get<JwtService>(JwtService)
+    platformClient = module.get<ClientPlatformService>(ClientPlatformService)
   })
 
   afterEach(() => {
@@ -416,9 +432,50 @@ describe('POST /checkout brand membership gate', () => {
     })
     expect(walletService.debit).toHaveBeenCalledTimes(1)
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - PLAN_PRICE_COP)
+    expect(paymentRepo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'system' }))
   })
 
-  it('rejects a member session without moving Brand B wallet balance when backend-platform does not respond', async () => {
+  it('records req.user.id from the user session on payment, subscription, event, and audit log while ignoring userId in the body (LOC-53)', async () => {
+    mockPlatformResponses([{ userId: 'user-member-b', roleName: 'superuser' }])
+
+    const response = await postCheckout(
+      { cookies: signUserCookies('user-member-b') },
+      checkoutBody('other-user-id'),
+    )
+
+    expect(response.status).toBe(201)
+    expect(paymentRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: BRAND_B_ID,
+        userId: 'user-member-b',
+      }),
+    )
+    expect(paymentRepo.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'other-user-id' }),
+    )
+    expect(subscriptionRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: BRAND_B_ID,
+        userId: 'user-member-b',
+      }),
+    )
+    expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        triggeredBy: 'user-member-b',
+      }),
+    )
+    expect(auditService.log).toHaveBeenCalledWith(
+      'user-member-b',
+      'checkout_completed',
+      'payment',
+      'pay-1',
+      expect.any(Object),
+      expect.any(String),
+    )
+  })
+
+  it('responds 503 BRAND_LOOKUP_UNAVAILABLE without moving Brand B wallet balance when backend-platform does not respond', async () => {
+    platformClient.invalidateCountryCache()
     fetchMock.mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:3010'))
 
     const response = await postCheckout(
@@ -426,7 +483,13 @@ describe('POST /checkout brand membership gate', () => {
       checkoutBody('user-member-b'),
     )
 
-    expect(response.status).toBe(403)
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        code: BRAND_LOOKUP_UNAVAILABLE,
+        status: 503,
+      }),
+    )
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE)
     expect(walletService.debit).not.toHaveBeenCalled()
   })
@@ -676,6 +739,147 @@ describe('POST /checkout brand membership gate', () => {
       expect(second.body.data.paymentId).not.toBe(first.body.data.paymentId)
       expect(walletService.debit).toHaveBeenCalledTimes(2)
       expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - 20000)
+    })
+  })
+
+  describe('wallet_recharge walletId requirement (LOC-59)', () => {
+    let checkoutService: CheckoutService
+    let createCheckoutMock: jest.Mock
+    let getProviderMock: jest.Mock
+
+    beforeEach(() => {
+      mockPlatformResponses([{ userId: 'user-owner-b', roleName: 'superuser' }])
+      checkoutService = (controller as any).checkoutService as CheckoutService
+      createCheckoutMock = jest.fn().mockResolvedValue({
+        providerPaymentId: 'confio-order-1',
+        checkoutUrl: 'https://pay.confio.test/order-1',
+      })
+      getProviderMock = (checkoutService as any).providerFactory.getProvider as jest.Mock
+      getProviderMock.mockReturnValue({ createCheckout: createCheckoutMock })
+      ;((checkoutService as any).taxService.getTaxForCountry as jest.Mock).mockResolvedValue({
+        taxName: 'IVA',
+        taxRate: 0.19,
+        isInclusive: false,
+      })
+      walletService.credit.mockImplementation(async (_walletId: string, amount: number) => {
+        brandBWallet.balance += amount
+        return { data: brandBWallet }
+      })
+    })
+
+    // Mutation: dropping `req.purpose === 'wallet_recharge'` from the wallet gate returns 201 instead of 400.
+    it.each([
+      ['omitted', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+    ])(
+      'responds 400 MISSING_WALLET_ID on POST /checkout wallet_recharge via confio when walletId is %s without creating a payment or calling the provider',
+      async (_label, walletId) => {
+        const response = await postCheckout(
+          { cookies: signUserCookies('user-owner-b') },
+          {
+            brandId: BRAND_B_ID,
+            userId: 'user-owner-b',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            amount: 100000,
+            currency: 'COP',
+            walletId,
+          },
+        )
+
+        expect(response.status).toBe(400)
+        expect(response.body).toEqual(
+          expect.objectContaining({
+            code: 'MISSING_WALLET_ID',
+          }),
+        )
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(getProviderMock).not.toHaveBeenCalled()
+        expect(createCheckoutMock).not.toHaveBeenCalled()
+      },
+    )
+
+    it('responds 201 pending on POST /checkout wallet_recharge via confio with walletId and on completion marks completed, credits 100000 to the wallet, and invoices 84033.61 + 15966.39', async () => {
+      let persistedPayment: any = null
+      paymentRepo.create.mockImplementation((data: any) => {
+        persistedPayment = { id: 'pay-recharge-100k', ...data }
+        return persistedPayment
+      })
+      paymentRepo.save.mockImplementation(async (payment: any) => {
+        persistedPayment = { ...payment }
+        return persistedPayment
+      })
+      paymentRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id === 'pay-recharge-100k' && persistedPayment) {
+          return { ...persistedPayment }
+        }
+        return null
+      })
+      paymentRepo.update.mockImplementation(async (_where: any, partial: any) => {
+        persistedPayment = { ...persistedPayment, ...partial }
+        return { affected: 1 }
+      })
+
+      const response = await postCheckout(
+        { cookies: signUserCookies('user-owner-b') },
+        {
+          brandId: BRAND_B_ID,
+          userId: 'user-owner-b',
+          purpose: 'wallet_recharge',
+          provider: 'confio',
+          walletId: WALLET_B_ID,
+          amount: 100000,
+          currency: 'COP',
+        },
+      )
+
+      expect(response.status).toBe(201)
+      expect(response.body.data).toEqual(
+        expect.objectContaining({
+          paymentId: 'pay-recharge-100k',
+          status: 'pending',
+          checkoutUrl: 'https://pay.confio.test/order-1',
+        }),
+      )
+      expect(createCheckoutMock).toHaveBeenCalledTimes(1)
+      expect(createCheckoutMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 100000,
+          currency: 'COP',
+          purpose: 'wallet_recharge',
+        }),
+      )
+
+      await checkoutService.completeExternalPayment('pay-recharge-100k', {
+        data: { status: 'Pagado', amountCents: 10000000 },
+      })
+
+      expect(persistedPayment.status).toBe('completed')
+      expect(walletService.credit).toHaveBeenCalledTimes(1)
+      expect(walletService.credit).toHaveBeenCalledWith(
+        WALLET_B_ID,
+        100000,
+        expect.objectContaining({
+          brandId: BRAND_B_ID,
+          category: 'recharge',
+          referenceType: 'payment',
+          referenceId: 'pay-recharge-100k',
+        }),
+      )
+      expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE + 100000)
+      expect(invoiceService.create).toHaveBeenCalledTimes(1)
+      expect(invoiceService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          brandId: BRAND_B_ID,
+          paymentId: 'pay-recharge-100k',
+          subtotal: 84033.61,
+          taxTotal: 15966.39,
+          total: 100000,
+          currency: 'COP',
+        }),
+      )
     })
   })
 })

@@ -11,6 +11,7 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
 /**
  * Implementación de Dropi como proveedor de pagos.
@@ -165,7 +166,7 @@ export class DropiProvider implements PaymentProvider {
   }
 
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
-    const secret = process.env.DROPI_WEBHOOK_SECRET
+    const secret = readWebhookSecret('DROPI_WEBHOOK_SECRET')
     if (!secret || typeof signature !== 'string') return false
 
     const expected = Buffer.from(createHmac('sha256', secret).update(payload).digest('hex'), 'utf8')

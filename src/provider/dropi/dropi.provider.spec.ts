@@ -57,6 +57,14 @@ describe('DropiProvider - validateWebhookSignature', () => {
     expect(provider.validateWebhookSignature(PAYLOAD, VALID_SIGNATURE)).toBe(false)
   })
 
+  it('rejects a webhook signed with CHANGEME when DROPI_WEBHOOK_SECRET is CHANGEME', () => {
+    process.env.DROPI_WEBHOOK_SECRET = 'CHANGEME'
+    const provider = new DropiProvider()
+    const changemeSignature = crypto.createHmac('sha256', 'CHANGEME').update(PAYLOAD).digest('hex')
+
+    expect(provider.validateWebhookSignature(PAYLOAD, changemeSignature)).toBe(false)
+  })
+
   it('compares the signature in constant time using crypto.timingSafeEqual', () => {
     const spy = jest.spyOn(crypto, 'timingSafeEqual')
     const provider = new DropiProvider()

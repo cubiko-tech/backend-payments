@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { HttpStatus, Injectable, Logger } from '@nestjs/common'
+import { RequestException } from '../shared/exception/request.exception'
 
 /** Roles de marca que pueden ver el crédito: dueño, admin y financiero. */
 export const ALLOWED_BRAND_ROLES = ['superuser', 'admin', 'financial']
@@ -75,20 +76,21 @@ export class ClientPlatformService {
     this.countryCache.clear()
   }
 
-  /**
-   * ¿El usuario es miembro de la marca con un rol que puede ver el crédito
-   * (owner/admin/financiero)? Se filtra por `brand.id` (los miembros de ESA
-   * marca; el filtro `?user=` no aplica con token de servicio). Fail-closed:
-   * ante error de red/servicio devuelve false.
-   */
+  /** Filters by `brand.id` because `?user=` is ignored under the server token. */
   async canViewBrandCredit(userId: string, brandId: string): Promise<boolean> {
     const normalizedBrandId = typeof brandId === 'string' ? brandId.trim() : ''
     if (!userId || !normalizedBrandId) {
       return false
     }
     if (!this.platformUrl) {
-      this.logger.warn('SERVICE_PLATFORM no configurado — acceso denegado (fail-closed)')
-      return false
+      this.logger.warn('SERVICE_PLATFORM is not configured — brand lookup unavailable')
+      throw new RequestException(
+        {
+          code: BRAND_LOOKUP_UNAVAILABLE,
+          message: 'Brand membership lookup is temporarily unavailable',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
     }
     try {
       const url = `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(normalizedBrandId)}`
@@ -97,8 +99,14 @@ export class ClientPlatformService {
         signal: AbortSignal.timeout(10000),
       })
       if (!response.ok) {
-        this.logger.warn(`backend-platform brand/rol/user respondió ${response.status}`)
-        return false
+        this.logger.warn(`backend-platform brand/rol/user responded ${response.status}`)
+        throw new RequestException(
+          {
+            code: BRAND_LOOKUP_UNAVAILABLE,
+            message: 'Brand membership lookup is temporarily unavailable',
+          },
+          HttpStatus.SERVICE_UNAVAILABLE,
+        )
       }
       const body = await response.json()
       const rows: BrandMember[] = Array.isArray(body) ? body : (body?.data ?? [])
@@ -112,8 +120,17 @@ export class ClientPlatformService {
           : membership.rol || membership.rolName
       return !!role && ALLOWED_BRAND_ROLES.includes(role)
     } catch (error) {
-      this.logger.error(`Error verificando membresía en platform: ${error.message}`)
-      return false
+      if (error instanceof RequestException) {
+        throw error
+      }
+      this.logger.error(`Failed to verify brand membership in platform: ${error.message}`)
+      throw new RequestException(
+        {
+          code: BRAND_LOOKUP_UNAVAILABLE,
+          message: 'Brand membership lookup is temporarily unavailable',
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
     }
   }
 

@@ -153,3 +153,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `:1152-1156`, `:1461-1471`) antes de lanzar error y pasar la suscripción a `past_due` (`:486-489`).
   Abierto sobre caché vencido: `getPlanRows` (`src/client/client-roles.service.ts:201-205`) no tiene tope
   de antigüedad cuando `backend-roles` cae después de la primera carga.
+
+## El servicio deja de arrancar si `ACCESS_SERVER` o `JWT_SECRET` falta, vale `CHANGEME` o tiene espacios al borde (LOC-56)
+
+- **Dónde**: `src/main.ts:11-24` (`requireStartupSecret`, `bootstrap`)
+- **Qué lo dispara**: iniciar el proceso con `ACCESS_SERVER` o `JWT_SECRET` ausente, vacío, igual a
+  `CHANGEME` o con espacios al principio o al final.
+- **Qué rompe**: antes `bootstrap` no exigía `ACCESS_SERVER` al arrancar ni rechazaba `CHANGEME` o
+  espacios al borde en `JWT_SECRET` y `ACCESS_SERVER`; si un ambiente conserva el placeholder `CHANGEME`
+  de `.env-template`, omite `ACCESS_SERVER` o tiene espacios accidentales en los extremos, el arranque
+  aborta antes de escuchar en el puerto 80.
+- **Estado**: abierto — verificar que `JWT_SECRET` y `ACCESS_SERVER` tengan valores distintos de
+  `CHANGEME` y sin espacios al borde en la configuración de cada ambiente antes de desplegar.

@@ -1,6 +1,7 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
+import { Payment } from '../payment/entities/payment.entity'
 import { Refund, RefundStatus } from './entities/refund.entity'
 import { RequestException } from '../shared/exception/request.exception'
 
@@ -13,6 +14,8 @@ export class RefundService {
     private readonly refundRepository: Repository<Refund>,
     @InjectRepository(Refund, 'DBRead')
     private readonly refundReadRepository: Repository<Refund>,
+    @InjectRepository(Payment, 'DBRead')
+    private readonly paymentReadRepository: Repository<Payment>,
   ) {}
 
   /**
@@ -20,6 +23,13 @@ export class RefundService {
    */
   async request(data: Partial<Refund>) {
     try {
+      const payment = data.paymentId
+        ? await this.paymentReadRepository.findOne({ where: { id: data.paymentId } })
+        : null
+      if (!payment || !data.brandId || payment.brandId !== data.brandId) {
+        throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+      }
+
       const refund = this.refundRepository.create({
         brandId: data.brandId,
         paymentId: data.paymentId,
@@ -36,6 +46,7 @@ export class RefundService {
       this.logger.log(`Reembolso solicitado: ${saved.id} para pago ${saved.paymentId}`)
       return { data: saved }
     } catch (error) {
+      if (error instanceof RequestException) throw error
       this.logger.error(`Error al solicitar reembolso: ${error.message}`)
       return { error: error.message }
     }

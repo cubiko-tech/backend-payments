@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   HttpStatus,
+  Logger,
   Post,
   Patch,
   Delete,
@@ -12,7 +13,14 @@ import {
   UseGuards,
 } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import {
+  assertBrandAccess,
+  assertResourceBrandAccess,
+  isPrivilegedCaller,
+} from '../shared/auth/brand-scope.util'
 import { RequestException } from '../shared/exception/request.exception'
+import { ClientPlatformService } from '../client/client-platform.service'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
@@ -20,43 +28,35 @@ import { CreateSubscriptionDto } from './dto/create-subscription.dto'
 import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
 
 /**
- * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
- * decorador vacío, o sea ningún guard—, así que todo endpoint de acá era
- * alcanzable sin credencial por el gateway público: cualquiera podía originar
- * cobros y links de pago. Verificado en vivo el 2026-08-25 con 20+ POST sin
- * credencial, que dejaron filas en `payments` y `payment_attempts`.
+ * Authenticated subscription endpoints guarded by `ApiAuthGuard` (session cookie or Bearer
+ * JWT, `ACCESS_SERVER` for server-to-server calls, and `POST /client/validate-token` fallback
+ * for auto-login tokens signed with rotating client secrets).
  *
- * `ApiAuthGuard` resuelve quién llama con el MISMO JWT del resto del sistema
- * (cookie de sesión o Bearer, verificado local con `JWT_SECRET`, más el
- * `ACCESS_SERVER` para server-to-server y el fallback a
- * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
- * firmados con un `clientSecret` que rota y que payments no puede guardar).
- *
- * Es autenticación SOLA: ningún handler de acá declara `@RequirePermission`, así
- * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
- * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
- * si hacen falta, son una decisión aparte.
- *
- * ⚠️ CONSECUENCIA ABIERTA, YA NO ENTERA: las tres LECTURAS (`GET /subscription`,
- * `/acceptance-link` y `/history`) sí resuelven la marca contra `req.user` — la
- * regla completa está en `resolveBrandId`, al final de la clase. Lo que sigue
- * abierto son las ESCRITURAS: `create`, `startTrial`, `changePlan`, `cancel` y
- * `reactivate` toman el `brandId` del BODY y NINGUNA lo compara contra
- * `req.user.brand`, así que un usuario autenticado todavía puede cambiar de plan o
- * dar de baja la suscripción de CUALQUIER marca. Es deuda conocida y anotada en el
- * INBOX de roax-ops (autorización por marca en `subscription.controller`); queda
- * deliberadamente fuera de esta tarea porque un body es un contrato con más
- * llamadores que un query y exige decidir qué pasa con cada uno. Lo que SÍ se cerró
- * antes es lo que esa lectura habilitaba: el alta genérica ya no acepta campos
- * arbitrarios (ver `create` más abajo).
+ * Authorization coverage:
+ * - `POST /subscription`, `GET /subscription/enterprise-pricing`,
+ *   `POST /subscription/enterprise-pricing/:brandId`, and
+ *   `DELETE /subscription/enterprise-pricing/:brandId` require `@RequireSuperAdmin()`.
+ * - `GET /subscription/enterprise-pricing/:brandId` requires brand membership
+ *   (`assertResourceBrandAccess`) or an operator.
+ * - `GET /subscription`, `/acceptance-link`, `/history`, and `POST /confirm` resolve the
+ *   caller brand via `assertBrandAccess` from the `brandId` query parameter (brand
+ *   membership or privileged caller; 400 when `brandId` is missing or not a valid UUID).
+ * - `POST /subscription/trial`, `POST /subscription/paid`, `PATCH /subscription/plan`,
+ *   `POST /subscription/cancel`, and `POST /subscription/reactivate` resolve the target
+ *   brand via `resolveBrandId` (session brand or body `brandId` verified via
+ *   `ClientPlatformService.canViewBrandCredit`; only privileged service principals can
+ *   target any brand).
  */
 @ApiTags('Subscription')
 @Controller('subscription')
 @UseGuards(ApiAuthGuard)
 export class SubscriptionController {
+  private readonly logger = new Logger(SubscriptionController.name)
+
   constructor(
     private readonly subscriptionService: SubscriptionService,
     private readonly enterprisePricingService: EnterprisePricingService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Get()
@@ -64,11 +64,18 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Suscripción obtenida correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async getCurrent(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getCurrent(this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription',
+    )
+    return this.subscriptionService.getCurrent(validBrandId)
   }
 
   /**
@@ -85,12 +92,19 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Link de aceptación obtenido' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   async getAcceptanceLink(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getAcceptanceLink(this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/acceptance-link',
+    )
+    return this.subscriptionService.getAcceptanceLink(validBrandId)
   }
 
   /**
@@ -106,9 +120,11 @@ export class SubscriptionController {
    * el pipe global corre sin `transform`, así que del body salen strings.
    */
   @Post()
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Crear una suscripción' })
   @ApiResponse({ status: 201, description: 'Suscripción creada correctamente' })
   @ApiResponse({ status: 400, description: 'Campo no permitido en el body' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async create(@Body() data: CreateSubscriptionDto) {
     return this.subscriptionService.create({
       ...data,
@@ -121,6 +137,11 @@ export class SubscriptionController {
   @Post('trial')
   @ApiOperation({ summary: 'Iniciar trial gratuito de 15 días (sin método de pago)' })
   @ApiResponse({ status: 201, description: 'Trial iniciado correctamente' })
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async startTrial(
     @Body()
     data: {
@@ -132,8 +153,11 @@ export class SubscriptionController {
       /** Teléfono de la cuenta de ConfioPagos que va a pagar, si no es el del perfil. */
       billingPhone?: string
     },
+    @Req() req?: any,
   ) {
-    return this.subscriptionService.startTrial(data)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
+    return this.subscriptionService.startTrial({ ...data, brandId, userId })
   }
 
   /**
@@ -149,6 +173,11 @@ export class SubscriptionController {
     description: 'Suscripción creada en `pending` con su link de aceptación',
   })
   @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  @ApiResponse({
     status: 409,
     description: 'SUBSCRIPTION_ALREADY_EXISTS (la marca ya tiene servicio vigente)',
   })
@@ -160,15 +189,26 @@ export class SubscriptionController {
     status: 503,
     description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)',
   })
-  async startPaid(@Body() data: StartPaidSubscriptionDto) {
-    return this.subscriptionService.startPaid(data)
+  async startPaid(@Body() data: StartPaidSubscriptionDto, @Req() req?: any) {
+    const brandId = await this.resolveBrandId(data?.brandId, req)
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
+    return this.subscriptionService.startPaid({ ...data, brandId, userId })
   }
 
   @Patch('plan')
   @ApiOperation({ summary: 'Cambiar de plan' })
   @ApiResponse({ status: 200, description: 'Plan cambiado correctamente' })
-  async changePlan(@Body() data: { brandId: string; planSlug: string; triggeredBy: string }) {
-    return this.subscriptionService.changePlan(data.brandId, {
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  async changePlan(
+    @Body() data: { brandId: string; planSlug: string; triggeredBy: string },
+    @Req() req?: any,
+  ) {
+    const brandId = await this.resolveBrandId(data?.brandId, req)
+    return this.subscriptionService.changePlan(brandId, {
       planSlug: data.planSlug,
       triggeredBy: data.triggeredBy,
     })
@@ -177,8 +217,17 @@ export class SubscriptionController {
   @Post('cancel')
   @ApiOperation({ summary: 'Cancelar suscripción' })
   @ApiResponse({ status: 200, description: 'Suscripción cancelada correctamente' })
-  async cancel(@Body() data: { brandId: string; reason: string; triggeredBy: string }) {
-    return this.subscriptionService.cancel(data.brandId, {
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  async cancel(
+    @Body() data: { brandId: string; reason: string; triggeredBy: string },
+    @Req() req?: any,
+  ) {
+    const brandId = await this.resolveBrandId(data?.brandId, req)
+    return this.subscriptionService.cancel(brandId, {
       reason: data.reason,
       triggeredBy: data.triggeredBy,
     })
@@ -187,19 +236,16 @@ export class SubscriptionController {
   @Post('reactivate')
   @ApiOperation({ summary: 'Reactivar suscripción cancelada' })
   @ApiResponse({ status: 200, description: 'Suscripción reactivada correctamente' })
-  async reactivate(@Body() data: { brandId: string; triggeredBy: string }) {
-    return this.subscriptionService.reactivate(data.brandId, data.triggeredBy)
+  @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  async reactivate(@Body() data: { brandId: string; triggeredBy: string }, @Req() req?: any) {
+    const brandId = await this.resolveBrandId(data?.brandId, req)
+    return this.subscriptionService.reactivate(brandId, data.triggeredBy)
   }
 
-  /**
-   * Confirma la suscripción preguntándole a ConfioPagos, sin esperar su webhook.
-   *
-   * Resuelve la marca del principal con la misma regla que las otras lecturas
-   * (`resolveBrandId`, al final de la clase): un usuario confirma SU marca y sólo un
-   * principal de servicio puede nombrar una ajena. Es `POST` porque escribe —puede
-   * dejar la fila viva y asignar el plan en roles—, aunque el hecho lo decida el
-   * proveedor y no el llamador.
-   */
   @Post('confirm')
   @ApiOperation({ summary: 'Confirmar la suscripción contra ConfioPagos, sin esperar el webhook' })
   @ApiResponse({
@@ -208,14 +254,21 @@ export class SubscriptionController {
   })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   @ApiResponse({ status: 422, description: 'NO_CONFIO_SUBSCRIPTION' })
   @ApiResponse({ status: 503, description: 'CONFIO_STATUS_UNAVAILABLE (no se pudo preguntar)' })
   async confirm(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.confirm(this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'POST /subscription/confirm',
+    )
+    return this.subscriptionService.confirm(validBrandId)
   }
 
   @Get('history')
@@ -223,35 +276,50 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Historial obtenido correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async getHistory(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getHistory(this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/history',
+    )
+    return this.subscriptionService.getHistory(validBrandId)
   }
 
-  // ============================================
-  // Enterprise Pricing (Admin)
-  // ============================================
-
   @Get('enterprise-pricing')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar precios enterprise personalizados (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de precios enterprise' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async listEnterprisePricing() {
     return this.enterprisePricingService.findAll()
   }
 
   @Get('enterprise-pricing/:brandId')
-  @ApiOperation({ summary: 'Obtener precio enterprise de una marca (Admin)' })
+  @ApiOperation({ summary: 'Get enterprise pricing for a brand (member or operator)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise obtenido' })
-  async getEnterprisePricing(@Param('brandId') brandId: string) {
+  @ApiResponse({ status: 403, description: 'forbidden (not a brand member or operator)' })
+  async getEnterprisePricing(@Param('brandId') brandId: string, @Req() req?: any) {
+    await assertResourceBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/enterprise-pricing/:brandId',
+    )
     const pricing = await this.enterprisePricingService.getForBrand(brandId)
     return { data: pricing }
   }
 
   @Post('enterprise-pricing/:brandId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Crear/actualizar precio enterprise para marca (Admin)' })
   @ApiResponse({ status: 201, description: 'Precio enterprise guardado' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async upsertEnterprisePricing(
     @Param('brandId') brandId: string,
     @Body()
@@ -270,44 +338,16 @@ export class SubscriptionController {
   }
 
   @Delete('enterprise-pricing/:brandId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Eliminar precio enterprise (volver a estándar) (Admin)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise eliminado' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async removeEnterprisePricing(@Param('brandId') brandId: string) {
     return this.enterprisePricingService.remove(brandId)
   }
 
-  /**
-   * De qué marca es la lectura. Regla ÚNICA de las tres lecturas del controller,
-   * escrita una sola vez para que no puedan divergir entre sí.
-   *
-   * - Principal de SERVICIO (`isSuperAdmin`): se honra el `brandId` del query tal
-   *   cual. Es el único que puede nombrar una marca ajena, y tiene que poder: el
-   *   `ACCESS_SERVER` llega como `{ id: 'server', isSuperAdmin: true, brand: null }`
-   *   —no tiene marca propia—, así que sin el query no podría direccionar nada. Por
-   *   eso mismo, si el query falta, es 400 y no un fallback silencioso a "ninguna".
-   * - Principal USUARIO: se lee SU marca y el query se IGNORA, incluso si trae otra.
-   *   Se ignora en vez de rechazar por dos razones. Una, un 400 ante el desacuerdo
-   *   convertiría el endpoint en un oráculo de existencia de marcas —el mismo motivo
-   *   por el que `credit.controller` no distingue la causa de su 403—. Dos, los
-   *   llamadores de hoy mandan su propio `brandId` en el query y rechazarlos los
-   *   rompería sin ganar nada: la propiedad que importa es que por ningún camino
-   *   salga el dato de la marca del query, y ignorarla ya la cumple.
-   * - Usuario SIN marca: 403 con el mismo `{ error: 'forbidden', code: 'forbidden' }`
-   *   que usa el guard, para que el cliente no pueda distinguir "no tengo marca" de
-   *   "no tengo permiso".
-   *
-   * El chequeo por falsy cubre a la vez el `brandId` ausente (`undefined`) y el
-   * vacío (`?brandId=` llega como `''`), igual que `credit.controller.ts`.
-   *
-   * ⚠️ DEUDA RESIDUAL: `req.user.brand` es un CLAIM, no una verificación de
-   * pertenencia. Sale del JWT local (`payload.brand`) o de lo que devuelve
-   * backend-auth (`body.data.brand`), y acá no se contrasta contra backend-platform
-   * como sí hace `credit.controller.preapproval` con `canViewBrandCredit`. Un token
-   * con una marca vieja sigue leyendo esa marca; cerrarlo exige el mismo llamado
-   * cross-servicio y es una decisión aparte.
-   */
-  private resolveBrandId(brandId: string, req: any): string {
-    if (req?.user?.isSuperAdmin) {
+  private async resolveBrandId(brandId: string, req: any): Promise<string> {
+    if (isPrivilegedCaller(req)) {
       if (!brandId) {
         throw new RequestException(
           {
@@ -320,10 +360,28 @@ export class SubscriptionController {
       return brandId
     }
 
-    const brand = req?.user?.brand
-    if (!brand) {
+    const rawSessionBrand = req?.user?.brand
+    const sessionBrand =
+      typeof rawSessionBrand === 'string'
+        ? rawSessionBrand
+        : typeof rawSessionBrand?.id === 'string'
+          ? rawSessionBrand.id
+          : undefined
+
+    if (brandId) {
+      if (sessionBrand && brandId === sessionBrand) {
+        return sessionBrand
+      }
+      if (req?.user?.id && (await this.platformClient.canViewBrandCredit(req.user.id, brandId))) {
+        return brandId
+      }
       throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
-    return brand
+
+    if (sessionBrand) {
+      return sessionBrand
+    }
+
+    throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
   }
 }
