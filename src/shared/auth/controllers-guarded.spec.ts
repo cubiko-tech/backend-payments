@@ -198,4 +198,17 @@ describe('admin and metrics controllers require superadmin operator', () => {
       expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
     },
   )
+
+  it.each(['sendInvoice', 'checkStatus'] as const)(
+    'DianController.%s declares @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(DianController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it('DianController.isConfigured does not declare @RequireSuperAdmin()', () => {
+    const handler: unknown = Reflect.get(DianController.prototype, 'isConfigured')
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+  })
 })

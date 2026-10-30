@@ -2,6 +2,7 @@ import { Controller, Post, Get, Param, UseGuards, ParseUUIDPipe } from '@nestjs/
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { DianService } from './dian.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 
 @ApiTags('DIAN')
 @Controller('dian')
@@ -18,15 +19,19 @@ export class DianController {
   constructor(private readonly dianService: DianService) {}
 
   @Post('send/:invoiceId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Enviar factura a la DIAN' })
   @ApiResponse({ status: 200, description: 'Resultado del envío a DIAN' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async sendInvoice(@Param('invoiceId', ParseUUIDPipe) invoiceId: string) {
     return this.dianService.sendInvoice(invoiceId)
   }
 
   @Get('status/:invoiceId')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Consultar estado de factura ante la DIAN' })
   @ApiResponse({ status: 200, description: 'Estado del documento' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async checkStatus(@Param('invoiceId', ParseUUIDPipe) invoiceId: string) {
     return this.dianService.checkStatus(invoiceId)
   }
