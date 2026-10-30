@@ -767,7 +767,7 @@ describe('POST /checkout brand membership gate', () => {
       })
     })
 
-    // Mutation: removing `req.purpose === 'wallet_recharge'` from the assertWalletCurrency gate returns 201 instead of 400.
+    // Mutation: dropping `req.purpose === 'wallet_recharge'` from the wallet gate returns 201 instead of 400.
     it.each([
       ['omitted', undefined],
       ['empty', ''],

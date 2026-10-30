@@ -1,4 +1,4 @@
-// R6: Unit suite for CheckoutService shares one mocked repository and provider graph across pricing, tax, wallet, and completion scenarios.
+// R6: CheckoutService unit suite shares one mocked repository and provider graph across checkout scenarios.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { HttpStatus } from '@nestjs/common'
