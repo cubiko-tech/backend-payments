@@ -10,6 +10,59 @@ export type InFlightCheckoutsMap = Map<
   { fingerprint: string; promise: Promise<CheckoutResult> }
 >
 
+export type RetryFailedPaymentCallback = (existing: Payment) => Promise<CheckoutResult>
+
+export const MAX_IDEMPOTENCY_KEY_LENGTH = 255
+
+export function normalizeIdempotencyKey(raw?: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined
+  }
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) {
+    return undefined
+  }
+  if (trimmed.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+    throw new RequestException(
+      {
+        code: 'INVALID_IDEMPOTENCY_KEY',
+        message: `Idempotency-Key must not exceed ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+      },
+      HttpStatus.BAD_REQUEST,
+    )
+  }
+  return trimmed
+}
+
+export function canRetryFailedIdempotentPayment(payment: Payment): boolean {
+  return !payment.providerPaymentId && !payment.metadata?.amountMismatch
+}
+
+export function createFailedExternalIdempotentPaymentException(payment: Payment): RequestException {
+  const isAmountMismatch = Boolean(payment.metadata?.amountMismatch)
+  return new RequestException(
+    {
+      code: isAmountMismatch ? 'PROVIDER_AMOUNT_MISMATCH' : 'IDEMPOTENT_PAYMENT_FAILED',
+      message:
+        payment.failureReason ||
+        'Previous payment attempt with this Idempotency-Key failed after creating an external provider session',
+      paymentId: payment.id,
+    },
+    HttpStatus.CONFLICT,
+  )
+}
+
+export function createIncompleteIdempotentCheckoutException(payment: Payment): RequestException {
+  return new RequestException(
+    {
+      code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
+      message: 'Payment was marked completed without a stored checkout result',
+      paymentId: payment.id,
+    },
+    HttpStatus.CONFLICT,
+  )
+}
+
 export function isUniqueConstraintViolation(error: any): boolean {
   return error?.code === '23505' || error?.driverError?.code === '23505'
 }
@@ -98,6 +151,33 @@ export function assertMatchingIdempotencyPayload(
   }
 }
 
+async function resolvePaymentStateOutcome(
+  payment: Payment,
+  retryFailedPayment?: RetryFailedPaymentCallback,
+): Promise<CheckoutResult | null> {
+  if (payment.status === PaymentStatus.FAILED) {
+    if (!canRetryFailedIdempotentPayment(payment)) {
+      throw createFailedExternalIdempotentPaymentException(payment)
+    }
+    if (retryFailedPayment) {
+      return retryFailedPayment(payment)
+    }
+  }
+
+  if (payment.status === PaymentStatus.COMPLETED) {
+    if (payment.metadata?.checkoutResult) {
+      return payment.metadata.checkoutResult as CheckoutResult
+    }
+    throw createIncompleteIdempotentCheckoutException(payment)
+  }
+
+  if (payment.metadata?.checkoutResult) {
+    return payment.metadata.checkoutResult as CheckoutResult
+  }
+
+  return null
+}
+
 /**
  * Replays the outcome of a previously registered idempotent checkout, awaiting
  * the in-process execution promise when the original request is still in flight.
@@ -108,6 +188,7 @@ export async function resolveExistingIdempotentPayment(
   paymentRepo: Pick<Repository<Payment>, 'findOne'>,
   inFlightCheckouts: InFlightCheckoutsMap,
   incomingFingerprint?: string,
+  retryFailedPayment?: RetryFailedPaymentCallback,
 ): Promise<CheckoutResult> {
   assertMatchingIdempotencyPayload(existing, req, incomingFingerprint)
 
@@ -122,18 +203,20 @@ export async function resolveExistingIdempotentPayment(
     }
   }
 
-  if (existing.metadata?.checkoutResult) {
-    return existing.metadata.checkoutResult as CheckoutResult
+  const immediateOutcome = await resolvePaymentStateOutcome(existing, retryFailedPayment)
+  if (immediateOutcome !== null) {
+    return immediateOutcome
   }
 
   if (existing.status === PaymentStatus.PENDING && req.idempotencyKey) {
     const refreshed = await paymentRepo.findOne({
       where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
     })
-    if (refreshed?.metadata?.checkoutResult) {
-      return refreshed.metadata.checkoutResult as CheckoutResult
-    }
     if (refreshed) {
+      const refreshedOutcome = await resolvePaymentStateOutcome(refreshed, retryFailedPayment)
+      if (refreshedOutcome !== null) {
+        return refreshedOutcome
+      }
       return {
         paymentId: refreshed.id,
         status: refreshed.status,
@@ -155,6 +238,7 @@ export async function handleConcurrentIdempotentCheckout(
   inFlightCheckouts: InFlightCheckoutsMap,
   incomingFingerprint?: string,
   inFlightKey?: string,
+  retryFailedPayment?: RetryFailedPaymentCallback,
 ): Promise<CheckoutResult> {
   if (inFlightKey) {
     const active = inFlightCheckouts.get(inFlightKey)
@@ -176,6 +260,7 @@ export async function handleConcurrentIdempotentCheckout(
       paymentRepo,
       inFlightCheckouts,
       incomingFingerprint,
+      retryFailedPayment,
     )
   }
 

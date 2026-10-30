@@ -108,6 +108,29 @@ describe('CheckoutController', () => {
       }),
     )
   })
+
+  it('ignores body.idempotencyKey when no Idempotency-Key HTTP header is provided', async () => {
+    // R15: restoring conditional spread `...(idempotencyKey !== undefined ? { idempotencyKey } : {})` in CheckoutController.processCheckout leaks body.idempotencyKey into CheckoutService.
+    await controller.processCheckout(
+      {
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        userId: 'u-1',
+        purpose: 'plan_purchase',
+        provider: 'wallet',
+        planSlug: 'dropi-roax',
+        idempotencyKey: 'spoofed-from-body',
+      },
+      { headers: {} },
+    )
+
+    expect(checkoutService.processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: undefined,
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        planSlug: 'dropi-roax',
+      }),
+    )
+  })
 })
 
 describe('POST /checkout brand membership gate', () => {

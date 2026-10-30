@@ -83,7 +83,7 @@ export class CheckoutController {
       data: await this.checkoutService.processCheckout({
         ...body,
         userId,
-        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        idempotencyKey,
         renewal: undefined,
       }),
     }

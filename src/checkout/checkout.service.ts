@@ -59,6 +59,7 @@ import {
   handleConcurrentIdempotentCheckout,
   InFlightCheckoutsMap,
   isUniqueConstraintViolation,
+  normalizeIdempotencyKey,
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
 
@@ -195,6 +196,8 @@ export class CheckoutService implements OnModuleInit {
           this.paymentRepo,
           this.inFlightCheckouts,
           idempotencyFingerprint,
+          (failedPayment) =>
+            this.retryFailedIdempotentPayment(failedPayment, req, idempotencyFingerprint),
         )
       }
     }
@@ -296,6 +299,8 @@ export class CheckoutService implements OnModuleInit {
           this.inFlightCheckouts,
           idempotencyFingerprint,
           inFlightKey,
+          (failedPayment) =>
+            this.retryFailedIdempotentPayment(failedPayment, req, idempotencyFingerprint),
         )
       }
       throw error
@@ -331,6 +336,90 @@ export class CheckoutService implements OnModuleInit {
       currency,
       tax,
     )
+  }
+
+  private async retryFailedIdempotentPayment(
+    existing: Payment,
+    req: CheckoutRequest,
+    idempotencyFingerprint?: string,
+  ): Promise<CheckoutResult> {
+    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
+    const runRetry = async (): Promise<CheckoutResult> => {
+      const retryNow = new Date()
+      const retryMetadata = { ...(existing.metadata || {}) }
+      delete retryMetadata.checkoutResult
+
+      const claimed = await this.paymentRepo.update(
+        { id: existing.id, status: PaymentStatus.FAILED },
+        {
+          status: PaymentStatus.PENDING,
+          failureReason: null,
+          createdAt: retryNow,
+          metadata: retryMetadata,
+        },
+      )
+
+      if (claimed && claimed.affected === 0) {
+        const current = await this.paymentRepo.findOne({
+          where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
+        })
+        if (current) {
+          return resolveExistingIdempotentPayment(
+            current,
+            req,
+            this.paymentRepo,
+            new Map(),
+            idempotencyFingerprint,
+          )
+        }
+      }
+
+      existing.status = PaymentStatus.PENDING
+      existing.failureReason = null
+      existing.createdAt = retryNow
+      existing.metadata = retryMetadata
+
+      const totalAmount = Number(existing.amount)
+      const currency = existing.currency
+      const taxAmount =
+        existing.metadata?.taxAmount !== undefined ? Number(existing.metadata.taxAmount) : 0
+      const subtotalAmount =
+        existing.metadata?.subtotal !== undefined
+          ? Number(existing.metadata.subtotal)
+          : Math.round((totalAmount - taxAmount) * 100) / 100
+      const tax =
+        existing.metadata?.taxRate !== undefined
+          ? {
+              taxRate: Number(existing.metadata.taxRate),
+              taxName: existing.metadata.taxName || 'IVA',
+            }
+          : null
+
+      return this.executeCheckoutPayment(
+        existing,
+        req,
+        subtotalAmount,
+        taxAmount,
+        totalAmount,
+        currency,
+        tax,
+      )
+    }
+
+    const executionPromise = runRetry()
+    if (inFlightKey) {
+      this.inFlightCheckouts.set(inFlightKey, {
+        fingerprint: idempotencyFingerprint,
+        promise: executionPromise,
+      })
+    }
+    try {
+      return await executionPromise
+    } finally {
+      if (inFlightKey) {
+        this.inFlightCheckouts.delete(inFlightKey)
+      }
+    }
   }
 
   private executeCheckoutPayment(
@@ -1050,10 +1139,7 @@ export class CheckoutService implements OnModuleInit {
       return { ...req, brandId }
     }
 
-    const idempotencyKey =
-      typeof req.idempotencyKey === 'string' && req.idempotencyKey.trim().length > 0
-        ? req.idempotencyKey.trim()
-        : undefined
+    const idempotencyKey = normalizeIdempotencyKey(req.idempotencyKey)
 
     return { ...req, brandId, idempotencyKey }
   }
