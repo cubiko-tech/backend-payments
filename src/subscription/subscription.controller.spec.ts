@@ -160,7 +160,9 @@ describe('SubscriptionController — alta paga', () => {
     // `data` → este caso se pone rojo. El front lee `res.acceptanceUrl`.
     const body = { brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax' }
 
-    const result = await controller.startPaid(body)
+    const result = await controller.startPaid(body, {
+      user: { id: 'user-1', isSuperAdmin: false, brand: 'brand-1' },
+    })
 
     expect(service.startPaid).toHaveBeenCalledWith(body)
     expect(result.acceptanceUrl).toBe('https://pay/x')
@@ -181,6 +183,10 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
+  let subscriptionService: {
+    create: jest.Mock
+    startPaid: jest.Mock
+  }
   let enterprisePricingService: {
     findAll: jest.Mock
     getForBrand: jest.Mock
@@ -199,6 +205,15 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
     userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
     superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
 
+    subscriptionService = {
+      create: jest.fn().mockImplementation(async (data: any) => ({
+        data: { id: 'sub-created', ...data },
+      })),
+      startPaid: jest.fn().mockImplementation(async (data: any) => ({
+        data: { id: 'sub-paid', ...data },
+        acceptanceUrl: 'https://pay.confio/accept',
+      })),
+    }
     enterprisePricingService = {
       findAll: jest.fn().mockResolvedValue({
         data: [{ id: 'ep-1', brandId: OWN_BRAND_ID, monthlyPrice: 500000, currency: 'COP' }],
@@ -227,7 +242,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
         Reflector,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
-        { provide: SubscriptionService, useValue: {} },
+        { provide: SubscriptionService, useValue: subscriptionService },
         { provide: EnterprisePricingService, useValue: enterprisePricingService },
         { provide: ClientPlatformService, useValue: platformClient },
       ],
@@ -382,6 +397,78 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
     expect(serverRes.body).toEqual({ data: { success: true } })
     expect(enterprisePricingService.remove).toHaveBeenCalledTimes(2)
   })
+
+  it('rejects POST /subscription for a regular user without writing and allows operator and service token', async () => {
+    const payload = {
+      brandId: FOREIGN_BRAND_ID,
+      userId: USER_ID,
+      planSlug: 'pro',
+      status: 'active',
+    }
+
+    const forbiddenRes = await request(app.getHttpServer())
+      .post('/subscription')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send(payload)
+
+    expect(forbiddenRes.status).toBe(403)
+    expect(forbiddenRes.body).toMatchObject({ code: 'forbidden' })
+    expect(subscriptionService.create).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .post('/subscription')
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send(payload)
+
+    expect(superAdminRes.status).toBe(201)
+    expect(subscriptionService.create).toHaveBeenCalledWith({
+      ...payload,
+      currentPeriodStart: undefined,
+      currentPeriodEnd: undefined,
+      nextBillingDate: undefined,
+    })
+
+    const serverRes = await request(app.getHttpServer())
+      .post('/subscription')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send(payload)
+
+    expect(serverRes.status).toBe(201)
+    expect(subscriptionService.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects POST /subscription/paid for a foreign brand without calling Confio and allows own brand', async () => {
+    const foreignPayload = {
+      brandId: FOREIGN_BRAND_ID,
+      userId: USER_ID,
+      planSlug: 'dropi-roax',
+    }
+
+    const forbiddenRes = await request(app.getHttpServer())
+      .post('/subscription/paid')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send(foreignPayload)
+
+    expect(forbiddenRes.status).toBe(403)
+    expect(forbiddenRes.body).toMatchObject({ code: 'forbidden' })
+    expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, FOREIGN_BRAND_ID)
+    expect(subscriptionService.startPaid).not.toHaveBeenCalled()
+
+    const ownPayload = {
+      brandId: OWN_BRAND_ID,
+      userId: USER_ID,
+      planSlug: 'dropi-roax',
+    }
+
+    const ownRes = await request(app.getHttpServer())
+      .post('/subscription/paid')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send(ownPayload)
+
+    expect(ownRes.status).toBe(201)
+    expect(ownRes.body.acceptanceUrl).toBe('https://pay.confio/accept')
+    expect(subscriptionService.startPaid).toHaveBeenCalledWith(ownPayload)
+  })
 })
 
 describe('SubscriptionController — brand resolution on subscription writes', () => {
@@ -393,6 +480,7 @@ describe('SubscriptionController — brand resolution on subscription writes', (
   let controller: SubscriptionController
   let service: {
     startTrial: jest.Mock
+    startPaid: jest.Mock
     changePlan: jest.Mock
     cancel: jest.Mock
     reactivate: jest.Mock
@@ -410,6 +498,10 @@ describe('SubscriptionController — brand resolution on subscription writes', (
   beforeEach(async () => {
     service = {
       startTrial: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
+      startPaid: jest.fn().mockResolvedValue({
+        data: { id: 'sub-1' },
+        acceptanceUrl: 'https://pay/x',
+      }),
       changePlan: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
       cancel: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
       reactivate: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
@@ -701,6 +793,71 @@ describe('SubscriptionController — brand resolution on subscription writes', (
         HttpStatus.BAD_REQUEST,
       )
       expect(service.reactivate).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('startPaid', () => {
+    it('allows caller to start paid subscription on own brand via session or brand membership', async () => {
+      await controller.startPaid(
+        { brandId: OWN_BRAND_ID, userId: USER_ID, planSlug: 'dropi-roax' },
+        { user: { id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID } },
+      )
+      expect(service.startPaid).toHaveBeenCalledWith({
+        brandId: OWN_BRAND_ID,
+        userId: USER_ID,
+        planSlug: 'dropi-roax',
+      })
+
+      service.startPaid.mockClear()
+
+      await controller.startPaid(
+        { brandId: MEMBER_BRAND_ID, userId: USER_ID, planSlug: 'dropi-roax' },
+        { user: { id: USER_ID, isSuperAdmin: false, brand: null } },
+      )
+      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, MEMBER_BRAND_ID)
+      expect(service.startPaid).toHaveBeenCalledWith({
+        brandId: MEMBER_BRAND_ID,
+        userId: USER_ID,
+        planSlug: 'dropi-roax',
+      })
+    })
+
+    it('rejects foreign brand with 403 and does not call subscriptionService.startPaid', async () => {
+      await expectWriteException(
+        controller.startPaid(
+          { brandId: FOREIGN_BRAND_ID, userId: USER_ID, planSlug: 'dropi-roax' },
+          { user: { id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID } },
+        ),
+        'forbidden',
+        HttpStatus.FORBIDDEN,
+      )
+      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, FOREIGN_BRAND_ID)
+      expect(service.startPaid).not.toHaveBeenCalled()
+    })
+
+    it('allows service token to target any brand and requires brandId', async () => {
+      await controller.startPaid(
+        { brandId: FOREIGN_BRAND_ID, userId: USER_ID, planSlug: 'dropi-roax' },
+        { user: { ...SERVER_PRINCIPAL } },
+      )
+      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+      expect(service.startPaid).toHaveBeenCalledWith({
+        brandId: FOREIGN_BRAND_ID,
+        userId: USER_ID,
+        planSlug: 'dropi-roax',
+      })
+
+      service.startPaid.mockClear()
+
+      await expectWriteException(
+        controller.startPaid(
+          { brandId: '', userId: USER_ID, planSlug: 'dropi-roax' },
+          { user: { ...SERVER_PRINCIPAL } },
+        ),
+        'BRAND_ID_REQUIRED',
+        HttpStatus.BAD_REQUEST,
+      )
+      expect(service.startPaid).not.toHaveBeenCalled()
     })
   })
 })

@@ -160,19 +160,20 @@ describe('admin and metrics controllers require superadmin operator', () => {
     },
   )
 
-  it.each(['listEnterprisePricing', 'upsertEnterprisePricing', 'removeEnterprisePricing'] as const)(
-    'SubscriptionController.%s declares @RequireSuperAdmin()',
-    (handlerName) => {
-      const handler: unknown = Reflect.get(SubscriptionController.prototype, handlerName)
-      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
-    },
-  )
+  it.each([
+    'create',
+    'listEnterprisePricing',
+    'upsertEnterprisePricing',
+    'removeEnterprisePricing',
+  ] as const)('SubscriptionController.%s declares @RequireSuperAdmin()', (handlerName) => {
+    const handler: unknown = Reflect.get(SubscriptionController.prototype, handlerName)
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
 
   it.each([
     'getEnterprisePricing',
     'getCurrent',
     'getAcceptanceLink',
-    'create',
     'startTrial',
     'startPaid',
     'changePlan',

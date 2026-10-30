@@ -29,17 +29,19 @@ import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
  * for auto-login tokens signed with rotating client secrets).
  *
  * Authorization coverage:
- * - `GET /subscription/enterprise-pricing`, `POST /subscription/enterprise-pricing/:brandId`,
- *   and `DELETE /subscription/enterprise-pricing/:brandId` require `@RequireSuperAdmin()`.
+ * - `POST /subscription`, `GET /subscription/enterprise-pricing`,
+ *   `POST /subscription/enterprise-pricing/:brandId`, and
+ *   `DELETE /subscription/enterprise-pricing/:brandId` require `@RequireSuperAdmin()`.
  * - `GET /subscription/enterprise-pricing/:brandId` requires brand membership
  *   (`assertResourceBrandAccess`) or an operator.
  * - `GET /subscription`, `/acceptance-link`, `/history`, and `POST /confirm` resolve the
  *   caller brand via `resolveBrandId` (session brand when present so query mismatches do
  *   not act as a brand-existence oracle).
- * - `POST /subscription/trial`, `PATCH /subscription/plan`, `POST /subscription/cancel`,
- *   and `POST /subscription/reactivate` resolve the target brand via `resolveBrandId`
- *   (session brand or body `brandId` verified via `ClientPlatformService.canViewBrandCredit`;
- *   only privileged service principals can target any brand).
+ * - `POST /subscription/trial`, `POST /subscription/paid`, `PATCH /subscription/plan`,
+ *   `POST /subscription/cancel`, and `POST /subscription/reactivate` resolve the target
+ *   brand via `resolveBrandId` (session brand or body `brandId` verified via
+ *   `ClientPlatformService.canViewBrandCredit`; only privileged service principals can
+ *   target any brand).
  */
 @ApiTags('Subscription')
 @Controller('subscription')
@@ -100,9 +102,11 @@ export class SubscriptionController {
    * el pipe global corre sin `transform`, así que del body salen strings.
    */
   @Post()
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Crear una suscripción' })
   @ApiResponse({ status: 201, description: 'Suscripción creada correctamente' })
   @ApiResponse({ status: 400, description: 'Campo no permitido en el body' })
+  @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async create(@Body() data: CreateSubscriptionDto) {
     return this.subscriptionService.create({
       ...data,
@@ -151,6 +155,11 @@ export class SubscriptionController {
     description: 'Suscripción creada en `pending` con su link de aceptación',
   })
   @ApiResponse({
+    status: 400,
+    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+  })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  @ApiResponse({
     status: 409,
     description: 'SUBSCRIPTION_ALREADY_EXISTS (la marca ya tiene servicio vigente)',
   })
@@ -162,8 +171,9 @@ export class SubscriptionController {
     status: 503,
     description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)',
   })
-  async startPaid(@Body() data: StartPaidSubscriptionDto) {
-    return this.subscriptionService.startPaid(data)
+  async startPaid(@Body() data: StartPaidSubscriptionDto, @Req() req?: any) {
+    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    return this.subscriptionService.startPaid({ ...data, brandId })
   }
 
   @Patch('plan')
