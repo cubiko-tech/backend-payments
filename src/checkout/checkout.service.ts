@@ -1,3 +1,8 @@
+/**
+ * R6: CheckoutService keeps the end-to-end payment, subscription, invoice, DIAN,
+ * and role-assignment orchestration together because immediate wallet settlements
+ * and deferred external webhooks share the same transactional completion state.
+ */
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
@@ -49,6 +54,13 @@ import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { logger as winstonLogger } from '../shared/logger/logger'
+import {
+  buildIdempotencyFingerprint,
+  handleConcurrentIdempotentCheckout,
+  InFlightCheckoutsMap,
+  isUniqueConstraintViolation,
+  resolveExistingIdempotentPayment,
+} from './checkout-idempotency'
 
 /**
  * Servicio orquestador de checkout.
@@ -120,10 +132,7 @@ export interface CheckoutResult {
 export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
-  private readonly inFlightCheckouts = new Map<
-    string,
-    { fingerprint: string; promise: Promise<CheckoutResult> }
-  >()
+  private readonly inFlightCheckouts: InFlightCheckoutsMap = new Map()
   private readonly inFlightCompletions = new Set<string>()
 
   constructor(
@@ -173,16 +182,20 @@ export class CheckoutService implements OnModuleInit {
     // mutar la request del llamador escondía el efecto y le reescribía el objeto al
     // cron, que nos pasa datos derivados de una fila viva de `subscriptions`.
     const req = this.normalizeRequest(request)
-    const idempotencyFingerprint = req.idempotencyKey
-      ? this.buildIdempotencyFingerprint(req)
-      : undefined
+    const idempotencyFingerprint = req.idempotencyKey ? buildIdempotencyFingerprint(req) : undefined
 
     if (req.idempotencyKey) {
       const existing = await this.paymentRepo.findOne({
         where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
       })
       if (existing) {
-        return this.resolveExistingIdempotentPayment(existing, req, idempotencyFingerprint)
+        return resolveExistingIdempotentPayment(
+          existing,
+          req,
+          this.paymentRepo,
+          this.inFlightCheckouts,
+          idempotencyFingerprint,
+        )
       }
     }
 
@@ -276,8 +289,14 @@ export class CheckoutService implements OnModuleInit {
         payment.id = savedPayment.id
       }
     } catch (error) {
-      if (req.idempotencyKey && this.isUniqueConstraintViolation(error)) {
-        return this.handleConcurrentIdempotentCheckout(req, idempotencyFingerprint, inFlightKey)
+      if (req.idempotencyKey && isUniqueConstraintViolation(error)) {
+        return handleConcurrentIdempotentCheckout(
+          req,
+          this.paymentRepo,
+          this.inFlightCheckouts,
+          idempotencyFingerprint,
+          inFlightKey,
+        )
       }
       throw error
     }
@@ -1747,153 +1766,5 @@ export class CheckoutService implements OnModuleInit {
       where: { brandId },
     })
     return profile?.country || 'CO' // Default Colombia
-  }
-
-  private isUniqueConstraintViolation(error: any): boolean {
-    return error?.code === '23505' || error?.driverError?.code === '23505'
-  }
-
-  private createIdempotencyConflictException(): RequestException {
-    return new RequestException(
-      {
-        code: 'IDEMPOTENCY_KEY_CONFLICT',
-        message: 'Idempotency-Key was already used with a different checkout request body',
-      },
-      HttpStatus.CONFLICT,
-    )
-  }
-
-  private buildIdempotencyFingerprint(req: CheckoutRequest): string {
-    return JSON.stringify({
-      userId: req.userId || null,
-      purpose: req.purpose || null,
-      provider: req.provider || null,
-      planSlug: req.planSlug || null,
-      amount: req.amount !== undefined && req.amount !== null ? Number(req.amount) : null,
-      currency: req.currency ? String(req.currency).toUpperCase() : null,
-      walletId: req.walletId || null,
-      successUrl: req.successUrl || null,
-      cancelUrl: req.cancelUrl || null,
-      buyer: req.buyer
-        ? {
-            firstName: req.buyer.firstName || null,
-            lastName: req.buyer.lastName || null,
-            email: req.buyer.email || null,
-            phoneNumber: req.buyer.phoneNumber || null,
-          }
-        : null,
-      renewal: Boolean(req.renewal),
-    })
-  }
-
-  private assertMatchingIdempotencyPayload(
-    existing: Payment,
-    req: CheckoutRequest,
-    incomingFingerprint?: string,
-  ): void {
-    const storedFingerprint = existing.metadata?.idempotencyFingerprint
-    if (typeof storedFingerprint === 'string' && incomingFingerprint) {
-      if (storedFingerprint !== incomingFingerprint) {
-        throw this.createIdempotencyConflictException()
-      }
-      return
-    }
-
-    if (existing.purpose && req.purpose && String(existing.purpose) !== String(req.purpose)) {
-      throw this.createIdempotencyConflictException()
-    }
-    if (existing.provider && req.provider && String(existing.provider) !== String(req.provider)) {
-      throw this.createIdempotencyConflictException()
-    }
-    if ((existing.purposeId || null) !== (req.planSlug || null)) {
-      throw this.createIdempotencyConflictException()
-    }
-    if ((existing.walletId || null) !== (req.walletId || null)) {
-      throw this.createIdempotencyConflictException()
-    }
-    if (
-      req.amount !== undefined &&
-      existing.amount !== undefined &&
-      Number(existing.amount) !== Number(req.amount)
-    ) {
-      throw this.createIdempotencyConflictException()
-    }
-    if (
-      req.currency !== undefined &&
-      existing.currency !== undefined &&
-      String(existing.currency).toUpperCase() !== String(req.currency).toUpperCase()
-    ) {
-      throw this.createIdempotencyConflictException()
-    }
-  }
-
-  private async resolveExistingIdempotentPayment(
-    existing: Payment,
-    req: CheckoutRequest,
-    incomingFingerprint?: string,
-  ): Promise<CheckoutResult> {
-    this.assertMatchingIdempotencyPayload(existing, req, incomingFingerprint)
-
-    const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
-    if (inFlightKey) {
-      const active = this.inFlightCheckouts.get(inFlightKey)
-      if (active) {
-        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
-          throw this.createIdempotencyConflictException()
-        }
-        return active.promise
-      }
-    }
-
-    if (existing.metadata?.checkoutResult) {
-      return existing.metadata.checkoutResult as CheckoutResult
-    }
-
-    if (existing.status === PaymentStatus.PENDING && req.idempotencyKey) {
-      const refreshed = await this.paymentRepo.findOne({
-        where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
-      })
-      if (refreshed?.metadata?.checkoutResult) {
-        return refreshed.metadata.checkoutResult as CheckoutResult
-      }
-      if (refreshed) {
-        return {
-          paymentId: refreshed.id,
-          status: refreshed.status,
-          ...(refreshed.checkoutUrl ? { checkoutUrl: refreshed.checkoutUrl } : {}),
-        }
-      }
-    }
-
-    return {
-      paymentId: existing.id,
-      status: existing.status,
-      ...(existing.checkoutUrl ? { checkoutUrl: existing.checkoutUrl } : {}),
-    }
-  }
-
-  private async handleConcurrentIdempotentCheckout(
-    req: CheckoutRequest,
-    incomingFingerprint?: string,
-    inFlightKey?: string,
-  ): Promise<CheckoutResult> {
-    if (inFlightKey) {
-      const active = this.inFlightCheckouts.get(inFlightKey)
-      if (active) {
-        if (incomingFingerprint && active.fingerprint !== incomingFingerprint) {
-          throw this.createIdempotencyConflictException()
-        }
-        return active.promise
-      }
-    }
-
-    const existing = await this.paymentRepo.findOne({
-      where: { brandId: req.brandId, idempotencyKey: req.idempotencyKey },
-    })
-    if (existing) {
-      return this.resolveExistingIdempotentPayment(existing, req, incomingFingerprint)
-    }
-
-    throw this.createIdempotencyConflictException()
   }
 }
