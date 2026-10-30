@@ -39,6 +39,7 @@ lerna-debug.log*
 .env.*
 !.env-template
 !.env.schema
+.line-vars
 
 # Claude Code (personal state — only project-shared files are tracked)
 .claude/settings.local.json

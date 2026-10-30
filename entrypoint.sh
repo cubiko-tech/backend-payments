@@ -20,17 +20,26 @@ echo "${0}: Compiling code."
 rm -rf ./dist
 npm run build
 
-echo "${0}: Running migrations."
-npm run migration:run
+# RUN_MIGRATIONS and RUN_FIXTURES default to on; a second container on a shared base (a work line) turns them off so
+# it neither migrates that base nor rewrites its seeded data.
+run_migrations=${RUN_MIGRATIONS:-true}
+run_fixtures=${RUN_FIXTURES:-true}
 
-echo "${0}: Loading core fixtures (idempotent upsert; no-op si core/ vacío)."
-npm run fixtures:core || true
+if [[ $run_migrations != "false" ]]; then
+  echo "${0}: Running migrations."
+  npm run migration:run
+fi
+
+if [[ $run_fixtures != "false" ]]; then
+  echo "${0}: Loading core fixtures (idempotent upsert; no-op si core/ vacío)."
+  npm run fixtures:core || true
+fi
 
 # Dev fixtures. No generamos migraciones automáticamente: hacerlo en cada
 # restart crea archivos cruft cuando entities y BD divergen por nombres
 # hash-generated de TypeORM. Para generar una migración el dev corre a mano:
 #   npm run migration:generate --name=Feature
-if [[ $ENV == "development" ]]; then
+if [[ $ENV == "development" && $run_fixtures != "false" ]]; then
   npm run fixtures:dev || true
 fi
 
