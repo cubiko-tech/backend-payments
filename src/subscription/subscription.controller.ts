@@ -191,7 +191,8 @@ export class SubscriptionController {
   })
   async startPaid(@Body() data: StartPaidSubscriptionDto, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId, req)
-    return this.subscriptionService.startPaid({ ...data, brandId })
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
+    return this.subscriptionService.startPaid({ ...data, brandId, userId })
   }
 
   @Patch('plan')

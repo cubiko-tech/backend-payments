@@ -891,5 +891,32 @@ describe('SubscriptionController — brand resolution on subscription writes', (
       )
       expect(service.startPaid).not.toHaveBeenCalled()
     })
+
+    it('uses req.user.id from a user session and ignores a different userId in the body while allowing the service token to specify userId', async () => {
+      await controller.startPaid(
+        { brandId: OWN_BRAND_ID, userId: 'other-user-id', planSlug: 'dropi-roax' },
+        { user: { id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID } },
+      )
+      expect(service.startPaid).toHaveBeenCalledWith({
+        brandId: OWN_BRAND_ID,
+        userId: USER_ID,
+        planSlug: 'dropi-roax',
+      })
+      expect(service.startPaid).not.toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'other-user-id' }),
+      )
+
+      service.startPaid.mockClear()
+
+      await controller.startPaid(
+        { brandId: OWN_BRAND_ID, userId: 'other-user-id', planSlug: 'dropi-roax' },
+        { user: { ...SERVER_PRINCIPAL } },
+      )
+      expect(service.startPaid).toHaveBeenCalledWith({
+        brandId: OWN_BRAND_ID,
+        userId: 'other-user-id',
+        planSlug: 'dropi-roax',
+      })
+    })
   })
 })
