@@ -26,7 +26,7 @@
     "start:prod": "node dist/src/main",
     "test": "jest",
     "test:cov": "jest --coverage --passWithNoTests",
-    "test:e2e": "jest --config ./test/jest-e2e.json --runInBand --detectOpenHandles --coverage",
+    "test:e2e": "jest --config ./test/jest-e2e.json --detectOpenHandles --coverage",
     "test:watch": "jest --watch",
     "typeorm": "ts-node ./node_modules/typeorm/cli",
     "verify": "npm run lint && npm run test:cov"
