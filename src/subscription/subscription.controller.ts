@@ -134,7 +134,8 @@ export class SubscriptionController {
     @Req() req?: any,
   ) {
     const brandId = await this.resolveBrandId(data?.brandId, req, true)
-    return this.subscriptionService.startTrial({ ...data, brandId })
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
+    return this.subscriptionService.startTrial({ ...data, brandId, userId })
   }
 
   /**

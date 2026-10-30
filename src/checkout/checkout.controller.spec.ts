@@ -141,6 +141,9 @@ describe('POST /checkout brand membership gate', () => {
   }
   let walletService: { debit: jest.Mock; credit: jest.Mock; findById: jest.Mock }
   let paymentRepo: ReturnType<typeof createMockRepo>
+  let subscriptionRepo: ReturnType<typeof createMockRepo>
+  let subscriptionEventRepo: ReturnType<typeof createMockRepo>
+  let auditService: { log: jest.Mock }
   let invoiceService: { create: jest.Mock }
 
   const createMockRepo = () => ({
@@ -219,6 +222,9 @@ describe('POST /checkout brand membership gate', () => {
     }
 
     paymentRepo = createMockRepo()
+    subscriptionRepo = createMockRepo()
+    subscriptionEventRepo = createMockRepo()
+    auditService = { log: jest.fn().mockResolvedValue(null) }
     invoiceService = {
       create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),
     }
@@ -232,8 +238,11 @@ describe('POST /checkout brand membership gate', () => {
         CheckoutService,
         { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: paymentRepo },
         { provide: getRepositoryToken(PaymentAttempt, 'DBWrite'), useValue: createMockRepo() },
-        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: createMockRepo() },
-        { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
+        { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionRepo },
+        {
+          provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'),
+          useValue: subscriptionEventRepo,
+        },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
         { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
         { provide: WalletService, useValue: walletService },
@@ -242,7 +251,7 @@ describe('POST /checkout brand membership gate', () => {
           useValue: invoiceService,
         },
         { provide: SubscriptionService, useValue: {} },
-        { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(null) } },
+        { provide: AuditService, useValue: auditService },
         {
           provide: TaxService,
           useValue: {
@@ -423,6 +432,46 @@ describe('POST /checkout brand membership gate', () => {
     })
     expect(walletService.debit).toHaveBeenCalledTimes(1)
     expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE - PLAN_PRICE_COP)
+    expect(paymentRepo.create).toHaveBeenCalledWith(expect.objectContaining({ userId: 'system' }))
+  })
+
+  it('records req.user.id from the user session on payment, subscription, event, and audit log while ignoring userId in the body (LOC-53)', async () => {
+    mockPlatformResponses([{ userId: 'user-member-b', roleName: 'superuser' }])
+
+    const response = await postCheckout(
+      { cookies: signUserCookies('user-member-b') },
+      checkoutBody('other-user-id'),
+    )
+
+    expect(response.status).toBe(201)
+    expect(paymentRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: BRAND_B_ID,
+        userId: 'user-member-b',
+      }),
+    )
+    expect(paymentRepo.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'other-user-id' }),
+    )
+    expect(subscriptionRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: BRAND_B_ID,
+        userId: 'user-member-b',
+      }),
+    )
+    expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        triggeredBy: 'user-member-b',
+      }),
+    )
+    expect(auditService.log).toHaveBeenCalledWith(
+      'user-member-b',
+      'checkout_completed',
+      'payment',
+      'pay-1',
+      expect.any(Object),
+      expect.any(String),
+    )
   })
 
   it('responds 503 BRAND_LOOKUP_UNAVAILABLE without moving Brand B wallet balance when backend-platform does not respond', async () => {
