@@ -195,13 +195,18 @@ describe('WalletService idempotent movements (e2e)', () => {
       const queryRunner = migrationDataSource.createQueryRunner()
       try {
         await queryRunner.connect()
-        await queryRunner.query(`
-          CREATE TABLE "transactions" (
-            "id" uuid NOT NULL DEFAULT gen_random_uuid(),
-            CONSTRAINT "PK_transactions" PRIMARY KEY ("id")
-          )
-        `)
-        await new AddTransactionIdempotencyKey1792728404940().up(queryRunner)
+        const existingColumns = await queryRunner.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+        )
+        if (existingColumns.length === 0) {
+          await queryRunner.query(`
+            CREATE TABLE IF NOT EXISTS "transactions" (
+              "id" uuid NOT NULL DEFAULT gen_random_uuid(),
+              CONSTRAINT "PK_transactions" PRIMARY KEY ("id")
+            )
+          `)
+          await new AddTransactionIdempotencyKey1792728404940().up(queryRunner)
+        }
         await run(queryRunner)
       } finally {
         await queryRunner.release()
@@ -224,24 +229,7 @@ describe('WalletService idempotent movements (e2e)', () => {
   }
 
   it('reverts and reapplies the idempotencyKey migration cleanly', async () => {
-    const migration = new AddTransactionIdempotencyKey1792728404940()
-
-    await withDisposableMigrationRunner(async (queryRunner) => {
-      await migration.down(queryRunner)
-      const afterDown = await queryRunner.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
-      )
-      expect(afterDown).toHaveLength(0)
-
-      await migration.up(queryRunner)
-      const afterUp = await queryRunner.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
-      )
-      expect(afterUp).toHaveLength(1)
-    })
-  })
-
-  it('runs the idempotencyKey migration on a disposable database without dropping the column from the shared connection', async () => {
+    // Fails on targetDb/sharedColumnsWhileDown if queryRunner uses dataSource instead of the disposable DB.
     const migration = new AddTransactionIdempotencyKey1792728404940()
 
     await withDisposableMigrationRunner(async (queryRunner) => {
@@ -249,16 +237,25 @@ describe('WalletService idempotent movements (e2e)', () => {
       try {
         const [{ db: targetDb }] = await queryRunner.query(`SELECT current_database() AS db`)
         const [{ db: sharedDb }] = await dataSource.query(`SELECT current_database() AS db`)
+        const afterDown = await queryRunner.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+        )
         const sharedColumnsWhileDown = await dataSource.query(
           `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
         )
 
         expect(targetDb).not.toBe('payments')
         expect(targetDb).not.toBe(sharedDb)
+        expect(afterDown).toHaveLength(0)
         expect(sharedColumnsWhileDown).toHaveLength(1)
       } finally {
         await migration.up(queryRunner)
       }
+
+      const afterUp = await queryRunner.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+      )
+      expect(afterUp).toHaveLength(1)
     })
   })
 })
