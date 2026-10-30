@@ -13,30 +13,31 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequestException } from '../shared/exception/request.exception'
 
-/**
- * Los CUATRO endpoints que resuelven la marca del principal van en una sola tabla a
- * propósito: la regla de resolución es una, y si mañana se agrega otro que se saltee
- * `resolveBrandId`, el que lo agregue tiene que sumarlo acá o el spec deja de cubrir
- * el endpoint nuevo de forma visible.
- *
- * `confirm` es el único que ESCRIBE —puede dejar la fila viva y asignar el plan en
- * roles—, y por eso está acá y no aparte: que escriba lo hace MÁS importante, no
- * menos, que la marca no salga nunca del query de un usuario.
- */
 const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory'], ['confirm']] as const
 
 const SERVER_PRINCIPAL = { id: 'server', isSuperAdmin: true, brand: null }
-const USER_WITH_BRAND = { id: 'u1', isSuperAdmin: false, brand: 'A' }
-const USER_WITHOUT_BRAND = { id: 'u1', isSuperAdmin: false, brand: null }
+const READ_OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
+const READ_OTHER_SESSION_BRAND_ID = '44444444-4444-4444-8444-444444444444'
+const READ_FOREIGN_BRAND_ID = '22222222-2222-4222-8222-222222222222'
+const READ_USER_ID = '33333333-3333-4333-8333-333333333333'
+const SUPERADMIN_PRINCIPAL = {
+  id: '55555555-5555-4555-8555-555555555555',
+  isSuperAdmin: true,
+  brand: null,
+}
+const SERVER_TOKEN_PRINCIPAL = { id: 'server', isSuperAdmin: false, brand: null }
+const USER_WITHOUT_BRAND = { id: READ_USER_ID, isSuperAdmin: false, brand: null }
+const USER_WITH_OTHER_BRAND = {
+  id: READ_USER_ID,
+  isSuperAdmin: false,
+  brand: READ_OTHER_SESSION_BRAND_ID,
+}
 
-describe('SubscriptionController — marca del principal en las lecturas', () => {
+describe('SubscriptionController — brand membership on subscription reads (LOC-60)', () => {
   let controller: SubscriptionController
   let service: Record<string, jest.Mock>
+  let platformClient: { canViewBrandCredit: jest.Mock }
 
-  /**
-   * Se afirma sobre el `code` y el status, NUNCA sobre el texto del mensaje: el
-   * cuerpo es lo que ve el cliente y el campo estable del contrato es `code`.
-   */
   async function expectRequestException(
     promise: Promise<unknown>,
     code: string,
@@ -50,27 +51,28 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
   }
 
   beforeEach(async () => {
+    platformClient = {
+      canViewBrandCredit: jest.fn().mockImplementation(async (userId: string, brandId: string) => {
+        return userId === READ_USER_ID && brandId === READ_OWN_BRAND_ID
+      }),
+    }
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [SubscriptionController],
       providers: [
         {
           provide: SubscriptionService,
           useValue: {
-            getCurrent: jest.fn().mockResolvedValue({ data: {} }),
+            getCurrent: jest.fn().mockResolvedValue({ data: { brandId: READ_OWN_BRAND_ID } }),
             getAcceptanceLink: jest.fn().mockResolvedValue({ data: {} }),
             getHistory: jest.fn().mockResolvedValue({ data: [] }),
             confirm: jest.fn().mockResolvedValue({ data: {}, confirmed: false }),
           },
         },
         { provide: EnterprisePricingService, useValue: {} },
-        { provide: ClientPlatformService, useValue: { canViewBrandCredit: jest.fn() } },
+        { provide: ClientPlatformService, useValue: platformClient },
       ],
     })
-      // El controller está detrás de `ApiAuthGuard`, que inyecta `JwtService` y
-      // `ClientRolesService`. Este spec prueba la LÓGICA del controller —de dónde
-      // sale el `brandId` con el que se llama al servicio—, no la autenticación:
-      // eso vive en `shared/auth/api-auth.guard.spec.ts`. Sin el override Nest
-      // falla al resolver `JwtService` en el módulo de test.
       .overrideGuard(ApiAuthGuard)
       .useValue({ canActivate: () => true })
       .compile()
@@ -80,54 +82,84 @@ describe('SubscriptionController — marca del principal en las lecturas', () =>
   })
 
   it.each(READS)(
-    '%s: el principal de servicio sí puede nombrar la marca por query',
+    '%s: allows brand owner when session has no brand and resolves brandId from query',
     async (method) => {
-      await controller[method]('B', { user: { ...SERVER_PRINCIPAL } })
+      await controller[method](READ_OWN_BRAND_ID, { user: { ...USER_WITHOUT_BRAND } })
 
-      expect(service[method]).toHaveBeenCalledWith('B')
+      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(
+        READ_USER_ID,
+        READ_OWN_BRAND_ID,
+      )
+      expect(service[method]).toHaveBeenCalledWith(READ_OWN_BRAND_ID)
+
+      service[method].mockClear()
+      platformClient.canViewBrandCredit.mockClear()
+
+      await controller[method](READ_OWN_BRAND_ID, { user: { ...USER_WITH_OTHER_BRAND } })
+
+      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(
+        READ_USER_ID,
+        READ_OWN_BRAND_ID,
+      )
+      expect(service[method]).toHaveBeenCalledWith(READ_OWN_BRAND_ID)
+      expect(service[method]).not.toHaveBeenCalledWith(READ_OTHER_SESSION_BRAND_ID)
     },
   )
 
   it.each(READS)(
-    '%s: el principal de servicio sin brandId da 400 y no consulta',
+    '%s: rejects foreign brand with 403 forbidden without querying the subscription service',
     async (method) => {
       await expectRequestException(
-        controller[method](undefined as unknown as string, { user: { ...SERVER_PRINCIPAL } }),
-        'BRAND_ID_REQUIRED',
-        HttpStatus.BAD_REQUEST,
+        controller[method](READ_FOREIGN_BRAND_ID, { user: { ...USER_WITHOUT_BRAND } }),
+        'forbidden',
+        HttpStatus.FORBIDDEN,
       )
 
+      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(
+        READ_USER_ID,
+        READ_FOREIGN_BRAND_ID,
+      )
       expect(service[method]).not.toHaveBeenCalled()
     },
   )
 
-  it.each(READS)('%s: al usuario se le lee SU marca y el query se ignora', async (method) => {
-    await controller[method]('B', { user: { ...USER_WITH_BRAND } })
+  it.each(READS)(
+    '%s: rejects missing or invalid brandId with 400 INVALID_BRAND_ID without querying',
+    async (method) => {
+      await expectRequestException(
+        controller[method](undefined as unknown as string, { user: { ...USER_WITHOUT_BRAND } }),
+        'INVALID_BRAND_ID',
+        HttpStatus.BAD_REQUEST,
+      )
+      await expectRequestException(
+        controller[method]('not-a-uuid', { user: { ...USER_WITHOUT_BRAND } }),
+        'INVALID_BRAND_ID',
+        HttpStatus.BAD_REQUEST,
+      )
+      await expectRequestException(
+        controller[method](undefined as unknown as string, { user: { ...SERVER_PRINCIPAL } }),
+        'INVALID_BRAND_ID',
+        HttpStatus.BAD_REQUEST,
+      )
 
-    expect(service[method]).toHaveBeenCalledWith('A')
-    // Esta segunda aserción es la que rompe la mutación (volver el handler a
-    // `this.subscriptionService.X(brandId)`): sin ella, un handler que pasara la
-    // marca del query igual podría verse verde si alguien relajara la primera.
-    expect(service[method]).not.toHaveBeenCalledWith('B')
-  })
+      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+      expect(service[method]).not.toHaveBeenCalled()
+    },
+  )
 
-  it.each(READS)('%s: el usuario sin marca da 403 forbidden y no consulta', async (method) => {
-    await expectRequestException(
-      controller[method]('B', { user: { ...USER_WITHOUT_BRAND } }),
-      'forbidden',
-      HttpStatus.FORBIDDEN,
-    )
+  it.each(READS)(
+    '%s: allows superadmin and server principal to read any valid brand without membership lookup',
+    async (method) => {
+      await controller[method](READ_FOREIGN_BRAND_ID, { user: { ...SUPERADMIN_PRINCIPAL } })
+      await controller[method](READ_FOREIGN_BRAND_ID, { user: { ...SERVER_TOKEN_PRINCIPAL } })
 
-    expect(service[method]).not.toHaveBeenCalled()
-  })
+      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+      expect(service[method]).toHaveBeenNthCalledWith(1, READ_FOREIGN_BRAND_ID)
+      expect(service[method]).toHaveBeenNthCalledWith(2, READ_FOREIGN_BRAND_ID)
+    },
+  )
 })
 
-/**
- * `POST /subscription/paid` es una ESCRITURA, y como el resto de las escrituras del
- * controller recibe la marca por body — `resolveBrandId` es de las tres lecturas y el
- * docblock del controller lo dice—. Este spec fija lo único que sí es de esta tarea:
- * que el handler pase el body validado tal cual, sin completar ni reinterpretar nada.
- */
 describe('SubscriptionController — alta paga', () => {
   let controller: SubscriptionController
   let service: Record<string, jest.Mock>

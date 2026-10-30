@@ -14,7 +14,11 @@ import {
 } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
-import { assertResourceBrandAccess, isPrivilegedCaller } from '../shared/auth/brand-scope.util'
+import {
+  assertBrandAccess,
+  assertResourceBrandAccess,
+  isPrivilegedCaller,
+} from '../shared/auth/brand-scope.util'
 import { RequestException } from '../shared/exception/request.exception'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
@@ -35,8 +39,8 @@ import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
  * - `GET /subscription/enterprise-pricing/:brandId` requires brand membership
  *   (`assertResourceBrandAccess`) or an operator.
  * - `GET /subscription`, `/acceptance-link`, `/history`, and `POST /confirm` resolve the
- *   caller brand via `resolveBrandId` (session brand when present so query mismatches do
- *   not act as a brand-existence oracle).
+ *   caller brand via `assertBrandAccess` from the `brandId` query parameter (brand
+ *   membership or privileged caller; 400 when `brandId` is missing or not a valid UUID).
  * - `POST /subscription/trial`, `POST /subscription/paid`, `PATCH /subscription/plan`,
  *   `POST /subscription/cancel`, and `POST /subscription/reactivate` resolve the target
  *   brand via `resolveBrandId` (session brand or body `brandId` verified via
@@ -60,11 +64,18 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Suscripción obtenida correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async getCurrent(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getCurrent(await this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription',
+    )
+    return this.subscriptionService.getCurrent(validBrandId)
   }
 
   /**
@@ -81,12 +92,19 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Link de aceptación obtenido' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   async getAcceptanceLink(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getAcceptanceLink(await this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/acceptance-link',
+    )
+    return this.subscriptionService.getAcceptanceLink(validBrandId)
   }
 
   /**
@@ -137,7 +155,7 @@ export class SubscriptionController {
     },
     @Req() req?: any,
   ) {
-    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
     const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
     return this.subscriptionService.startTrial({ ...data, brandId, userId })
   }
@@ -172,7 +190,7 @@ export class SubscriptionController {
     description: 'PAID_START_FAILED (ConfioPagos no respondió o falló la escritura)',
   })
   async startPaid(@Body() data: StartPaidSubscriptionDto, @Req() req?: any) {
-    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
     return this.subscriptionService.startPaid({ ...data, brandId })
   }
 
@@ -188,7 +206,7 @@ export class SubscriptionController {
     @Body() data: { brandId: string; planSlug: string; triggeredBy: string },
     @Req() req?: any,
   ) {
-    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
     return this.subscriptionService.changePlan(brandId, {
       planSlug: data.planSlug,
       triggeredBy: data.triggeredBy,
@@ -207,7 +225,7 @@ export class SubscriptionController {
     @Body() data: { brandId: string; reason: string; triggeredBy: string },
     @Req() req?: any,
   ) {
-    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
     return this.subscriptionService.cancel(brandId, {
       reason: data.reason,
       triggeredBy: data.triggeredBy,
@@ -223,19 +241,10 @@ export class SubscriptionController {
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async reactivate(@Body() data: { brandId: string; triggeredBy: string }, @Req() req?: any) {
-    const brandId = await this.resolveBrandId(data?.brandId, req, true)
+    const brandId = await this.resolveBrandId(data?.brandId, req)
     return this.subscriptionService.reactivate(brandId, data.triggeredBy)
   }
 
-  /**
-   * Confirma la suscripción preguntándole a ConfioPagos, sin esperar su webhook.
-   *
-   * Resuelve la marca del principal con la misma regla que las otras lecturas
-   * (`resolveBrandId`, al final de la clase): un usuario confirma SU marca y sólo un
-   * principal de servicio puede nombrar una ajena. Es `POST` porque escribe —puede
-   * dejar la fila viva y asignar el plan en roles—, aunque el hecho lo decida el
-   * proveedor y no el llamador.
-   */
   @Post('confirm')
   @ApiOperation({ summary: 'Confirmar la suscripción contra ConfioPagos, sin esperar el webhook' })
   @ApiResponse({
@@ -244,14 +253,21 @@ export class SubscriptionController {
   })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   @ApiResponse({ status: 422, description: 'NO_CONFIO_SUBSCRIPTION' })
   @ApiResponse({ status: 503, description: 'CONFIO_STATUS_UNAVAILABLE (no se pudo preguntar)' })
   async confirm(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.confirm(await this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'POST /subscription/confirm',
+    )
+    return this.subscriptionService.confirm(validBrandId)
   }
 
   @Get('history')
@@ -259,11 +275,18 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Historial obtenido correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (principal de servicio sin brandId)',
+    description: 'INVALID_BRAND_ID (brandId is required and must be a valid UUID)',
   })
-  @ApiResponse({ status: 403, description: 'forbidden (usuario sin marca)' })
+  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async getHistory(@Query('brandId') brandId: string, @Req() req: any) {
-    return this.subscriptionService.getHistory(await this.resolveBrandId(brandId, req))
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /subscription/history',
+    )
+    return this.subscriptionService.getHistory(validBrandId)
   }
 
   @Get('enterprise-pricing')
@@ -322,7 +345,7 @@ export class SubscriptionController {
     return this.enterprisePricingService.remove(brandId)
   }
 
-  private async resolveBrandId(brandId: string, req: any, fromBody = false): Promise<string> {
+  private async resolveBrandId(brandId: string, req: any): Promise<string> {
     if (isPrivilegedCaller(req)) {
       if (!brandId) {
         throw new RequestException(
@@ -343,10 +366,6 @@ export class SubscriptionController {
         : typeof rawSessionBrand?.id === 'string'
           ? rawSessionBrand.id
           : undefined
-
-    if (!fromBody && sessionBrand) {
-      return sessionBrand
-    }
 
     if (brandId) {
       if (sessionBrand && brandId === sessionBrand) {
