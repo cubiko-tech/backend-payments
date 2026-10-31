@@ -1,3 +1,8 @@
+/**
+ * R6: TasksService groups the scheduled @Cron entrypoints of backend-payments in a
+ * single NestJS injectable while delegating domain logic such as wallet payment
+ * reconciliation to dedicated helpers.
+ */
 import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
@@ -7,7 +12,11 @@ import { DataSource, LessThan, In, Between, IsNull, Not, QueryRunner, Repository
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
+import {
+  hasWalletPaymentDebit,
+  WALLET_RECONCILE_MIN_AGE_MS,
+} from '../checkout/wallet-payment-reconciliation'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
 import {
   Subscription,
@@ -594,6 +603,44 @@ export class TasksService {
     )
   }
 
+  @Cron('*/5 * * * *')
+  async reconcileWalletPayments() {
+    const now = new Date()
+    const cutoff = new Date(now.getTime() - WALLET_RECONCILE_MIN_AGE_MS)
+    const pending = await this.paymentRepo.find({
+      where: {
+        provider: PaymentProvider.WALLET,
+        status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
+        createdAt: LessThan(cutoff),
+      },
+    })
+
+    if (!pending || pending.length === 0) return
+
+    let completed = 0
+    let failed = 0
+    for (const p of pending) {
+      try {
+        const res = await this.checkoutService.reconcileWalletPayment(p.id, now)
+        if (res?.outcome === 'completed') {
+          completed++
+        } else if (res?.outcome === 'failed_without_debit') {
+          failed++
+        }
+      } catch (error) {
+        logger.log(
+          'warn',
+          `[CRON] reconcileWalletPayments: error with payment ${p.id}: ${error.message}`,
+        )
+      }
+    }
+
+    logger.log(
+      'info',
+      `[CRON] reconcileWalletPayments: ${pending.length} checked, ${completed} completed, ${failed} failed`,
+    )
+  }
+
   // =============================================================
   // 3. Expirar checkouts pendientes (cada 30 min)
   // =============================================================
@@ -602,10 +649,37 @@ export class TasksService {
     const expiryTime = new Date()
     expiryTime.setHours(expiryTime.getHours() - this.CHECKOUT_EXPIRY_HOURS)
 
-    const result = await this.paymentRepo.update(
-      {
+    const expiredPending = await this.paymentRepo.find({
+      where: {
         status: PaymentStatus.PENDING,
         createdAt: LessThan(expiryTime),
+      },
+    })
+
+    if (!expiredPending || expiredPending.length === 0) {
+      return
+    }
+
+    const expirableIds: string[] = []
+    for (const payment of expiredPending) {
+      const debited = await hasWalletPaymentDebit(payment, {
+        walletService: this.walletService,
+        transactionReadRepo: this.transactionReadRepo,
+        dataSource: this.dataSource,
+      })
+      if (!debited) {
+        expirableIds.push(payment.id)
+      }
+    }
+
+    if (expirableIds.length === 0) {
+      return
+    }
+
+    const result = await this.paymentRepo.update(
+      {
+        id: In(expirableIds),
+        status: PaymentStatus.PENDING,
       },
       {
         status: PaymentStatus.FAILED,
@@ -613,7 +687,7 @@ export class TasksService {
       },
     )
 
-    if (result.affected > 0) {
+    if ((result?.affected ?? 0) > 0) {
       logger.log('info', `[CRON] expirePendingCheckouts: ${result.affected} checkouts expirados`)
     }
   }

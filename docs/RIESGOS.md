@@ -170,15 +170,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/checkout-idempotency.ts:37-67`, `:157-175`
   (`canRetryFailedIdempotentPayment`, `createIncompleteIdempotentCheckoutException`,
-  `resolvePaymentStateOutcome`), `src/checkout/checkout.service.ts:341-423`, `:446-586`, `:591-657`
+  `resolvePaymentStateOutcome`), `src/checkout/checkout.service.ts:346-428`, `:451-591`, `:596-662`
   (`retryFailedIdempotentPayment`, `processWalletPayment`, `processExternalPayment`),
   `src/payment/payment.service.ts:79-107` (`cancelPayment`) y `src/provider/dropi/dropi.provider.ts:57`,
   `:71-90` (`createCheckout`)
 - **Qué lo dispara**: (a) un reintento con la misma `Idempotency-Key` cuando el intento anterior alcanzó
   `status = 'completed'` pero falló después de `walletService.debit` en `createOrRenewSubscription`,
   `assignPlanInRoles` o `auditService.log` guardando `status = 'completed'` sin `metadata.checkoutResult`
-  (`src/checkout/checkout.service.ts:526-554`), si el proceso cayó antes del `save` final con
-  `checkoutResult` (`:556-562`), o cuando un pago externo fue completado por webhook o reconciliación sin
+  (`src/checkout/checkout.service.ts:531-559`), si el proceso cayó antes del `save` final con
+  `checkoutResult` (`:561-567`), o cuando un pago externo fue completado por webhook o reconciliación sin
   haber guardado `metadata.checkoutResult`; (b) un reintento con la misma `Idempotency-Key` sobre un pago
   externo `failed` con `metadata.idempotencyFingerprint` y sin `providerPaymentId`; (c) un reintento en
   `POST /checkout` sobre una fila `payments` que la ruta retirada `POST /payment/checkout` (eliminada en
@@ -189,22 +189,49 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   (`src/checkout/checkout-idempotency.ts:58-67`, `:170-175`) de forma permanente para esa llave, con el
   cobro ya efectuado y sin camino de recuperación desde la misma `Idempotency-Key`; (b) el reintento de un
   pago externo `failed` sin `providerPaymentId` invoca otra vez `provider.createCheckout`
-  (`src/checkout/checkout.service.ts:599-609`), donde en Dropi (`src/provider/dropi/dropi.provider.ts:57`,
+  (`src/checkout/checkout.service.ts:604-614`), donde en Dropi (`src/provider/dropi/dropi.provider.ts:57`,
   `:71-90`) se ejecuta `POST /charges` con timeout de 15 s sin llave de idempotencia hacia el proveedor:
   si el proveedor creó el cobro y la respuesta venció antes de guardar `providerPaymentId`, el reintento
   deja un segundo cobro pendiente (hipótesis, R14: no se ejercitó contra Dropi y no consta que cree el
   cobro cuando la respuesta vence); (c) las filas que `POST /payment/checkout` ya hubiera escrito antes de
   su retiro siguen siendo elegibles al reintento en `canRetryFailedIdempotentPayment`
   (`src/checkout/checkout-idempotency.ts:37-42`) y `retryFailedIdempotentPayment` reutiliza sus importes
-  almacenados (`src/checkout/checkout.service.ts:382-396`); esas filas no se contaron por ambiente.
+  almacenados (`src/checkout/checkout.service.ts:387-401`); esas filas no se contaron por ambiente.
 - **Estado**: mitigado en reintentos de pagos `failed` con huella verificada y cobros por wallet (LOC-86)
   — `canRetryFailedIdempotentPayment` (`src/checkout/checkout-idempotency.ts:37-42`) exige
   `metadata.idempotencyFingerprint` no vacío, ausencia de `providerPaymentId` y ausencia de
   `metadata.amountMismatch`, `retryFailedIdempotentPayment` reclama la fila con
-  `UPDATE ... WHERE id = :id AND status = 'failed'` (`src/checkout/checkout.service.ts:352-360`), y el
-  débito en wallet usa la llave determinística `payment:${payment.id}:debit` (`:479`). Abierto en los tres
+  `UPDATE ... WHERE id = :id AND status = 'failed'` (`src/checkout/checkout.service.ts:357-365`), y el
+  débito en wallet usa la llave determinística `payment:${payment.id}:debit` (`:484`). Abierto en los tres
   bordes de arriba: un pago `completed` sin `metadata.checkoutResult` devuelve siempre `409
   IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCheckout` antes de
   persistir `providerPaymentId` puede abrir una segunda sesión o cobro pendiente en el proveedor externo, y
   las filas que `POST /payment/checkout` ya hubiera escrito antes de `c77a594` (LOC-93) siguen siendo
   elegibles al reintento y no se contaron por ambiente.
+
+## Reconciliación de pagos `wallet` en `PROCESSING` ante fallo persistente de efectos o de `backend-roles` (LOC-87)
+
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:187-344` (`reconcileWalletPayment`),
+  `src/tasks/tasks.service.ts:607-643`, `:647-693` (`reconcileWalletPayments`, `expirePendingCheckouts`) y
+  `src/checkout/checkout.service.ts:1864-1872` (`assignPlanInRoles`)
+- **Qué lo dispara**: (a) un pago `wallet` cuyo débito `payment:${payment.id}:debit` ya se asentó en
+  `transactions` pero cuyo proceso cayó dejando `status` en `pending` o `processing`, cuando durante el
+  barrido `createOrRenewSubscription` o `auditService.log` lanza excepción; (b) `assignPlanInRoles`
+  (`src/checkout/checkout.service.ts:1864-1872`) cuando `clientRoles.assignPlanToBrand` falla y captura el
+  error sin relanzarlo.
+- **Qué rompe**: (a) `reconcileWalletPayment` mantiene la fila en `processing` sin marcar `completed`
+  (`src/checkout/wallet-payment-reconciliation.ts:242-298`) y `reconcileWalletPayments` la reintenta cada
+  5 minutos (`src/tasks/tasks.service.ts:607-643`) sin tope de reintentos mientras la excepción persista;
+  (b) como `assignPlanInRoles` captura el fallo de `backend-roles` y sólo lo registra en `error`
+  (`src/checkout/checkout.service.ts:1869-1871`), si `backend-roles` está caído durante la reconciliación
+  el pago pasa a `completed` con la suscripción creada en `backend-payments` pero sin el plan asignado en
+  `backend-roles`.
+- **Estado**: mitigado en pérdida de pagos `wallet` con débito en `pending`/`processing`, expiración y
+  carreras entre barridos (LOC-87) — `reconcileWalletPayments` (`src/tasks/tasks.service.ts:607-643`) y
+  `reconcileWalletPayment` (`src/checkout/wallet-payment-reconciliation.ts:187-344`) completan bajo
+  candado `pg_advisory_xact_lock` (`:67-130`) los pagos con débito asentado escribiendo `completed` y
+  `metadata.checkoutResult` juntos (`:300-318`), pasan a `failed` los `pending` sin débito fuera de la
+  ventana de 2 minutos (`:223-240`) y `expirePendingCheckouts` excluye todo `pending` con débito
+  (`src/tasks/tasks.service.ts:664-674`). Abierto en convergencia sin cota cuando `createOrRenewSubscription`
+  o `auditService.log` fallan de forma permanente y cuando `assignPlanInRoles` traga un fallo de
+  `backend-roles`.

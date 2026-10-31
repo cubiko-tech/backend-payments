@@ -62,6 +62,10 @@ import {
   normalizeIdempotencyKey,
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
+import {
+  reconcileWalletPayment as executeWalletPaymentReconciliation,
+  WalletPaymentReconciliationResult,
+} from './wallet-payment-reconciliation'
 
 /**
  * Servicio orquestador de checkout.
@@ -135,6 +139,7 @@ export class CheckoutService implements OnModuleInit {
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
   private readonly inFlightCheckouts: InFlightCheckoutsMap = new Map()
   private readonly inFlightCompletions = new Set<string>()
+  private readonly walletReconcileLocks = new Map<string, Promise<void>>()
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -667,6 +672,7 @@ export class CheckoutService implements OnModuleInit {
       const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
       if (
         !payment ||
+        payment.provider === PaymentProvider.WALLET ||
         payment.status === PaymentStatus.COMPLETED ||
         this.hasAmountMismatchMark(payment)
       ) {
@@ -866,7 +872,10 @@ export class CheckoutService implements OnModuleInit {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
-      if (payment.status === PaymentStatus.PROCESSING) {
+      if (
+        payment.status === PaymentStatus.PROCESSING &&
+        payment.provider !== PaymentProvider.WALLET
+      ) {
         try {
           await this.completeExternalPayment(paymentId, { source: 'reconcile' })
           const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
@@ -917,6 +926,27 @@ export class CheckoutService implements OnModuleInit {
       const current = await this.paymentRepo.findOne({ where: { id: paymentId } })
       return { status: current?.status ?? payment.status }
     }
+  }
+
+  async reconcileWalletPayment(
+    paymentId: string,
+    now?: Date,
+  ): Promise<WalletPaymentReconciliationResult> {
+    return executeWalletPaymentReconciliation(
+      paymentId,
+      {
+        paymentRepo: this.paymentRepo,
+        walletService: this.walletService,
+        dataSource: this.dataSource,
+        inProcessLocks: this.walletReconcileLocks,
+        createOrRenewSubscription: (req, p) => this.createOrRenewSubscription(req, p),
+        assignPlanInRoles: (brandId, planSlug, expiresAt) =>
+          this.assignPlanInRoles(brandId, planSlug, expiresAt),
+        auditService: this.auditService,
+        eventBus: this.eventBus,
+      },
+      now,
+    )
   }
 
   // =============================================================
