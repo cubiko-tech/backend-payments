@@ -8,7 +8,7 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payment/entities/payment.entity'
-import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import { Subscription } from '../subscription/entities/subscription.entity'
 import {
   Transaction,
   TransactionStatus,
@@ -186,7 +186,7 @@ export async function hasWalletPaymentDebit(
   return false
 }
 
-async function findConflictingActivePlanSubscription(
+async function findConflictingPlanSubscription(
   payment: Payment,
   deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'paymentRepo' | 'dataSource'>,
 ): Promise<Subscription | null> {
@@ -195,32 +195,31 @@ async function findConflictingActivePlanSubscription(
     (typeof (deps.dataSource as any)?.getRepository === 'function'
       ? deps.dataSource!.getRepository(Subscription)
       : undefined)
-  if (typeof subRepo?.findOne !== 'function') {
+  if (typeof subRepo?.findOne !== 'function' || typeof deps.paymentRepo?.findOne !== 'function') {
     return null
   }
   const existingSub = await subRepo.findOne({ where: { brandId: payment.brandId } })
   if (
     !existingSub ||
-    existingSub.status !== SubscriptionStatus.ACTIVE ||
     !existingSub.planSlug ||
     existingSub.planSlug === payment.purposeId ||
+    !existingSub.lastPaymentId ||
     existingSub.lastPaymentId === payment.id
   ) {
     return null
   }
-  if (existingSub.lastPaymentId && typeof deps.paymentRepo?.findOne === 'function') {
-    const lastPayment = await deps.paymentRepo.findOne({
-      where: { id: existingSub.lastPaymentId },
-    })
-    if (lastPayment) {
-      const lastTime = new Date(lastPayment.paidAt ?? lastPayment.createdAt).getTime()
-      const paymentTime = new Date(payment.createdAt).getTime()
-      if (Number.isFinite(lastTime) && Number.isFinite(paymentTime) && lastTime < paymentTime) {
-        return null
-      }
-    }
+  const lastPayment = await deps.paymentRepo.findOne({
+    where: { id: existingSub.lastPaymentId },
+  })
+  if (!lastPayment) {
+    return null
   }
-  return existingSub
+  const lastTime = new Date(lastPayment.paidAt ?? lastPayment.createdAt).getTime()
+  const paymentTime = new Date(payment.createdAt).getTime()
+  if (!Number.isFinite(lastTime) || !Number.isFinite(paymentTime)) {
+    return null
+  }
+  return lastTime > paymentTime ? existingSub : null
 }
 
 export async function reconcileWalletPayment(
@@ -301,10 +300,10 @@ export async function reconcileWalletPayment(
     }
 
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      const conflictingSub = await findConflictingActivePlanSubscription(payment, deps)
+      const conflictingSub = await findConflictingPlanSubscription(payment, deps)
       if (conflictingSub) {
         deps.logger?.error(
-          `reconcileWalletPayment: brand ${payment.brandId} already has active plan ` +
+          `reconcileWalletPayment: brand ${payment.brandId} already has newer plan ` +
             `${conflictingSub.planSlug}; keeping payment ${payment.id} (${payment.purposeId}) in processing`,
         )
         return { outcome: 'noop', status: PaymentStatus.PROCESSING }

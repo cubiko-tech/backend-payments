@@ -37,6 +37,22 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       return row
     }
 
+    const seedSub = (id: string, brandId: string, planSlug: string, extra: any = {}) => {
+      const sub = {
+        id,
+        brandId,
+        planSlug,
+        status: SubscriptionStatus.ACTIVE,
+        provider: SubscriptionProvider.WALLET,
+        currentPeriodEnd: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
+        lastPaymentId: null,
+        autoRenew: true,
+        ...extra,
+      }
+      subscriptions.set(id, sub)
+      return sub
+    }
+
     const beforeDate = (val: any, cutoff: any) =>
       !(cutoff instanceof Date) || new Date(val).getTime() < cutoff.getTime()
 
@@ -69,10 +85,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
         }
         return { affected }
       }),
-      save: jest.fn(async (entity: any) => {
-        payments.set(entity.id, { ...entity })
-        return entity
-      }),
+      save: jest.fn(async (entity: any) => (payments.set(entity.id, { ...entity }), entity)),
     }
 
     // R17: stateful Subscription and SubscriptionEvent doubles to verify single execution on races.
@@ -102,16 +115,15 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     // R17: Transaction read repo and WalletService doubles track wallet balance and debit rows.
     const findTxByKey = async ({ where }: any = {}) =>
       transactions.find((t) => t.idempotencyKey === where?.idempotencyKey) ?? null
-    const transactionReadRepo: any = { findOne: jest.fn(findTxByKey) }
     const walletService: any = {
       findDebitByIdempotencyKey: jest.fn(
         async (walletId: string, key: string) =>
           transactions.find((t) => t.walletId === walletId && t.idempotencyKey === key) ?? null,
       ),
       debit: jest.fn(async (walletId: string, amount: number, meta: any) => {
-        const dup = meta?.idempotencyKey
-          ? transactions.find((t) => t.idempotencyKey === meta.idempotencyKey)
-          : null
+        const dup = transactions.find(
+          (t) => t.idempotencyKey && t.idempotencyKey === meta?.idempotencyKey,
+        )
         if (dup) return dup
         walletBalances.set(walletId, (walletBalances.get(walletId) ?? 0) - amount)
         const tx = {
@@ -120,7 +132,6 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
           amount,
           type: TransactionType.DEBIT,
           status: TransactionStatus.COMPLETED,
-          referenceType: meta?.referenceType ?? 'payment',
           referenceId: meta?.referenceId ?? null,
           idempotencyKey: meta?.idempotencyKey ?? null,
         }
@@ -133,11 +144,9 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     const dataSource: any = {
       createQueryRunner: jest.fn(() => {
         let releaseGate: (() => void) | null = null
-        const runner: any = {
-          isTransactionActive: false,
-          isReleased: false,
-          connect: jest.fn(async () => undefined),
-          startTransaction: jest.fn(async () => void (runner.isTransactionActive = true)),
+        return {
+          connect: jest.fn(),
+          startTransaction: jest.fn(),
           query: jest.fn(async (sql: string) => {
             if (sql.includes('pg_advisory_xact_lock')) {
               const prev = advisoryChain
@@ -146,100 +155,76 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
             }
             return [{ pg_advisory_xact_lock: '' }]
           }),
-          commitTransaction: jest.fn(async () => void (runner.isTransactionActive = false)),
-          rollbackTransaction: jest.fn(async () => void (runner.isTransactionActive = false)),
-          release: jest.fn(async () => void ((runner.isReleased = true), releaseGate?.())),
+          commitTransaction: jest.fn(),
+          rollbackTransaction: jest.fn(),
+          release: jest.fn(async () => releaseGate?.()),
         }
-        return runner
       }),
       getRepository: jest.fn((entity: any) =>
         entity?.name === 'Subscription' ? subscriptionRepo : { findOne: jest.fn(findTxByKey) },
       ),
     }
 
-    // R17: Collaborator doubles for audit, events, roles, invoices, taxes, and logger.
-    const auditService: any = { log: jest.fn(async () => undefined) }
-    const eventBus: any = {
-      publishPaymentCompleted: jest.fn(),
-      notifyPaymentSuccess: jest.fn(),
-      notifyInvoiceReady: jest.fn(),
-    }
-    const clientRoles: any = { assignPlanToBrand: jest.fn(async () => undefined) }
-    const invoiceService: any = {
-      create: jest.fn(async () => ({ id: 'inv-1', invoiceNumber: 'INV-1' })),
-    }
-    const taxService: any = {
-      getTaxForCountry: jest.fn(async () => ({ taxName: 'IVA', taxRate: 19, isInclusive: true })),
-    }
-    const log: any = { log: jest.fn(), warn: jest.fn(), error: jest.fn() }
-
     const seedDebit = (paymentId: string, amount = 49000) =>
       walletService.debit('wallet-1', amount, {
-        referenceType: 'payment',
         referenceId: paymentId,
         idempotencyKey: `payment:${paymentId}:debit`,
       })
 
-    const shared = {
-      paymentRepo,
-      subscriptionRepo,
-      subscriptionEventRepo,
-      dataSource,
-      walletService,
-      auditService,
-      eventBus,
-      clientRoles,
-    }
-    const checkoutService: CheckoutService = Object.assign(
-      Object.create(CheckoutService.prototype),
-      shared,
+    // R17: Collaborator doubles for audit, events, roles, invoices, taxes, and logger.
+    const state: any = Object.assign(
       {
         BILLING_PERIOD_DAYS: 30,
-        invoiceService,
-        taxService,
+        CHECKOUT_EXPIRY_HOURS: 24,
+        transactionReadRepo: { findOne: jest.fn(findTxByKey) },
+        auditService: { log: jest.fn(async () => undefined) },
+        eventBus: {
+          publishPaymentCompleted: jest.fn(),
+          notifyPaymentSuccess: jest.fn(),
+          notifyInvoiceReady: jest.fn(),
+        },
+        clientRoles: { assignPlanToBrand: jest.fn(async () => undefined) },
+        invoiceService: { create: jest.fn(async () => ({ id: 'inv-1', invoiceNumber: 'INV-1' })) },
+        taxService: {
+          getTaxForCountry: jest.fn(async () => ({
+            taxName: 'IVA',
+            taxRate: 19,
+            isInclusive: true,
+          })),
+        },
+        log: { log: jest.fn(), warn: jest.fn(), error: jest.fn() },
+      },
+      { paymentRepo, subscriptionRepo, subscriptionEventRepo, dataSource, walletService },
+      { payments, subscriptions, subscriptionEvents, transactions, walletBalances },
+      { seedPayment, seedSub, seedDebit },
+    )
+    const makeCheckout = (): CheckoutService =>
+      Object.assign(Object.create(CheckoutService.prototype), state, {
         inFlightCheckouts: new Map(),
         inFlightCompletions: new Set(),
         walletReconcileLocks: new Map(),
-        log,
-      },
-    )
-    const tasksService: TasksService = Object.assign(
-      Object.create(TasksService.prototype),
-      shared,
-      { CHECKOUT_EXPIRY_HOURS: 24, transactionReadRepo, checkoutService },
-    )
-
-    return {
-      ...shared,
-      payments,
-      subscriptions,
-      subscriptionEvents,
-      transactions,
-      walletBalances,
-      seedPayment,
-      seedDebit,
-      invoiceService,
-      log,
-      checkoutService,
-      tasksService,
-    }
+      })
+    state.checkoutService = makeCheckout()
+    state.checkoutServiceB = makeCheckout()
+    state.tasksService = Object.assign(Object.create(TasksService.prototype), state)
+    return state
   }
 
   it('runs reconcileWalletPayments on its 5-minute cron and completes a debited PENDING payment once', async () => {
     // R15: red if reconcileWalletPayment charges debit without idempotencyKey or lacks @Cron.
-    const cronSchedule = Reflect.getMetadata(
+    const cron = Reflect.getMetadata(
       SCHEDULE_CRON_OPTIONS,
       TasksService.prototype.reconcileWalletPayments,
     )
-    expect(cronSchedule?.cronTime).toBe('*/5 * * * *')
+    expect(cron?.cronTime).toBe('*/5 * * * *')
 
-    const state = buildState()
-    await state.seedDebit('pay-debited-1', 49000)
-    state.seedPayment('pay-debited-1', { idempotencyKey: 'idem-debited-1' })
+    const s = buildState()
+    await s.seedDebit('pay-debited-1', 49000)
+    s.seedPayment('pay-debited-1', { idempotencyKey: 'idem-debited-1' })
 
-    await state.tasksService.reconcileWalletPayments()
+    await s.tasksService.reconcileWalletPayments()
 
-    const updated = state.payments.get('pay-debited-1')!
+    const updated = s.payments.get('pay-debited-1')!
     expect(updated.status).toBe(PaymentStatus.COMPLETED)
     expect(updated.paidAt).toBeInstanceOf(Date)
     expect(updated.metadata?.checkoutResult).toMatchObject({
@@ -247,13 +232,9 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       status: 'completed',
       subscriptionId: expect.any(String),
     })
-    expect(state.clientRoles.assignPlanToBrand).toHaveBeenCalledWith(
-      '101',
-      'growth',
-      expect.any(Date),
-    )
-    expect(state.walletBalances.get('wallet-1')).toBe(51000)
-    expect(state.transactions.filter((t) => t.referenceId === 'pay-debited-1')).toHaveLength(1)
+    expect(s.clientRoles.assignPlanToBrand).toHaveBeenCalledWith('101', 'growth', expect.any(Date))
+    expect(s.walletBalances.get('wallet-1')).toBe(51000)
+    expect(s.transactions.filter((t: any) => t.referenceId === 'pay-debited-1')).toHaveLength(1)
   })
 
   it('transitions a PENDING wallet payment without debit to failed without touching wallet balance', async () => {
@@ -287,55 +268,39 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
   })
 
   it('serializes concurrent sweeps on a PROCESSING payment so post-debit effects run only once', async () => {
-    // R15: red if acquireWalletReconcileLock is bypassed, duplicating event, role, and audit calls.
+    // R15: red if pg_advisory_xact_lock is removed, duplicating event, role, and audit calls.
     const state = buildState()
-    const initialEnd = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000)
-    state.subscriptions.set('sub-existing', {
-      id: 'sub-existing',
-      brandId: '105',
-      planSlug: 'growth',
-      status: SubscriptionStatus.ACTIVE,
-      provider: SubscriptionProvider.WALLET,
-      walletId: 'wallet-1',
-      currentPeriodStart: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
-      currentPeriodEnd: initialEnd,
-      nextBillingDate: initialEnd,
-      lastPaymentId: 'previous-payment',
-      retryCount: 0,
-      autoRenew: true,
-    })
+    state.seedSub('sub-existing', '105', 'growth', { lastPaymentId: 'previous-payment' })
     await state.seedDebit('pay-processing-race', 49000)
-    state.seedPayment('pay-processing-race', {
-      brandId: '105',
-      status: PaymentStatus.PROCESSING,
-    })
+    state.seedPayment('pay-processing-race', { brandId: '105', status: PaymentStatus.PROCESSING })
 
     await Promise.all([
       state.checkoutService.reconcileWalletPayment('pay-processing-race'),
-      state.checkoutService.reconcileWalletPayment('pay-processing-race'),
+      state.checkoutServiceB.reconcileWalletPayment('pay-processing-race'),
     ])
 
-    const events = state.subscriptionEvents.filter((e) => e.paymentId === 'pay-processing-race')
+    const events = state.subscriptionEvents.filter(
+      (e: any) => e.paymentId === 'pay-processing-race',
+    )
     expect(events).toHaveLength(1)
     expect(state.clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
     expect(state.auditService.log).toHaveBeenCalledTimes(1)
     expect(state.payments.get('pay-processing-race')!.status).toBe(PaymentStatus.COMPLETED)
   })
 
-  it('keeps the payment in PROCESSING when auditService.log fails and completes on the next sweep', async () => {
-    // R15: red if reconcileWalletPayment marks COMPLETED when auditService.log throws.
-    const state = buildState()
-    await state.seedDebit('pay-retry-effect', 49000)
-    state.seedPayment('pay-retry-effect', { idempotencyKey: 'idem-retry-effect' })
-    state.auditService.log.mockRejectedValueOnce(new Error('Audit write failed'))
+  it('keeps the payment in PROCESSING when createOrRenewSubscription fails and completes on retry', async () => {
+    // R15: red if reconcileWalletPayment marks COMPLETED when createOrRenewSubscription throws.
+    const { seedDebit, seedPayment, subscriptionRepo, checkoutService, payments } = buildState()
+    await seedDebit('pay-retry-effect', 49000)
+    seedPayment('pay-retry-effect', { idempotencyKey: 'idem-retry-effect' })
+    subscriptionRepo.save.mockRejectedValueOnce(new Error('Subscription write failed'))
 
-    await expect(state.checkoutService.reconcileWalletPayment('pay-retry-effect')).rejects.toThrow(
-      'Audit write failed',
-    )
-    expect(state.payments.get('pay-retry-effect')!.status).toBe(PaymentStatus.PROCESSING)
+    const firstAttempt = checkoutService.reconcileWalletPayment('pay-retry-effect')
+    await expect(firstAttempt).rejects.toThrow('Subscription write failed')
+    expect(payments.get('pay-retry-effect')!.status).toBe(PaymentStatus.PROCESSING)
 
-    await state.checkoutService.reconcileWalletPayment('pay-retry-effect')
-    const completed = state.payments.get('pay-retry-effect')!
+    await checkoutService.reconcileWalletPayment('pay-retry-effect')
+    const completed = payments.get('pay-retry-effect')!
     expect(completed.status).toBe(PaymentStatus.COMPLETED)
     expect(completed.metadata?.checkoutResult).toMatchObject({
       paymentId: 'pay-retry-effect',
@@ -343,27 +308,67 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     })
   })
 
-  it('does not overwrite an active subscription on another plan and leaves old payment in PROCESSING', async () => {
-    // R15: red if findConflictingActivePlanSubscription is bypassed and overwrites planSlug.
+  it('does not overwrite a subscription with a newer payment, whether active or expired', async () => {
+    // R15: red if findConflictingPlanSubscription is bypassed or only checks ACTIVE status.
     const state = buildState()
+    const tOld = new Date(Date.now() - 10 * 60 * 1000)
+    const tNewer = new Date(Date.now() - 5 * 60 * 1000)
     await state.seedDebit('pay-old-plan', 49000)
-    state.seedPayment('pay-old-plan', { brandId: '106', purposeId: 'dropi-roax' })
-    state.subscriptions.set('sub-newer', {
-      id: 'sub-newer',
+    state.seedPayment('pay-old-plan', { brandId: '106', purposeId: 'dropi-roax', createdAt: tOld })
+    state.seedPayment('pay-newer-plan', {
       brandId: '106',
-      planSlug: 'growth',
-      status: SubscriptionStatus.ACTIVE,
-      provider: SubscriptionProvider.WALLET,
-      lastPaymentId: 'pay-newer-plan',
+      status: PaymentStatus.COMPLETED,
+      createdAt: tNewer,
+      paidAt: tNewer,
     })
+    state.seedSub('sub-newer', '106', 'growth', { lastPaymentId: 'pay-newer-plan' })
 
     await state.tasksService.reconcileWalletPayments()
-
     expect(state.subscriptions.get('sub-newer')!.planSlug).toBe('growth')
     expect(state.subscriptions.get('sub-newer')!.lastPaymentId).toBe('pay-newer-plan')
     expect(state.payments.get('pay-old-plan')!.status).toBe(PaymentStatus.PROCESSING)
     expect(state.clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
     expect(state.log.error).toHaveBeenCalledTimes(1)
+
+    state.seedSub('sub-newer', '106', 'growth', {
+      lastPaymentId: 'pay-newer-plan',
+      status: SubscriptionStatus.EXPIRED,
+      autoRenew: false,
+    })
+    await state.tasksService.reconcileWalletPayments()
+    expect(state.subscriptions.get('sub-newer')!.planSlug).toBe('growth')
+    expect(state.subscriptions.get('sub-newer')!.status).toBe(SubscriptionStatus.EXPIRED)
+    expect(state.subscriptions.get('sub-newer')!.autoRenew).toBe(false)
+    expect(state.payments.get('pay-old-plan')!.status).toBe(PaymentStatus.PROCESSING)
+  })
+
+  it('completes a plan change when subscription has no lastPaymentId or an older lastPaymentId', async () => {
+    // R15: red if findConflictingPlanSubscription blocks null or older lastPaymentId.
+    const state = buildState()
+    const tPrior = new Date(Date.now() - 30 * 60 * 1000)
+    const tUpgrade = new Date(Date.now() - 10 * 60 * 1000)
+    state.seedSub('sub-no-pay', '107', 'starter', { lastPaymentId: null })
+    await state.seedDebit('pay-upgrade-null', 49000)
+    state.seedPayment('pay-upgrade-null', { brandId: '107', createdAt: tUpgrade })
+
+    state.seedPayment('pay-prior', {
+      brandId: '108',
+      purposeId: 'starter',
+      status: PaymentStatus.COMPLETED,
+      createdAt: tPrior,
+      paidAt: tPrior,
+    })
+    state.seedSub('sub-older-pay', '108', 'starter', { lastPaymentId: 'pay-prior' })
+    await state.seedDebit('pay-upgrade-older', 49000)
+    state.seedPayment('pay-upgrade-older', { brandId: '108', createdAt: tUpgrade })
+
+    await state.tasksService.reconcileWalletPayments()
+    expect(state.payments.get('pay-upgrade-null')!.status).toBe(PaymentStatus.COMPLETED)
+    expect(state.subscriptions.get('sub-no-pay')!.planSlug).toBe('growth')
+    expect(state.subscriptions.get('sub-no-pay')!.lastPaymentId).toBe('pay-upgrade-null')
+    expect(state.payments.get('pay-upgrade-older')!.status).toBe(PaymentStatus.COMPLETED)
+    expect(state.subscriptions.get('sub-older-pay')!.planSlug).toBe('growth')
+    expect(state.subscriptions.get('sub-older-pay')!.lastPaymentId).toBe('pay-upgrade-older')
   })
 
   it('prevents reconcilePayment and completeExternalPayment from invoicing a wallet payment', async () => {

@@ -209,41 +209,44 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   las filas que `POST /payment/checkout` ya hubiera escrito antes de `c77a594` (LOC-93) siguen siendo
   elegibles al reintento y no se contaron por ambiente.
 
-## Reconciliación de pagos `wallet` en `PROCESSING` ante plan activo distinto o fallos (LOC-87)
+## Reconciliación de pagos `wallet` en `PROCESSING` ante plan posterior o fallos (LOC-87)
 
-- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:189-224`, `:226-386`
-  (`findConflictingActivePlanSubscription`, `reconcileWalletPayment`),
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:189-223`, `:225-385`
+  (`findConflictingPlanSubscription`, `reconcileWalletPayment`),
   `src/tasks/tasks.service.ts:607-642`, `:648-693` (`reconcileWalletPayments`, `expirePendingCheckouts`),
   `src/checkout/checkout.service.ts:1869-1877` (`assignPlanInRoles`) y
   `src/client/client-roles.service.ts:314-321`, `:351-385` (`assignPlanToBrand`, `callRolesApi`)
 - **Qué lo dispara**: (a) un pago `wallet` de `plan_purchase` cuyo débito `payment:${payment.id}:debit` ya
-  se asentó en `transactions` pero quedó en `pending` o `processing` mientras la marca ya tiene una
-  suscripción `active` en otro plan (`planSlug !== payment.purposeId`) originada por una compra posterior;
-  (b) un pago `wallet` con débito asentado en `pending` o `processing` cuando durante el barrido
-  `createOrRenewSubscription` o `auditService.log` lanza excepción; (c) `assignPlanInRoles`
+  se asentó en `transactions` pero quedó en `pending` o `processing` mientras la suscripción de la marca
+  está en otro plan (`planSlug !== payment.purposeId`) y su `lastPaymentId` apunta a un pago en `payments`
+  más nuevo que éste (`lastTime > paymentTime`, esté la suscripción `active` o `expired`); (b) un pago
+  `wallet` con débito asentado en `pending` o `processing` cuando durante el barrido
+  `createOrRenewSubscription` (`:312`) lanza excepción; (c) `assignPlanInRoles`
   (`src/checkout/checkout.service.ts:1869-1877`) cuando `clientRoles.assignPlanToBrand`
   (`src/client/client-roles.service.ts:314-321`) recibe respuesta no exitosa o excepción en
   `callRolesApi` (`:378-384`) y devuelve `false` sin relanzar error.
-- **Qué rompe**: (a) `findConflictingActivePlanSubscription` (`src/checkout/wallet-payment-reconciliation.ts:189-224`)
-  detecta la suscripción `active` en otro plan y `reconcileWalletPayment` registra `error` (`:306-309`) y
-  mantiene el pago viejo en `processing` (`:310`) sin pisar `planSlug` ni `lastPaymentId` de la suscripción
-  vigente, quedando ese pago con débito en `processing` (y emitiendo `error` en cada barrido de 5 minutos)
-  hasta que quien aprueba decida qué hacer con ese saldo o fila; (b) ante excepción de
-  `createOrRenewSubscription` o `auditService.log` (`:313-340`), la fila permanece en `processing` sin
-  marcar `completed` y `reconcileWalletPayments` (`src/tasks/tasks.service.ts:607-642`) la reintenta cada
-  5 minutos sin tope de reintentos mientras la excepción persista; (c) como `callRolesApi` captura el fallo
-  de `backend-roles` (`src/client/client-roles.service.ts:378-384`), si `backend-roles` falla durante la
+- **Qué rompe**: (a) `findConflictingPlanSubscription`
+  (`src/checkout/wallet-payment-reconciliation.ts:189-223`) detecta que `lastPaymentId` pertenece a un
+  pago más nuevo en otro plan (sin depender de `status`, evitando también revivir un plan viejo cuando la
+  suscripción posterior ya pasó a `expired` con `autoRenew: false`) y `reconcileWalletPayment` registra
+  `error` (`:305-308`) y mantiene el pago viejo en `processing` (`:309`) sin pisar `planSlug` ni
+  `lastPaymentId`, quedando ese pago con débito en `processing` (y emitiendo `error` en cada barrido de
+  5 minutos) hasta que quien aprueba decida qué hacer con ese saldo o fila; (b) ante excepción de
+  `createOrRenewSubscription` (`:312`), la fila permanece en `processing` sin marcar `completed` y
+  `reconcileWalletPayments` (`src/tasks/tasks.service.ts:607-642`) la reintenta cada 5 minutos sin tope
+  de reintentos mientras la excepción persista; (c) como `callRolesApi` captura el fallo de
+  `backend-roles` (`src/client/client-roles.service.ts:378-384`), si `backend-roles` falla durante la
   reconciliación el pago pasa a `completed` con la suscripción creada en `backend-payments` pero sin el
   plan asignado en `backend-roles`.
 - **Estado**: mitigado en pérdida de pagos `wallet` con débito en `pending`/`processing`, pisado de una
   compra posterior en otro plan, expiración y carreras entre barridos (LOC-87) — `reconcileWalletPayments`
   (`src/tasks/tasks.service.ts:607-642`) y `reconcileWalletPayment`
-  (`src/checkout/wallet-payment-reconciliation.ts:226-386`) completan bajo candado
-  `pg_advisory_xact_lock` (`:69-132`) los pagos con débito asentado escribiendo `completed` y
-  `metadata.checkoutResult` juntos (`:343-360`), frenan con `error` sin pisar la suscripción cuando la
-  marca ya tiene otro plan `active` (`:189-224`, `:304-311`), pasan a `failed` los `pending` sin débito
-  fuera de la ventana de 2 minutos (`:256-273`) y `expirePendingCheckouts` excluye todo `pending` con
-  débito (`src/tasks/tasks.service.ts:664-673`). Abierto sobre la resolución del saldo de un pago viejo
-  frenado en `processing` por conflicto de plan, la convergencia sin cota cuando `createOrRenewSubscription`
-  o `auditService.log` fallan de forma permanente y cuando `callRolesApi` absorbe un fallo de
+  (`src/checkout/wallet-payment-reconciliation.ts:225-385`) completan bajo candado
+  `pg_advisory_xact_lock` (`:68-131`) los pagos con débito asentado escribiendo `completed` y
+  `metadata.checkoutResult` juntos (`:342-359`), frenan con `error` sin pisar la suscripción cuando
+  `lastPaymentId` apunta a un pago más nuevo en otro plan (`:189-223`, `:303-310`), pasan a `failed` los
+  `pending` sin débito fuera de la ventana de 2 minutos (`:255-272`) y `expirePendingCheckouts` excluye
+  todo `pending` con débito (`src/tasks/tasks.service.ts:664-673`). Abierto sobre la resolución del saldo
+  de un pago viejo frenado en `processing` por conflicto de plan, la convergencia sin cota cuando
+  `createOrRenewSubscription` falla de forma permanente y cuando `callRolesApi` absorbe un fallo de
   `backend-roles`.

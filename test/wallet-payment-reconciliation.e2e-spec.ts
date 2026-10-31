@@ -33,19 +33,14 @@ import { WebhookEvent } from '../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../src/webhook/webhook.service'
 
 const BRAND_ID = 'f8787878-2222-4333-8444-555555555555'
-const DEFAULT_PRICE = {
-  id: 'p-87',
-  countryCode: 'CO',
-  currency: 'COP',
-  price: 19900,
-  isDefault: true,
-}
+const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
 const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
 
 describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', () => {
   let moduleFixture: TestingModule
   let realDataSource: DataSource
   let checkoutService: CheckoutService
+  let checkoutServiceB: CheckoutService
   let tasksService: TasksService
   let paymentRepo: Repository<Payment>
   let attemptRepo: Repository<PaymentAttempt>
@@ -70,6 +65,14 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     }
   }
 
+  const backdatePayments = (ids: string | string[], interval = '10 minutes') =>
+    realDataSource.query(
+      `UPDATE payments SET "createdAt" = NOW() - INTERVAL '${interval}' WHERE id = ANY($1::uuid[])`,
+      [[ids].flat()],
+    )
+
+  const getPaymentStatus = async (id: string) => (await paymentRepo.findOneBy({ id }))!.status
+
   const seedWallet = (balance: number): Promise<Wallet> =>
     walletRepo.save(
       walletRepo.create({
@@ -82,8 +85,8 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
       }),
     )
 
-  const seedActiveSub = (walletId: string, planSlug: string, endDays = 30) => {
-    const end = new Date(Date.now() + endDays * 24 * 60 * 60 * 1000)
+  const seedActiveSub = (walletId: string, planSlug: string, extra: Partial<Subscription> = {}) => {
+    const end = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
     return subRepo.save(
       subRepo.create({
         brandId: BRAND_ID,
@@ -97,6 +100,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
         nextBillingDate: end,
         retryCount: 0,
         autoRenew: true,
+        ...extra,
       }),
     )
   }
@@ -135,10 +139,9 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
       saveSpy.mockRestore()
       ;(checkoutService as any).createOrRenewSubscription = origCreateOrRenew
     }
-    const stuck = await paymentRepo.findOne({ where: { idempotencyKey: key } })
-    expect(stuck).toBeDefined()
-    expect(stuck!.status).toBe(PaymentStatus.PENDING)
-    return stuck!
+    const stuck = (await paymentRepo.findOneBy({ idempotencyKey: key }))!
+    expect(stuck.status).toBe(PaymentStatus.PENDING)
+    return stuck
   }
 
   const provokePreDebitCrash = async (walletId: string, key: string): Promise<Payment> => {
@@ -153,23 +156,20 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     } finally {
       attemptSpy.mockRestore()
     }
-    const stuck = await paymentRepo.findOne({ where: { idempotencyKey: key } })
-    expect(stuck).toBeDefined()
-    expect(stuck!.status).toBe(PaymentStatus.PENDING)
-    return stuck!
+    const stuck = (await paymentRepo.findOneBy({ idempotencyKey: key }))!
+    expect(stuck.status).toBe(PaymentStatus.PENDING)
+    return stuck
   }
 
   beforeAll(async () => {
+    const readEntities = [Payment, Wallet, Transaction, BillingProfile]
     const entities = [
-      Payment,
+      ...readEntities,
       PaymentAttempt,
-      Wallet,
       WalletBalanceSnapshot,
-      Transaction,
       Subscription,
       SubscriptionEvent,
       WebhookEvent,
-      BillingProfile,
     ]
     realDataSource = new DataSource({
       type: 'postgres',
@@ -205,7 +205,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
         TasksService,
         provideVal(getDataSourceToken('DBWrite'), realDataSource),
         ...entities.map((e) => provideRepo(e, 'DBWrite')),
-        ...[Payment, Wallet, Transaction, BillingProfile].map((e) => provideRepo(e, 'DBRead')),
+        ...readEntities.map((e) => provideRepo(e, 'DBRead')),
         provideVal(ClientPlatformService, {
           canViewBrandCredit: jest.fn().mockResolvedValue(true),
           resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
@@ -226,16 +226,11 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
         provideVal(ProviderFactory, { getProvider: jest.fn() }),
         provideVal(ProviderConfigService, {
           isProviderAvailable: jest.fn().mockResolvedValue(true),
-          getAvailableProviders: jest.fn().mockResolvedValue([]),
         }),
         provideVal(EnterprisePricingService, { getForBrand: jest.fn().mockResolvedValue(null) }),
         provideVal(EventBusService, {
           publishPaymentCompleted: jest.fn(),
-          publishSubscriptionRenewed: jest.fn(),
-          publishSubscriptionExpired: jest.fn(),
-          publishWalletLowBalance: jest.fn(),
           notifyPaymentSuccess: jest.fn(),
-          notifyPaymentFailed: jest.fn(),
           notifyInvoiceReady: jest.fn(),
         }),
         provideVal(WebhookService, { setCheckoutService: jest.fn() }),
@@ -244,6 +239,9 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     }).compile()
 
     checkoutService = moduleFixture.get(CheckoutService)
+    checkoutServiceB = Object.assign(Object.create(CheckoutService.prototype), checkoutService, {
+      walletReconcileLocks: new Map(),
+    })
     tasksService = moduleFixture.get(TasksService)
   })
 
@@ -262,28 +260,24 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     // R15: red if reconcileWalletPayment charges debit without idempotencyKey or skips completion.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-crash-after-debit')
-    await realDataSource.query(
-      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
-      [stuckPayment.id],
-    )
+    await backdatePayments(stuckPayment.id)
     await tasksService.reconcileWalletPayments()
 
-    const refreshedPayment = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
-    expect(refreshedPayment!.status).toBe(PaymentStatus.COMPLETED)
-    expect(refreshedPayment!.paidAt).toBeInstanceOf(Date)
-    expect(refreshedPayment!.metadata?.checkoutResult).toMatchObject({
+    const refreshedPayment = (await paymentRepo.findOneBy({ id: stuckPayment.id }))!
+    expect(refreshedPayment.status).toBe(PaymentStatus.COMPLETED)
+    expect(refreshedPayment.paidAt).toBeInstanceOf(Date)
+    expect(refreshedPayment.metadata?.checkoutResult).toMatchObject({
       paymentId: stuckPayment.id,
       status: 'completed',
     })
-    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
-    expect(sub).toBeDefined()
-    expect(sub!.status).toBe(SubscriptionStatus.ACTIVE)
-    expect(sub!.planSlug).toBe('dropi-roax')
-    expect(sub!.lastPaymentId).toBe(stuckPayment.id)
+    const sub = (await subRepo.findOneBy({ brandId: BRAND_ID }))!
+    expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+    expect(sub.planSlug).toBe('dropi-roax')
+    expect(sub.lastPaymentId).toBe(stuckPayment.id)
     expect(assignPlanToBrandMock).toHaveBeenCalledWith(BRAND_ID, 'dropi-roax', expect.any(Date))
-    const refreshedWallet = await walletRepo.findOne({ where: { id: wallet.id } })
-    expect(Number(refreshedWallet!.balance)).toBe(80100)
-    const debits = await txRepo.find({ where: { referenceId: stuckPayment.id } })
+    const refreshedWallet = (await walletRepo.findOneBy({ id: wallet.id }))!
+    expect(Number(refreshedWallet.balance)).toBe(80100)
+    const debits = await txRepo.findBy({ referenceId: stuckPayment.id })
     expect(debits).toHaveLength(1)
     expect(debits[0].idempotencyKey).toBe(`payment:${stuckPayment.id}:debit`)
   })
@@ -292,32 +286,24 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     // R15: red if reconcileWalletPayment skips setting FAILED or modifies the wallet balance.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePreDebitCrash(wallet.id, 'idem-loc87-crash-before-debit')
-    await realDataSource.query(
-      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
-      [stuckPayment.id],
-    )
+    await backdatePayments(stuckPayment.id)
     await tasksService.reconcileWalletPayments()
 
-    const refreshedPayment = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
-    expect(refreshedPayment!.status).toBe(PaymentStatus.FAILED)
-    const refreshedWallet = await walletRepo.findOne({ where: { id: wallet.id } })
-    expect(Number(refreshedWallet!.balance)).toBe(100000)
-    const debits = await txRepo.find({ where: { walletId: wallet.id } })
-    expect(debits).toHaveLength(0)
-    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
-    expect(sub).toBeNull()
+    expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.FAILED)
+    const refreshedWallet = (await walletRepo.findOneBy({ id: wallet.id }))!
+    expect(Number(refreshedWallet.balance)).toBe(100000)
+    expect(await txRepo.findBy({ walletId: wallet.id })).toHaveLength(0)
+    expect(await subRepo.findOneBy({ brandId: BRAND_ID })).toBeNull()
   })
 
   it('serializes two simultaneous sweeps on a PROCESSING payment so effects run once', async () => {
-    // R15: red if acquireWalletReconcileLock is bypassed, duplicating event, role, and audit calls.
+    // R15: red if pg_advisory_xact_lock is removed, duplicating event, role, and audit calls.
     const wallet = await seedWallet(100000)
-    await seedActiveSub(wallet.id, 'dropi-roax', 10)
+    await seedActiveSub(wallet.id, 'dropi-roax')
 
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-concurrent-sweep')
-    await realDataSource.query(
-      'UPDATE payments SET status = $2, "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
-      [stuckPayment.id, PaymentStatus.PROCESSING],
-    )
+    await paymentRepo.update(stuckPayment.id, { status: PaymentStatus.PROCESSING })
+    await backdatePayments(stuckPayment.id)
     assignPlanToBrandMock.mockClear()
     auditLogMock.mockClear()
 
@@ -329,38 +315,63 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     })
     try {
       await Promise.all([
-        tasksService.reconcileWalletPayments(),
-        tasksService.reconcileWalletPayments(),
+        checkoutService.reconcileWalletPayment(stuckPayment.id),
+        checkoutServiceB.reconcileWalletPayment(stuckPayment.id),
       ])
     } finally {
       subSaveSpy.mockRestore()
     }
 
-    const events = await subEventRepo.find({ where: { paymentId: stuckPayment.id } })
-    expect(events).toHaveLength(1)
+    expect(await subEventRepo.findBy({ paymentId: stuckPayment.id })).toHaveLength(1)
     expect(assignPlanToBrandMock).toHaveBeenCalledTimes(1)
     expect(auditLogMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does not overwrite an active subscription on another plan and leaves old payment in PROCESSING', async () => {
-    // R15: red if findConflictingActivePlanSubscription is bypassed and overwrites planSlug.
+  it('blocks a sweep when subscription has a newer payment (active or expired) and completes when older or null', async () => {
+    // R15: red if findConflictingPlanSubscription is bypassed or checks ACTIVE instead of payment time.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-conflict-old-plan')
-    await realDataSource.query(
-      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
-      [stuckPayment.id],
+    await backdatePayments(stuckPayment.id)
+    const newerPayment = await paymentRepo.save(
+      paymentRepo.create({
+        ...stuckPayment,
+        id: undefined,
+        idempotencyKey: null as any,
+        purposeId: 'growth',
+        status: PaymentStatus.COMPLETED,
+        paidAt: new Date(),
+      }),
     )
-    await seedActiveSub(wallet.id, 'growth', 30)
+    const sub = await seedActiveSub(wallet.id, 'growth', { lastPaymentId: newerPayment.id })
     assignPlanToBrandMock.mockClear()
 
     await tasksService.reconcileWalletPayments()
-
-    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
-    expect(sub!.planSlug).toBe('growth')
-    expect(sub!.lastPaymentId).not.toBe(stuckPayment.id)
-    const afterSweep = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
-    expect(afterSweep!.status).toBe(PaymentStatus.PROCESSING)
+    expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.PROCESSING)
     expect(assignPlanToBrandMock).not.toHaveBeenCalled()
+
+    await subRepo.update(sub.id, { status: SubscriptionStatus.EXPIRED, autoRenew: false })
+    await tasksService.reconcileWalletPayments()
+    const subAfterExpired = (await subRepo.findOneBy({ id: sub.id }))!
+    expect(subAfterExpired.planSlug).toBe('growth')
+    expect(subAfterExpired.status).toBe(SubscriptionStatus.EXPIRED)
+    expect(subAfterExpired.autoRenew).toBe(false)
+
+    await realDataSource.query(
+      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'20 minutes\', "paidAt" = NOW() - INTERVAL \'20 minutes\' WHERE id = $1',
+      [newerPayment.id],
+    )
+    await tasksService.reconcileWalletPayments()
+    expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.COMPLETED)
+    const subAfterOlder = (await subRepo.findOneBy({ id: sub.id }))!
+    expect(subAfterOlder.planSlug).toBe('dropi-roax')
+    expect(subAfterOlder.lastPaymentId).toBe(stuckPayment.id)
+
+    await subRepo.update(sub.id, { planSlug: 'growth', lastPaymentId: null as any })
+    await paymentRepo.update(stuckPayment.id, { status: PaymentStatus.PROCESSING, metadata: {} })
+    await subEventRepo.delete({ paymentId: stuckPayment.id })
+    await tasksService.reconcileWalletPayments()
+    expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.COMPLETED)
+    expect((await subRepo.findOneBy({ id: sub.id }))!.planSlug).toBe('dropi-roax')
   })
 
   it('does not expire a debited PENDING wallet payment and allows the sweep to complete it', async () => {
@@ -368,27 +379,19 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     const wallet = await seedWallet(100000)
     const debitedPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-expire-with-debit')
     const unpaidPayment = await provokePreDebitCrash(wallet.id, 'idem-loc87-expire-without-debit')
-
-    await realDataSource.query(
-      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'25 hours\' WHERE id IN ($1, $2)',
-      [debitedPayment.id, unpaidPayment.id],
-    )
+    await backdatePayments([debitedPayment.id, unpaidPayment.id], '25 hours')
 
     await tasksService.expirePendingCheckouts()
 
-    const afterExpireDebited = await paymentRepo.findOne({ where: { id: debitedPayment.id } })
-    const afterExpireUnpaid = await paymentRepo.findOne({ where: { id: unpaidPayment.id } })
-    expect(afterExpireDebited!.status).toBe(PaymentStatus.PENDING)
-    expect(afterExpireUnpaid!.status).toBe(PaymentStatus.FAILED)
+    expect(await getPaymentStatus(debitedPayment.id)).toBe(PaymentStatus.PENDING)
+    expect(await getPaymentStatus(unpaidPayment.id)).toBe(PaymentStatus.FAILED)
 
     await tasksService.reconcileWalletPayments()
 
-    const completedPayment = await paymentRepo.findOne({ where: { id: debitedPayment.id } })
-    expect(completedPayment!.status).toBe(PaymentStatus.COMPLETED)
-    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
-    expect(sub).toBeDefined()
-    expect(sub!.status).toBe(SubscriptionStatus.ACTIVE)
-    const refreshedWallet = await walletRepo.findOne({ where: { id: wallet.id } })
-    expect(Number(refreshedWallet!.balance)).toBe(80100)
+    expect(await getPaymentStatus(debitedPayment.id)).toBe(PaymentStatus.COMPLETED)
+    const sub = (await subRepo.findOneBy({ brandId: BRAND_ID }))!
+    expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+    const refreshedWallet = (await walletRepo.findOneBy({ id: wallet.id }))!
+    expect(Number(refreshedWallet.balance)).toBe(80100)
   })
 })
