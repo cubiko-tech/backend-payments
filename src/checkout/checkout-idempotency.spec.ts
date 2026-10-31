@@ -118,7 +118,7 @@ describe('CheckoutService idempotency recovery and guards', () => {
       providerPaymentId: 'cs_live_123',
       checkoutUrl: 'https://checkout.stripe.com/c/pay/cs_live_123',
     })
-
+    // R17: Stateless collaborator doubles for CheckoutService constructor dependencies not under test.
     service = new CheckoutService(
       paymentRepo as any,
       createMockRepo() as any,
@@ -137,6 +137,7 @@ describe('CheckoutService idempotency recovery and guards', () => {
           .fn()
           .mockResolvedValue({ taxName: 'IVA', taxRate: 0.19, isInclusive: true }),
       } as any,
+      // R17: Outbound billing/provider/event/config doubles isolate unit tests from external I/O.
       {
         isConfigured: jest.fn().mockReturnValue(false),
         sendInvoice: jest.fn().mockResolvedValue({ success: true }),
@@ -155,8 +156,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     )
   })
 
+  // R15: returning existing failed status in resolvePaymentStateOutcome instead of invoking retryFailedPayment makes the retry return status 'failed' instead of 'completed'.
   it('retries a failed wallet checkout with the same Idempotency-Key and payload, reusing the payment row and stored pricing', async () => {
-    // R15: returning existing failed status in resolvePaymentStateOutcome instead of invoking retryFailedPayment makes the retry return status 'failed' instead of 'completed'.
     walletService.debit
       .mockRejectedValueOnce(new Error('Deadlock detected'))
       .mockResolvedValueOnce({ data: { id: WALLET_ID } })
@@ -193,8 +194,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     )
   })
 
+  // R15: treating every FAILED payment as non-retryable in canRetryFailedIdempotentPayment rejects this retry with 409 instead of returning the pending checkoutUrl.
   it('retries a failed external checkout when the provider failed before assigning providerPaymentId', async () => {
-    // R15: treating every FAILED payment as non-retryable in canRetryFailedIdempotentPayment rejects this retry with 409 instead of returning the pending checkoutUrl.
     createCheckoutMock.mockRejectedValueOnce(new Error('Stripe timeout')).mockResolvedValueOnce({
       providerPaymentId: 'cs_retry_ok',
       checkoutUrl: 'https://checkout.stripe.com/c/pay/cs_retry_ok',
@@ -221,8 +222,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(storedPayments.get('pay-idem-1')?.providerPaymentId).toBe('cs_retry_ok')
   })
 
+  // R15: checking existing.metadata?.checkoutResult before existing.status === PaymentStatus.FAILED returns the expired pending checkoutResult instead of throwing 409 IDEMPOTENT_PAYMENT_FAILED.
   it('rejects with 409 IDEMPOTENT_PAYMENT_FAILED when a failed external checkout already has providerPaymentId and stale metadata.checkoutResult', async () => {
-    // R15: checking existing.metadata?.checkoutResult before existing.status === PaymentStatus.FAILED returns the expired pending checkoutResult instead of throwing 409 IDEMPOTENT_PAYMENT_FAILED.
     const req = buildReq({
       provider: 'stripe',
       walletId: undefined,
@@ -254,8 +255,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(createCheckoutMock).not.toHaveBeenCalled()
   })
 
+  // R15: omitting metadata.amountMismatch in createFailedExternalIdempotentPaymentException returns IDEMPOTENT_PAYMENT_FAILED or retries instead of throwing 409 PROVIDER_AMOUNT_MISMATCH.
   it('rejects with 409 PROVIDER_AMOUNT_MISMATCH when a failed payment has metadata.amountMismatch', async () => {
-    // R15: omitting metadata.amountMismatch in createFailedExternalIdempotentPaymentException returns IDEMPOTENT_PAYMENT_FAILED or retries instead of throwing 409 PROVIDER_AMOUNT_MISMATCH.
     const req = buildReq({
       provider: 'stripe',
       walletId: undefined,
@@ -286,8 +287,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(createCheckoutMock).not.toHaveBeenCalled()
   })
 
+  // R15: removing inFlightCheckouts registration in retryFailedIdempotentPayment causes concurrent retries to fail or execute twice instead of sharing the in-flight retry.
   it('deduplicates two concurrent retries of the same failed payment so walletService.debit runs only once', async () => {
-    // R15: removing inFlightCheckouts registration in retryFailedIdempotentPayment causes concurrent retries to fail or execute twice instead of sharing the in-flight retry.
     const req = buildReq({
       purpose: 'service_payment',
       planSlug: undefined,
@@ -316,8 +317,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(walletService.debit).toHaveBeenCalledTimes(1)
   })
 
+  // R15: falling back to { paymentId, status: existing.status } when existing.status === PaymentStatus.COMPLETED and metadata.checkoutResult is missing returns 201 completed instead of throwing 409 IDEMPOTENT_CHECKOUT_INCOMPLETE.
   it('rejects with 409 IDEMPOTENT_CHECKOUT_INCOMPLETE when a payment is completed without metadata.checkoutResult', async () => {
-    // R15: falling back to { paymentId, status: existing.status } when existing.status === PaymentStatus.COMPLETED and metadata.checkoutResult is missing returns 201 completed instead of throwing 409 IDEMPOTENT_CHECKOUT_INCOMPLETE.
     const req = buildReq({ idempotencyKey: 'incomplete-completed-key' })
     seedStoredPayment('pay-incomplete-1', {
       idempotencyKey: 'incomplete-completed-key',
@@ -345,8 +346,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(walletService.debit).not.toHaveBeenCalled()
   })
 
+  // R15: removing the MAX_IDEMPOTENCY_KEY_LENGTH check in normalizeIdempotencyKey allows a 256-character key to proceed instead of throwing 400 INVALID_IDEMPOTENCY_KEY.
   it('rejects with 400 INVALID_IDEMPOTENCY_KEY when trimmed Idempotency-Key exceeds 255 characters and accepts 255 characters', async () => {
-    // R15: removing the MAX_IDEMPOTENCY_KEY_LENGTH check in normalizeIdempotencyKey allows a 256-character key to proceed instead of throwing 400 INVALID_IDEMPOTENCY_KEY.
     const baseReq = buildReq({
       purpose: 'service_payment',
       planSlug: undefined,
@@ -370,8 +371,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(result.status).toBe('completed')
   })
 
+  // R15: moving assertMatchingIdempotencyPayload after the FAILED branch retries the payment instead of throwing 409 IDEMPOTENCY_KEY_CONFLICT.
   it('rejects with 409 IDEMPOTENCY_KEY_CONFLICT when retrying a failed payment with a different payload', async () => {
-    // R15: moving assertMatchingIdempotencyPayload after the FAILED branch retries the payment instead of throwing 409 IDEMPOTENCY_KEY_CONFLICT.
     const originalReq = buildReq({
       purpose: 'service_payment',
       planSlug: undefined,
