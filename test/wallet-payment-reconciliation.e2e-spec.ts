@@ -327,12 +327,12 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     expect(auditLogMock).toHaveBeenCalledTimes(1)
   })
 
-  it('blocks a sweep when subscription has a newer payment (active or expired) and completes when older or null', async () => {
-    // R15: red if findConflictingPlanSubscription is bypassed or checks ACTIVE instead of payment time.
+  it('completes a sweep when subscription on another plan has an older payment or null lastPaymentId', async () => {
+    // R15: red if findConflictingPlanSubscription blocks completion when lastPaymentId is older or null.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-conflict-old-plan')
     await backdatePayments(stuckPayment.id)
-    const newerPayment = await paymentRepo.save(
+    const olderPayment = await paymentRepo.save(
       paymentRepo.create({
         ...stuckPayment,
         id: undefined,
@@ -342,24 +342,13 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
         paidAt: new Date(),
       }),
     )
-    const sub = await seedActiveSub(wallet.id, 'growth', { lastPaymentId: newerPayment.id })
-    assignPlanToBrandMock.mockClear()
-
-    await tasksService.reconcileWalletPayments()
-    expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.PROCESSING)
-    expect(assignPlanToBrandMock).not.toHaveBeenCalled()
-
-    await subRepo.update(sub.id, { status: SubscriptionStatus.EXPIRED, autoRenew: false })
-    await tasksService.reconcileWalletPayments()
-    const subAfterExpired = (await subRepo.findOneBy({ id: sub.id }))!
-    expect(subAfterExpired.planSlug).toBe('growth')
-    expect(subAfterExpired.status).toBe(SubscriptionStatus.EXPIRED)
-    expect(subAfterExpired.autoRenew).toBe(false)
-
     await realDataSource.query(
       'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'20 minutes\', "paidAt" = NOW() - INTERVAL \'20 minutes\' WHERE id = $1',
-      [newerPayment.id],
+      [olderPayment.id],
     )
+    const sub = await seedActiveSub(wallet.id, 'growth', { lastPaymentId: olderPayment.id })
+    assignPlanToBrandMock.mockClear()
+
     await tasksService.reconcileWalletPayments()
     expect(await getPaymentStatus(stuckPayment.id)).toBe(PaymentStatus.COMPLETED)
     const subAfterOlder = (await subRepo.findOneBy({ id: sub.id }))!

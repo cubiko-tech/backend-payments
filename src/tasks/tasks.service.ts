@@ -619,14 +619,13 @@ export class TasksService {
 
     let completed = 0
     let failed = 0
+    let refunded = 0
     for (const p of pending) {
       try {
         const res = await this.checkoutService.reconcileWalletPayment(p.id, now)
-        if (res?.outcome === 'completed') {
-          completed++
-        } else if (res?.outcome === 'failed_without_debit') {
-          failed++
-        }
+        if (res?.outcome === 'completed') completed++
+        else if (res?.outcome === 'failed_without_debit') failed++
+        else if (res?.outcome === 'refunded') refunded++
       } catch (error) {
         logger.log(
           'warn',
@@ -637,7 +636,7 @@ export class TasksService {
 
     logger.log(
       'info',
-      `[CRON] reconcileWalletPayments: ${pending.length} checked, ${completed} completed, ${failed} failed`,
+      `[CRON] reconcileWalletPayments: ${pending.length} checked, ${completed} completed, ${failed} failed, ${refunded} refunded`,
     )
   }
 

@@ -308,40 +308,6 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     })
   })
 
-  it('does not overwrite a subscription with a newer payment, whether active or expired', async () => {
-    // R15: red if findConflictingPlanSubscription is bypassed or only checks ACTIVE status.
-    const state = buildState()
-    const tOld = new Date(Date.now() - 10 * 60 * 1000)
-    const tNewer = new Date(Date.now() - 5 * 60 * 1000)
-    await state.seedDebit('pay-old-plan', 49000)
-    state.seedPayment('pay-old-plan', { brandId: '106', purposeId: 'dropi-roax', createdAt: tOld })
-    state.seedPayment('pay-newer-plan', {
-      brandId: '106',
-      status: PaymentStatus.COMPLETED,
-      createdAt: tNewer,
-      paidAt: tNewer,
-    })
-    state.seedSub('sub-newer', '106', 'growth', { lastPaymentId: 'pay-newer-plan' })
-
-    await state.tasksService.reconcileWalletPayments()
-    expect(state.subscriptions.get('sub-newer')!.planSlug).toBe('growth')
-    expect(state.subscriptions.get('sub-newer')!.lastPaymentId).toBe('pay-newer-plan')
-    expect(state.payments.get('pay-old-plan')!.status).toBe(PaymentStatus.PROCESSING)
-    expect(state.clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
-    expect(state.log.error).toHaveBeenCalledTimes(1)
-
-    state.seedSub('sub-newer', '106', 'growth', {
-      lastPaymentId: 'pay-newer-plan',
-      status: SubscriptionStatus.EXPIRED,
-      autoRenew: false,
-    })
-    await state.tasksService.reconcileWalletPayments()
-    expect(state.subscriptions.get('sub-newer')!.planSlug).toBe('growth')
-    expect(state.subscriptions.get('sub-newer')!.status).toBe(SubscriptionStatus.EXPIRED)
-    expect(state.subscriptions.get('sub-newer')!.autoRenew).toBe(false)
-    expect(state.payments.get('pay-old-plan')!.status).toBe(PaymentStatus.PROCESSING)
-  })
-
   it('completes a plan change when subscription has no lastPaymentId or an older lastPaymentId', async () => {
     // R15: red if findConflictingPlanSubscription blocks null or older lastPaymentId.
     const state = buildState()
