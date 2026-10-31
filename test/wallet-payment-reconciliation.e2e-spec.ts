@@ -187,9 +187,9 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
       useValue: realDataSource.getRepository(entity),
     })
     const provideVal = (provide: any, useValue: any) => ({ provide, useValue })
+
     // R17: Remote HTTP/Redis doubles isolate backend-payments PostgreSQL persistence from external microservices.
     assignPlanToBrandMock = jest.fn().mockResolvedValue(true)
-
     moduleFixture = await Test.createTestingModule({
       providers: [
         CheckoutService,
