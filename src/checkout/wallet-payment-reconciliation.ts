@@ -8,7 +8,7 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payment/entities/payment.entity'
-import { Subscription } from '../subscription/entities/subscription.entity'
+import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import {
   Transaction,
   TransactionStatus,
@@ -27,10 +27,12 @@ export const WALLET_RECONCILE_MIN_AGE_MS = 2 * 60 * 1000
 
 export interface WalletPaymentReconciliationDeps {
   paymentRepo: Repository<Payment>
+  subscriptionRepo?: Repository<Subscription>
   walletService?: Pick<WalletService, 'findDebitByIdempotencyKey'>
   transactionReadRepo?: Repository<Transaction>
   dataSource?: DataSource
   inProcessLocks?: Map<string, Promise<void>>
+  logger?: { error: (message: string) => void }
   createOrRenewSubscription: (
     req: CheckoutRequest,
     payment: Payment,
@@ -184,6 +186,43 @@ export async function hasWalletPaymentDebit(
   return false
 }
 
+async function findConflictingActivePlanSubscription(
+  payment: Payment,
+  deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'paymentRepo' | 'dataSource'>,
+): Promise<Subscription | null> {
+  const subRepo =
+    deps.subscriptionRepo ??
+    (typeof (deps.dataSource as any)?.getRepository === 'function'
+      ? deps.dataSource!.getRepository(Subscription)
+      : undefined)
+  if (typeof subRepo?.findOne !== 'function') {
+    return null
+  }
+  const existingSub = await subRepo.findOne({ where: { brandId: payment.brandId } })
+  if (
+    !existingSub ||
+    existingSub.status !== SubscriptionStatus.ACTIVE ||
+    !existingSub.planSlug ||
+    existingSub.planSlug === payment.purposeId ||
+    existingSub.lastPaymentId === payment.id
+  ) {
+    return null
+  }
+  if (existingSub.lastPaymentId && typeof deps.paymentRepo?.findOne === 'function') {
+    const lastPayment = await deps.paymentRepo.findOne({
+      where: { id: existingSub.lastPaymentId },
+    })
+    if (lastPayment) {
+      const lastTime = new Date(lastPayment.paidAt ?? lastPayment.createdAt).getTime()
+      const paymentTime = new Date(payment.createdAt).getTime()
+      if (Number.isFinite(lastTime) && Number.isFinite(paymentTime) && lastTime < paymentTime) {
+        return null
+      }
+    }
+  }
+  return existingSub
+}
+
 export async function reconcileWalletPayment(
   paymentId: string,
   deps: WalletPaymentReconciliationDeps,
@@ -262,6 +301,15 @@ export async function reconcileWalletPayment(
     }
 
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
+      const conflictingSub = await findConflictingActivePlanSubscription(payment, deps)
+      if (conflictingSub) {
+        deps.logger?.error(
+          `reconcileWalletPayment: brand ${payment.brandId} already has active plan ` +
+            `${conflictingSub.planSlug}; keeping payment ${payment.id} (${payment.purposeId}) in processing`,
+        )
+        return { outcome: 'noop', status: PaymentStatus.PROCESSING }
+      }
+
       const { subscription: sub, extended } = await deps.createOrRenewSubscription(req, payment)
       result.subscriptionId = sub.id
       if (extended && sub.currentPeriodEnd) {

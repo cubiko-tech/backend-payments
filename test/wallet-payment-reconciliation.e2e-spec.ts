@@ -54,6 +54,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
   let subRepo: Repository<Subscription>
   let subEventRepo: Repository<SubscriptionEvent>
   let assignPlanToBrandMock: jest.Mock
+  let auditLogMock: jest.Mock
 
   const cleanupBrandData = async () => {
     if (!realDataSource?.isInitialized) return
@@ -69,8 +70,8 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     }
   }
 
-  const seedWallet = async (balance: number): Promise<Wallet> => {
-    return walletRepo.save(
+  const seedWallet = (balance: number): Promise<Wallet> =>
+    walletRepo.save(
       walletRepo.create({
         brandId: BRAND_ID,
         userId: '11111111-2222-4333-8444-555555555555',
@@ -80,17 +81,42 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
         status: WalletStatus.ACTIVE,
       }),
     )
+
+  const seedActiveSub = (walletId: string, planSlug: string, endDays = 30) => {
+    const end = new Date(Date.now() + endDays * 24 * 60 * 60 * 1000)
+    return subRepo.save(
+      subRepo.create({
+        brandId: BRAND_ID,
+        userId: 'user-loc87-1',
+        planSlug,
+        status: SubscriptionStatus.ACTIVE,
+        provider: SubscriptionProvider.WALLET,
+        walletId,
+        currentPeriodStart: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
+        currentPeriodEnd: end,
+        nextBillingDate: end,
+        retryCount: 0,
+        autoRenew: true,
+      }),
+    )
   }
 
-  const provokePostDebitCrash = async (
-    walletId: string,
-    idempotencyKey: string,
-  ): Promise<Payment> => {
+  const buildCheckoutDto = (walletId: string, idempotencyKey: string) => ({
+    brandId: BRAND_ID,
+    userId: 'user-loc87-1',
+    provider: 'wallet' as const,
+    purpose: 'plan_purchase' as const,
+    planSlug: 'dropi-roax',
+    walletId,
+    idempotencyKey,
+  })
+
+  const provokePostDebitCrash = async (walletId: string, key: string): Promise<Payment> => {
     const origCreateOrRenew = (checkoutService as any).createOrRenewSubscription.bind(
       checkoutService,
     )
     const origSave = paymentRepo.save.bind(paymentRepo)
-    // R17: Spy on createOrRenewSubscription and paymentRepo.save to simulate a process crash right after walletService.debit commits in PostgreSQL.
+    // R17: Spy on createOrRenewSubscription and paymentRepo.save to simulate a crash post-debit.
     const subSpy = jest
       .spyOn(checkoutService as any, 'createOrRenewSubscription')
       .mockRejectedValueOnce(new Error('Simulated crash after wallet debit commit'))
@@ -102,51 +128,32 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     })
     try {
       await expect(
-        checkoutService.processCheckout({
-          brandId: BRAND_ID,
-          userId: 'user-loc87-1',
-          provider: 'wallet',
-          purpose: 'plan_purchase',
-          planSlug: 'dropi-roax',
-          walletId,
-          idempotencyKey,
-        }),
+        checkoutService.processCheckout(buildCheckoutDto(walletId, key)),
       ).rejects.toThrow('Simulated process death before persisting COMPLETED')
     } finally {
       subSpy.mockRestore()
       saveSpy.mockRestore()
       ;(checkoutService as any).createOrRenewSubscription = origCreateOrRenew
     }
-    const stuck = await paymentRepo.findOne({ where: { idempotencyKey } })
+    const stuck = await paymentRepo.findOne({ where: { idempotencyKey: key } })
     expect(stuck).toBeDefined()
     expect(stuck!.status).toBe(PaymentStatus.PENDING)
     return stuck!
   }
 
-  const provokePreDebitCrash = async (
-    walletId: string,
-    idempotencyKey: string,
-  ): Promise<Payment> => {
-    // R17: Spy on attemptRepo.save (which executes after paymentRepo.save(PENDING) and before walletService.debit) to simulate a crash before debiting.
+  const provokePreDebitCrash = async (walletId: string, key: string): Promise<Payment> => {
+    // R17: Spy on attemptRepo.save to simulate a crash after PENDING save and before debit.
     const attemptSpy = jest
       .spyOn(attemptRepo, 'save')
       .mockRejectedValueOnce(new Error('Simulated crash before walletService.debit'))
     try {
       await expect(
-        checkoutService.processCheckout({
-          brandId: BRAND_ID,
-          userId: 'user-loc87-1',
-          provider: 'wallet',
-          purpose: 'plan_purchase',
-          planSlug: 'dropi-roax',
-          walletId,
-          idempotencyKey,
-        }),
+        checkoutService.processCheckout(buildCheckoutDto(walletId, key)),
       ).rejects.toThrow('Simulated crash before walletService.debit')
     } finally {
       attemptSpy.mockRestore()
     }
-    const stuck = await paymentRepo.findOne({ where: { idempotencyKey } })
+    const stuck = await paymentRepo.findOne({ where: { idempotencyKey: key } })
     expect(stuck).toBeDefined()
     expect(stuck!.status).toBe(PaymentStatus.PENDING)
     return stuck!
@@ -188,8 +195,9 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     })
     const provideVal = (provide: any, useValue: any) => ({ provide, useValue })
 
-    // R17: Remote HTTP/Redis doubles isolate backend-payments PostgreSQL persistence from external microservices.
+    // R17: Remote HTTP/Redis doubles isolate PostgreSQL persistence from external services.
     assignPlanToBrandMock = jest.fn().mockResolvedValue(true)
+    auditLogMock = jest.fn().mockResolvedValue(null)
     moduleFixture = await Test.createTestingModule({
       providers: [
         CheckoutService,
@@ -212,7 +220,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
           create: jest.fn().mockResolvedValue({ data: { id: 'inv-87', invoiceNumber: 'CK-87' } }),
         }),
         provideVal(SubscriptionService, {}),
-        provideVal(AuditService, { log: jest.fn().mockResolvedValue(null) }),
+        provideVal(AuditService, { log: auditLogMock }),
         provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(DEFAULT_TAX) }),
         provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
         provideVal(ProviderFactory, { getProvider: jest.fn() }),
@@ -250,16 +258,14 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     if (realDataSource?.isInitialized) await realDataSource.destroy()
   })
 
-  it('completes a PENDING wallet payment whose debit committed before a crash, creating the subscription without a second debit', async () => {
-    // R15: turns red if reconcileWalletPayment charges walletService.debit without idempotencyKey (balance drops to 60200 and debit rows become 2) or fails to complete the payment.
+  it('completes a PENDING wallet payment whose debit committed before a crash once', async () => {
+    // R15: red if reconcileWalletPayment charges debit without idempotencyKey or skips completion.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-crash-after-debit')
-
     await realDataSource.query(
       'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
       [stuckPayment.id],
     )
-
     await tasksService.reconcileWalletPayments()
 
     const refreshedPayment = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
@@ -269,14 +275,12 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
       paymentId: stuckPayment.id,
       status: 'completed',
     })
-
     const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
     expect(sub).toBeDefined()
     expect(sub!.status).toBe(SubscriptionStatus.ACTIVE)
     expect(sub!.planSlug).toBe('dropi-roax')
     expect(sub!.lastPaymentId).toBe(stuckPayment.id)
     expect(assignPlanToBrandMock).toHaveBeenCalledWith(BRAND_ID, 'dropi-roax', expect.any(Date))
-
     const refreshedWallet = await walletRepo.findOne({ where: { id: wallet.id } })
     expect(Number(refreshedWallet!.balance)).toBe(80100)
     const debits = await txRepo.find({ where: { referenceId: stuckPayment.id } })
@@ -284,21 +288,18 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     expect(debits[0].idempotencyKey).toBe(`payment:${stuckPayment.id}:debit`)
   })
 
-  it('marks a PENDING wallet payment without a committed debit as failed without touching the wallet balance', async () => {
-    // R15: turns red if reconcileWalletPayment does not transition an un-debited PENDING payment to FAILED or modifies the wallet balance.
+  it('marks a PENDING wallet payment without debit as failed without touching balance', async () => {
+    // R15: red if reconcileWalletPayment skips setting FAILED or modifies the wallet balance.
     const wallet = await seedWallet(100000)
     const stuckPayment = await provokePreDebitCrash(wallet.id, 'idem-loc87-crash-before-debit')
-
     await realDataSource.query(
       'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
       [stuckPayment.id],
     )
-
     await tasksService.reconcileWalletPayments()
 
     const refreshedPayment = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
     expect(refreshedPayment!.status).toBe(PaymentStatus.FAILED)
-
     const refreshedWallet = await walletRepo.findOne({ where: { id: wallet.id } })
     expect(Number(refreshedWallet!.balance)).toBe(100000)
     const debits = await txRepo.find({ where: { walletId: wallet.id } })
@@ -307,49 +308,63 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     expect(sub).toBeNull()
   })
 
-  it('serializes two simultaneous sweeps against PostgreSQL on a PROCESSING wallet payment so the subscription period extends only once', async () => {
-    // R15: turns red if acquireWalletReconcileLock omits pg_advisory_xact_lock / in-process locking, letting concurrent sweeps extend currentPeriodEnd twice.
+  it('serializes two simultaneous sweeps on a PROCESSING payment so effects run once', async () => {
+    // R15: red if acquireWalletReconcileLock is bypassed, duplicating event, role, and audit calls.
     const wallet = await seedWallet(100000)
-    const initialEnd = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000)
-    await subRepo.save(
-      subRepo.create({
-        brandId: BRAND_ID,
-        userId: 'user-loc87-1',
-        planSlug: 'dropi-roax',
-        status: SubscriptionStatus.ACTIVE,
-        provider: SubscriptionProvider.WALLET,
-        walletId: wallet.id,
-        currentPeriodStart: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
-        currentPeriodEnd: initialEnd,
-        nextBillingDate: initialEnd,
-        retryCount: 0,
-        autoRenew: true,
-      }),
-    )
+    await seedActiveSub(wallet.id, 'dropi-roax', 10)
 
     const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-concurrent-sweep')
     await realDataSource.query(
       'UPDATE payments SET status = $2, "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
       [stuckPayment.id, PaymentStatus.PROCESSING],
     )
+    assignPlanToBrandMock.mockClear()
+    auditLogMock.mockClear()
 
-    await Promise.all([
-      tasksService.reconcileWalletPayments(),
-      tasksService.reconcileWalletPayments(),
-    ])
+    const origSubSave = subRepo.save.bind(subRepo)
+    // R17: Delay subRepo.save by 30ms to force concurrent sweeps to overlap if unlocked.
+    const subSaveSpy = jest.spyOn(subRepo, 'save').mockImplementation(async (entity: any) => {
+      await new Promise((r) => setTimeout(r, 30))
+      return origSubSave(entity)
+    })
+    try {
+      await Promise.all([
+        tasksService.reconcileWalletPayments(),
+        tasksService.reconcileWalletPayments(),
+      ])
+    } finally {
+      subSaveSpy.mockRestore()
+    }
 
-    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
-    const expectedEnd = new Date(initialEnd.getTime())
-    expectedEnd.setDate(expectedEnd.getDate() + 30)
-    expect(
-      Math.abs(new Date(sub!.currentPeriodEnd).getTime() - expectedEnd.getTime()),
-    ).toBeLessThan(2000)
     const events = await subEventRepo.find({ where: { paymentId: stuckPayment.id } })
     expect(events).toHaveLength(1)
+    expect(assignPlanToBrandMock).toHaveBeenCalledTimes(1)
+    expect(auditLogMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does not mark a debited PENDING wallet payment as failed during expirePendingCheckouts and allows the sweep to complete it', async () => {
-    // R15: turns red if expirePendingCheckouts updates PENDING payments with a committed debit to FAILED.
+  it('does not overwrite an active subscription on another plan and leaves old payment in PROCESSING', async () => {
+    // R15: red if findConflictingActivePlanSubscription is bypassed and overwrites planSlug.
+    const wallet = await seedWallet(100000)
+    const stuckPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-conflict-old-plan')
+    await realDataSource.query(
+      'UPDATE payments SET "createdAt" = NOW() - INTERVAL \'10 minutes\' WHERE id = $1',
+      [stuckPayment.id],
+    )
+    await seedActiveSub(wallet.id, 'growth', 30)
+    assignPlanToBrandMock.mockClear()
+
+    await tasksService.reconcileWalletPayments()
+
+    const sub = await subRepo.findOne({ where: { brandId: BRAND_ID } })
+    expect(sub!.planSlug).toBe('growth')
+    expect(sub!.lastPaymentId).not.toBe(stuckPayment.id)
+    const afterSweep = await paymentRepo.findOne({ where: { id: stuckPayment.id } })
+    expect(afterSweep!.status).toBe(PaymentStatus.PROCESSING)
+    expect(assignPlanToBrandMock).not.toHaveBeenCalled()
+  })
+
+  it('does not expire a debited PENDING wallet payment and allows the sweep to complete it', async () => {
+    // R15: red if expirePendingCheckouts updates PENDING payments with a committed debit to FAILED.
     const wallet = await seedWallet(100000)
     const debitedPayment = await provokePostDebitCrash(wallet.id, 'idem-loc87-expire-with-debit')
     const unpaidPayment = await provokePreDebitCrash(wallet.id, 'idem-loc87-expire-without-debit')

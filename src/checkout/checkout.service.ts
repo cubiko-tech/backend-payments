@@ -936,9 +936,11 @@ export class CheckoutService implements OnModuleInit {
       paymentId,
       {
         paymentRepo: this.paymentRepo,
+        subscriptionRepo: this.subscriptionRepo,
         walletService: this.walletService,
         dataSource: this.dataSource,
         inProcessLocks: this.walletReconcileLocks,
+        logger: this.log,
         createOrRenewSubscription: (req, p) => this.createOrRenewSubscription(req, p),
         assignPlanInRoles: (brandId, planSlug, expiresAt) =>
           this.assignPlanInRoles(brandId, planSlug, expiresAt),

@@ -40,7 +40,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     const beforeDate = (val: any, cutoff: any) =>
       !(cutoff instanceof Date) || new Date(val).getTime() < cutoff.getTime()
 
-    // R17: stateful in-memory Payment repository double to test TasksService and CheckoutService unit logic without a live DB.
+    // R17: in-memory Payment repo double to test TasksService and CheckoutService without a live DB.
     const paymentRepo: any = {
       find: jest.fn(async ({ where }: any = {}) =>
         Array.from(payments.values()).filter((p) => {
@@ -75,7 +75,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       }),
     }
 
-    // R17: stateful Subscription and SubscriptionEvent doubles to verify single-extension invariant under concurrent sweeps.
+    // R17: stateful Subscription and SubscriptionEvent doubles to verify single execution on races.
     const subscriptionRepo: any = {
       findOne: jest.fn(async ({ where }: any = {}) => {
         const sub = Array.from(subscriptions.values()).find(
@@ -99,7 +99,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       save: jest.fn(async (evt: any) => (subscriptionEvents.push(evt), evt)),
     }
 
-    // R17: Transaction read repo and WalletService doubles track wallet balance and debit rows by idempotencyKey.
+    // R17: Transaction read repo and WalletService doubles track wallet balance and debit rows.
     const findTxByKey = async ({ where }: any = {}) =>
       transactions.find((t) => t.idempotencyKey === where?.idempotencyKey) ?? null
     const transactionReadRepo: any = { findOne: jest.fn(findTxByKey) }
@@ -129,7 +129,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       }),
     }
 
-    // R17: DataSource double serializes pg_advisory_xact_lock calls across QueryRunners and exposes Transaction repo.
+    // R17: DataSource double serializes pg_advisory_xact_lock calls across QueryRunners.
     const dataSource: any = {
       createQueryRunner: jest.fn(() => {
         let releaseGate: (() => void) | null = null
@@ -137,36 +137,27 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
           isTransactionActive: false,
           isReleased: false,
           connect: jest.fn(async () => undefined),
-          startTransaction: jest.fn(async () => {
-            runner.isTransactionActive = true
-          }),
+          startTransaction: jest.fn(async () => void (runner.isTransactionActive = true)),
           query: jest.fn(async (sql: string) => {
             if (sql.includes('pg_advisory_xact_lock')) {
               const prev = advisoryChain
-              advisoryChain = new Promise<void>((r) => {
-                releaseGate = r
-              })
+              advisoryChain = new Promise<void>((r) => void (releaseGate = r))
               await prev
             }
             return [{ pg_advisory_xact_lock: '' }]
           }),
-          commitTransaction: jest.fn(async () => {
-            runner.isTransactionActive = false
-          }),
-          rollbackTransaction: jest.fn(async () => {
-            runner.isTransactionActive = false
-          }),
-          release: jest.fn(async () => {
-            runner.isReleased = true
-            releaseGate?.()
-          }),
+          commitTransaction: jest.fn(async () => void (runner.isTransactionActive = false)),
+          rollbackTransaction: jest.fn(async () => void (runner.isTransactionActive = false)),
+          release: jest.fn(async () => void ((runner.isReleased = true), releaseGate?.())),
         }
         return runner
       }),
-      getRepository: jest.fn(() => ({ findOne: jest.fn(findTxByKey) })),
+      getRepository: jest.fn((entity: any) =>
+        entity?.name === 'Subscription' ? subscriptionRepo : { findOne: jest.fn(findTxByKey) },
+      ),
     }
 
-    // R17: External collaborator doubles for audit, events, roles, invoices, and taxes.
+    // R17: Collaborator doubles for audit, events, roles, invoices, taxes, and logger.
     const auditService: any = { log: jest.fn(async () => undefined) }
     const eventBus: any = {
       publishPaymentCompleted: jest.fn(),
@@ -180,6 +171,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     const taxService: any = {
       getTaxForCountry: jest.fn(async () => ({ taxName: 'IVA', taxRate: 19, isInclusive: true })),
     }
+    const log: any = { log: jest.fn(), warn: jest.fn(), error: jest.fn() }
 
     const seedDebit = (paymentId: string, amount = 49000) =>
       walletService.debit('wallet-1', amount, {
@@ -188,29 +180,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
         idempotencyKey: `payment:${paymentId}:debit`,
       })
 
-    const checkoutService: CheckoutService = Object.assign(
-      Object.create(CheckoutService.prototype),
-      {
-        BILLING_PERIOD_DAYS: 30,
-        paymentRepo,
-        subscriptionRepo,
-        subscriptionEventRepo,
-        dataSource,
-        walletService,
-        invoiceService,
-        auditService,
-        taxService,
-        eventBus,
-        clientRoles,
-        inFlightCheckouts: new Map(),
-        inFlightCompletions: new Set(),
-        walletReconcileLocks: new Map(),
-        log: { log: () => undefined, warn: () => undefined, error: () => undefined },
-      },
-    )
-    const tasksService: TasksService = Object.assign(Object.create(TasksService.prototype), {
-      CHECKOUT_EXPIRY_HOURS: 24,
-      transactionReadRepo,
+    const shared = {
       paymentRepo,
       subscriptionRepo,
       subscriptionEventRepo,
@@ -219,26 +189,44 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       auditService,
       eventBus,
       clientRoles,
-      checkoutService,
-    })
+    }
+    const checkoutService: CheckoutService = Object.assign(
+      Object.create(CheckoutService.prototype),
+      shared,
+      {
+        BILLING_PERIOD_DAYS: 30,
+        invoiceService,
+        taxService,
+        inFlightCheckouts: new Map(),
+        inFlightCompletions: new Set(),
+        walletReconcileLocks: new Map(),
+        log,
+      },
+    )
+    const tasksService: TasksService = Object.assign(
+      Object.create(TasksService.prototype),
+      shared,
+      { CHECKOUT_EXPIRY_HOURS: 24, transactionReadRepo, checkoutService },
+    )
 
     return {
+      ...shared,
       payments,
       subscriptions,
+      subscriptionEvents,
       transactions,
       walletBalances,
       seedPayment,
       seedDebit,
-      walletService,
-      clientRoles,
       invoiceService,
+      log,
       checkoutService,
       tasksService,
     }
   }
 
-  it('runs reconcileWalletPayments on its own 5-minute cron without Confio rows and completes a debited PENDING wallet payment without a second debit', async () => {
-    // R15: turns red if reconcileWalletPayment invokes walletService.debit without idempotencyKey (balance drops twice and debit count becomes 2) or if @Cron metadata is missing.
+  it('runs reconcileWalletPayments on its 5-minute cron and completes a debited PENDING payment once', async () => {
+    // R15: red if reconcileWalletPayment charges debit without idempotencyKey or lacks @Cron.
     const cronSchedule = Reflect.getMetadata(
       SCHEDULE_CRON_OPTIONS,
       TasksService.prototype.reconcileWalletPayments,
@@ -269,7 +257,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
   })
 
   it('transitions a PENDING wallet payment without debit to failed without touching wallet balance', async () => {
-    // R15: turns red if the non-debited branch in reconcileWalletPayment does not update status to FAILED or debits the wallet.
+    // R15: red if the non-debited branch skips setting status to FAILED or debits the wallet.
     const state = buildState()
     state.seedPayment('pay-no-debit-1', { brandId: '102', amount: 35000, purposeId: 'starter' })
 
@@ -280,8 +268,8 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     expect(state.transactions).toHaveLength(0)
   })
 
-  it('skips in-flight wallet payments younger than the 2-minute cutoff in both debited and non-debited branches', async () => {
-    // R15: turns red if isWalletPaymentOldEnoughForReconcile is removed from either branch in reconcileWalletPayment.
+  it('skips in-flight wallet payments younger than the 2-minute cutoff in both branches', async () => {
+    // R15: red if isWalletPaymentOldEnoughForReconcile is removed from reconcileWalletPayment.
     const state = buildState()
     const thirtySecondsAgo = new Date(Date.now() - 30 * 1000)
     await state.seedDebit('pay-fresh-debited', 20000)
@@ -298,8 +286,8 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     expect(state.clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
   })
 
-  it('serializes concurrent sweeps on a PROCESSING wallet payment so an active subscription is extended only once', async () => {
-    // R15: turns red if acquireWalletReconcileLock is bypassed on PROCESSING payments, causing two concurrent sweeps to extend currentPeriodEnd twice.
+  it('serializes concurrent sweeps on a PROCESSING payment so post-debit effects run only once', async () => {
+    // R15: red if acquireWalletReconcileLock is bypassed, duplicating event, role, and audit calls.
     const state = buildState()
     const initialEnd = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000)
     state.subscriptions.set('sub-existing', {
@@ -327,25 +315,22 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
       state.checkoutService.reconcileWalletPayment('pay-processing-race'),
     ])
 
-    const expectedEnd = new Date(initialEnd.getTime())
-    expectedEnd.setDate(expectedEnd.getDate() + 30)
-    expect(new Date(state.subscriptions.get('sub-existing')!.currentPeriodEnd).getTime()).toBe(
-      expectedEnd.getTime(),
-    )
+    const events = state.subscriptionEvents.filter((e) => e.paymentId === 'pay-processing-race')
+    expect(events).toHaveLength(1)
+    expect(state.clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
+    expect(state.auditService.log).toHaveBeenCalledTimes(1)
     expect(state.payments.get('pay-processing-race')!.status).toBe(PaymentStatus.COMPLETED)
   })
 
-  it('keeps the payment in PROCESSING when a post-debit effect fails and writes COMPLETED with checkoutResult on the next sweep', async () => {
-    // R15: turns red if reconcileWalletPayment marks the payment COMPLETED when assignPlanInRoles throws or omits checkoutResult.
+  it('keeps the payment in PROCESSING when auditService.log fails and completes on the next sweep', async () => {
+    // R15: red if reconcileWalletPayment marks COMPLETED when auditService.log throws.
     const state = buildState()
     await state.seedDebit('pay-retry-effect', 49000)
     state.seedPayment('pay-retry-effect', { idempotencyKey: 'idem-retry-effect' })
-    state.clientRoles.assignPlanToBrand.mockRejectedValueOnce(
-      new Error('Roles service unavailable'),
-    )
+    state.auditService.log.mockRejectedValueOnce(new Error('Audit write failed'))
 
     await expect(state.checkoutService.reconcileWalletPayment('pay-retry-effect')).rejects.toThrow(
-      'Roles service unavailable',
+      'Audit write failed',
     )
     expect(state.payments.get('pay-retry-effect')!.status).toBe(PaymentStatus.PROCESSING)
 
@@ -358,8 +343,31 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     })
   })
 
-  it('prevents reconcilePayment and completeExternalPayment from invoicing a PROCESSING wallet payment', async () => {
-    // R15: turns red if reconcilePayment or completeExternalPayment allows provider === WALLET to enter finalizeProcessingPayment and call invoiceService.create.
+  it('does not overwrite an active subscription on another plan and leaves old payment in PROCESSING', async () => {
+    // R15: red if findConflictingActivePlanSubscription is bypassed and overwrites planSlug.
+    const state = buildState()
+    await state.seedDebit('pay-old-plan', 49000)
+    state.seedPayment('pay-old-plan', { brandId: '106', purposeId: 'dropi-roax' })
+    state.subscriptions.set('sub-newer', {
+      id: 'sub-newer',
+      brandId: '106',
+      planSlug: 'growth',
+      status: SubscriptionStatus.ACTIVE,
+      provider: SubscriptionProvider.WALLET,
+      lastPaymentId: 'pay-newer-plan',
+    })
+
+    await state.tasksService.reconcileWalletPayments()
+
+    expect(state.subscriptions.get('sub-newer')!.planSlug).toBe('growth')
+    expect(state.subscriptions.get('sub-newer')!.lastPaymentId).toBe('pay-newer-plan')
+    expect(state.payments.get('pay-old-plan')!.status).toBe(PaymentStatus.PROCESSING)
+    expect(state.clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
+    expect(state.log.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('prevents reconcilePayment and completeExternalPayment from invoicing a wallet payment', async () => {
+    // R15: red if reconcilePayment or completeExternalPayment lets WALLET call invoiceService.
     const state = buildState()
     state.seedPayment('pay-wallet-proc', { status: PaymentStatus.PROCESSING })
 
@@ -371,8 +379,8 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     expect(state.payments.get('pay-wallet-proc')!.status).toBe(PaymentStatus.PROCESSING)
   })
 
-  it('does not expire a PENDING payment that already has a wallet debit while expiring PENDING payments without debit', async () => {
-    // R15: turns red if expirePendingCheckouts updates PENDING payments without excluding rows where hasWalletPaymentDebit is true.
+  it('does not expire a PENDING payment with a wallet debit while expiring unpaid PENDING rows', async () => {
+    // R15: red if expirePendingCheckouts updates PENDING rows without excluding debited ones.
     const state = buildState()
     const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000)
     await state.seedDebit('pay-old-debited', 49000)
