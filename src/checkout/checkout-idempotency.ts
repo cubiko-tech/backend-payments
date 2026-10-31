@@ -35,7 +35,10 @@ export function normalizeIdempotencyKey(raw?: unknown): string | undefined {
 }
 
 export function canRetryFailedIdempotentPayment(payment: Payment): boolean {
-  return !payment.providerPaymentId && !payment.metadata?.amountMismatch
+  const hasStoredFingerprint =
+    typeof payment.metadata?.idempotencyFingerprint === 'string' &&
+    payment.metadata.idempotencyFingerprint.length > 0
+  return hasStoredFingerprint && !payment.providerPaymentId && !payment.metadata?.amountMismatch
 }
 
 export function createFailedExternalIdempotentPaymentException(payment: Payment): RequestException {

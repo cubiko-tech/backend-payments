@@ -519,14 +519,19 @@ export class CheckoutService implements OnModuleInit {
     }
 
     // Marcar pago como completado
-    payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = new Date()
-    await this.paymentRepo.save(payment)
-
     const result: CheckoutResult = {
       paymentId: payment.id,
       status: 'completed',
     }
+    payment.status = PaymentStatus.COMPLETED
+    payment.paidAt = new Date()
+    if (req.idempotencyKey) {
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        checkoutResult: result,
+      }
+    }
+    await this.paymentRepo.save(payment)
 
     // Si es compra de plan → crear/renovar suscripción
     if (req.purpose === 'plan_purchase' && req.planSlug) {

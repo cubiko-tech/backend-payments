@@ -110,7 +110,7 @@ describe('CheckoutController', () => {
   })
 
   it('ignores body.idempotencyKey when no Idempotency-Key HTTP header is provided', async () => {
-    // R15 (Mutation): restoring conditional spread `...(idempotencyKey !== undefined ? { idempotencyKey } : {})` in CheckoutController.processCheckout leaks body.idempotencyKey into CheckoutService and turns this test red.
+    // R15 (Mutation): conditional spread of idempotencyKey in processCheckout turns this case red.
     await controller.processCheckout(
       {
         brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',

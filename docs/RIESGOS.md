@@ -165,3 +165,35 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   aborta antes de escuchar en el puerto 80.
 - **Estado**: abierto — verificar que `JWT_SECRET` y `ACCESS_SERVER` tengan valores distintos de
   `CHANGEME` y sin espacios al borde en la configuración de cada ambiente antes de desplegar.
+
+## Pago `completed` sin `checkoutResult` en `409` y reintento externo sin `providerPaymentId` (LOC-86)
+
+- **Dónde**: `src/checkout/checkout-idempotency.ts:37-67`, `:157-175`
+  (`canRetryFailedIdempotentPayment`, `createIncompleteIdempotentCheckoutException`,
+  `resolvePaymentStateOutcome`), `src/checkout/checkout.service.ts:572-578`, `:589-656`
+  (`processWalletPayment`, `processExternalPayment`) y `src/provider/dropi/dropi.provider.ts:57`,
+  `:71-90` (`createCheckout`)
+- **Qué lo dispara**: (a) un reintento con la misma `Idempotency-Key` cuando el intento anterior alcanzó
+  `status = 'completed'` pero el proceso cayó antes de persistir `metadata.checkoutResult`
+  (`src/checkout/checkout.service.ts:572-578`), o cuando un pago externo fue completado por webhook o
+  reconciliación sin haber guardado `metadata.checkoutResult`; (b) un reintento con la misma
+  `Idempotency-Key` sobre un pago externo `failed` con `metadata.idempotencyFingerprint` y sin
+  `providerPaymentId`.
+- **Qué rompe**: (a) `resolvePaymentStateOutcome` rechaza con `409 IDEMPOTENT_CHECKOUT_INCOMPLETE`
+  (`src/checkout/checkout-idempotency.ts:58-67`, `:170-175`) de forma permanente para esa llave, con el
+  cobro ya efectuado y sin camino de recuperación desde la misma `Idempotency-Key`; (b) el reintento de un
+  pago externo `failed` sin `providerPaymentId` invoca otra vez `provider.createCheckout`
+  (`src/checkout/checkout.service.ts:596-607`), donde en Dropi (`src/provider/dropi/dropi.provider.ts:57`,
+  `:71-90`) se ejecuta `POST /charges` con timeout de 15 s sin llave de idempotencia hacia el proveedor:
+  si el proveedor creó el cobro y la respuesta venció antes de guardar `providerPaymentId`, el reintento
+  deja un segundo cobro pendiente (hipótesis, R14: no se ejercitó contra Dropi y no consta que cree el
+  cobro cuando la respuesta vence).
+- **Estado**: mitigado en reintentos de pagos `failed` con huella verificada y cobros por wallet (LOC-86)
+  — `canRetryFailedIdempotentPayment` (`src/checkout/checkout-idempotency.ts:37-42`) exige
+  `metadata.idempotencyFingerprint` no vacío, ausencia de `providerPaymentId` y ausencia de
+  `metadata.amountMismatch`, `retryFailedIdempotentPayment` reclama la fila con
+  `UPDATE ... WHERE id = :id AND status = 'failed'` (`src/checkout/checkout.service.ts:352-360`), y el
+  débito en wallet usa la llave determinística `payment:${payment.id}:debit` (`:479`). Abierto en los dos
+  bordes de arriba: un pago `completed` sin `metadata.checkoutResult` devuelve siempre `409
+  IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, y un timeout en `provider.createCheckout` antes de
+  persistir `providerPaymentId` puede abrir una segunda sesión o cobro pendiente en el proveedor externo.
