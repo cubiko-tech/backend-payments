@@ -15,13 +15,10 @@ import { CheckoutRequest, CheckoutService } from '../src/checkout/checkout.servi
 import { DianService } from '../src/dian/dian.service'
 import { EventBusService } from '../src/event-bus/event-bus.service'
 import { InvoiceService } from '../src/invoice/invoice.service'
-import {
-  Payment,
-  PaymentProvider,
-  PaymentPurpose,
-  PaymentStatus,
-} from '../src/payment/entities/payment.entity'
+import * as paymentEntities from '../src/payment/entities/payment.entity'
 import { PaymentAttempt } from '../src/payment/entities/paymentAttempt.entity'
+import { PaymentController } from '../src/payment/payment.controller'
+import { PaymentService } from '../src/payment/payment.service'
 import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { ProviderFactory } from '../src/provider/provider.factory'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
@@ -35,13 +32,16 @@ import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { WebhookService } from '../src/webhook/webhook.service'
 
+const { Payment, PaymentProvider, PaymentPurpose, PaymentStatus } = paymentEntities
+type Payment = paymentEntities.Payment
 const ACCESS_SERVER = 'e2e-checkout-idem-server-token'
 const BRAND_ID = 'f1111111-2222-4333-8444-555555555555'
 const DEFAULT_CHECKOUT = {
   providerPaymentId: 'cs_e2e_ok',
   checkoutUrl: 'https://checkout.stripe.com/c/pay/cs_e2e_ok',
 }
-
+const DEFAULT_PRICE = { id: 'p', countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
+const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
 const buildBody = (overrides: Record<string, unknown> = {}) => ({
   brandId: BRAND_ID,
   userId: 'user-e2e-1',
@@ -62,10 +62,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   let subRepo: Repository<Subscription>
   let createCheckoutMock: jest.Mock
   let assignPlanToBrandMock: jest.Mock
-  const envSnapshot = {
-    ACCESS_SERVER: process.env.ACCESS_SERVER,
-    JWT_SECRET: process.env.JWT_SECRET,
-  }
+  const envSnapshot = [process.env.ACCESS_SERVER, process.env.JWT_SECRET]
 
   const cleanupBrandData = async () => {
     if (!realDataSource?.isInitialized) return
@@ -92,6 +89,14 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   beforeAll(async () => {
     process.env.ACCESS_SERVER = ACCESS_SERVER
     process.env.JWT_SECRET = 'e2e-checkout-idem-jwt-secret'
+    const writeEntities = [
+      Payment,
+      PaymentAttempt,
+      Wallet,
+      Transaction,
+      Subscription,
+      SubscriptionEvent,
+    ]
     realDataSource = new DataSource({
       type: 'postgres',
       host: process.env.POSTGRES_HOST || '127.0.0.1',
@@ -99,15 +104,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
       username: process.env.POSTGRES_USER || 'postgres',
       password: process.env.POSTGRES_PASSWORD || 'postgres',
       database: process.env.POSTGRES_DB,
-      entities: [
-        Payment,
-        PaymentAttempt,
-        Wallet,
-        Transaction,
-        Subscription,
-        SubscriptionEvent,
-        BillingProfile,
-      ],
+      entities: [...writeEntities, BillingProfile],
       synchronize: false,
     })
     await realDataSource.initialize()
@@ -123,26 +120,17 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     // R17: Remote HTTP/Redis doubles isolate backend-payments HTTP + Postgres e2e persistence.
     createCheckoutMock = jest.fn().mockResolvedValue(DEFAULT_CHECKOUT)
     assignPlanToBrandMock = jest.fn().mockResolvedValue(true)
-    const defaultPrice = {
-      id: 'p-co',
-      countryCode: 'CO',
-      currency: 'COP',
-      price: 19900,
-      isDefault: true,
-    }
-    const defaultTax = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
     const moduleFixture: TestingModule = await Test.createTestingModule({
-      controllers: [CheckoutController],
+      controllers: [CheckoutController, PaymentController],
       providers: [
         ApiAuthGuard,
         JwtService,
         CheckoutService,
+        PaymentService,
         WalletService,
         provideVal(getDataSourceToken('DBWrite'), realDataSource),
-        ...[Payment, PaymentAttempt, Wallet, Transaction, Subscription, SubscriptionEvent].map(
-          (e) => provideRepo(e),
-        ),
-        ...[Wallet, Transaction, BillingProfile].map((e) => provideRepo(e, 'DBRead')),
+        ...writeEntities.map((e) => provideRepo(e)),
+        ...[Payment, Wallet, Transaction, BillingProfile].map((e) => provideRepo(e, 'DBRead')),
         provideVal(ClientPlatformService, {
           canViewBrandCredit: jest.fn().mockResolvedValue(true),
           resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
@@ -150,7 +138,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
         }),
         provideVal(ClientRolesService, {
           getPlanPrice: jest.fn().mockResolvedValue(19900),
-          resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: defaultPrice }),
+          resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: DEFAULT_PRICE }),
           assignPlanToBrand: assignPlanToBrandMock,
         }),
         provideVal(InvoiceService, {
@@ -158,11 +146,8 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
         }),
         provideVal(SubscriptionService, {}),
         provideVal(AuditService, { log: jest.fn().mockResolvedValue(null) }),
-        provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(defaultTax) }),
-        provideVal(DianService, {
-          isConfigured: jest.fn().mockReturnValue(false),
-          sendInvoice: jest.fn().mockResolvedValue({ success: true }),
-        }),
+        provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(DEFAULT_TAX) }),
+        provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
         provideVal(ProviderFactory, {
           getProvider: jest.fn(() => ({ createCheckout: createCheckoutMock })),
         }),
@@ -201,8 +186,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
         if (app) await app.close()
       } finally {
         if (realDataSource?.isInitialized) await realDataSource.destroy()
-        process.env.ACCESS_SERVER = envSnapshot.ACCESS_SERVER
-        process.env.JWT_SECRET = envSnapshot.JWT_SECRET
+        ;[process.env.ACCESS_SERVER, process.env.JWT_SECRET] = envSnapshot
       }
     }
   })
@@ -249,9 +233,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     })
 
     const payload = buildBody({ walletId: wallet.id })
-
-    const firstRes = await postCheckout(payload, 'e2e-wallet-retry-1')
-    expect(firstRes.status).toBe(500)
+    expect((await postCheckout(payload, 'e2e-wallet-retry-1')).status).toBe(500)
     const failedPayment = await paymentRepo.findOne({
       where: { brandId: BRAND_ID, idempotencyKey: 'e2e-wallet-retry-1' },
     })
@@ -260,10 +242,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
 
     const retryRes = await postCheckout(payload, 'e2e-wallet-retry-1')
     expect(retryRes.status).toBe(201)
-    expect(retryRes.body.data).toMatchObject({
-      paymentId: failedPayment?.id,
-      status: 'completed',
-    })
+    expect(retryRes.body.data).toMatchObject({ paymentId: failedPayment?.id, status: 'completed' })
     expect(await paymentRepo.count({ where: { brandId: BRAND_ID } })).toBe(1)
     expect(await txRepo.count({ where: { brandId: BRAND_ID } })).toBe(1)
     expect(Number((await walletRepo.findOneBy({ id: wallet.id }))?.balance)).toBe(80100)
@@ -331,6 +310,29 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     expect(Number((await walletRepo.findOneBy({ id: wallet.id }))?.balance)).toBe(100000)
   })
 
+  it('returns 404 on removed POST /payment/checkout when attempting to seed client metadata', async () => {
+    // R15 (Mutation): re-exposing POST /payment/checkout turns this 404 assertion red.
+    const wallet = await createBrandWallet(100000)
+    const body = buildBody({ walletId: wallet.id })
+    const key = 'e2e-removed-payment-checkout-1'
+    const fp = buildIdempotencyFingerprint({ ...body, idempotencyKey: key } as CheckoutRequest)
+    const seedRes = await request(app.getHttpServer())
+      .post('/payment/checkout')
+      .set('Authorization', `Bearer ${ACCESS_SERVER}`)
+      .send({
+        ...body,
+        purposeId: 'dropi-roax',
+        amount: 1,
+        currency: 'COP',
+        idempotencyKey: key,
+        metadata: { idempotencyFingerprint: fp, subtotal: 1, taxAmount: 0 },
+      })
+    expect(seedRes.status).toBe(404)
+    expect(await paymentRepo.count({ where: { brandId: BRAND_ID } })).toBe(0)
+    expect((await postCheckout(body, key)).status).toBe(201)
+    expect(Number((await walletRepo.findOneBy({ id: wallet.id }))?.balance)).toBe(80100)
+  })
+
   it('retries failed external row without providerPaymentId and rejects when present', async () => {
     // R15 (Mutation): reading metadata.checkoutResult before FAILED status turns this red.
     createCheckoutMock
@@ -361,22 +363,23 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   })
 
   it('responds 409 IDEMPOTENT_CHECKOUT_INCOMPLETE, 400 on >255 key, and 409 on conflict', async () => {
-    // R15 (Mutation): omitting incomplete check, >255 check, or conflict check turns this red.
+    // R15 (Mutation): saving checkoutResult before createOrRenewSubscription turns this red.
     const wallet = await createBrandWallet(100000)
     const body = buildBody({ walletId: wallet.id })
-    const reqPayload = { ...body, idempotencyKey: 'e2e-incomplete-1' } as CheckoutRequest
-    const saved = await seedPayment({
-      idempotencyKey: 'e2e-incomplete-1',
-      walletId: wallet.id,
-      status: PaymentStatus.COMPLETED,
-      metadata: { idempotencyFingerprint: buildIdempotencyFingerprint(reqPayload) },
+    // R17: Spy on subRepo.save simulates a Postgres failure after the wallet debit commits.
+    jest.spyOn(subRepo, 'save').mockRejectedValueOnce(new Error('Subscription failure after debit'))
+    expect((await postCheckout(body, 'e2e-incomplete-1')).status).toBe(500)
+    expect(await txRepo.count({ where: { brandId: BRAND_ID } })).toBe(1)
+    expect(await subRepo.count({ where: { brandId: BRAND_ID } })).toBe(0)
+    const saved = await paymentRepo.findOne({
+      where: { brandId: BRAND_ID, idempotencyKey: 'e2e-incomplete-1' },
     })
 
-    const incompleteRes = await postCheckout(buildBody({ walletId: wallet.id }), 'e2e-incomplete-1')
+    const incompleteRes = await postCheckout(body, 'e2e-incomplete-1')
     expect(incompleteRes.status).toBe(409)
     expect(incompleteRes.body).toMatchObject({
       code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
-      paymentId: saved.id,
+      paymentId: saved?.id,
     })
 
     const svcBody = buildBody({

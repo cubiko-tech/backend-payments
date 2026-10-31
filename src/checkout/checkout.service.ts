@@ -525,6 +525,34 @@ export class CheckoutService implements OnModuleInit {
     }
     payment.status = PaymentStatus.COMPLETED
     payment.paidAt = new Date()
+
+    try {
+      if (req.purpose === 'plan_purchase' && req.planSlug) {
+        const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
+        result.subscriptionId = sub.id
+        if (extended && sub.currentPeriodEnd) {
+          result.renewal = 'extended'
+          result.currentPeriodEnd = sub.currentPeriodEnd
+        }
+
+        await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
+      }
+
+      await this.auditService.log(
+        req.userId,
+        'checkout_completed',
+        'payment',
+        payment.id,
+        { purpose: req.purpose, planSlug: req.planSlug, amount: totalAmount, provider: 'wallet' },
+        `Checkout completado: ${req.purpose} por ${currency} ${totalAmount}`,
+      )
+    } catch (error) {
+      // Save COMPLETED without checkoutResult after debit so retries return 409
+      // while keeping status PENDING in-flight so concurrent reads do not fail.
+      await this.paymentRepo.save(payment)
+      throw error
+    }
+
     if (req.idempotencyKey) {
       payment.metadata = {
         ...(payment.metadata || {}),
@@ -532,29 +560,6 @@ export class CheckoutService implements OnModuleInit {
       }
     }
     await this.paymentRepo.save(payment)
-
-    // Si es compra de plan → crear/renovar suscripción
-    if (req.purpose === 'plan_purchase' && req.planSlug) {
-      const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
-      result.subscriptionId = sub.id
-      if (extended && sub.currentPeriodEnd) {
-        result.renewal = 'extended'
-        result.currentPeriodEnd = sub.currentPeriodEnd
-      }
-
-      // Asignar plan en backend-roles
-      await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
-    }
-
-    // Audit
-    await this.auditService.log(
-      req.userId,
-      'checkout_completed',
-      'payment',
-      payment.id,
-      { purpose: req.purpose, planSlug: req.planSlug, amount: totalAmount, provider: 'wallet' },
-      `Checkout completado: ${req.purpose} por ${currency} ${totalAmount}`,
-    )
 
     // Publicar evento en Redis Streams
     this.eventBus.publishPaymentCompleted({
@@ -573,14 +578,6 @@ export class CheckoutService implements OnModuleInit {
       String(subtotal + taxAmount),
       currency,
     )
-
-    if (req.idempotencyKey) {
-      payment.metadata = {
-        ...(payment.metadata || {}),
-        checkoutResult: result,
-      }
-      await this.paymentRepo.save(payment)
-    }
 
     this.log.log(
       `Checkout completado: payment=${payment.id} brand=${req.brandId} plan=${req.planSlug}`,

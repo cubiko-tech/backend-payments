@@ -326,20 +326,23 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects 409 IDEMPOTENT_CHECKOUT_INCOMPLETE when completed without checkoutResult', async () => {
-    // R15 (Mutation): returning { paymentId, status } for incomplete completed turns this red.
+  it('rejects 409 IDEMPOTENT_CHECKOUT_INCOMPLETE when subscription fails after wallet debit', async () => {
+    // R15 (Mutation): saving checkoutResult before createOrRenewSubscription turns this case red.
     const req = buildReq({ idempotencyKey: 'incomplete-completed-key' })
-    seedStoredPayment('pay-incomplete-1', {
-      idempotencyKey: 'incomplete-completed-key',
-      status: PaymentStatus.COMPLETED,
-      metadata: { idempotencyFingerprint: buildIdempotencyFingerprint(req) },
-    })
+    subscriptionRepo.save.mockRejectedValueOnce(new Error('Subscription insert failed after debit'))
+
+    await expect(service.processCheckout(req)).rejects.toThrow(
+      'Subscription insert failed after debit',
+    )
+    expect(walletService.debit).toHaveBeenCalledTimes(1)
+    expect(storedPayments.get('pay-idem-1')?.status).toBe(PaymentStatus.COMPLETED)
+    expect(storedPayments.get('pay-idem-1')?.metadata?.checkoutResult).toBeUndefined()
 
     await expect(service.processCheckout(req)).rejects.toMatchObject({
       code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
       status: HttpStatus.CONFLICT,
     })
-    expect(walletService.debit).not.toHaveBeenCalled()
+    expect(walletService.debit).toHaveBeenCalledTimes(1)
   })
 
   it('rejects 400 INVALID_IDEMPOTENCY_KEY above 255 trimmed chars and accepts 255 chars', async () => {
