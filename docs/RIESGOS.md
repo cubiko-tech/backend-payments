@@ -209,7 +209,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   las filas que `POST /payment/checkout` ya hubiera escrito antes de `c77a594` (LOC-93) siguen siendo
   elegibles al reintento y no se contaron por ambiente.
 
-## Reconciliación de pagos `wallet` en `PROCESSING` ante otro plan activo, fallo de efectos o de `backend-roles` (LOC-87)
+## Reconciliación de pagos `wallet` en `PROCESSING` ante plan activo distinto o fallos (LOC-87)
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:189-224`, `:226-386`
   (`findConflictingActivePlanSubscription`, `reconcileWalletPayment`),
