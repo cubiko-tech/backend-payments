@@ -134,7 +134,6 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
       isDefault: true,
     }
     const defaultTax = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
-
     const moduleFixture: TestingModule = await Test.createTestingModule({
       controllers: [CheckoutController],
       providers: [
@@ -234,11 +233,11 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     )
 
   it('completes a failed wallet payment on retry with the same Idempotency-Key without a second wallet debit when the first debit committed before failing', async () => {
-    // R15: returning existing failed status in resolvePaymentStateOutcome instead of calling retryFailedPayment leaves the retry at status 'failed' instead of 'completed'.
+    // R15 (Mutation): suffixing the WalletService.debit idempotencyKey per attempt charges a second wallet transaction and turns this case red.
     const wallet = await createBrandWallet(100000)
     const originalDebit = walletService.debit.bind(walletService)
     let firstAttempt = true
-
+    // R17: Spy wraps the real WalletService.debit so the first call commits in Postgres and then simulates a lost confirmation.
     jest.spyOn(walletService, 'debit').mockImplementation(async (...args) => {
       const res = await originalDebit(...args)
       if (firstAttempt) {
@@ -275,7 +274,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   })
 
   it('retries a failed external payment without providerPaymentId and rejects with 409 IDEMPOTENT_PAYMENT_FAILED when providerPaymentId already exists', async () => {
-    // R15: checking metadata.checkoutResult before status === PaymentStatus.FAILED returns 201 pending with the expired checkoutUrl instead of 409 IDEMPOTENT_PAYMENT_FAILED.
+    // R15 (Mutation): checking metadata.checkoutResult before status === PaymentStatus.FAILED returns 201 pending with the expired checkoutUrl and turns this case red.
     createCheckoutMock
       .mockRejectedValueOnce(new Error('Stripe connection error'))
       .mockResolvedValueOnce({
@@ -309,7 +308,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   })
 
   it('responds 409 IDEMPOTENT_CHECKOUT_INCOMPLETE when a completed payment lacks metadata.checkoutResult', async () => {
-    // R15: returning { paymentId, status: existing.status } when existing.status === PaymentStatus.COMPLETED and metadata.checkoutResult is absent responds 201 instead of 409.
+    // R15 (Mutation): returning { paymentId, status: existing.status } when existing.status === PaymentStatus.COMPLETED and metadata.checkoutResult is absent responds 201 and turns this case red.
     const wallet = await createBrandWallet(100000)
     const reqPayload: CheckoutRequest = {
       brandId: BRAND_ID,
@@ -346,7 +345,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   })
 
   it('responds 400 INVALID_IDEMPOTENCY_KEY for a 256-char header and ignores body.idempotencyKey when header is omitted', async () => {
-    // R15: removing the 255-character check in normalizeIdempotencyKey or keeping conditional spread in CheckoutController lets the 256-char key through instead of returning 400 / ignoring body.idempotencyKey.
+    // R15 (Mutation): removing the 255-character check in normalizeIdempotencyKey or keeping conditional spread in CheckoutController turns this case red.
     const wallet = await createBrandWallet(100000)
     const payload = buildBody({
       purpose: 'service_payment',
@@ -368,7 +367,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   })
 
   it('responds 409 IDEMPOTENCY_KEY_CONFLICT when the same Idempotency-Key is sent with a different payload', async () => {
-    // R15: skipping assertMatchingIdempotencyPayload returns 201 instead of 409 IDEMPOTENCY_KEY_CONFLICT.
+    // R15 (Mutation): skipping assertMatchingIdempotencyPayload returns 201 instead of 409 IDEMPOTENCY_KEY_CONFLICT and turns this case red.
     const wallet = await createBrandWallet(100000)
     const basePayload = buildBody({
       purpose: 'service_payment',
