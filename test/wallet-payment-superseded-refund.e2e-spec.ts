@@ -37,14 +37,8 @@ const BRAND_ID = 'f8969696-2222-4333-8444-555555555555'
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
 const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
 const READ_ENTITIES = [Payment, Wallet, Transaction, BillingProfile, AuditLog]
-const WRITE_ENTITIES = [
-  ...READ_ENTITIES,
-  PaymentAttempt,
-  WalletBalanceSnapshot,
-  Subscription,
-  SubscriptionEvent,
-  WebhookEvent,
-]
+const EXTRA_ENTITIES = [PaymentAttempt, WalletBalanceSnapshot, Subscription, SubscriptionEvent]
+const WRITE_ENTITIES = [...READ_ENTITIES, ...EXTRA_ENTITIES, WebhookEvent]
 
 async function compileSupersededE2eModule(realDataSource: DataSource, assignPlanMock: jest.Mock) {
   const provideRepo = (entity: any, conn = 'DBWrite') => ({
@@ -52,6 +46,7 @@ async function compileSupersededE2eModule(realDataSource: DataSource, assignPlan
     useValue: realDataSource.getRepository(entity),
   })
   const provideVal = (provide: any, useValue: any) => ({ provide, useValue })
+  const invRes = { data: { id: 'inv-96', invoiceNumber: 'CK-96' } }
   // R17: External HTTP/Redis service doubles isolate PostgreSQL persistence from remote services.
   return Test.createTestingModule({
     providers: [
@@ -72,16 +67,12 @@ async function compileSupersededE2eModule(realDataSource: DataSource, assignPlan
         resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: DEFAULT_PRICE }),
         assignPlanToBrand: assignPlanMock,
       }),
-      provideVal(InvoiceService, {
-        create: jest.fn().mockResolvedValue({ data: { id: 'inv-96', invoiceNumber: 'CK-96' } }),
-      }),
+      provideVal(InvoiceService, { create: jest.fn().mockResolvedValue(invRes) }),
       provideVal(SubscriptionService, {}),
       provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(DEFAULT_TAX) }),
       provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
       provideVal(ProviderFactory, { getProvider: jest.fn() }),
-      provideVal(ProviderConfigService, {
-        isProviderAvailable: jest.fn().mockResolvedValue(true),
-      }),
+      provideVal(ProviderConfigService, { isProviderAvailable: jest.fn().mockResolvedValue(true) }),
       provideVal(EnterprisePricingService, { getForBrand: jest.fn().mockResolvedValue(null) }),
       provideVal(EventBusService, {
         publishPaymentCompleted: jest.fn(),
@@ -130,26 +121,18 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
   const getWalletBalance = async (id: string) =>
     Number((await walletRepo.findOneBy({ id }))!.balance)
   const getPaymentStatus = async (id: string) => (await paymentRepo.findOneBy({ id }))!.status
-  const seedWallet = (balance = 100000): Promise<Wallet> =>
-    walletRepo.save(
-      walletRepo.create({
-        brandId: BRAND_ID,
-        userId: '11111111-2222-4333-8444-555555555555',
-        provider: 'internal',
-        balance,
-        currency: 'COP',
-        status: WalletStatus.ACTIVE,
-      }),
-    )
-  const buildCheckoutDto = (walletId: string, idempotencyKey: string, planSlug = 'dropi-roax') => ({
-    brandId: BRAND_ID,
-    userId: 'user-loc96-1',
-    provider: 'wallet' as const,
-    purpose: 'plan_purchase' as const,
-    planSlug,
-    walletId,
-    idempotencyKey,
-  })
+  const findPaymentCredits = (paymentId: string) =>
+    txRepo.findBy({ referenceId: paymentId, type: TransactionType.CREDIT })
+  const seedWallet = (balance = 100000): Promise<Wallet> => {
+    const base = { brandId: BRAND_ID, userId: BRAND_ID, provider: 'internal', currency: 'COP' }
+    return walletRepo.save(walletRepo.create({ ...base, balance, status: WalletStatus.ACTIVE }))
+  }
+  const buildCheckoutDto = (walletId: string, idempotencyKey: string, planSlug = 'dropi-roax') => {
+    const base = { brandId: BRAND_ID, userId: 'user-loc96-1', provider: 'wallet' as const }
+    return { ...base, purpose: 'plan_purchase' as const, planSlug, walletId, idempotencyKey }
+  }
+  const purchasePlan = (walletId: string, idempotencyKey: string, planSlug: string) =>
+    checkoutService.processCheckout(buildCheckoutDto(walletId, idempotencyKey, planSlug))
 
   const provokePostDebitCrash = async (walletId: string, key: string, planSlug = 'dropi-roax') => {
     const origSub = (checkoutService as any).createOrRenewSubscription.bind(checkoutService)
@@ -163,9 +146,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
       return origSave(entity)
     })
     try {
-      await expect(
-        checkoutService.processCheckout(buildCheckoutDto(walletId, key, planSlug)),
-      ).rejects.toThrow('Simulated process death')
+      await expect(purchasePlan(walletId, key, planSlug)).rejects.toThrow('Simulated process death')
     } finally {
       subSpy.mockRestore()
       saveSpy.mockRestore()
@@ -174,6 +155,26 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     const stuck = (await paymentRepo.findOneBy({ idempotencyKey: key }))!
     expect(stuck.status).toBe(PaymentStatus.PENDING)
     return stuck
+  }
+
+  const runSweepWithFailedRefundUpdate = async () => {
+    const origUpdate = paymentRepo.update.bind(paymentRepo)
+    let failedOnce = false
+    // R17: Fail the first status update to REFUNDED after credit commits so the next sweep retries.
+    const updateSpy = jest
+      .spyOn(paymentRepo, 'update')
+      .mockImplementation(async (criteria: any, partial: any) => {
+        if (!failedOnce && partial?.status === PaymentStatus.REFUNDED) {
+          failedOnce = true
+          throw new Error('Simulated DB interruption before marking payment REFUNDED')
+        }
+        return origUpdate(criteria, partial)
+      })
+    try {
+      await tasksService.reconcileWalletPayments()
+    } finally {
+      updateSpy.mockRestore()
+    }
   }
 
   beforeAll(async () => {
@@ -221,9 +222,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     const stuck = await provokePostDebitCrash(wallet.id, 'idem-loc96-stuck-1', 'dropi-roax')
     await backdatePayment(stuck.id)
 
-    const newerRes = await checkoutService.processCheckout(
-      buildCheckoutDto(wallet.id, 'idem-loc96-newer-growth', 'growth'),
-    )
+    const newerRes = await purchasePlan(wallet.id, 'idem-loc96-newer-growth', 'growth')
     expect(newerRes.status).toBe('completed')
     assignPlanToBrandMock.mockClear()
 
@@ -235,9 +234,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     expect(await getWalletBalance(wallet.id)).toBe(80100)
     expect(assignPlanToBrandMock).not.toHaveBeenCalled()
 
-    const retryCheckout = await checkoutService.processCheckout(
-      buildCheckoutDto(wallet.id, 'idem-loc96-stuck-1', 'dropi-roax'),
-    )
+    const retryCheckout = await purchasePlan(wallet.id, 'idem-loc96-stuck-1', 'dropi-roax')
     expect(retryCheckout).toEqual({ paymentId: stuck.id, status: 'refunded' })
     expect(await checkoutService.reconcilePayment(stuck.id)).toEqual({ status: 'refunded' })
 
@@ -259,13 +256,11 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     const wallet = await seedWallet(100000)
     const stuck = await provokePostDebitCrash(wallet.id, 'idem-loc96-trail-stuck', 'dropi-roax')
     await backdatePayment(stuck.id)
-    await checkoutService.processCheckout(
-      buildCheckoutDto(wallet.id, 'idem-loc96-trail-newer', 'growth'),
-    )
+    await purchasePlan(wallet.id, 'idem-loc96-trail-newer', 'growth')
 
     await tasksService.reconcileWalletPayments()
 
-    const credits = await txRepo.findBy({ referenceId: stuck.id, type: TransactionType.CREDIT })
+    const credits = await findPaymentCredits(stuck.id)
     expect(credits).toHaveLength(1)
     expect(credits[0]).toMatchObject({
       walletId: wallet.id,
@@ -300,33 +295,15 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     const wallet = await seedWallet(100000)
     const stuck = await provokePostDebitCrash(wallet.id, 'idem-loc96-idem-retry', 'dropi-roax')
     await backdatePayment(stuck.id)
-    await checkoutService.processCheckout(
-      buildCheckoutDto(wallet.id, 'idem-loc96-idem-newer', 'growth'),
-    )
+    await purchasePlan(wallet.id, 'idem-loc96-idem-newer', 'growth')
 
-    const origUpdate = paymentRepo.update.bind(paymentRepo)
-    let failedRefundUpdateOnce = false
-    // R17: Fail the first status update to REFUNDED after credit commits so the next sweep retries.
-    const updateSpy = jest
-      .spyOn(paymentRepo, 'update')
-      .mockImplementation(async (criteria: any, partial: any) => {
-        if (!failedRefundUpdateOnce && partial?.status === PaymentStatus.REFUNDED) {
-          failedRefundUpdateOnce = true
-          throw new Error('Simulated DB interruption before marking payment REFUNDED')
-        }
-        return origUpdate(criteria, partial)
-      })
-    try {
-      await tasksService.reconcileWalletPayments()
-    } finally {
-      updateSpy.mockRestore()
-    }
+    await runSweepWithFailedRefundUpdate()
     expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.PROCESSING)
 
     await tasksService.reconcileWalletPayments()
 
     expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.REFUNDED)
-    const credits = await txRepo.findBy({ referenceId: stuck.id, type: TransactionType.CREDIT })
+    const credits = await findPaymentCredits(stuck.id)
     expect(credits).toHaveLength(1)
     expect(credits[0].idempotencyKey).toBe(`payment:${stuck.id}:refund`)
     expect(await getWalletBalance(wallet.id)).toBe(80100)
@@ -342,9 +319,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
       checkoutService.reconcileWalletPayment(stuckConcurrent.id),
       checkoutServiceB.reconcileWalletPayment(stuckConcurrent.id),
     ])
-    expect(
-      await txRepo.findBy({ referenceId: stuckConcurrent.id, type: TransactionType.CREDIT }),
-    ).toHaveLength(1)
+    expect(await findPaymentCredits(stuckConcurrent.id)).toHaveLength(1)
     expect(await getWalletBalance(wallet.id)).toBe(80100)
   })
 
@@ -353,9 +328,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     const wallet = await seedWallet(100000)
     const stuck = await provokePostDebitCrash(wallet.id, 'idem-loc96-credit-fail', 'dropi-roax')
     await backdatePayment(stuck.id)
-    await checkoutService.processCheckout(
-      buildCheckoutDto(wallet.id, 'idem-loc96-credit-fail-newer', 'growth'),
-    )
+    await purchasePlan(wallet.id, 'idem-loc96-credit-fail-newer', 'growth')
 
     await walletRepo.update(wallet.id, { status: WalletStatus.CLOSED })
     // R17: Spy on CheckoutService log.error to verify credit failure is logged while keeping PROCESSING.
@@ -363,9 +336,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     try {
       await tasksService.reconcileWalletPayments()
       expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.PROCESSING)
-      expect(
-        await txRepo.findBy({ referenceId: stuck.id, type: TransactionType.CREDIT }),
-      ).toHaveLength(0)
+      expect(await findPaymentCredits(stuck.id)).toHaveLength(0)
       expect(errorLogSpy).toHaveBeenCalledWith(expect.stringContaining(stuck.id))
     } finally {
       errorLogSpy.mockRestore()
@@ -374,9 +345,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
 
     await tasksService.reconcileWalletPayments()
     expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.REFUNDED)
-    expect(
-      await txRepo.findBy({ referenceId: stuck.id, type: TransactionType.CREDIT }),
-    ).toHaveLength(1)
+    expect(await findPaymentCredits(stuck.id)).toHaveLength(1)
     expect(await getWalletBalance(wallet.id)).toBe(80100)
   })
 
@@ -389,10 +358,36 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
     await tasksService.reconcileWalletPayments()
 
     expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.COMPLETED)
-    expect(
-      await txRepo.findBy({ referenceId: stuck.id, type: TransactionType.CREDIT }),
-    ).toHaveLength(0)
+    expect(await findPaymentCredits(stuck.id)).toHaveLength(0)
     expect((await subRepo.findOneBy({ brandId: BRAND_ID }))!.planSlug).toBe('dropi-roax')
     expect(await getWalletBalance(wallet.id)).toBe(80100)
+  })
+
+  it('transitions a payment to refunded instead of completed when its refund credit was already recorded before the brand repurchased the same plan', async () => {
+    // R15: red if reconcileWalletPayment ignores an existing payment:<id>:refund credit after the brand repurchases the same plan.
+    const wallet = await seedWallet(150000)
+    const stuck = await provokePostDebitCrash(wallet.id, 'idem-loc96-rebound-stuck', 'dropi-roax')
+    await backdatePayment(stuck.id)
+    await purchasePlan(wallet.id, 'idem-loc96-rebound-growth', 'growth')
+
+    await runSweepWithFailedRefundUpdate()
+    expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.PROCESSING)
+    expect(await findPaymentCredits(stuck.id)).toHaveLength(1)
+
+    const repurchased = await purchasePlan(wallet.id, 'idem-loc96-rebound-same', 'dropi-roax')
+    expect(repurchased.status).toBe('completed')
+    const subBefore = (await subRepo.findOneBy({ brandId: BRAND_ID }))!
+    const periodEndBefore = subBefore.currentPeriodEnd.toISOString()
+    assignPlanToBrandMock.mockClear()
+
+    await tasksService.reconcileWalletPayments()
+
+    expect(await getPaymentStatus(stuck.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await findPaymentCredits(stuck.id)).toHaveLength(1)
+    expect(await getWalletBalance(wallet.id)).toBe(110200)
+    expect(assignPlanToBrandMock).not.toHaveBeenCalled()
+    const subAfter = (await subRepo.findOneBy({ brandId: BRAND_ID }))!
+    expect(subAfter.planSlug).toBe('dropi-roax')
+    expect(subAfter.currentPeriodEnd.toISOString()).toBe(periodEndBefore)
   })
 })

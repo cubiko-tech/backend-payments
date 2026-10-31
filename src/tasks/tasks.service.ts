@@ -623,9 +623,13 @@ export class TasksService {
     for (const p of pending) {
       try {
         const res = await this.checkoutService.reconcileWalletPayment(p.id, now)
-        if (res?.outcome === 'completed') completed++
-        else if (res?.outcome === 'failed_without_debit') failed++
-        else if (res?.outcome === 'refunded') refunded++
+        if (res?.outcome === 'completed') {
+          completed++
+        } else if (res?.outcome === 'failed_without_debit') {
+          failed++
+        } else if (res?.outcome === 'refunded') {
+          refunded++
+        }
       } catch (error) {
         logger.log(
           'warn',

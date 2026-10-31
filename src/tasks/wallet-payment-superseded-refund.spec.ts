@@ -10,6 +10,17 @@ import { TasksService } from './tasks.service'
 
 const beforeDate = (val: any, cutoff: any) =>
   !(cutoff instanceof Date) || new Date(val).getTime() < cutoff.getTime()
+const BASE_PAY_META = { brandId: '106', userId: 'user-1', walletId: 'wallet-1', amount: 49000 }
+const BASE_PAYMENT = {
+  ...BASE_PAY_META,
+  currency: 'COP',
+  status: PaymentStatus.PENDING,
+  provider: PaymentProvider.WALLET,
+  purpose: PaymentPurpose.PLAN_PURCHASE,
+  purposeId: 'dropi-roax',
+}
+const BASE_SUB_STATE = { status: SubscriptionStatus.ACTIVE, provider: SubscriptionProvider.WALLET }
+const BASE_SUB = { ...BASE_SUB_STATE, lastPaymentId: null, autoRenew: true }
 
 // R17: in-memory Payment, Subscription, and SubscriptionEvent repo doubles for unit reconciliation tests.
 function createRepoDoubles(
@@ -76,8 +87,30 @@ function createWalletAndDataSourceDoubles(
   callOrder: string[],
 ) {
   let advisoryChain = Promise.resolve()
+  const pushTx = (tx: any) => (transactions.push(tx), tx)
+  const wrapTx = (walletId: string, balance: number, transaction: any) => ({
+    data: { wallet: { id: walletId, balance }, transaction },
+  })
+  const makeTx = (walletId: string, amount: number, type: TransactionType, meta: any) =>
+    pushTx({
+      id: `tx-${transactions.length + 1}`,
+      walletId,
+      brandId: '106',
+      amount,
+      type,
+      status: TransactionStatus.COMPLETED,
+      referenceType: 'payment',
+      ...meta,
+    })
   const findTxByKey = async ({ where }: any = {}) =>
-    transactions.find((t) => t.idempotencyKey === where?.idempotencyKey) ?? null
+    transactions.find((t) =>
+      where?.idempotencyKey
+        ? t.idempotencyKey === where.idempotencyKey
+        : t.referenceType === where?.referenceType &&
+          t.referenceId === where?.referenceId &&
+          t.type === where?.type &&
+          t.status === where?.status,
+    ) ?? null
   const walletService: any = {
     findDebitByIdempotencyKey: jest.fn(
       async (walletId: string, key: string) =>
@@ -85,53 +118,20 @@ function createWalletAndDataSourceDoubles(
     ),
     debit: jest.fn(async (walletId: string, amount: number, meta: any) => {
       walletBalances.set(walletId, (walletBalances.get(walletId) ?? 0) - amount)
-      const tx = {
-        id: `tx-${transactions.length + 1}`,
-        walletId,
-        amount,
-        type: TransactionType.DEBIT,
-        status: TransactionStatus.COMPLETED,
-        referenceType: meta?.referenceType ?? 'payment',
-        referenceId: meta?.referenceId ?? null,
-        idempotencyKey: meta?.idempotencyKey ?? null,
-      }
-      transactions.push(tx)
-      return { data: { transaction: tx } }
+      return { data: { transaction: makeTx(walletId, amount, TransactionType.DEBIT, meta) } }
     }),
     credit: jest.fn(async (walletId: string, amount: number, meta: any) => {
       callOrder.push('wallet.credit')
-      const resolvedKey = meta?.idempotencyKey ?? null
-      const dup = resolvedKey
-        ? transactions.find((t) => t.idempotencyKey === resolvedKey)
-        : undefined
-      if (dup) {
-        return {
-          data: {
-            wallet: { id: walletId, balance: walletBalances.get(walletId) ?? 0 },
-            transaction: dup,
-          },
-        }
-      }
+      const idempotencyKey = meta?.idempotencyKey ?? null
+      const dup = idempotencyKey
+        ? transactions.find((t) => t.idempotencyKey === idempotencyKey)
+        : null
+      if (dup) return wrapTx(walletId, walletBalances.get(walletId) ?? 0, dup)
       const balanceBefore = walletBalances.get(walletId) ?? 0
       const balanceAfter = balanceBefore + amount
       walletBalances.set(walletId, balanceAfter)
-      const tx = {
-        id: `tx-${transactions.length + 1}`,
-        walletId,
-        brandId: meta?.brandId ?? '106',
-        amount,
-        balanceBefore,
-        balanceAfter,
-        type: TransactionType.CREDIT,
-        status: TransactionStatus.COMPLETED,
-        category: meta?.category ?? null,
-        description: meta?.description ?? null,
-        referenceType: meta?.referenceType ?? null,
-        referenceId: meta?.referenceId ?? null,
-        idempotencyKey: resolvedKey,
-      }
-      transactions.push(tx)
-      return { data: { wallet: { id: walletId, balance: balanceAfter }, transaction: tx } }
+      const extra = { balanceBefore, balanceAfter, ...meta, idempotencyKey }
+      return wrapTx(walletId, balanceAfter, makeTx(walletId, amount, TransactionType.CREDIT, extra))
     }),
   }
   const dataSource: any = {
@@ -176,42 +176,19 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
       callOrder,
     )
     const seedPayment = (id: string, overrides: Record<string, any> = {}) => {
-      const row = {
-        id,
-        brandId: '106',
-        userId: 'user-1',
-        walletId: 'wallet-1',
-        amount: 49000,
-        currency: 'COP',
-        status: PaymentStatus.PENDING,
-        provider: PaymentProvider.WALLET,
-        purpose: PaymentPurpose.PLAN_PURCHASE,
-        purposeId: 'dropi-roax',
-        createdAt: new Date(Date.now() - 10 * 60 * 1000),
-        ...overrides,
-      }
-      payments.set(id, row)
-      return row
+      const createdAt = new Date(Date.now() - 600_000)
+      const row = { id, ...BASE_PAYMENT, createdAt, ...overrides }
+      return (payments.set(id, row), row)
     }
     const seedSub = (id: string, brandId: string, planSlug: string, extra: any = {}) => {
-      const sub = {
-        id,
-        brandId,
-        planSlug,
-        status: SubscriptionStatus.ACTIVE,
-        provider: SubscriptionProvider.WALLET,
-        currentPeriodEnd: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
-        lastPaymentId: null,
-        autoRenew: true,
-        ...extra,
-      }
-      subscriptions.set(id, sub)
-      return sub
+      const currentPeriodEnd = new Date(Date.now() + 864_000_000)
+      const sub = { id, brandId, planSlug, ...BASE_SUB, currentPeriodEnd, ...extra }
+      return (subscriptions.set(id, sub), sub)
     }
-    const seedDebit = (paymentId: string, amount = 49000) =>
-      walletService.debit('wallet-1', amount, {
-        referenceId: paymentId,
-        idempotencyKey: `payment:${paymentId}:debit`,
+    const seedDebit = (id: string, amt = 49000) =>
+      walletService.debit('wallet-1', amt, {
+        referenceId: id,
+        idempotencyKey: `payment:${id}:debit`,
       })
 
     // R17: Collaborator doubles for audit, events, roles, and logger.
@@ -221,9 +198,7 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
         CHECKOUT_EXPIRY_HOURS: 24,
         transactionReadRepo: { findOne: jest.fn(findTxByKey) },
         auditService: {
-          log: jest.fn(
-            async (_u: string, action: string) => void callOrder.push(`audit.log:${action}`),
-          ),
+          log: jest.fn(async (_u: string, act: string) => void callOrder.push(`audit.log:${act}`)),
         },
         eventBus: {
           publishPaymentCompleted: jest.fn(),
@@ -250,23 +225,29 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
   }
 
   const seedConflictingScenario = async (state: any, paymentId: string, extraPayment: any = {}) => {
-    const tOld = new Date(Date.now() - 10 * 60 * 1000)
-    const tNewer = new Date(Date.now() - 5 * 60 * 1000)
+    const tOld = new Date(Date.now() - 600_000)
+    const tNewer = new Date(Date.now() - 300_000)
     await state.seedDebit(paymentId, 49000)
-    state.seedPayment(paymentId, {
-      brandId: '106',
-      purposeId: 'dropi-roax',
-      createdAt: tOld,
-      ...extraPayment,
-    })
+    state.seedPayment(paymentId, { createdAt: tOld, ...extraPayment })
     state.seedPayment('pay-newer-plan', {
-      brandId: '106',
       purposeId: 'growth',
       status: PaymentStatus.COMPLETED,
       createdAt: tNewer,
       paidAt: tNewer,
     })
     state.seedSub('sub-newer', '106', 'growth', { lastPaymentId: 'pay-newer-plan' })
+  }
+
+  const failFirstRefundStatusUpdate = (state: any) => {
+    const origUpdate = state.paymentRepo.update
+    // R17: Simulate a failed status update to REFUNDED on the first sweep so the next sweep retries.
+    state.paymentRepo.update = jest.fn(async (criteria: any, partial: any) => {
+      if (partial?.status === PaymentStatus.REFUNDED) {
+        state.paymentRepo.update = origUpdate
+        return { affected: 0 }
+      }
+      return origUpdate(criteria, partial)
+    })
   }
 
   it('refunds a debited wallet payment when subscription is on another plan from a newer payment', async () => {
@@ -329,16 +310,7 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
     // R15: red if getWalletRefundIdempotencyKey is not passed to walletService.credit.
     const state = buildState()
     await seedConflictingScenario(state, 'pay-idem-refund', { status: PaymentStatus.PROCESSING })
-
-    const origUpdate = state.paymentRepo.update
-    // R17: Simulate a failed status update to REFUNDED on the first sweep so the next sweep retries.
-    state.paymentRepo.update = jest.fn(async (criteria: any, partial: any) => {
-      if (partial?.status === PaymentStatus.REFUNDED) {
-        state.paymentRepo.update = origUpdate
-        return { affected: 0 }
-      }
-      return origUpdate(criteria, partial)
-    })
+    failFirstRefundStatusUpdate(state)
 
     const first = await state.checkoutService.reconcileWalletPayment('pay-idem-refund')
     expect(first).toEqual({ outcome: 'noop', status: PaymentStatus.PROCESSING })
@@ -396,5 +368,31 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
       'growth',
       expect.any(Date),
     )
+  })
+
+  it('marks the payment refunded instead of completed when its refund credit was already recorded before the brand returned to the same plan', async () => {
+    // R15: red if reconcileWalletPayment ignores an already recorded payment:<id>:refund credit when the subscription is back on the same plan.
+    const state = buildState()
+    await seedConflictingScenario(state, 'pay-rebound', { status: PaymentStatus.PROCESSING })
+    failFirstRefundStatusUpdate(state)
+
+    const first = await state.checkoutService.reconcileWalletPayment('pay-rebound')
+    expect(first).toEqual({ outcome: 'noop', status: PaymentStatus.PROCESSING })
+    expect(state.walletBalances.get('wallet-1')).toBe(100000)
+
+    const tRepurchase = new Date(Date.now() - 120_000)
+    state.seedPayment('pay-rebound-same', {
+      status: PaymentStatus.COMPLETED,
+      createdAt: tRepurchase,
+      paidAt: tRepurchase,
+    })
+    state.seedSub('sub-newer', '106', 'dropi-roax', { lastPaymentId: 'pay-rebound-same' })
+
+    await state.tasksService.reconcileWalletPayments()
+
+    expect(state.payments.get('pay-rebound')!.status).toBe(PaymentStatus.REFUNDED)
+    expect(state.transactions.filter((t: any) => t.type === TransactionType.CREDIT)).toHaveLength(1)
+    expect(state.walletBalances.get('wallet-1')).toBe(100000)
+    expect(state.clientRoles.assignPlanToBrand).not.toHaveBeenCalled()
   })
 })
