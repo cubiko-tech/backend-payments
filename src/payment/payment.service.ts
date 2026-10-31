@@ -23,34 +23,6 @@ export class PaymentService {
   ) {}
 
   /**
-   * Crear un checkout de pago.
-   * Registra el pago en estado PENDING y genera la URL de checkout si aplica.
-   */
-  async createCheckout(data: Partial<Payment>) {
-    try {
-      const payment = this.paymentRepository.create({
-        brandId: data.brandId,
-        userId: data.userId,
-        idempotencyKey: data.idempotencyKey,
-        walletId: data.walletId,
-        provider: data.provider,
-        amount: data.amount,
-        currency: data.currency,
-        purpose: data.purpose,
-        purposeId: data.purposeId,
-        metadata: data.metadata,
-        status: PaymentStatus.PENDING,
-      })
-      const saved = await this.paymentRepository.save(payment)
-      this.logger.log(`Checkout creado: ${saved.id} para marca ${saved.brandId}`)
-      return { data: saved }
-    } catch (error) {
-      this.logger.error(`Error al crear checkout: ${error.message}`)
-      return { error: error.message }
-    }
-  }
-
-  /**
    * Obtener un pago por ID
    */
   async getPaymentById(id: string) {
