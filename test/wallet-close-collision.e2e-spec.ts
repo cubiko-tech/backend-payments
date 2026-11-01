@@ -87,7 +87,7 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
     return { gate, purchase, payment: await findPaymentByKey(a.dataSource, key) }
   }
 
-  it('E6: two first purchases of one plan at once both apply, with no index collision', async () => {
+  it('E6: two first purchases of one plan at once both apply without an index collision', async () => {
     // R15: red if the close drops its brand lock: the second purchase no longer waits for the first.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const { gate, purchase } = await buyAndParkHoldingBrandLock(wallet.id, 'loc99-e6-a')
@@ -216,7 +216,7 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE)
   })
 
-  it('E9: an older and a newer purchase that both fail to close end credited, with no plan', async () => {
+  it('E9: an older and a newer purchase that both fail to close end credited and planless', async () => {
     // R15: red if the sweep always rethrows: the newer purchase never leaves processing.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     failSubscriptionSave(a)
