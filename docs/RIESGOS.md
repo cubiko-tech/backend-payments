@@ -224,12 +224,12 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   más nuevo que éste (`lastTime > paymentTime`, esté la suscripción `active` o `expired`), y durante la
   devolución `walletService.credit` falla (p. ej. wallet `closed` o fallo de base); (b) un pago
   `wallet` con débito asentado en `pending` o `processing` cuando durante el barrido
-  `createOrRenewSubscription` (`src/checkout/wallet-payment-close.ts:171`) lanza excepción; (c) `assignPlanInRoles`
+  `createOrRenewSubscription` (`src/checkout/wallet-payment-close.ts:184`) lanza excepción; (c) `assignPlanInRoles`
   (`src/checkout/checkout.service.ts:1932-1940`) cuando `clientRoles.assignPlanToBrand`
   (`src/client/client-roles.service.ts:314-321`) recibe respuesta no exitosa o excepción en
   `callRolesApi` (`:378-384`) y devuelve `false` sin relanzar error;
   (d) un proceso que muere entre el commit de `closeWalletPayment`
-  (`src/checkout/wallet-payment-close.ts:144-195`) y `assignPlanInRoles`
+  (`src/checkout/wallet-payment-close.ts:157-208`) y `assignPlanInRoles`
   (`src/checkout/checkout.service.ts:570-576`, `src/checkout/wallet-payment-reconciliation.ts:411-417`);
   (e) un pago `failed` con débito que lleva más de 30 días (`WALLET_FAILED_DEBIT_LOOKBACK_MS`) sin poder
   acreditarse; (f) dos compras de planes distintos que se solapan y la más vieja cierra primero
@@ -239,7 +239,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   `refundSupersededWalletPayment` (`src/checkout/wallet-payment-reconciliation.ts:304-374`) registra
   `error` (`:319-322`, `:338-340`) y deja la fila en `processing` para reintentarla cada 5 minutos sin
   tope mientras la wallet siga sin aceptar créditos; (b) ante excepción de `createOrRenewSubscription`
-  (`src/checkout/wallet-payment-close.ts:171`), la fila permanece en `processing` sin marcar `completed` y
+  (`src/checkout/wallet-payment-close.ts:184`), la fila permanece en `processing` sin marcar `completed` y
   `reconcileWalletPayments`
   (`src/tasks/tasks.service.ts:620-670`) la reintenta cada 5 minutos sin tope de reintentos mientras la
   excepción persista; (c) como `callRolesApi` captura el fallo de `backend-roles`
@@ -270,7 +270,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   estado (`src/wallet/wallet.service.ts:223-251`), un `failed` con débito se acredita sin pasar por un estado
   completable (`src/checkout/wallet-payment-reconciliation.ts:517-526`), el cierre corre bajo un candado por
   marca en una sola transacción y gana el `createdAt` más nuevo
-  (`src/checkout/wallet-payment-close.ts:144-195`), y un pago con débito no se cancela
+  (`src/checkout/wallet-payment-close.ts:157-208`), y un pago con débito no se cancela
   (`src/payment/payment.service.ts:81-126`). Abierto sobre la convergencia sin cota cuando
   `walletService.credit` o `createOrRenewSubscription` fallan de forma permanente, cuando `callRolesApi`
   absorbe un fallo de `backend-roles`, y sobre (d) y (e), que hoy no tienen quien los recupere; los cierra un
