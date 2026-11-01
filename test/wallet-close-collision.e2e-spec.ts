@@ -129,6 +129,28 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
   })
 
+  it('E2d: giving up does not credit a purchase handed back and bought again, its plan applied', async () => {
+    // R15: red if isPlanAppliedByPayment stops reading the events: the sweep credits the purchase.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const parked = await buyAndParkHoldingBrandLock(wallet.id, 'loc99-e2d-a', 'dropi-roax')
+    const rival = buy(b, wallet.id, 'loc99-e2d-b', 'dropi-roax-plus')
+    expect(await someoneWaitsOnAdvisoryLock(a.dataSource)).toBe(true)
+    parked.gate.release()
+    await Promise.all([parked.purchase, rival])
+    const handedBack = parked.payment
+    expect(await statusOf(a.dataSource, handedBack.id)).toBe(PaymentStatus.PROCESSING)
+    await buy(a, wallet.id, 'loc99-e2d-c', 'dropi-roax')
+    const again = await findPaymentByKey(a.dataSource, 'loc99-e2d-c')
+    expect((await subscription())?.lastPaymentId).toBe(again.id)
+    // R17: A close that keeps failing is a database failure that cannot be provoked on demand.
+    jest.spyOn(b.checkout as any, 'closeWalletPayment').mockRejectedValue(new Error(CLOSE_ERROR))
+
+    await expect(sweepAfter(b, handedBack.id, TWO_HOURS_MS)).rejects.toThrow(CLOSE_ERROR)
+
+    expect(await statusOf(a.dataSource, handedBack.id)).toBe(PaymentStatus.PROCESSING)
+    expect(await creditsOf(handedBack.id)).toHaveLength(0)
+  })
+
   it('E7: a real unique index collision against an external purchase ends with the plan', async () => {
     // R15: red if a failed close does not hand over: the payment stays pending, not processing.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
