@@ -63,7 +63,6 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
   let createCheckoutMock: jest.Mock
   let assignPlanToBrandMock: jest.Mock
   const envSnapshot = [process.env.ACCESS_SERVER, process.env.JWT_SECRET]
-
   const cleanupBrandData = async () => {
     if (!realDataSource?.isInitialized) return
     for (const sql of [

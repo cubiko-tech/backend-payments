@@ -193,7 +193,6 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
         referenceId: id,
         idempotencyKey: `payment:${id}:debit`,
       })
-
     // R17: Collaborator doubles for audit, events, roles, and logger.
     const state: any = Object.assign(
       {
