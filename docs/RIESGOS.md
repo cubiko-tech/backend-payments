@@ -177,8 +177,9 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: (a) un reintento con la misma `Idempotency-Key` cuando el intento anterior alcanzó
   `status = 'completed'` y falló después del cierre, en la lectura de la suscripción o en
   `auditService.log`, sin `metadata.checkoutResult` (`src/checkout/checkout.service.ts:584-599`), si el
-  proceso cayó antes del `update` final con `checkoutResult` (`:601-610`), o cuando un pago externo fue completado por webhook o reconciliación sin
-  haber guardado `metadata.checkoutResult`; (b) un reintento con la misma `Idempotency-Key` sobre un pago
+  proceso cayó antes del `update` final con `checkoutResult` (`:601-610`), o cuando un pago externo fue
+  completado por webhook o reconciliación sin haber guardado `metadata.checkoutResult`; (b) un reintento
+  con la misma `Idempotency-Key` sobre un pago
   externo `failed` con `metadata.idempotencyFingerprint` y sin `providerPaymentId`; (c) un reintento en
   `POST /checkout` sobre una fila `payments` que la ruta retirada `POST /payment/checkout` (eliminada en
   `c77a594`, LOC-93) ya hubiera escrito antes de su retiro con `metadata.idempotencyFingerprint`,
@@ -188,7 +189,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   (`src/checkout/checkout-idempotency.ts:58-67`, `:182-187`) de forma permanente para esa llave, con el
   cobro ya efectuado y sin camino de recuperación desde la misma `Idempotency-Key`; (b) el reintento de un
   pago externo `failed` sin `providerPaymentId` invoca otra vez `provider.createCheckout`
-  (`src/checkout/checkout.service.ts:604-614`), donde en Dropi (`src/provider/dropi/dropi.provider.ts:57`,
+  (`src/checkout/checkout.service.ts:680-690`), donde en Dropi (`src/provider/dropi/dropi.provider.ts:57`,
   `:71-90`) se ejecuta `POST /charges` con timeout de 15 s sin llave de idempotencia hacia el proveedor:
   si el proveedor creó el cobro y la respuesta venció antes de guardar `providerPaymentId`, el reintento
   deja un segundo cobro pendiente (hipótesis, R14: no se ejercitó contra Dropi y no consta que cree el
@@ -241,8 +242,9 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   (`src/checkout/wallet-payment-close.ts:186`), la fila permanece en `processing` y
   `reconcileWalletPayments`
   (`src/tasks/tasks.service.ts:620-670`) la reintenta cada 5 minutos hasta `WALLET_CLOSE_GIVE_UP_MS`,
-  1 h desde `createdAt`, y ahí se acredita (ver el riesgo siguiente); (c) como `callRolesApi` captura el fallo de `backend-roles`
-  (`src/client/client-roles.service.ts:378-384`), si `backend-roles` falla durante la reconciliación el
+  1 h desde `createdAt`, y ahí se acredita (ver el riesgo siguiente); (c) como `callRolesApi` captura el
+  fallo de `backend-roles` (`src/client/client-roles.service.ts:378-384`), si `backend-roles` falla
+  durante la reconciliación el
   pago pasa a `completed` con la suscripción creada en `backend-payments` pero sin el plan asignado en
   `backend-roles`;
   (d) el pago queda `completed` con la suscripción guardada y sin el plan en `backend-roles`, y el barrido ya
@@ -269,7 +271,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   estado (`src/wallet/wallet.service.ts:223-251`), un `failed` con débito se acredita sin pasar por un estado
   completable (`src/checkout/wallet-payment-reconciliation.ts:566-575`), el cierre corre bajo un candado por
   marca en una sola transacción, gana el `createdAt` más nuevo y `lastPaymentId` no retrocede
-  (`src/checkout/wallet-payment-close.ts:159-210`, `src/checkout/checkout.service.ts:1486-1498`), y un pago con débito no se cancela
+  (`src/checkout/wallet-payment-close.ts:159-210`, `src/checkout/checkout.service.ts:1486-1498`), y un pago
+  con débito no se cancela
   (`src/payment/payment.service.ts:81-126`). Abierto sobre la convergencia sin cota cuando
   `walletService.credit` falla de forma permanente, cuando `callRolesApi`
   absorbe un fallo de `backend-roles`, y sobre (d) y (e), que hoy no tienen quien los recupere; los cierra un
