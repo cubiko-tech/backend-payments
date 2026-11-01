@@ -1816,7 +1816,20 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         walletReadRepo as any,
         createMockRepo() as any,
         createMockRepo() as any,
-        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+        {
+          // R17: Doubled runner; the payment lock and its status re-read are proven in the e2e.
+          createQueryRunner: jest.fn(() => ({
+            ...mockQueryRunner,
+            query: jest.fn(),
+            manager: {
+              ...mockQueryRunner.manager,
+              findOne: (entity: unknown, opts: unknown) =>
+                entity === Payment
+                  ? Promise.resolve({ status: PaymentStatus.PENDING })
+                  : mockQueryRunner.manager.findOne(entity, opts),
+            },
+          })),
+        } as any,
       )
 
       walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))

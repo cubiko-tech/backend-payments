@@ -9,6 +9,8 @@ import {
 } from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { lockPayment } from '../payment/payment-lock'
 
 @Injectable()
 export class WalletService {
@@ -217,6 +219,11 @@ export class WalletService {
     await queryRunner.startTransaction()
 
     try {
+      const paymentId = txData.referenceType === 'payment' ? txData.referenceId : undefined
+      if (paymentId) {
+        await lockPayment(queryRunner, paymentId)
+      }
+
       // Bloqueo pesimista para evitar condiciones de carrera
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
@@ -228,6 +235,16 @@ export class WalletService {
         if (existing) {
           await queryRunner.rollbackTransaction()
           return { data: existing }
+        }
+      }
+
+      if (paymentId) {
+        const payment = await queryRunner.manager.findOne(Payment, { where: { id: paymentId } })
+        if (payment?.status !== PaymentStatus.PENDING) {
+          throw new RequestException(
+            { code: 'WALLET_DEBIT_FAILED', message: 'Payment is no longer pending' },
+            HttpStatus.INTERNAL_SERVER_ERROR,
+          )
         }
       }
 

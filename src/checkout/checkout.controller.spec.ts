@@ -15,7 +15,7 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { DianService } from '../dian/dian.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { InvoiceService } from '../invoice/invoice.service'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { PaymentAttempt } from '../payment/entities/paymentAttempt.entity'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ProviderFactory } from '../provider/provider.factory'
@@ -560,7 +560,20 @@ describe('POST /checkout brand membership gate', () => {
         { findOne: jest.fn(() => Promise.resolve(brandBWallet)) } as any,
         createMockRepo() as any,
         createMockRepo() as any,
-        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+        {
+          // R17: Doubled runner; the payment lock and its status re-read are proven in the e2e.
+          createQueryRunner: jest.fn(() => ({
+            ...mockQueryRunner,
+            query: jest.fn(),
+            manager: {
+              ...mockQueryRunner.manager,
+              findOne: (entity: unknown, opts: unknown) =>
+                entity === Payment
+                  ? Promise.resolve({ status: PaymentStatus.PENDING })
+                  : mockQueryRunner.manager.findOne(entity, opts),
+            },
+          })),
+        } as any,
       )
 
       walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
