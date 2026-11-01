@@ -138,6 +138,43 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
   })
 
+  it('R2: a retry does not revive an older purchase over a newer one of another plan', async () => {
+    // R15: red if the retry rewrites createdAt of a debited payment: it passes for the newest.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const older = await failWithDebit(wallet.id, 'loc97-r2-a')
+    await b.checkout.processCheckout(planCheckout(BRAND_ID, wallet.id, 'loc97-r2-b', 'growth'))
+    const newer = await findPaymentByKey(a.dataSource, 'loc97-r2-b')
+
+    await expect(retry(wallet.id, 'loc97-r2-a')).rejects.toMatchObject(LOST)
+    await b.tasks.reconcileWalletPayments()
+
+    expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, older.id, TransactionType.DEBIT)).toHaveLength(1)
+    expect(await movements(a.dataSource, older.id, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await statusOf(a.dataSource, newer.id)).toBe(PaymentStatus.COMPLETED)
+    const subscription = a.dataSource.getRepository(Subscription)
+    expect(await subscription.findOneBy({ brandId: BRAND_ID })).toMatchObject({
+      planSlug: 'growth',
+      lastPaymentId: newer.id,
+    })
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
+  })
+
+  it('R2b: a retry over a newer purchase of the same plan completes as an extension', async () => {
+    // R15: red if the close treats the same plan as a conflict: the retry is refused.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const older = await failWithDebit(wallet.id, 'loc97-r2b-a')
+    await retry(wallet.id, 'loc97-r2b-b')
+
+    await expect(retry(wallet.id, 'loc97-r2b-a')).resolves.toMatchObject({ status: 'completed' })
+    await b.tasks.reconcileWalletPayments()
+
+    expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await movements(a.dataSource, older.id, TransactionType.DEBIT)).toHaveLength(1)
+    expect(await movements(a.dataSource, older.id, TransactionType.CREDIT)).toHaveLength(0)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - 2 * PLAN_PRICE)
+  })
+
   const expectNotCredited = async (paymentId: string, walletId: string, charged: number) => {
     // R17: The error log is the only trace this case leaves for whoever must look at the row.
     const logged = jest.spyOn((b.checkout as any).log, 'error')

@@ -76,13 +76,18 @@ async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityMan
 /**
  * Moves a failed payment back to `pending` for a retry, unless its money was already
  * credited back: completing it then would give the plan for free. Takes the payment
- * lock, so it waits for a sweep that is crediting the payment. Returns the claim result.
+ * lock, so it waits for a sweep that is crediting the payment.
+ *
+ * A payment with a debit keeps its `createdAt`: the purchase happened then, and a newer
+ * one still wins over it at the close. One without a debit is a new purchase from
+ * `retriedAt`. Returns the claim result and the `createdAt` the payment ended up with.
  */
 export async function claimFailedPaymentForRetry(
   paymentId: string,
   values: Partial<Payment>,
+  retriedAt: Date,
   dataSource: DataSource,
-) {
+): Promise<{ affected?: number | null; createdAt?: Date }> {
   const runner = dataSource.createQueryRunner()
   await runner.connect()
   await runner.startTransaction()
@@ -98,11 +103,19 @@ export async function claimFailedPaymentForRetry(
         HttpStatus.INTERNAL_SERVER_ERROR,
       )
     }
+    const debits = await runner.manager.query(
+      'SELECT 1 FROM transactions WHERE "idempotencyKey" = $1 LIMIT 1',
+      [`payment:${paymentId}:debit`],
+    )
+    const createdAt = debits.length > 0 ? undefined : retriedAt
     const claimed = await runner.manager
       .getRepository(Payment)
-      .update({ id: paymentId, status: PaymentStatus.FAILED }, values)
+      .update(
+        { id: paymentId, status: PaymentStatus.FAILED },
+        createdAt ? { ...values, createdAt } : values,
+      )
     await runner.commitTransaction()
-    return claimed
+    return { affected: claimed.affected, createdAt }
   } catch (error) {
     if (runner.isTransactionActive) {
       await runner.rollbackTransaction()

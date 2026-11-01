@@ -365,9 +365,9 @@ export class CheckoutService implements OnModuleInit {
         {
           status: PaymentStatus.PENDING,
           failureReason: null,
-          createdAt: retryNow,
           metadata: retryMetadata,
         },
+        retryNow,
         this.dataSource,
       )
 
@@ -388,7 +388,7 @@ export class CheckoutService implements OnModuleInit {
 
       existing.status = PaymentStatus.PENDING
       existing.failureReason = null
-      existing.createdAt = retryNow
+      existing.createdAt = claimed.createdAt ?? existing.createdAt
       existing.metadata = retryMetadata
 
       const totalAmount = Number(existing.amount)
