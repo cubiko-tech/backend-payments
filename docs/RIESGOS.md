@@ -211,11 +211,11 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Reconciliación de pagos `wallet` en `PROCESSING` ante plan posterior, fallos o checkout lento en vuelo (LOC-87, LOC-96)
 
-- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:198-251`, `:253-287`, `:289-354`,
-  `:356-447`, `:449-529` (`hasWalletPaymentRefund`, `findConflictingPlanSubscription`,
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:198-251`, `:253-287`, `:289-359`,
+  `:361-448`, `:450-537` (`hasWalletPaymentRefund`, `findConflictingPlanSubscription`,
   `refundSupersededWalletPayment`, `completeReconciledWalletPayment`, `reconcileWalletPayment`),
-  `src/tasks/tasks.service.ts:607-645`, `:651-696` (`reconcileWalletPayments`,
-  `expirePendingCheckouts`), `src/checkout/checkout.service.ts:451-591`, `:1869-1877`
+  `src/tasks/tasks.service.ts:620-670`, `:676-721` (`reconcileWalletPayments`,
+  `expirePendingCheckouts`), `src/checkout/checkout.service.ts:452-627`, `:1927-1935`
   (`processWalletPayment`, `assignPlanInRoles`) y `src/client/client-roles.service.ts:314-321`,
   `:351-385` (`assignPlanToBrand`, `callRolesApi`)
 - **Qué lo dispara**: (a) un pago `wallet` de `plan_purchase` cuyo débito `payment:${payment.id}:debit` ya
@@ -224,44 +224,50 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   más nuevo que éste (`lastTime > paymentTime`, esté la suscripción `active` o `expired`), y durante la
   devolución `walletService.credit` falla (p. ej. wallet `closed` o fallo de base); (b) un pago
   `wallet` con débito asentado en `pending` o `processing` cuando durante el barrido
-  `createOrRenewSubscription` (`:377`) lanza excepción; (c) `assignPlanInRoles`
-  (`src/checkout/checkout.service.ts:1869-1877`) cuando `clientRoles.assignPlanToBrand`
+  `createOrRenewSubscription` (`src/checkout/wallet-payment-close.ts:82`) lanza excepción; (c) `assignPlanInRoles`
+  (`src/checkout/checkout.service.ts:1927-1935`) cuando `clientRoles.assignPlanToBrand`
   (`src/client/client-roles.service.ts:314-321`) recibe respuesta no exitosa o excepción en
-  `callRolesApi` (`:378-384`) y devuelve `false` sin relanzar error; (d) un `processWalletPayment`
-  (`src/checkout/checkout.service.ts:451-591`) cuyo proceso no murió sino que demoró más de 2 minutos
-  (`WALLET_RECONCILE_MIN_AGE_MS`) entre el commit de `walletService.debit` (`:474-487`) y
-  `paymentRepo.save(payment)` (`:557`, `:567`) mientras otro checkout más nuevo en otro plan se completó y
-  el barrido devolvió el pago antiguo a `refunded`.
+  `callRolesApi` (`:378-384`) y devuelve `false` sin relanzar error;
+  (d) un proceso que muere entre el commit de `closeWalletPayment`
+  (`src/checkout/wallet-payment-close.ts:56-106`) y `assignPlanInRoles`
+  (`src/checkout/checkout.service.ts:563-569`, `src/checkout/wallet-payment-reconciliation.ts:396-402`);
+  (e) un pago `failed` con débito que lleva más de 30 días (`WALLET_FAILED_DEBIT_LOOKBACK_MS`) sin poder
+  acreditarse.
 - **Qué rompe**: (a) si `walletService.credit` falla al devolver un pago superado por otro plan más nuevo,
-  `refundSupersededWalletPayment` (`src/checkout/wallet-payment-reconciliation.ts:289-354`) registra
-  `error` (`:299-302`, `:318-320`) y deja la fila en `processing` para reintentarla cada 5 minutos sin
+  `refundSupersededWalletPayment` (`src/checkout/wallet-payment-reconciliation.ts:289-359`) registra
+  `error` (`:304-307`, `:323-325`) y deja la fila en `processing` para reintentarla cada 5 minutos sin
   tope mientras la wallet siga sin aceptar créditos; (b) ante excepción de `createOrRenewSubscription`
-  (`:377`), la fila permanece en `processing` sin marcar `completed` y `reconcileWalletPayments`
-  (`src/tasks/tasks.service.ts:607-645`) la reintenta cada 5 minutos sin tope de reintentos mientras la
+  (`src/checkout/wallet-payment-close.ts:82`), la fila permanece en `processing` sin marcar `completed` y
+  `reconcileWalletPayments`
+  (`src/tasks/tasks.service.ts:620-670`) la reintenta cada 5 minutos sin tope de reintentos mientras la
   excepción persista; (c) como `callRolesApi` captura el fallo de `backend-roles`
   (`src/client/client-roles.service.ts:378-384`), si `backend-roles` falla durante la reconciliación el
   pago pasa a `completed` con la suscripción creada en `backend-payments` pero sin el plan asignado en
-  `backend-roles`; (d) como `processWalletPayment` no toma `acquireWalletReconcileLock` y termina con
-  `paymentRepo.save(payment)` sin condición de estado (`src/checkout/checkout.service.ts:531-567`), si se
-  reanuda después de que el barrido acreditó `payment:${payment.id}:refund` y pasó la fila a `refunded`,
-  pisa la suscripción con el plan viejo y sobrescribe `status = 'refunded'` a `'completed'` dejando el
-  plan activo con el saldo ya devuelto.
+  `backend-roles`;
+  (d) el pago queda `completed` con la suscripción guardada y sin el plan en `backend-roles`, y el barrido ya
+  no lo mira; (e) el barrido deja de seleccionarlo (`src/tasks/tasks.service.ts:620-650`) y la plata queda
+  sin devolver hasta una corrección manual.
 - **Estado**: mitigado en pérdida de pagos `wallet` con débito en `pending`/`processing`, pisado de una
   compra posterior en otro plan por el barrido, expiración y carreras entre barridos (LOC-87), y en
   devolución automática a la misma wallet cuando un pago queda superado por una compra más nueva en otro
   plan o cuando el crédito `payment:${payment.id}:refund` ya se había asentado antes de que la marca
   volviera a comprar el mismo plan (LOC-96) — `reconcileWalletPayments`
-  (`src/tasks/tasks.service.ts:607-645`) y `reconcileWalletPayment`
-  (`src/checkout/wallet-payment-reconciliation.ts:449-529`) completan bajo candado
-  `pg_advisory_xact_lock` (`:78-141`) los pagos con débito asentado escribiendo `completed` y
-  `metadata.checkoutResult` juntos (`:406-421`), acreditan el monto de vuelta a la misma wallet con llave
-  determinística `payment:${payment.id}:refund` (`:60-62`, `:305-316`), rastro en `audit_log`
-  (`wallet_payment_refunded`, `:326-343`) y transición atómica a `refunded` (`:345-353`) tanto cuando
-  `lastPaymentId` apunta a un pago más nuevo en otro plan (`:253-287`, `:512`) como cuando
+  (`src/tasks/tasks.service.ts:620-670`) y `reconcileWalletPayment`
+  (`src/checkout/wallet-payment-reconciliation.ts:450-537`) completan bajo candado
+  `pg_advisory_xact_lock` (`:80-141`) los pagos con débito asentado escribiendo `completed` y
+  `metadata.checkoutResult` después del cierre, acreditan el monto de vuelta a la misma wallet con llave
+  determinística `payment:${payment.id}:refund` (`:62-64`, `:311-321`), rastro en `audit_log`
+  (`wallet_payment_refunded`, `:331-348`) y transición atómica a `refunded` (`:350-358`) tanto cuando
+  `lastPaymentId` apunta a un pago más nuevo en otro plan (`:253-287`, `:520`) como cuando
   `hasWalletPaymentRefund` detecta que el crédito de reembolso ya existe en `transactions` (`:198-251`,
-  `:513-521`), pasan a `failed` los `pending` sin débito fuera de la ventana de 2 minutos (`:479-496`) y
-  `expirePendingCheckouts` excluye todo `pending` con débito (`src/tasks/tasks.service.ts:666-676`).
-  Abierto sobre la convergencia sin cota cuando `walletService.credit` o `createOrRenewSubscription`
-  fallan de forma permanente, cuando `callRolesApi` absorbe un fallo de `backend-roles`, y sobre la
-  carrera con un `processWalletPayment` en vuelo demorado más de 2 minutos entre el débito y `save`
-  (cedida a LOC-97).
+  `:521-530`), pasan a `failed` los `pending` sin débito fuera de la ventana de 2 minutos (`:480-497`) y
+  `expirePendingCheckouts` excluye todo `pending` con débito (`src/tasks/tasks.service.ts:691-701`).
+  La carrera con un checkout en vuelo está cerrada (LOC-97): el débito toma el candado del pago y relee su
+  estado (`src/wallet/wallet.service.ts:222-250`), un `failed` con débito se acredita sin pasar por un estado
+  completable (`src/checkout/wallet-payment-reconciliation.ts:502-505`), el cierre corre bajo un candado por
+  marca en una sola transacción y gana el `createdAt` más nuevo
+  (`src/checkout/wallet-payment-close.ts:56-106`), y un pago con débito no se cancela
+  (`src/payment/payment.service.ts:81-126`). Abierto sobre la convergencia sin cota cuando
+  `walletService.credit` o `createOrRenewSubscription` fallan de forma permanente, cuando `callRolesApi`
+  absorbe un fallo de `backend-roles`, y sobre (d) y (e), que hoy no tienen quien los recupere; los cierra un
+  barrido que reasigne el plan de los `completed` recientes y una alerta sobre (e).
