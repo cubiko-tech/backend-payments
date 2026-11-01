@@ -270,11 +270,11 @@ describe('POST /checkout brand membership gate', () => {
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
         {
           provide: getDataSourceToken('DBWrite'),
-          useValue: walletCloseDataSource({
-            payment: () => paymentRepo,
-            subscription: () => subscriptionRepo,
-            subscriptionEvent: () => subscriptionEventRepo,
-          }),
+          useValue: walletCloseDataSource(() => ({
+            paymentRepo,
+            subscriptionRepo,
+            subscriptionEventRepo,
+          })),
         },
         { provide: WalletService, useValue: walletService },
         {

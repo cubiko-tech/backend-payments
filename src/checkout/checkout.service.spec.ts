@@ -115,11 +115,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
         {
           provide: getDataSourceToken('DBWrite'),
-          useValue: walletCloseDataSource({
-            payment: () => paymentRepo,
-            subscription: () => subscriptionRepo,
-            subscriptionEvent: () => (service as any).subscriptionEventRepo,
-          }),
+          useValue: walletCloseDataSource(() => service as any),
         },
         {
           provide: WalletService,

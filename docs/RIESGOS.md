@@ -263,7 +263,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   `:521-530`), pasan a `failed` los `pending` sin débito fuera de la ventana de 2 minutos (`:480-497`) y
   `expirePendingCheckouts` excluye todo `pending` con débito (`src/tasks/tasks.service.ts:691-701`).
   La carrera con un checkout en vuelo está cerrada (LOC-97): el débito toma el candado del pago y relee su
-  estado (`src/wallet/wallet.service.ts:222-250`), un `failed` con débito se acredita sin pasar por un estado
+  estado (`src/wallet/wallet.service.ts:223-251`), un `failed` con débito se acredita sin pasar por un estado
   completable (`src/checkout/wallet-payment-reconciliation.ts:502-505`), el cierre corre bajo un candado por
   marca en una sola transacción y gana el `createdAt` más nuevo
   (`src/checkout/wallet-payment-close.ts:56-106`), y un pago con débito no se cancela

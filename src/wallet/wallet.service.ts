@@ -1,3 +1,4 @@
+// R6: One responsibility, the wallet ledger: every balance movement shares its locks and checks.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'

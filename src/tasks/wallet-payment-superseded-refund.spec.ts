@@ -7,6 +7,7 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { TransactionStatus, TransactionType } from '../transaction/entities/transaction.entity'
 import { TasksService } from './tasks.service'
+import { walletCloseManager } from '../../test/support/wallet-close-double'
 
 const beforeDate = (val: any, cutoff: any) =>
   !(cutoff instanceof Date) || new Date(val).getTime() < cutoff.getTime()
@@ -152,15 +153,7 @@ function createWalletAndDataSourceDoubles(
         commitTransaction: jest.fn(),
         rollbackTransaction: jest.fn(),
         release: jest.fn(async () => releaseGate?.()),
-        manager: {
-          query: jest.fn(async () => []),
-          getRepository: (entity: any) =>
-            ({
-              Payment: repos.paymentRepo,
-              Subscription: repos.subscriptionRepo,
-              SubscriptionEvent: repos.subscriptionEventRepo,
-            })[entity?.name as string],
-        },
+        manager: walletCloseManager(() => repos),
       }
     }),
     getRepository: jest.fn((entity: any) =>

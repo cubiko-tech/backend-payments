@@ -130,11 +130,7 @@ describe('CheckoutService idempotency recovery and guards', () => {
       subscriptionRepo as any,
       createMockRepo() as any,
       createMockRepo() as any,
-      walletCloseDataSource({
-        payment: () => paymentRepo,
-        subscription: () => subscriptionRepo,
-        subscriptionEvent: () => (service as any).subscriptionEventRepo,
-      }) as any,
+      walletCloseDataSource(() => service as any) as any,
       walletService as any,
       {
         create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),

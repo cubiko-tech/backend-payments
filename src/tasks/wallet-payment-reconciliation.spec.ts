@@ -8,6 +8,7 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { TransactionStatus, TransactionType } from '../transaction/entities/transaction.entity'
 import { TasksService } from './tasks.service'
+import { walletCloseManager } from '../../test/support/wallet-close-double'
 
 describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
   const buildState = () => {
@@ -159,15 +160,11 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
           commitTransaction: jest.fn(),
           rollbackTransaction: jest.fn(),
           release: jest.fn(async () => releaseGate?.()),
-          manager: {
-            query: jest.fn(async () => []),
-            getRepository: (entity: any) =>
-              ({
-                Payment: paymentRepo,
-                Subscription: subscriptionRepo,
-                SubscriptionEvent: subscriptionEventRepo,
-              })[entity?.name as string],
-          },
+          manager: walletCloseManager(() => ({
+            paymentRepo,
+            subscriptionRepo,
+            subscriptionEventRepo,
+          })),
         }
       }),
       getRepository: jest.fn((entity: any) =>

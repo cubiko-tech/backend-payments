@@ -1,15 +1,26 @@
 import { Payment } from '../../src/payment/entities/payment.entity'
 import { Subscription } from '../../src/subscription/entities/subscription.entity'
 
-/**
- * DataSource double for unit specs that reach the wallet close through mocked repos.
- * R17: Locks and the rollback are not modeled; the wallet-checkout-close e2e proves them.
- */
-export function walletCloseDataSource(repos: {
-  payment: () => unknown
-  subscription: () => unknown
-  subscriptionEvent: () => unknown
-}) {
+/** Repositories a wallet close asks its transaction manager for. */
+export interface WalletCloseRepos {
+  paymentRepo: unknown
+  subscriptionRepo: unknown
+  subscriptionEventRepo: unknown
+}
+
+/** R17: Transaction manager double; its rollback is proven by the wallet-checkout-close e2e. */
+export function walletCloseManager(repos: () => WalletCloseRepos) {
+  return {
+    query: jest.fn().mockResolvedValue([]),
+    getRepository: (entity: unknown) => {
+      if (entity === Payment) return repos().paymentRepo
+      return entity === Subscription ? repos().subscriptionRepo : repos().subscriptionEventRepo
+    },
+  }
+}
+
+/** R17: DataSource double for unit specs that reach the wallet close through mocked repos. */
+export function walletCloseDataSource(repos: () => WalletCloseRepos) {
   return {
     createQueryRunner: jest.fn(() => ({
       connect: jest.fn(),
@@ -18,13 +29,7 @@ export function walletCloseDataSource(repos: {
       rollbackTransaction: jest.fn(),
       release: jest.fn(),
       query: jest.fn().mockResolvedValue([]),
-      manager: {
-        query: jest.fn().mockResolvedValue([]),
-        getRepository: (entity: unknown) => {
-          if (entity === Payment) return repos.payment()
-          return entity === Subscription ? repos.subscription() : repos.subscriptionEvent()
-        },
-      },
+      manager: walletCloseManager(repos),
     })),
   }
 }
