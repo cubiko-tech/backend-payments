@@ -6,12 +6,14 @@ import {
   backdate,
   balanceOf,
   cleanBrand,
+  createGate,
   findPaymentByKey,
   movements,
   planCheckout,
   PLAN_PRICE,
   RaceInstance,
   seedWallet,
+  someoneWaitsOnAdvisoryLock,
   startInstance,
   statusOf,
   stopInstance,
@@ -19,6 +21,7 @@ import {
 
 const BRAND_ID = 'a7970002-2222-4333-8444-555555555555'
 const BALANCE = 100000
+const LOST = { response: { code: 'WALLET_DEBIT_FAILED' } }
 
 describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances, LOC-97)', () => {
   let a: RaceInstance
@@ -63,6 +66,111 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     await backdate(a.dataSource, payment.id)
     return payment
   }
+
+  const retry = (walletId: string, key: string) =>
+    a.checkout.processCheckout(planCheckout(BRAND_ID, walletId, key, 'dropi-roax'))
+
+  const expectRefundedWithoutPlan = async (paymentId: string, walletId: string) => {
+    expect(await statusOf(a.dataSource, paymentId)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, paymentId, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await balanceOf(a.dataSource, walletId)).toBe(BALANCE)
+    const subscription = a.dataSource.getRepository(Subscription)
+    expect(await subscription.findOneBy({ brandId: BRAND_ID })).toBeNull()
+  }
+
+  it('P1: a retry waits for the sweep that is crediting the payment and never completes it', async () => {
+    // R15: red if the retry stops taking the payment lock: it does not wait for the sweep.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const payment = await failWithDebit(wallet.id, 'loc97-p1')
+    const gate = createGate()
+    const credit = b.wallet.credit.bind(b.wallet)
+    // R17: Holding the sweep between its credit and its refunded write is this exact interleaving.
+    jest.spyOn(b.wallet, 'credit').mockImplementationOnce(async (...args) => {
+      const credited = await credit(...args)
+      gate.arrive()
+      await gate.wait
+      return credited
+    })
+    const sweep = b.tasks.reconcileWalletPayments()
+    await gate.reached
+
+    const retried = retry(wallet.id, 'loc97-p1')
+    const retryWaited = await someoneWaitsOnAdvisoryLock(a.dataSource)
+    gate.release()
+
+    await expect(retried).rejects.toMatchObject(LOST)
+    await sweep
+    expect(retryWaited).toBe(true)
+    await expectRefundedWithoutPlan(payment.id, wallet.id)
+  })
+
+  it('P2: a retry after a credit that lost its response does not complete the payment', async () => {
+    // R15: red if the retry stops looking at the credit: the plan comes free with the money back.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const payment = await failWithDebit(wallet.id, 'loc97-p2')
+    const credit = b.wallet.credit.bind(b.wallet)
+    // R17: A lost response after the commit cannot be provoked on demand with a real connection.
+    jest.spyOn(b.wallet, 'credit').mockImplementationOnce(async (...args) => {
+      await credit(...args)
+      throw new Error('connection lost after commit')
+    })
+    await b.tasks.reconcileWalletPayments()
+    expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.FAILED)
+
+    await expect(retry(wallet.id, 'loc97-p2')).rejects.toMatchObject(LOST)
+    await backdate(a.dataSource, payment.id)
+    await b.tasks.reconcileWalletPayments()
+
+    await expectRefundedWithoutPlan(payment.id, wallet.id)
+  })
+
+  it('P3: a retry before any credit completes on the same debit, and the sweep leaves it', async () => {
+    // R15: red if the retry is refused for having a debit: the buyer never gets the plan.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const payment = await failWithDebit(wallet.id, 'loc97-p3')
+
+    await expect(retry(wallet.id, 'loc97-p3')).resolves.toMatchObject({ status: 'completed' })
+    await b.tasks.reconcileWalletPayments()
+
+    expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await movements(a.dataSource, payment.id, TransactionType.DEBIT)).toHaveLength(1)
+    expect(await movements(a.dataSource, payment.id, TransactionType.CREDIT)).toHaveLength(0)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
+  })
+
+  const expectNotCredited = async (paymentId: string, walletId: string, charged: number) => {
+    // R17: The error log is the only trace this case leaves for whoever must look at the row.
+    const logged = jest.spyOn((b.checkout as any).log, 'error')
+    await a.dataSource.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [paymentId])
+    await backdate(a.dataSource, paymentId)
+
+    await b.tasks.reconcileWalletPayments()
+
+    expect(await statusOf(a.dataSource, paymentId)).toBe(PaymentStatus.FAILED)
+    expect(await movements(a.dataSource, paymentId, TransactionType.CREDIT)).toHaveLength(0)
+    expect(await balanceOf(a.dataSource, walletId)).toBe(BALANCE - charged)
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining(paymentId))
+  }
+
+  it('P4: does not credit a failed payment the subscription names as its last payment', async () => {
+    // R15: red if the sweep stops comparing lastPaymentId: it credits a plan already applied.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    await retry(wallet.id, 'loc97-p4')
+    const payment = await findPaymentByKey(a.dataSource, 'loc97-p4')
+    await a.dataSource.query(`DELETE FROM subscription_events WHERE "paymentId" = $1`, [payment.id])
+
+    await expectNotCredited(payment.id, wallet.id, PLAN_PRICE)
+  })
+
+  it('P4b: does not credit a failed payment that only a subscription event names', async () => {
+    // R15: red if the sweep stops looking at the subscription event: it credits an applied plan.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    await retry(wallet.id, 'loc97-p4b-a')
+    await retry(wallet.id, 'loc97-p4b-b')
+    const payment = await findPaymentByKey(a.dataSource, 'loc97-p4b-a')
+
+    await expectNotCredited(payment.id, wallet.id, 2 * PLAN_PRICE)
+  })
 
   it('E3: credits a failed payment with a debit once, restores the balance and leaves one log', async () => {
     // R15: red if the sweep skips failed payments again: the money stays debited.

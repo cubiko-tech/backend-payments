@@ -1,6 +1,13 @@
-import { DataSource, EntityManager, In } from 'typeorm'
+import { HttpStatus } from '@nestjs/common'
+import { DataSource, EntityManager } from 'typeorm'
 
-import { Payment, PaymentPurpose, PaymentStatus } from '../payment/entities/payment.entity'
+import {
+  Payment,
+  PaymentProvider,
+  PaymentPurpose,
+  PaymentStatus,
+} from '../payment/entities/payment.entity'
+import { lockPayment } from '../payment/payment-lock'
 import { RequestException } from '../shared/exception/request.exception'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import type { CheckoutRequest } from './checkout.service'
@@ -44,14 +51,95 @@ async function hasNewerDebitedPurchase(payment: Payment, manager: EntityManager)
 }
 
 /**
+ * Hands back to the sweep an older purchase of another plan that closed while this one
+ * was already open: they overlapped, so the newer wins and the sweep credits the older.
+ * Purchases that did not overlap are plain plan changes and keep their money spent.
+ */
+async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityManager) {
+  await manager.query(
+    `UPDATE payments p SET status = $1
+     FROM subscriptions s
+     WHERE s."brandId" = $2 AND p.id = s."lastPaymentId" AND p.status = $3 AND p.provider = $4
+       AND p.purpose = $5 AND p."purposeId" <> $6 AND p."paidAt" > $7 AND p."createdAt" < $7`,
+    [
+      PaymentStatus.PROCESSING,
+      payment.brandId,
+      PaymentStatus.COMPLETED,
+      PaymentProvider.WALLET,
+      PaymentPurpose.PLAN_PURCHASE,
+      payment.purposeId,
+      payment.createdAt,
+    ],
+  )
+}
+
+/**
+ * Moves a failed payment back to `pending` for a retry, unless its money was already
+ * credited back: completing it then would give the plan for free. Takes the payment
+ * lock, so it waits for a sweep that is crediting the payment. Returns the claim result.
+ */
+export async function claimFailedPaymentForRetry(
+  paymentId: string,
+  values: Partial<Payment>,
+  dataSource: DataSource,
+) {
+  const runner = dataSource.createQueryRunner()
+  await runner.connect()
+  await runner.startTransaction()
+  try {
+    await lockPayment(runner, paymentId)
+    const credits = await runner.manager.query(
+      'SELECT 1 FROM transactions WHERE "idempotencyKey" = $1 LIMIT 1',
+      [`payment:${paymentId}:refund`],
+    )
+    if (credits.length > 0) {
+      throw new WalletCheckoutLostError(
+        { code: 'WALLET_DEBIT_FAILED', message: `Payment ${paymentId} was credited back` },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      )
+    }
+    const claimed = await runner.manager
+      .getRepository(Payment)
+      .update({ id: paymentId, status: PaymentStatus.FAILED }, values)
+    await runner.commitTransaction()
+    return claimed
+  } catch (error) {
+    if (runner.isTransactionActive) {
+      await runner.rollbackTransaction()
+    }
+    throw error
+  } finally {
+    await runner.release()
+  }
+}
+
+/** Reads a payment once any sweep working on it has finished, since it holds this lock. */
+export async function readPaymentAfterSweep(paymentId: string, dataSource: DataSource) {
+  const runner = dataSource.createQueryRunner()
+  await runner.connect()
+  await runner.startTransaction()
+  try {
+    await lockPayment(runner, paymentId)
+    return await runner.manager.getRepository(Payment).findOne({ where: { id: paymentId } })
+  } finally {
+    if (runner.isTransactionActive) {
+      await runner.rollbackTransaction()
+    }
+    await runner.release()
+  }
+}
+
+/**
  * Closes a debited wallet payment under the per-brand lock: moves it to `completed`
  * and saves the subscription in one transaction on one connection, so no HTTP call
  * and no second connection may happen inside. Across purchases of different plans,
  * the newest `createdAt` wins whatever the finishing order.
  *
  * Returns `superseded` when a newer purchase wins, leaving the payment untouched for
- * the sweep to credit, and `already_closed` when it is no longer open. Throws, with
- * nothing written, if saving the subscription fails.
+ * the sweep to credit, and `already_closed` when it left the status the caller holds
+ * (`pending` for a checkout, `processing` for the sweep that claimed it), so a checkout
+ * never completes a payment the sweep owns. Throws, with nothing written, if saving the
+ * subscription fails.
  */
 export async function closeWalletPayment(
   payment: Payment,
@@ -76,6 +164,7 @@ export async function closeWalletPayment(
         await runner.rollbackTransaction()
         return { outcome: 'superseded' }
       }
+      await yieldOverlappedOlderPurchase(payment, runner.manager)
     }
 
     const closed = isPlanPurchase
@@ -84,7 +173,7 @@ export async function closeWalletPayment(
 
     const paidAt = new Date()
     const claimed = await paymentRepo.update(
-      { id: payment.id, status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]) },
+      { id: payment.id, status: payment.status },
       { status: PaymentStatus.COMPLETED, paidAt },
     )
     if (!claimed.affected) {

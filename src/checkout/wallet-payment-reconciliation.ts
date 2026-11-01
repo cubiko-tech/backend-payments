@@ -14,6 +14,7 @@ import {
   PaymentStatus,
 } from '../payment/entities/payment.entity'
 import { Subscription } from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import {
   Transaction,
   TransactionStatus,
@@ -38,6 +39,7 @@ export const WALLET_FAILED_DEBIT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 export interface WalletPaymentReconciliationDeps {
   paymentRepo: Repository<Payment>
   subscriptionRepo?: Repository<Subscription>
+  subscriptionEventRepo?: Pick<Repository<SubscriptionEvent>, 'findOne'>
   walletService?: Pick<WalletService, 'findDebitByIdempotencyKey' | 'credit'>
   transactionReadRepo?: Repository<Transaction>
   dataSource?: DataSource
@@ -286,6 +288,19 @@ export async function findConflictingPlanSubscription(
   return lastTime > paymentTime ? existingSub : null
 }
 
+/** Whether the payment already took effect on the subscription of its brand. */
+async function isPlanAppliedByPayment(
+  payment: Payment,
+  deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'subscriptionEventRepo'>,
+): Promise<boolean> {
+  const sub = await deps.subscriptionRepo?.findOne({ where: { brandId: payment.brandId } })
+  if (sub?.lastPaymentId === payment.id) {
+    return true
+  }
+  const event = await deps.subscriptionEventRepo?.findOne({ where: { paymentId: payment.id } })
+  return !!event
+}
+
 async function refundSupersededWalletPayment(
   payment: Payment,
   conflictingSub: Subscription | null,
@@ -500,6 +515,12 @@ export async function reconcileWalletPayment(
 
     // The buyer was already told it failed, so a debit found here is only ever credited back.
     if (payment.status === PaymentStatus.FAILED) {
+      if (await isPlanAppliedByPayment(payment, deps)) {
+        deps.logger?.error(
+          `reconcileWalletPayment: failed payment ${payment.id} has a debit and its plan applied; not crediting it`,
+        )
+        return { outcome: 'noop', status: payment.status }
+      }
       const refundRecorded = await hasWalletPaymentRefund(payment, deps)
       return await refundSupersededWalletPayment(payment, null, totalAmount, deps, refundRecorded)
     }

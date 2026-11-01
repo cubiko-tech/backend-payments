@@ -5,7 +5,7 @@
  */
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, EntityManager, In, Repository } from 'typeorm'
+import { DataSource, EntityManager, Repository } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -66,7 +66,12 @@ import {
   reconcileWalletPayment as executeWalletPaymentReconciliation,
   WalletPaymentReconciliationResult,
 } from './wallet-payment-reconciliation'
-import { closeWalletPayment, WalletCheckoutLostError } from './wallet-payment-close'
+import {
+  claimFailedPaymentForRetry,
+  closeWalletPayment,
+  readPaymentAfterSweep,
+  WalletCheckoutLostError,
+} from './wallet-payment-close'
 
 /**
  * Servicio orquestador de checkout.
@@ -355,14 +360,15 @@ export class CheckoutService implements OnModuleInit {
       const retryMetadata = { ...(existing.metadata || {}) }
       delete retryMetadata.checkoutResult
 
-      const claimed = await this.paymentRepo.update(
-        { id: existing.id, status: PaymentStatus.FAILED },
+      const claimed = await claimFailedPaymentForRetry(
+        existing.id,
         {
           status: PaymentStatus.PENDING,
           failureReason: null,
           createdAt: retryNow,
           metadata: retryMetadata,
         },
+        this.dataSource,
       )
 
       if (claimed && claimed.affected === 0) {
@@ -545,10 +551,11 @@ export class CheckoutService implements OnModuleInit {
         throw this.walletCheckoutLostError(payment.id)
       }
       if (closed.outcome === 'already_closed') {
-        if (closed.payment?.status !== PaymentStatus.COMPLETED) {
+        const settled = await readPaymentAfterSweep(payment.id, this.dataSource)
+        if (settled?.status !== PaymentStatus.COMPLETED) {
           throw this.walletCheckoutLostError(payment.id)
         }
-        return (closed.payment.metadata?.checkoutResult as CheckoutResult) ?? result
+        return (settled.metadata?.checkoutResult as CheckoutResult) ?? result
       }
 
       payment.status = PaymentStatus.COMPLETED
@@ -581,10 +588,7 @@ export class CheckoutService implements OnModuleInit {
       if (!(error instanceof WalletCheckoutLostError)) {
         // Marks COMPLETED without checkoutResult after the debit so retries return 409.
         await this.paymentRepo.update(
-          {
-            id: payment.id,
-            status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
-          },
+          { id: payment.id, status: PaymentStatus.PENDING },
           { status: PaymentStatus.COMPLETED, paidAt: new Date() },
         )
       }
@@ -991,6 +995,7 @@ export class CheckoutService implements OnModuleInit {
       {
         paymentRepo: this.paymentRepo,
         subscriptionRepo: this.subscriptionRepo,
+        subscriptionEventRepo: this.subscriptionEventRepo,
         walletService: this.walletService,
         dataSource: this.dataSource,
         inProcessLocks: this.walletReconcileLocks,

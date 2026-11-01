@@ -68,8 +68,48 @@ describe('Closing a wallet checkout against other purchases and the sweep (Postg
   const currentPlan = () =>
     a.dataSource.getRepository(Subscription).findOneBy({ brandId: BRAND_ID })
 
-  it('E5: does not complete a payment the sweep already refunded for a newer purchase', async () => {
-    // R15: red if the superseded check is removed from the close: the old plan comes back.
+  /** Parks a purchase inside its close, holding the brand lock, past the superseded check. */
+  const buyAndParkInsideClose = async (walletId: string, key: string, plan: string) => {
+    const gate = createGate()
+    parkFirstCall(a.checkout, 'createOrRenewSubscription', gate)
+    const purchase = buy(a, walletId, key, plan)
+    await gate.reached
+    return { gate, purchase, payment: await findPaymentByKey(a.dataSource, key) }
+  }
+
+  const waitForStatus = async (paymentId: string, status: PaymentStatus) => {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && (await statusOf(a.dataSource, paymentId)) !== status) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+
+  it('E5: refunds a payment the sweep claimed while its checkout was about to complete it', async () => {
+    // R15: red if the close accepts processing again: it ends completed with one credit.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const old = await buyAndParkInsideClose(wallet.id, 'loc97-e5-a', 'dropi-roax')
+    const newer = buy(b, wallet.id, 'loc97-e5-b', 'growth')
+    await someoneWaitsOnAdvisoryLock(a.dataSource)
+    await backdate(a.dataSource, old.payment.id)
+    const sweep = b.tasks.reconcileWalletPayments()
+    await waitForStatus(old.payment.id, PaymentStatus.PROCESSING)
+
+    old.gate.release()
+
+    await expect(old.purchase).rejects.toMatchObject(LOST)
+    await Promise.all([newer, sweep])
+    const newerPayment = await findPaymentByKey(a.dataSource, 'loc97-e5-b')
+    expect(await statusOf(a.dataSource, old.payment.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, old.payment.id, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await currentPlan()).toMatchObject({
+      planSlug: 'growth',
+      lastPaymentId: newerPayment.id,
+    })
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
+  })
+
+  it('E5c: does not complete a payment the sweep already refunded for a newer purchase', async () => {
+    // R15: red only with both the superseded check and the status condition removed from the close.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const old = await buyAndParkBeforeClose(a, wallet.id, 'loc97-e5-old', 'dropi-roax')
     await buy(b, wallet.id, 'loc97-e5-new', 'growth')
@@ -94,12 +134,17 @@ describe('Closing a wallet checkout against other purchases and the sweep (Postg
     await sweepOldPayment(old.payment.id)
     expect(await statusOf(a.dataSource, old.payment.id)).toBe(PaymentStatus.REFUNDED)
     await buy(b, wallet.id, 'loc97-e5b-again', 'dropi-roax')
+    const before = await currentPlan()
 
     old.gate.release()
 
     await expect(old.purchase).rejects.toMatchObject(LOST)
     expect(await statusOf(a.dataSource, old.payment.id)).toBe(PaymentStatus.REFUNDED)
     expect(await movements(a.dataSource, old.payment.id, TransactionType.CREDIT)).toHaveLength(1)
+    // R15: red if the close saves the subscription outside its transaction: the rollback misses it.
+    const after = await currentPlan()
+    expect(after!.lastPaymentId).toBe(before!.lastPaymentId)
+    expect(after!.currentPeriodEnd.toISOString()).toBe(before!.currentPeriodEnd.toISOString())
   })
 
   it('E6: gives the plan to the newer purchase over an existing subscription and refunds the older', async () => {
@@ -160,15 +205,50 @@ describe('Closing a wallet checkout against other purchases and the sweep (Postg
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
   })
 
-  it('E7b: refunds the older purchase when the newer one is debited but has not closed yet', async () => {
+  it('E7b: refunds the older purchase when the newer one overlapped its subscription insert', async () => {
+    // R15: red if the newer close stops handing back the overlapped older one: both stay charged.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const older = await buyAndParkInsideClose(wallet.id, 'loc97-e7b-a', 'dropi-roax')
+    const newer = buy(b, wallet.id, 'loc97-e7b-b', 'growth')
+    await someoneWaitsOnAdvisoryLock(a.dataSource)
+
+    older.gate.release()
+    await Promise.allSettled([older.purchase, newer])
+    await sweepOldPayment(older.payment.id)
+
+    const newerPayment = await findPaymentByKey(a.dataSource, 'loc97-e7b-b')
+    expect(await statusOf(a.dataSource, older.payment.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, older.payment.id, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await statusOf(a.dataSource, newerPayment.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await currentPlan()).toMatchObject({
+      planSlug: 'growth',
+      lastPaymentId: newerPayment.id,
+    })
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
+  })
+
+  it('E7c: keeps a non-overlapping older purchase charged when the brand changes plan', async () => {
+    // R15: red if the overlap comparison is dropped: an ordinary plan change refunds the old plan.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    await buy(a, wallet.id, 'loc97-e7c-a', 'dropi-roax')
+    const first = await findPaymentByKey(a.dataSource, 'loc97-e7c-a')
+    await buy(b, wallet.id, 'loc97-e7c-b', 'growth')
+    await sweepOldPayment(first.id)
+
+    expect(await statusOf(a.dataSource, first.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await movements(a.dataSource, first.id, TransactionType.CREDIT)).toHaveLength(0)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - 2 * PLAN_PRICE)
+  })
+
+  it('E7d: refunds the older purchase when the newer one is debited but has not closed yet', async () => {
     // R15: red if the close ignores a newer debited purchase: the older completes first and is kept.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const olderGate = createGate()
     parkFirstCall(a.wallet, 'debit', olderGate)
-    const older = buy(a, wallet.id, 'loc97-e7b-a', 'dropi-roax')
+    const older = buy(a, wallet.id, 'loc97-e7d-a', 'dropi-roax')
     await olderGate.reached
-    const olderPayment = await findPaymentByKey(a.dataSource, 'loc97-e7b-a')
-    const newer = await buyAndParkBeforeClose(b, wallet.id, 'loc97-e7b-b', 'growth')
+    const olderPayment = await findPaymentByKey(a.dataSource, 'loc97-e7d-a')
+    const newer = await buyAndParkBeforeClose(b, wallet.id, 'loc97-e7d-b', 'growth')
 
     olderGate.release()
     await expect(older).rejects.toMatchObject(LOST)
