@@ -136,15 +136,17 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
 
   const provokePostDebitCrash = async (walletId: string, key: string, planSlug = 'dropi-roax') => {
     const origSub = (checkoutService as any).createOrRenewSubscription.bind(checkoutService)
-    const origSave = paymentRepo.save.bind(paymentRepo)
+    const origUpdate = paymentRepo.update.bind(paymentRepo)
     // R17: Spy on createOrRenewSubscription and paymentRepo.save to simulate a crash post-debit.
     const subSpy = jest
       .spyOn(checkoutService as any, 'createOrRenewSubscription')
       .mockRejectedValueOnce(new Error('Simulated crash after wallet debit commit'))
-    const saveSpy = jest.spyOn(paymentRepo, 'save').mockImplementation(async (entity: any) => {
-      if (entity?.status === PaymentStatus.COMPLETED) throw new Error('Simulated process death')
-      return origSave(entity)
-    })
+    const saveSpy = jest
+      .spyOn(paymentRepo, 'update')
+      .mockImplementation(async (criteria: any, partial: any) => {
+        if (partial?.status === PaymentStatus.COMPLETED) throw new Error('Simulated process death')
+        return origUpdate(criteria, partial)
+      })
     try {
       await expect(purchasePlan(walletId, key, planSlug)).rejects.toThrow('Simulated process death')
     } finally {

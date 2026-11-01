@@ -22,6 +22,7 @@ import {
 import { WalletService } from '../wallet/wallet.service'
 import { lockPayment } from '../payment/payment-lock'
 import type { CheckoutRequest, CheckoutResult } from './checkout.service'
+import type { WalletCloseResult } from './wallet-payment-close'
 
 /**
  * Minimum age before a wallet payment is eligible for background reconciliation.
@@ -42,10 +43,7 @@ export interface WalletPaymentReconciliationDeps {
   dataSource?: DataSource
   inProcessLocks?: Map<string, Promise<void>>
   logger?: { error: (message: string) => void }
-  createOrRenewSubscription: (
-    req: CheckoutRequest,
-    payment: Payment,
-  ) => Promise<{ subscription: Subscription; extended: boolean }>
+  closeWalletPayment: (payment: Payment, req: CheckoutRequest) => Promise<WalletCloseResult>
   assignPlanInRoles: (brandId: string, planSlug: string, expiresAt?: Date) => Promise<void>
   auditService: Pick<AuditService, 'log'>
   eventBus: Pick<EventBusService, 'publishPaymentCompleted' | 'notifyPaymentSuccess'>
@@ -252,7 +250,7 @@ export async function hasWalletPaymentRefund(
   return false
 }
 
-async function findConflictingPlanSubscription(
+export async function findConflictingPlanSubscription(
   payment: Payment,
   deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'paymentRepo' | 'dataSource'>,
 ): Promise<Subscription | null> {
@@ -280,7 +278,7 @@ async function findConflictingPlanSubscription(
   if (!lastPayment) {
     return null
   }
-  const lastTime = new Date(lastPayment.paidAt ?? lastPayment.createdAt).getTime()
+  const lastTime = new Date(lastPayment.createdAt).getTime()
   const paymentTime = new Date(payment.createdAt).getTime()
   if (!Number.isFinite(lastTime) || !Number.isFinite(paymentTime)) {
     return null
@@ -380,18 +378,27 @@ async function completeReconciledWalletPayment(
     idempotencyKey: payment.idempotencyKey || undefined,
   }
 
-  if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-    const { subscription: sub, extended } = await deps.createOrRenewSubscription(req, payment)
+  const closed = await deps.closeWalletPayment(payment, req)
+  if (closed.outcome === 'superseded') {
+    return refundSupersededWalletPayment(payment, null, totalAmount, deps)
+  }
+  if (closed.outcome === 'already_closed') {
+    return { outcome: 'noop', status: closed.payment?.status ?? PaymentStatus.PROCESSING }
+  }
+
+  const sub = closed.subscription
+  if (sub) {
     result.subscriptionId = sub.id
-    if (extended && sub.currentPeriodEnd) {
+    if (closed.extended && sub.currentPeriodEnd) {
       result.renewal = 'extended'
       result.currentPeriodEnd = sub.currentPeriodEnd
     }
-
+    // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
+    const current = await deps.subscriptionRepo?.findOne({ where: { brandId: payment.brandId } })
     await deps.assignPlanInRoles(
       payment.brandId,
-      sub?.planSlug || payment.purposeId,
-      sub?.currentPeriodEnd,
+      current?.planSlug ?? sub.planSlug,
+      current?.currentPeriodEnd ?? sub.currentPeriodEnd,
     )
   }
 
@@ -410,24 +417,11 @@ async function completeReconciledWalletPayment(
     `Wallet checkout completed via reconciliation: ${payment.purpose} for ${payment.currency} ${totalAmount}`,
   )
 
-  const paidAt = new Date()
-  const updatedMetadata = payment.idempotencyKey
-    ? {
-        ...(payment.metadata || {}),
-        checkoutResult: result,
-      }
-    : payment.metadata
-
-  const completed = await deps.paymentRepo.update(
-    { id: payment.id, status: PaymentStatus.PROCESSING },
-    {
-      status: PaymentStatus.COMPLETED,
-      paidAt,
-      ...(payment.idempotencyKey ? { metadata: updatedMetadata } : {}),
-    },
-  )
-  if (!completed.affected) {
-    return { outcome: 'noop', status: PaymentStatus.COMPLETED }
+  if (payment.idempotencyKey) {
+    await deps.paymentRepo.update(
+      { id: payment.id, status: PaymentStatus.COMPLETED },
+      { metadata: { ...(payment.metadata || {}), checkoutResult: result } },
+    )
   }
 
   deps.eventBus.publishPaymentCompleted({

@@ -119,17 +119,19 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
     const origCreateOrRenew = (checkoutService as any).createOrRenewSubscription.bind(
       checkoutService,
     )
-    const origSave = paymentRepo.save.bind(paymentRepo)
+    const origUpdate = paymentRepo.update.bind(paymentRepo)
     // R17: Spy on createOrRenewSubscription and paymentRepo.save to simulate a crash post-debit.
     const subSpy = jest
       .spyOn(checkoutService as any, 'createOrRenewSubscription')
       .mockRejectedValueOnce(new Error('Simulated crash after wallet debit commit'))
-    const saveSpy = jest.spyOn(paymentRepo, 'save').mockImplementation(async (entity: any) => {
-      if (entity && entity.status === PaymentStatus.COMPLETED) {
-        throw new Error('Simulated process death before persisting COMPLETED')
-      }
-      return origSave(entity)
-    })
+    const saveSpy = jest
+      .spyOn(paymentRepo, 'update')
+      .mockImplementation(async (criteria: any, partial: any) => {
+        if (partial?.status === PaymentStatus.COMPLETED) {
+          throw new Error('Simulated process death before persisting COMPLETED')
+        }
+        return origUpdate(criteria, partial)
+      })
     try {
       await expect(
         checkoutService.processCheckout(buildCheckoutDto(walletId, key)),

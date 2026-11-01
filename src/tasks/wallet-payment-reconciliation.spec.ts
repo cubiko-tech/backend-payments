@@ -16,7 +16,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     const subscriptionEvents: any[] = []
     const transactions: any[] = []
     const walletBalances = new Map<string, number>([['wallet-1', 100000]])
-    let advisoryChain = Promise.resolve()
+    const advisoryChains = new Map<string, Promise<void>>()
 
     const seedPayment = (id: string, overrides: Record<string, any> = {}) => {
       const row = {
@@ -78,7 +78,8 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
         let affected = 0
         for (const id of ids) {
           const cur = payments.get(id)
-          if (!cur || (criteria?.status && cur.status !== criteria.status)) continue
+          const wanted = [criteria?.status?._value ?? criteria?.status].flat()
+          if (!cur || (criteria?.status && !wanted.includes(cur.status))) continue
           if (!beforeDate(cur.createdAt, criteria?.createdAt?._value)) continue
           payments.set(id, { ...cur, ...partial })
           affected++
@@ -147,17 +148,26 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
         return {
           connect: jest.fn(),
           startTransaction: jest.fn(),
-          query: jest.fn(async (sql: string) => {
+          query: jest.fn(async (sql: string, params: string[] = []) => {
             if (sql.includes('pg_advisory_xact_lock')) {
-              const prev = advisoryChain
-              advisoryChain = new Promise<void>((r) => void (releaseGate = r))
+              const prev = advisoryChains.get(params[0]) ?? Promise.resolve()
+              advisoryChains.set(params[0], new Promise<void>((r) => void (releaseGate = r)))
               await prev
             }
-            return [{ pg_advisory_xact_lock: '' }]
+            return []
           }),
           commitTransaction: jest.fn(),
           rollbackTransaction: jest.fn(),
           release: jest.fn(async () => releaseGate?.()),
+          manager: {
+            query: jest.fn(async () => []),
+            getRepository: (entity: any) =>
+              ({
+                Payment: paymentRepo,
+                Subscription: subscriptionRepo,
+                SubscriptionEvent: subscriptionEventRepo,
+              })[entity?.name as string],
+          },
         }
       }),
       getRepository: jest.fn((entity: any) =>

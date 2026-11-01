@@ -30,6 +30,7 @@ import { WalletService } from '../wallet/wallet.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { CheckoutController } from './checkout.controller'
 import { CheckoutRequest, CheckoutService } from './checkout.service'
+import { walletCloseDataSource } from '../../test/support/wallet-close-double'
 
 describe('CheckoutController', () => {
   let controller: CheckoutController
@@ -267,7 +268,14 @@ describe('POST /checkout brand membership gate', () => {
           useValue: subscriptionEventRepo,
         },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
-        { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
+        {
+          provide: getDataSourceToken('DBWrite'),
+          useValue: walletCloseDataSource({
+            payment: () => paymentRepo,
+            subscription: () => subscriptionRepo,
+            subscriptionEvent: () => subscriptionEventRepo,
+          }),
+        },
         { provide: WalletService, useValue: walletService },
         {
           provide: InvoiceService,

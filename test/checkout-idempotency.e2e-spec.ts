@@ -366,8 +366,10 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     // R15 (Mutation): saving checkoutResult before createOrRenewSubscription turns this red.
     const wallet = await createBrandWallet(100000)
     const body = buildBody({ walletId: wallet.id })
-    // R17: Spy on subRepo.save simulates a Postgres failure after the wallet debit commits.
-    jest.spyOn(subRepo, 'save').mockRejectedValueOnce(new Error('Subscription failure after debit'))
+    // R17: Failing the subscription step simulates a Postgres failure after the debit commits.
+    jest
+      .spyOn(checkoutService as any, 'createOrRenewSubscription')
+      .mockRejectedValueOnce(new Error('Subscription failure after debit'))
     expect((await postCheckout(body, 'e2e-incomplete-1')).status).toBe(500)
     expect(await txRepo.count({ where: { brandId: BRAND_ID } })).toBe(1)
     expect(await subRepo.count({ where: { brandId: BRAND_ID } })).toBe(0)

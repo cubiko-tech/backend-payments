@@ -5,6 +5,8 @@ import { Payment, PaymentStatus } from './entities/payment.entity'
 import { PaymentAttempt } from './entities/paymentAttempt.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { Transaction } from '../transaction/entities/transaction.entity'
+import { lockPayment } from './payment-lock'
 
 @Injectable()
 export class PaymentService {
@@ -77,8 +79,12 @@ export class PaymentService {
    * Cancelar un pago pendiente
    */
   async cancelPayment(id: string) {
+    const runner = this.dataSource.createQueryRunner()
+    await runner.connect()
+    await runner.startTransaction()
     try {
-      const payment = await this.paymentRepository.findOne({ where: { id } })
+      await lockPayment(runner, id)
+      const payment = await runner.manager.findOne(Payment, { where: { id } })
       if (!payment) {
         throw new RequestException(
           { code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' },
@@ -86,23 +92,36 @@ export class PaymentService {
         )
       }
 
-      if (payment.status !== PaymentStatus.PENDING) {
+      const debit = await runner.manager.findOne(Transaction, {
+        where: { idempotencyKey: `payment:${id}:debit` },
+      })
+      const failureReason = 'Cancelado por el usuario'
+      const cancelled = debit
+        ? null
+        : await runner.manager.update(
+            Payment,
+            { id, status: PaymentStatus.PENDING },
+            { status: PaymentStatus.FAILED, failureReason },
+          )
+      if (!cancelled?.affected) {
         throw new RequestException(
           { code: 'PAYMENT_NOT_CANCELLABLE', message: 'Solo se pueden cancelar pagos pendientes' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
-
-      payment.status = PaymentStatus.FAILED
-      payment.failureReason = 'Cancelado por el usuario'
-      const saved = await this.paymentRepository.save(payment)
+      await runner.commitTransaction()
 
       this.logger.log(`Pago cancelado: ${id}`)
-      return { data: saved }
+      return { data: { ...payment, status: PaymentStatus.FAILED, failureReason } }
     } catch (error) {
+      if (runner.isTransactionActive) {
+        await runner.rollbackTransaction()
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error al cancelar pago ${id}: ${error.message}`)
       return { error: error.message }
+    } finally {
+      await runner.release()
     }
   }
 }

@@ -8,6 +8,7 @@ import {
 } from '../payment/entities/payment.entity'
 import { buildIdempotencyFingerprint } from './checkout-idempotency'
 import { CheckoutRequest, CheckoutService } from './checkout.service'
+import { walletCloseDataSource } from '../../test/support/wallet-close-double'
 
 const BRAND_ID = '72a8463b-1111-4c2a-9f1a-66a0985a10e6'
 const WALLET_ID = 'w-idem-1'
@@ -89,7 +90,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     })
     paymentRepo.update.mockImplementation(async (criteria: any, partial: any) => {
       const target = storedPayments.get(criteria.id)
-      if (!target || (criteria.status && target.status !== criteria.status)) return { affected: 0 }
+      const wanted = [criteria.status?._value ?? criteria.status].flat()
+      if (!target || (criteria.status && !wanted.includes(target.status))) return { affected: 0 }
       storedPayments.set(target.id, { ...target, ...partial })
       return { affected: 1 }
     })
@@ -128,7 +130,11 @@ describe('CheckoutService idempotency recovery and guards', () => {
       subscriptionRepo as any,
       createMockRepo() as any,
       createMockRepo() as any,
-      { createQueryRunner: jest.fn() } as any,
+      walletCloseDataSource({
+        payment: () => paymentRepo,
+        subscription: () => subscriptionRepo,
+        subscriptionEvent: () => (service as any).subscriptionEventRepo,
+      }) as any,
       walletService as any,
       {
         create: jest.fn().mockResolvedValue({ data: { id: 'inv-1', invoiceNumber: 'CK-1' } }),

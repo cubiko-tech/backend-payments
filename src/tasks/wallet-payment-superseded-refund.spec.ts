@@ -49,7 +49,8 @@ function createRepoDoubles(
       let affected = 0
       for (const id of ids) {
         const cur = payments.get(id)
-        if (!cur || (criteria?.status && cur.status !== criteria.status)) continue
+        const wanted = [criteria?.status?._value ?? criteria?.status].flat()
+        if (!cur || (criteria?.status && !wanted.includes(cur.status))) continue
         if (!beforeDate(cur.createdAt, criteria?.createdAt?._value)) continue
         payments.set(id, { ...cur, ...partial })
         affected++
@@ -83,10 +84,10 @@ function createRepoDoubles(
 function createWalletAndDataSourceDoubles(
   transactions: any[],
   walletBalances: Map<string, number>,
-  subscriptionRepo: any,
+  repos: any,
   callOrder: string[],
 ) {
-  let advisoryChain = Promise.resolve()
+  const advisoryChains = new Map<string, Promise<void>>()
   const pushTx = (tx: any) => (transactions.push(tx), tx)
   const wrapTx = (walletId: string, balance: number, transaction: any) => ({
     data: { wallet: { id: walletId, balance }, transaction },
@@ -140,21 +141,30 @@ function createWalletAndDataSourceDoubles(
       return {
         connect: jest.fn(),
         startTransaction: jest.fn(),
-        query: jest.fn(async (sql: string) => {
+        query: jest.fn(async (sql: string, params: string[] = []) => {
           if (sql.includes('pg_advisory_xact_lock')) {
-            const prev = advisoryChain
-            advisoryChain = new Promise<void>((r) => void (releaseGate = r))
+            const prev = advisoryChains.get(params[0]) ?? Promise.resolve()
+            advisoryChains.set(params[0], new Promise<void>((r) => void (releaseGate = r)))
             await prev
           }
-          return [{ pg_advisory_xact_lock: '' }]
+          return []
         }),
         commitTransaction: jest.fn(),
         rollbackTransaction: jest.fn(),
         release: jest.fn(async () => releaseGate?.()),
+        manager: {
+          query: jest.fn(async () => []),
+          getRepository: (entity: any) =>
+            ({
+              Payment: repos.paymentRepo,
+              Subscription: repos.subscriptionRepo,
+              SubscriptionEvent: repos.subscriptionEventRepo,
+            })[entity?.name as string],
+        },
       }
     }),
     getRepository: jest.fn((entity: any) =>
-      entity?.name === 'Subscription' ? subscriptionRepo : { findOne: jest.fn(findTxByKey) },
+      entity?.name === 'Subscription' ? repos.subscriptionRepo : { findOne: jest.fn(findTxByKey) },
     ),
   }
   return { walletService, dataSource, findTxByKey }
@@ -172,7 +182,7 @@ describe('Superseded wallet payment refund during reconciliation (LOC-96)', () =
     const { walletService, dataSource, findTxByKey } = createWalletAndDataSourceDoubles(
       transactions,
       walletBalances,
-      repos.subscriptionRepo,
+      repos,
       callOrder,
     )
     const seedPayment = (id: string, overrides: Record<string, any> = {}) => {

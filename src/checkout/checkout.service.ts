@@ -5,7 +5,7 @@
  */
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { DataSource, EntityManager, In, Repository } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -66,6 +66,7 @@ import {
   reconcileWalletPayment as executeWalletPaymentReconciliation,
   WalletPaymentReconciliationResult,
 } from './wallet-payment-reconciliation'
+import { closeWalletPayment, WalletCheckoutLostError } from './wallet-payment-close'
 
 /**
  * Servicio orquestador de checkout.
@@ -537,19 +538,35 @@ export class CheckoutService implements OnModuleInit {
       paymentId: payment.id,
       status: 'completed',
     }
-    payment.status = PaymentStatus.COMPLETED
-    payment.paidAt = new Date()
 
     try {
-      if (req.purpose === 'plan_purchase' && req.planSlug) {
-        const { subscription: sub, extended } = await this.createOrRenewSubscription(req, payment)
+      const closed = await this.closeWalletPayment(payment, req)
+      if (closed.outcome === 'superseded') {
+        throw this.walletCheckoutLostError(payment.id)
+      }
+      if (closed.outcome === 'already_closed') {
+        if (closed.payment?.status !== PaymentStatus.COMPLETED) {
+          throw this.walletCheckoutLostError(payment.id)
+        }
+        return (closed.payment.metadata?.checkoutResult as CheckoutResult) ?? result
+      }
+
+      payment.status = PaymentStatus.COMPLETED
+      payment.paidAt = closed.paidAt
+      const sub = closed.subscription
+      if (sub) {
         result.subscriptionId = sub.id
-        if (extended && sub.currentPeriodEnd) {
+        if (closed.extended && sub.currentPeriodEnd) {
           result.renewal = 'extended'
           result.currentPeriodEnd = sub.currentPeriodEnd
         }
-
-        await this.assignPlanInRoles(req.brandId, req.planSlug, sub.currentPeriodEnd)
+        // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
+        const current = await this.subscriptionRepo.findOne({ where: { brandId: req.brandId } })
+        await this.assignPlanInRoles(
+          req.brandId,
+          current?.planSlug ?? sub.planSlug,
+          current?.currentPeriodEnd ?? sub.currentPeriodEnd,
+        )
       }
 
       await this.auditService.log(
@@ -561,9 +578,16 @@ export class CheckoutService implements OnModuleInit {
         `Checkout completado: ${req.purpose} por ${currency} ${totalAmount}`,
       )
     } catch (error) {
-      // Save COMPLETED without checkoutResult after debit so retries return 409
-      // while keeping status PENDING in-flight so concurrent reads do not fail.
-      await this.paymentRepo.save(payment)
+      if (!(error instanceof WalletCheckoutLostError)) {
+        // Marks COMPLETED without checkoutResult after the debit so retries return 409.
+        await this.paymentRepo.update(
+          {
+            id: payment.id,
+            status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
+          },
+          { status: PaymentStatus.COMPLETED, paidAt: new Date() },
+        )
+      }
       throw error
     }
 
@@ -572,8 +596,11 @@ export class CheckoutService implements OnModuleInit {
         ...(payment.metadata || {}),
         checkoutResult: result,
       }
+      await this.paymentRepo.update(
+        { id: payment.id, status: PaymentStatus.COMPLETED },
+        { metadata: payment.metadata },
+      )
     }
-    await this.paymentRepo.save(payment)
 
     // Publicar evento en Redis Streams
     this.eventBus.publishPaymentCompleted({
@@ -597,6 +624,24 @@ export class CheckoutService implements OnModuleInit {
       `Checkout completado: payment=${payment.id} brand=${req.brandId} plan=${req.planSlug}`,
     )
     return result
+  }
+
+  private closeWalletPayment(payment: Payment, req: CheckoutRequest) {
+    return closeWalletPayment(payment, req, {
+      dataSource: this.dataSource,
+      createOrRenewSubscription: (r, p, manager) => this.createOrRenewSubscription(r, p, manager),
+    })
+  }
+
+  /** The payment lost to the sweep or to a newer purchase; the sweep settles its money. */
+  private walletCheckoutLostError(paymentId: string) {
+    return new WalletCheckoutLostError(
+      {
+        code: 'WALLET_DEBIT_FAILED',
+        message: `Payment ${paymentId} was closed by another process`,
+      },
+      HttpStatus.INTERNAL_SERVER_ERROR,
+    )
   }
 
   /**
@@ -950,7 +995,7 @@ export class CheckoutService implements OnModuleInit {
         dataSource: this.dataSource,
         inProcessLocks: this.walletReconcileLocks,
         logger: this.log,
-        createOrRenewSubscription: (req, p) => this.createOrRenewSubscription(req, p),
+        closeWalletPayment: (p, req) => this.closeWalletPayment(p, req),
         assignPlanInRoles: (brandId, planSlug, expiresAt) =>
           this.assignPlanInRoles(brandId, planSlug, expiresAt),
         auditService: this.auditService,
@@ -1356,19 +1401,23 @@ export class CheckoutService implements OnModuleInit {
   private async createOrRenewSubscription(
     req: CheckoutRequest,
     payment: Payment,
+    manager?: EntityManager,
   ): Promise<{ subscription: Subscription; extended: boolean }> {
+    const subscriptionRepo = manager?.getRepository(Subscription) ?? this.subscriptionRepo
+    const subscriptionEventRepo =
+      manager?.getRepository(SubscriptionEvent) ?? this.subscriptionEventRepo
     const now = new Date()
     const periodEnd = new Date()
     periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
     // Buscar suscripción existente
-    let subscription = await this.subscriptionRepo.findOne({
+    let subscription = await subscriptionRepo.findOne({
       where: { brandId: req.brandId },
     })
 
     if (subscription) {
       if (payment?.id) {
-        const existingEvent = await this.subscriptionEventRepo.findOne({
+        const existingEvent = await subscriptionEventRepo.findOne({
           where: { paymentId: payment.id },
         })
         if (subscription.lastPaymentId === payment.id || existingEvent) {
@@ -1421,7 +1470,7 @@ export class CheckoutService implements OnModuleInit {
       subscription.accessEndsAt = null
       subscription.autoRenew = true
 
-      await this.subscriptionRepo.save(subscription)
+      await subscriptionRepo.save(subscription)
 
       // Registrar evento
       const eventType =
@@ -1429,8 +1478,8 @@ export class CheckoutService implements OnModuleInit {
           ? SubscriptionEventType.PLAN_CHANGED
           : SubscriptionEventType.RENEWED
 
-      await this.subscriptionEventRepo.save(
-        this.subscriptionEventRepo.create({
+      await subscriptionEventRepo.save(
+        subscriptionEventRepo.create({
           subscriptionId: subscription.id,
           eventType,
           fromPlanSlug: fromPlan,
@@ -1457,7 +1506,7 @@ export class CheckoutService implements OnModuleInit {
       return { subscription, extended: isSameActivePlanExtension }
     } else {
       // Crear nueva
-      subscription = this.subscriptionRepo.create({
+      subscription = subscriptionRepo.create({
         brandId: req.brandId,
         userId: req.userId,
         planSlug: req.planSlug,
@@ -1470,10 +1519,10 @@ export class CheckoutService implements OnModuleInit {
         lastPaymentId: payment.id,
         autoRenew: true,
       })
-      await this.subscriptionRepo.save(subscription)
+      await subscriptionRepo.save(subscription)
 
-      await this.subscriptionEventRepo.save(
-        this.subscriptionEventRepo.create({
+      await subscriptionEventRepo.save(
+        subscriptionEventRepo.create({
           subscriptionId: subscription.id,
           eventType: SubscriptionEventType.CREATED,
           toPlanSlug: req.planSlug,
