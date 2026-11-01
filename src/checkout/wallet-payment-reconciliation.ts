@@ -20,6 +20,7 @@ import {
   TransactionType,
 } from '../transaction/entities/transaction.entity'
 import { WalletService } from '../wallet/wallet.service'
+import { lockPayment } from '../payment/payment-lock'
 import type { CheckoutRequest, CheckoutResult } from './checkout.service'
 
 /**
@@ -29,6 +30,9 @@ import type { CheckoutRequest, CheckoutResult } from './checkout.service'
  * effects before the sweep inspects the row.
  */
 export const WALLET_RECONCILE_MIN_AGE_MS = 2 * 60 * 1000
+
+/** How far back the sweep looks for `failed` payments with a debit to credit back. */
+export const WALLET_FAILED_DEBIT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
 export interface WalletPaymentReconciliationDeps {
   paymentRepo: Repository<Payment>
@@ -128,9 +132,7 @@ export async function acquireWalletReconcileLock(
         queryRunner = candidate
         await queryRunner.connect()
         await queryRunner.startTransaction()
-        await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-          `wallet-reconcile:${paymentId}`,
-        ])
+        await lockPayment(queryRunner, paymentId)
       }
     }
     return () => release(true)
@@ -294,19 +296,24 @@ async function refundSupersededWalletPayment(
   refundRecorded = false,
 ): Promise<WalletPaymentReconciliationResult> {
   const refundKey = getWalletRefundIdempotencyKey(payment.id)
+  const fromStatus = payment.status
+  const cause =
+    fromStatus === PaymentStatus.FAILED
+      ? 'its checkout failed after the debit'
+      : `subscription is on newer plan ${conflictingSub?.planSlug ?? payment.purposeId}`
   if (!refundRecorded) {
     if (!payment.walletId || typeof deps.walletService?.credit !== 'function') {
       deps.logger?.error(
         `reconcileWalletPayment: cannot refund superseded payment ${payment.id} (${payment.purposeId}) because wallet credit is unavailable`,
       )
-      return { outcome: 'noop', status: PaymentStatus.PROCESSING }
+      return { outcome: 'noop', status: fromStatus }
     }
 
     try {
       const creditResult = await deps.walletService.credit(payment.walletId, totalAmount, {
         brandId: payment.brandId,
         category: 'refund',
-        description: `Refund for superseded plan payment ${payment.id} (${payment.purposeId})`,
+        description: `Refund for payment ${payment.id} (${payment.purposeId}): ${cause}`,
         referenceType: 'payment',
         referenceId: payment.id,
         idempotencyKey: refundKey,
@@ -318,7 +325,7 @@ async function refundSupersededWalletPayment(
       deps.logger?.error(
         `reconcileWalletPayment: failed to credit wallet ${payment.walletId} for superseded payment ${payment.id}: ${error?.message ?? error}`,
       )
-      return { outcome: 'noop', status: PaymentStatus.PROCESSING }
+      return { outcome: 'noop', status: fromStatus }
     }
   }
 
@@ -339,16 +346,16 @@ async function refundSupersededWalletPayment(
       provider: 'wallet',
       reconciled: true,
     },
-    `Wallet payment refunded via reconciliation because subscription is on newer plan ${conflictingPlanSlug ?? payment.purposeId}: ${payment.currency} ${totalAmount}`,
+    `Wallet payment refunded via reconciliation because ${cause}: ${payment.currency} ${totalAmount}`,
   )
 
   const refunded = await deps.paymentRepo.update(
-    { id: payment.id, status: PaymentStatus.PROCESSING },
+    { id: payment.id, status: fromStatus },
     { status: PaymentStatus.REFUNDED },
   )
   if (!refunded.affected) {
     const latest = await deps.paymentRepo.findOne({ where: { id: payment.id } })
-    return { outcome: 'noop', status: latest?.status ?? PaymentStatus.PROCESSING }
+    return { outcome: 'noop', status: latest?.status ?? fromStatus }
   }
   return { outcome: 'refunded', status: PaymentStatus.REFUNDED }
 }
@@ -462,11 +469,11 @@ export async function reconcileWalletPayment(
       return { outcome: 'noop', status: payment?.status ?? 'not_found' }
     }
 
-    if (payment.status === PaymentStatus.COMPLETED || payment.status === PaymentStatus.FAILED) {
-      return { outcome: 'noop', status: payment.status }
-    }
-
-    if (payment.status !== PaymentStatus.PENDING && payment.status !== PaymentStatus.PROCESSING) {
+    if (
+      payment.status !== PaymentStatus.PENDING &&
+      payment.status !== PaymentStatus.PROCESSING &&
+      payment.status !== PaymentStatus.FAILED
+    ) {
       return { outcome: 'noop', status: payment.status }
     }
 
@@ -495,6 +502,14 @@ export async function reconcileWalletPayment(
       return { outcome: 'failed_without_debit', status: PaymentStatus.FAILED }
     }
 
+    const totalAmount = Math.round(parseFloat(String(payment.amount || 0)) * 100) / 100
+
+    // The buyer was already told it failed, so a debit found here is only ever credited back.
+    if (payment.status === PaymentStatus.FAILED) {
+      const refundRecorded = await hasWalletPaymentRefund(payment, deps)
+      return await refundSupersededWalletPayment(payment, null, totalAmount, deps, refundRecorded)
+    }
+
     if (payment.status === PaymentStatus.PENDING) {
       const claimed = await deps.paymentRepo.update(
         { id: payment.id, status: PaymentStatus.PENDING },
@@ -507,7 +522,6 @@ export async function reconcileWalletPayment(
       payment.status = PaymentStatus.PROCESSING
     }
 
-    const totalAmount = Math.round(parseFloat(String(payment.amount || 0)) * 100) / 100
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
       const conflictingSub = await findConflictingPlanSubscription(payment, deps)
       const refundRecorded = conflictingSub ? false : await hasWalletPaymentRefund(payment, deps)

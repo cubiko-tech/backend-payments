@@ -496,7 +496,16 @@ export class CheckoutService implements OnModuleInit {
     } catch (error) {
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
-      await this.paymentRepo.save(payment)
+      const markedFailed = await this.paymentRepo.update(
+        { id: payment.id, status: PaymentStatus.PENDING },
+        { status: PaymentStatus.FAILED, failureReason: error.message },
+      )
+      if (!markedFailed.affected) {
+        const latest = await this.paymentRepo.findOne({ where: { id: payment.id } })
+        if (latest?.status === PaymentStatus.COMPLETED && latest.metadata?.checkoutResult) {
+          return latest.metadata.checkoutResult as CheckoutResult
+        }
+      }
 
       await this.attemptRepo.save(
         this.attemptRepo.create({

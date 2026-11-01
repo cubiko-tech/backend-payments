@@ -7,7 +7,19 @@ import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, IsNull, Not, QueryRunner, Repository } from 'typeorm'
+import {
+  And,
+  Between,
+  DataSource,
+  In,
+  IsNull,
+  LessThan,
+  MoreThanOrEqual,
+  Not,
+  QueryRunner,
+  Raw,
+  Repository,
+} from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
@@ -15,6 +27,7 @@ import { Transaction } from '../transaction/entities/transaction.entity'
 import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import {
   hasWalletPaymentDebit,
+  WALLET_FAILED_DEBIT_LOOKBACK_MS,
   WALLET_RECONCILE_MIN_AGE_MS,
 } from '../checkout/wallet-payment-reconciliation'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
@@ -607,12 +620,24 @@ export class TasksService {
   async reconcileWalletPayments() {
     const now = new Date()
     const cutoff = new Date(now.getTime() - WALLET_RECONCILE_MIN_AGE_MS)
+    const failedFloor = new Date(now.getTime() - WALLET_FAILED_DEBIT_LOOKBACK_MS)
     const pending = await this.paymentRepo.find({
-      where: {
-        provider: PaymentProvider.WALLET,
-        status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
-        createdAt: LessThan(cutoff),
-      },
+      where: [
+        {
+          provider: PaymentProvider.WALLET,
+          status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
+          createdAt: LessThan(cutoff),
+        },
+        {
+          provider: PaymentProvider.WALLET,
+          status: PaymentStatus.FAILED,
+          createdAt: And(LessThan(cutoff), MoreThanOrEqual(failedFloor)),
+          id: Raw(
+            (id) =>
+              `EXISTS (SELECT 1 FROM transactions t WHERE t."idempotencyKey" = 'payment:' || ${id} || ':debit')`,
+          ),
+        },
+      ],
     })
 
     if (!pending || pending.length === 0) return
