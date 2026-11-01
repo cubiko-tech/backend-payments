@@ -9,6 +9,7 @@ import {
   createGate,
   findPaymentByKey,
   movements,
+  parkFirstCall,
   planCheckout,
   PLAN_PRICE,
   RaceInstance,
@@ -63,6 +64,12 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     const payment = await findPaymentByKey(a.dataSource, key)
     expect(payment.status).toBe(PaymentStatus.FAILED)
     expect(await balanceOf(a.dataSource, walletId)).toBe(BALANCE - PLAN_PRICE)
+    return payment
+  }
+
+  /** Old enough for any sweep: specs running at once share this database and sweep all brands. */
+  const failOldWithDebit = async (walletId: string, key: string) => {
+    const payment = await failWithDebit(walletId, key)
     await backdate(a.dataSource, payment.id)
     return payment
   }
@@ -81,7 +88,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
   it('P1: a retry waits for the sweep that is crediting the payment and never completes it', async () => {
     // R15: red if the retry stops taking the payment lock: it does not wait for the sweep.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
-    const payment = await failWithDebit(wallet.id, 'loc97-p1')
+    const payment = await failOldWithDebit(wallet.id, 'loc97-p1')
     const gate = createGate()
     const credit = b.wallet.credit.bind(b.wallet)
     // R17: Holding the sweep between its credit and its refunded write is this exact interleaving.
@@ -107,7 +114,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
   it('P2: a retry after a credit that lost its response does not complete the payment', async () => {
     // R15: red if the retry stops looking at the credit: the plan comes free with the money back.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
-    const payment = await failWithDebit(wallet.id, 'loc97-p2')
+    const payment = await failOldWithDebit(wallet.id, 'loc97-p2')
     const credit = b.wallet.credit.bind(b.wallet)
     // R17: A lost response after the commit cannot be provoked on demand with a real connection.
     jest.spyOn(b.wallet, 'credit').mockImplementationOnce(async (...args) => {
@@ -130,6 +137,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     const payment = await failWithDebit(wallet.id, 'loc97-p3')
 
     await expect(retry(wallet.id, 'loc97-p3')).resolves.toMatchObject({ status: 'completed' })
+    await backdate(a.dataSource, payment.id)
     await b.tasks.reconcileWalletPayments()
 
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.COMPLETED)
@@ -146,6 +154,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     const newer = await findPaymentByKey(a.dataSource, 'loc97-r2-b')
 
     await expect(retry(wallet.id, 'loc97-r2-a')).rejects.toMatchObject(LOST)
+    await backdate(a.dataSource, older.id)
     await b.tasks.reconcileWalletPayments()
 
     expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.REFUNDED)
@@ -165,13 +174,87 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const older = await failWithDebit(wallet.id, 'loc97-r2b-a')
     await retry(wallet.id, 'loc97-r2b-b')
+    const newer = await findPaymentByKey(a.dataSource, 'loc97-r2b-b')
+    const subscription = a.dataSource.getRepository(Subscription)
+    const before = await subscription.findOneBy({ brandId: BRAND_ID })
 
     await expect(retry(wallet.id, 'loc97-r2b-a')).resolves.toMatchObject({ status: 'completed' })
+    await backdate(a.dataSource, older.id)
     await b.tasks.reconcileWalletPayments()
 
+    const after = await subscription.findOneBy({ brandId: BRAND_ID })
+    expect(after!.lastPaymentId).toBe(newer.id)
+    const extended = new Date(before!.currentPeriodEnd)
+    extended.setDate(extended.getDate() + 30)
+    expect(after!.currentPeriodEnd.toISOString()).toBe(extended.toISOString())
     expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
     expect(await movements(a.dataSource, older.id, TransactionType.DEBIT)).toHaveLength(1)
     expect(await movements(a.dataSource, older.id, TransactionType.CREDIT)).toHaveLength(0)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - 2 * PLAN_PRICE)
+  })
+
+  it('R3: a retry of an older purchase does not open the way to one older than the newest', async () => {
+    // R15: red if the close moves lastPaymentId back to the retry: the middle purchase takes the plan.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const oldest = await failWithDebit(wallet.id, 'loc97-r3-a')
+    const gate = createGate()
+    parkFirstCall(b.wallet, 'debit', gate)
+    const middle = b.checkout.processCheckout(
+      planCheckout(BRAND_ID, wallet.id, 'loc97-r3-c', 'growth'),
+    )
+    await gate.reached
+    await retry(wallet.id, 'loc97-r3-b')
+    const newest = await findPaymentByKey(a.dataSource, 'loc97-r3-b')
+    const middlePayment = await findPaymentByKey(a.dataSource, 'loc97-r3-c')
+
+    await expect(retry(wallet.id, 'loc97-r3-a')).resolves.toMatchObject({ status: 'completed' })
+    gate.release()
+    await expect(middle).rejects.toMatchObject(LOST)
+    await backdate(a.dataSource, middlePayment.id, '5 minutes')
+    await b.tasks.reconcileWalletPayments()
+
+    const subscription = a.dataSource.getRepository(Subscription)
+    expect(await subscription.findOneBy({ brandId: BRAND_ID })).toMatchObject({
+      planSlug: 'dropi-roax',
+      lastPaymentId: newest.id,
+    })
+    expect(await statusOf(a.dataSource, oldest.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await statusOf(a.dataSource, newest.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await statusOf(a.dataSource, middlePayment.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, middlePayment.id, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - 2 * PLAN_PRICE)
+  })
+
+  it('R3b: a plan change hands back an older retry that closed under a newer purchase', async () => {
+    // R15: red if the overlap is searched through lastPaymentId: the retry stays charged.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    const oldest = await failWithDebit(wallet.id, 'loc97-r3b-a')
+    await retry(wallet.id, 'loc97-r3b-b')
+    const sameplan = await findPaymentByKey(a.dataSource, 'loc97-r3b-b')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const gate = createGate()
+    parkFirstCall(b.wallet, 'debit', gate)
+    const change = b.checkout.processCheckout(
+      planCheckout(BRAND_ID, wallet.id, 'loc97-r3b-c', 'growth'),
+    )
+    await gate.reached
+
+    await expect(retry(wallet.id, 'loc97-r3b-a')).resolves.toMatchObject({ status: 'completed' })
+    gate.release()
+    await change
+    await backdate(a.dataSource, oldest.id)
+    await b.tasks.reconcileWalletPayments()
+
+    const newest = await findPaymentByKey(a.dataSource, 'loc97-r3b-c')
+    const subscription = a.dataSource.getRepository(Subscription)
+    expect(await subscription.findOneBy({ brandId: BRAND_ID })).toMatchObject({
+      planSlug: 'growth',
+      lastPaymentId: newest.id,
+    })
+    expect(await statusOf(a.dataSource, oldest.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await movements(a.dataSource, oldest.id, TransactionType.CREDIT)).toHaveLength(1)
+    expect(await statusOf(a.dataSource, sameplan.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await movements(a.dataSource, sameplan.id, TransactionType.CREDIT)).toHaveLength(0)
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - 2 * PLAN_PRICE)
   })
 
@@ -212,7 +295,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
   it('E3: credits a failed payment with a debit once, restores the balance and leaves one log', async () => {
     // R15: red if the sweep skips failed payments again: the money stays debited.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
-    const payment = await failWithDebit(wallet.id, 'loc97-e3')
+    const payment = await failOldWithDebit(wallet.id, 'loc97-e3')
 
     await b.tasks.reconcileWalletPayments()
     await b.tasks.reconcileWalletPayments()
@@ -230,7 +313,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
   it('E4: keeps the payment failed when the credit fails and refunds it on the next pass', async () => {
     // R15: red if the refund claims an intermediate processing status: a crash could complete it.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
-    const payment = await failWithDebit(wallet.id, 'loc97-e4')
+    const payment = await failOldWithDebit(wallet.id, 'loc97-e4')
     // R17: Forcing one credit failure is the only way to observe the state between two passes.
     jest.spyOn(b.wallet, 'credit').mockRejectedValueOnce(new Error('credit unavailable'))
 

@@ -63,6 +63,7 @@ import {
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
 import {
+  isLastPaymentNewer,
   reconcileWalletPayment as executeWalletPaymentReconciliation,
   WalletPaymentReconciliationResult,
 } from './wallet-payment-reconciliation'
@@ -1465,7 +1466,19 @@ export class CheckoutService implements OnModuleInit {
         : now
       subscription.currentPeriodEnd = targetPeriodEnd
       subscription.nextBillingDate = targetPeriodEnd
-      subscription.lastPaymentId = payment.id
+      // An older purchase of this plan extends it, but the newest purchase stays named:
+      // the close of another plan decides its conflict by this payment's createdAt.
+      const keepsNewerPayment =
+        fromPlan === req.planSlug &&
+        !!subscription.lastPaymentId &&
+        (await isLastPaymentNewer(
+          subscription.lastPaymentId,
+          payment,
+          manager?.getRepository(Payment) ?? this.paymentRepo,
+        ))
+      if (!keepsNewerPayment) {
+        subscription.lastPaymentId = payment.id
+      }
       subscription.retryCount = 0
       subscription.cancelledAt = null
       subscription.cancelReason = null

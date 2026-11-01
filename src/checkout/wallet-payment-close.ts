@@ -51,15 +51,17 @@ async function hasNewerDebitedPurchase(payment: Payment, manager: EntityManager)
 }
 
 /**
- * Hands back to the sweep an older purchase of another plan that closed while this one
- * was already open: they overlapped, so the newer wins and the sweep credits the older.
+ * Hands back to the sweep every older purchase of another plan that closed while this
+ * one was already open: they overlapped, so the newer wins and the sweep credits the older.
  * Purchases that did not overlap are plain plan changes and keep their money spent.
+ * Looks in the subscription events because `lastPaymentId` only names the newest purchase.
  */
 async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityManager) {
   await manager.query(
     `UPDATE payments p SET status = $1
      FROM subscriptions s
-     WHERE s."brandId" = $2 AND p.id = s."lastPaymentId" AND p.status = $3 AND p.provider = $4
+     JOIN subscription_events e ON e."subscriptionId" = s.id
+     WHERE s."brandId" = $2 AND p.id = e."paymentId" AND p.status = $3 AND p.provider = $4
        AND p.purpose = $5 AND p."purposeId" <> $6 AND p."paidAt" > $7 AND p."createdAt" < $7`,
     [
       PaymentStatus.PROCESSING,

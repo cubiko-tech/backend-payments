@@ -252,6 +252,24 @@ export async function hasWalletPaymentRefund(
   return false
 }
 
+/** Whether the payment `lastPaymentId` names was created after `payment`. */
+export async function isLastPaymentNewer(
+  lastPaymentId: string,
+  payment: Payment,
+  paymentRepo: Pick<Repository<Payment>, 'findOne'>,
+): Promise<boolean> {
+  const lastPayment = await paymentRepo.findOne({ where: { id: lastPaymentId } })
+  if (!lastPayment) {
+    return false
+  }
+  const lastTime = new Date(lastPayment.createdAt).getTime()
+  const paymentTime = new Date(payment.createdAt).getTime()
+  if (!Number.isFinite(lastTime) || !Number.isFinite(paymentTime)) {
+    return false
+  }
+  return lastTime > paymentTime
+}
+
 export async function findConflictingPlanSubscription(
   payment: Payment,
   deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'paymentRepo' | 'dataSource'>,
@@ -274,18 +292,8 @@ export async function findConflictingPlanSubscription(
   ) {
     return null
   }
-  const lastPayment = await deps.paymentRepo.findOne({
-    where: { id: existingSub.lastPaymentId },
-  })
-  if (!lastPayment) {
-    return null
-  }
-  const lastTime = new Date(lastPayment.createdAt).getTime()
-  const paymentTime = new Date(payment.createdAt).getTime()
-  if (!Number.isFinite(lastTime) || !Number.isFinite(paymentTime)) {
-    return null
-  }
-  return lastTime > paymentTime ? existingSub : null
+  const newer = await isLastPaymentNewer(existingSub.lastPaymentId, payment, deps.paymentRepo)
+  return newer ? existingSub : null
 }
 
 /** Whether the payment already took effect on the subscription of its brand. */
