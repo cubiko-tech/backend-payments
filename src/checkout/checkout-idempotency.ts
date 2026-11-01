@@ -1,7 +1,7 @@
 import { HttpStatus } from '@nestjs/common'
 import { Repository } from 'typeorm'
 
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import type { CheckoutRequest, CheckoutResult } from './checkout.service'
 
@@ -60,6 +60,18 @@ export function createIncompleteIdempotentCheckoutException(payment: Payment): R
     {
       code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
       message: 'Payment was marked completed without a stored checkout result',
+      paymentId: payment.id,
+    },
+    HttpStatus.CONFLICT,
+  )
+}
+
+/** The debit is registered and the close or the sweep still has to settle it. */
+export function createInProgressIdempotentCheckoutException(payment: Payment): RequestException {
+  return new RequestException(
+    {
+      code: 'IDEMPOTENT_CHECKOUT_IN_PROGRESS',
+      message: 'Payment is debited and still being settled',
       paymentId: payment.id,
     },
     HttpStatus.CONFLICT,
@@ -174,6 +186,11 @@ async function resolvePaymentStateOutcome(
     throw createIncompleteIdempotentCheckoutException(payment)
   }
 
+  // Ahead of the stored result: a purchase handed back to the sweep keeps its old `completed`.
+  if (payment.provider === PaymentProvider.WALLET && payment.status === PaymentStatus.PROCESSING) {
+    throw createInProgressIdempotentCheckoutException(payment)
+  }
+
   if (payment.metadata?.checkoutResult) {
     return payment.metadata.checkoutResult as CheckoutResult
   }
@@ -184,6 +201,8 @@ async function resolvePaymentStateOutcome(
 /**
  * Replays the outcome of a previously registered idempotent checkout, awaiting
  * the in-process execution promise when the original request is still in flight.
+ * `hasDebit` turns a `pending` wallet payment with its debit into a 409; a caller that
+ * knows the payment has a live owner omits it and gets the `pending` result.
  */
 export async function resolveExistingIdempotentPayment(
   existing: Payment,
@@ -192,6 +211,7 @@ export async function resolveExistingIdempotentPayment(
   inFlightCheckouts: InFlightCheckoutsMap,
   incomingFingerprint?: string,
   retryFailedPayment?: RetryFailedPaymentCallback,
+  hasDebit?: (payment: Payment) => Promise<boolean>,
 ): Promise<CheckoutResult> {
   assertMatchingIdempotencyPayload(existing, req, incomingFingerprint)
 
@@ -219,6 +239,13 @@ export async function resolveExistingIdempotentPayment(
       const refreshedOutcome = await resolvePaymentStateOutcome(refreshed, retryFailedPayment)
       if (refreshedOutcome !== null) {
         return refreshedOutcome
+      }
+      if (
+        refreshed.provider === PaymentProvider.WALLET &&
+        refreshed.status === PaymentStatus.PENDING &&
+        (await hasDebit?.(refreshed))
+      ) {
+        throw createInProgressIdempotentCheckoutException(refreshed)
       }
       return {
         paymentId: refreshed.id,

@@ -161,6 +161,14 @@ export function backdate(dataSource: DataSource, paymentId: string, interval = '
   )
 }
 
+/**
+ * Sweeps one payment as if `ageMs` had passed. Moves the clock and not the row, so the sweep
+ * of a spec running in parallel does not pick it up and close it without this spec's failure.
+ */
+export function sweepAfter(instance: RaceInstance, paymentId: string, ageMs: number) {
+  return instance.checkout.reconcileWalletPayment(paymentId, new Date(Date.now() + ageMs))
+}
+
 export async function findPaymentByKey(dataSource: DataSource, key: string): Promise<Payment> {
   return (await dataSource.getRepository(Payment).findOneBy({ idempotencyKey: key }))!
 }

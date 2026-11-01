@@ -63,6 +63,7 @@ import {
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
 import {
+  hasWalletPaymentDebit,
   isLastPaymentNewer,
   reconcileWalletPayment as executeWalletPaymentReconciliation,
   WalletPaymentReconciliationResult,
@@ -72,6 +73,7 @@ import {
   closeWalletPayment,
   readPaymentAfterSweep,
   WalletCheckoutLostError,
+  WalletCloseResult,
 } from './wallet-payment-close'
 
 /**
@@ -210,6 +212,11 @@ export class CheckoutService implements OnModuleInit {
           idempotencyFingerprint,
           (failedPayment) =>
             this.retryFailedIdempotentPayment(failedPayment, req, idempotencyFingerprint),
+          (pendingPayment) =>
+            hasWalletPaymentDebit(pendingPayment, {
+              walletService: this.walletService,
+              dataSource: this.dataSource,
+            }),
         )
       }
     }
@@ -546,55 +553,50 @@ export class CheckoutService implements OnModuleInit {
       status: 'completed',
     }
 
+    let closed: WalletCloseResult
     try {
-      const closed = await this.closeWalletPayment(payment, req)
-      if (closed.outcome === 'superseded') {
-        throw this.walletCheckoutLostError(payment.id)
-      }
-      if (closed.outcome === 'already_closed') {
-        const settled = await readPaymentAfterSweep(payment.id, this.dataSource)
-        if (settled?.status !== PaymentStatus.COMPLETED) {
-          throw this.walletCheckoutLostError(payment.id)
-        }
-        return (settled.metadata?.checkoutResult as CheckoutResult) ?? result
-      }
-
-      payment.status = PaymentStatus.COMPLETED
-      payment.paidAt = closed.paidAt
-      const sub = closed.subscription
-      if (sub) {
-        result.subscriptionId = sub.id
-        if (closed.extended && sub.currentPeriodEnd) {
-          result.renewal = 'extended'
-          result.currentPeriodEnd = sub.currentPeriodEnd
-        }
-        // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
-        const current = await this.subscriptionRepo.findOne({ where: { brandId: req.brandId } })
-        await this.assignPlanInRoles(
-          req.brandId,
-          current?.planSlug ?? sub.planSlug,
-          current?.currentPeriodEnd ?? sub.currentPeriodEnd,
-        )
-      }
-
-      await this.auditService.log(
-        req.userId,
-        'checkout_completed',
-        'payment',
-        payment.id,
-        { purpose: req.purpose, planSlug: req.planSlug, amount: totalAmount, provider: 'wallet' },
-        `Checkout completado: ${req.purpose} por ${currency} ${totalAmount}`,
-      )
+      closed = await this.closeWalletPayment(payment, req)
     } catch (error) {
-      if (!(error instanceof WalletCheckoutLostError)) {
-        // Marks COMPLETED without checkoutResult after the debit so retries return 409.
-        await this.paymentRepo.update(
-          { id: payment.id, status: PaymentStatus.PENDING },
-          { status: PaymentStatus.COMPLETED, paidAt: new Date() },
-        )
-      }
+      await this.handPaymentToSweep(payment.id)
       throw error
     }
+    if (closed.outcome === 'superseded') {
+      throw this.walletCheckoutLostError(payment.id)
+    }
+    if (closed.outcome === 'already_closed') {
+      const settled = await readPaymentAfterSweep(payment.id, this.dataSource)
+      if (settled?.status !== PaymentStatus.COMPLETED) {
+        throw this.walletCheckoutLostError(payment.id)
+      }
+      return (settled.metadata?.checkoutResult as CheckoutResult) ?? result
+    }
+
+    payment.status = PaymentStatus.COMPLETED
+    payment.paidAt = closed.paidAt
+    const sub = closed.subscription
+    if (sub) {
+      result.subscriptionId = sub.id
+      if (closed.extended && sub.currentPeriodEnd) {
+        result.renewal = 'extended'
+        result.currentPeriodEnd = sub.currentPeriodEnd
+      }
+      // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
+      const current = await this.subscriptionRepo.findOne({ where: { brandId: req.brandId } })
+      await this.assignPlanInRoles(
+        req.brandId,
+        current?.planSlug ?? sub.planSlug,
+        current?.currentPeriodEnd ?? sub.currentPeriodEnd,
+      )
+    }
+
+    await this.auditService.log(
+      req.userId,
+      'checkout_completed',
+      'payment',
+      payment.id,
+      { purpose: req.purpose, planSlug: req.planSlug, amount: totalAmount, provider: 'wallet' },
+      `Checkout completado: ${req.purpose} por ${currency} ${totalAmount}`,
+    )
 
     if (req.idempotencyKey) {
       payment.metadata = {
@@ -636,6 +638,21 @@ export class CheckoutService implements OnModuleInit {
       dataSource: this.dataSource,
       createOrRenewSubscription: (r, p, manager) => this.createOrRenewSubscription(r, p, manager),
     })
+  }
+
+  /**
+   * Leaves a debited payment whose close failed to the sweep. Never throws, so the close
+   * error reaches the caller; a payment this write misses stays `pending`, also swept.
+   */
+  private async handPaymentToSweep(paymentId: string) {
+    try {
+      await this.paymentRepo.update(
+        { id: paymentId, status: PaymentStatus.PENDING },
+        { status: PaymentStatus.PROCESSING },
+      )
+    } catch (error) {
+      this.log.error(`Could not hand payment ${paymentId} to the sweep: ${error.message}`)
+    }
   }
 
   /** The payment lost to the sweep or to a newer purchase; the sweep settles its money. */

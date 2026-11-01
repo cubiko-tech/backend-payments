@@ -361,8 +361,8 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     expect(thirdRes.body).toMatchObject({ code: 'IDEMPOTENT_PAYMENT_FAILED' })
   })
 
-  it('responds 409 IDEMPOTENT_CHECKOUT_INCOMPLETE, 400 on >255 key, and 409 on conflict', async () => {
-    // R15 (Mutation): saving checkoutResult before createOrRenewSubscription turns this red.
+  it('responds 409 IDEMPOTENT_CHECKOUT_IN_PROGRESS, 400 on >255 key, and 409 on conflict', async () => {
+    // R15 (Mutation): dropping the wallet + processing branch of the replay turns this red.
     const wallet = await createBrandWallet(100000)
     const body = buildBody({ walletId: wallet.id })
     // R17: Failing the subscription step simulates a Postgres failure after the debit commits.
@@ -378,7 +378,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     const incompleteRes = await postCheckout(body, 'e2e-incomplete-1')
     expect(incompleteRes.status).toBe(409)
     expect(incompleteRes.body).toMatchObject({
-      code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
+      code: 'IDEMPOTENT_CHECKOUT_IN_PROGRESS',
       paymentId: saved?.id,
     })
 

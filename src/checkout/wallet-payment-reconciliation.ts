@@ -36,6 +36,9 @@ export const WALLET_RECONCILE_MIN_AGE_MS = 2 * 60 * 1000
 /** How far back the sweep looks for `failed` payments with a debit to credit back. */
 export const WALLET_FAILED_DEBIT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 
+/** Age from which a close that still fails is given up: the sweep credits the debit back. */
+export const WALLET_CLOSE_GIVE_UP_MS = 60 * 60 * 1000
+
 export interface WalletPaymentReconciliationDeps {
   paymentRepo: Repository<Payment>
   subscriptionRepo?: Repository<Subscription>
@@ -315,13 +318,15 @@ async function refundSupersededWalletPayment(
   totalAmount: number,
   deps: WalletPaymentReconciliationDeps,
   refundRecorded = false,
+  closeFailure?: string,
 ): Promise<WalletPaymentReconciliationResult> {
   const refundKey = getWalletRefundIdempotencyKey(payment.id)
   const fromStatus = payment.status
   const cause =
-    fromStatus === PaymentStatus.FAILED
+    closeFailure ??
+    (fromStatus === PaymentStatus.FAILED
       ? 'its checkout failed after the debit'
-      : `subscription is on newer plan ${conflictingSub?.planSlug ?? payment.purposeId}`
+      : `subscription is on newer plan ${conflictingSub?.planSlug ?? payment.purposeId}`)
   if (!refundRecorded) {
     if (!payment.walletId || typeof deps.walletService?.credit !== 'function') {
       deps.logger?.error(
@@ -381,10 +386,37 @@ async function refundSupersededWalletPayment(
   return { outcome: 'refunded', status: PaymentStatus.REFUNDED }
 }
 
+/**
+ * Whether a payment whose close just failed gets credited instead of swept again: only past
+ * the give-up age, still `processing` (a failed commit may have closed it) and with no plan
+ * applied (a purchase handed back to the sweep keeps its period).
+ */
+async function shouldGiveUpOnClose(
+  payment: Payment,
+  now: Date,
+  deps: WalletPaymentReconciliationDeps,
+): Promise<boolean> {
+  if (new Date(payment.createdAt).getTime() > now.getTime() - WALLET_CLOSE_GIVE_UP_MS) {
+    return false
+  }
+  const latest = await deps.paymentRepo.findOne({ where: { id: payment.id } })
+  if (latest?.status !== PaymentStatus.PROCESSING) {
+    return false
+  }
+  if (await isPlanAppliedByPayment(payment, deps)) {
+    deps.logger?.error(
+      `reconcileWalletPayment: payment ${payment.id} keeps failing to close with its plan applied; not crediting it`,
+    )
+    return false
+  }
+  return true
+}
+
 async function completeReconciledWalletPayment(
   payment: Payment,
   totalAmount: number,
   deps: WalletPaymentReconciliationDeps,
+  now: Date,
 ): Promise<WalletPaymentReconciliationResult> {
   const result: CheckoutResult = {
     paymentId: payment.id,
@@ -401,7 +433,16 @@ async function completeReconciledWalletPayment(
     idempotencyKey: payment.idempotencyKey || undefined,
   }
 
-  const closed = await deps.closeWalletPayment(payment, req)
+  let closed: WalletCloseResult
+  try {
+    closed = await deps.closeWalletPayment(payment, req)
+  } catch (error: any) {
+    if (!(await shouldGiveUpOnClose(payment, now, deps))) {
+      throw error
+    }
+    const closeFailure = `its close kept failing: ${error?.message ?? error}`
+    return refundSupersededWalletPayment(payment, null, totalAmount, deps, false, closeFailure)
+  }
   if (closed.outcome === 'superseded') {
     return refundSupersededWalletPayment(payment, null, totalAmount, deps)
   }
@@ -545,21 +586,22 @@ export async function reconcileWalletPayment(
       payment.status = PaymentStatus.PROCESSING
     }
 
-    if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      const conflictingSub = await findConflictingPlanSubscription(payment, deps)
-      const refundRecorded = conflictingSub ? false : await hasWalletPaymentRefund(payment, deps)
-      if (conflictingSub || refundRecorded) {
-        return await refundSupersededWalletPayment(
-          payment,
-          conflictingSub,
-          totalAmount,
-          deps,
-          refundRecorded,
-        )
-      }
+    const conflictingSub =
+      payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId
+        ? await findConflictingPlanSubscription(payment, deps)
+        : null
+    const refundRecorded = conflictingSub ? false : await hasWalletPaymentRefund(payment, deps)
+    if (conflictingSub || refundRecorded) {
+      return await refundSupersededWalletPayment(
+        payment,
+        conflictingSub,
+        totalAmount,
+        deps,
+        refundRecorded,
+      )
     }
 
-    return await completeReconciledWalletPayment(payment, totalAmount, deps)
+    return await completeReconciledWalletPayment(payment, totalAmount, deps, now)
   } finally {
     await releaseLock()
   }

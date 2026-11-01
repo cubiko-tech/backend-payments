@@ -328,8 +328,8 @@ describe('CheckoutService idempotency recovery and guards', () => {
     expect(clientRoles.assignPlanToBrand).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects 409 IDEMPOTENT_CHECKOUT_INCOMPLETE when subscription fails after wallet debit', async () => {
-    // R15 (Mutation): saving checkoutResult before createOrRenewSubscription turns this case red.
+  it('rejects 409 IDEMPOTENT_CHECKOUT_IN_PROGRESS when subscription fails after wallet debit', async () => {
+    // R15 (Mutation): dropping the wallet + processing branch of the idempotent replay turns this red.
     const req = buildReq({ idempotencyKey: 'incomplete-completed-key' })
     subscriptionRepo.save.mockRejectedValueOnce(new Error('Subscription insert failed after debit'))
 
@@ -337,11 +337,11 @@ describe('CheckoutService idempotency recovery and guards', () => {
       'Subscription insert failed after debit',
     )
     expect(walletService.debit).toHaveBeenCalledTimes(1)
-    expect(storedPayments.get('pay-idem-1')?.status).toBe(PaymentStatus.COMPLETED)
+    expect(storedPayments.get('pay-idem-1')?.status).toBe(PaymentStatus.PROCESSING)
     expect(storedPayments.get('pay-idem-1')?.metadata?.checkoutResult).toBeUndefined()
 
     await expect(service.processCheckout(req)).rejects.toMatchObject({
-      code: 'IDEMPOTENT_CHECKOUT_INCOMPLETE',
+      code: 'IDEMPOTENT_CHECKOUT_IN_PROGRESS',
       status: HttpStatus.CONFLICT,
     })
     expect(walletService.debit).toHaveBeenCalledTimes(1)
