@@ -31,6 +31,7 @@ import {
   PaymentStatus,
 } from '../payment/entities/payment.entity'
 import { LOST_TO_NEWER_PURCHASE_FLAG } from '../checkout/external-payment-close'
+import { lockBrandPlan } from '../checkout/wallet-payment-close'
 import {
   hasWalletPaymentDebit,
   WALLET_CLOSE_GIVEN_UP_FLAG,
@@ -314,36 +315,41 @@ export class TasksService {
     let linked = 0
     let skipped = 0
     for (const sub of trials) {
-      // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
-      if (sub.provider === 'wallet') {
-        if (!sub.walletId) {
-          if (await this.endTrialWithoutPayment(sub)) downgraded++
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
+      try {
+        if (sub.status !== SubscriptionStatus.TRIAL || !sub.autoRenew) continue
+
+        // Internal wallet: charge if funded; no walletId (trial without a card) goes down to free.
+        if (sub.provider === 'wallet') {
+          if (!sub.walletId) {
+            if (await this.endTrialWithoutPayment(sub)) downgraded++
+            continue
+          }
+          try {
+            if (await this.renewFromWallet(sub)) {
+              converted++
+            }
+          } catch (error) {
+            logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
+            await this.handleRenewalFailure(sub, error.message)
+          }
           continue
         }
-        try {
-          if (await this.renewFromWallet(sub)) {
-            converted++
-          }
-        } catch (error) {
-          logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
-          await this.handleRenewalFailure(sub, error.message)
+
+        // Signup issued this row's only initial link: another would open a second charge rail.
+        // The row stays in TRIAL on purpose; downgrading by `trialEnd` belongs elsewhere.
+        if (sub.initialPaymentLinkIssuedAt) {
+          skipped++
+          continue
         }
-        continue
-      }
 
-      // El alta ya emitió el único link inicial de esta fila: emitir otro abriría un riel de
-      // cobro paralelo al de la suscripción recurrente. Se discrimina por el marcador y NO por
-      // `providerSubscriptionId`. La fila queda en TRIAL a propósito: la degradación por
-      // `trialEnd` es de otra tarea.
-      if (sub.initialPaymentLinkIssuedAt) {
-        skipped++
-        continue
+        // External provider (ConfioPagos): issue the link; the webhook reactivates on payment.
+        await this.issueExternalCharge(sub, false)
+        linked++
+      } finally {
+        await release()
       }
-
-      // Proveedor externo (ConfioPagos): emitir link de pago y notificar.
-      // El webhook reactiva la suscripción cuando el usuario paga.
-      await this.issueExternalCharge(sub, false)
-      linked++
     }
 
     logger.log(
@@ -471,13 +477,9 @@ export class TasksService {
     let processed = 0
     for (const sub of dueSubscriptions) {
       if (!this.hasAvailableRetries(sub)) continue
-      let releaseSubscriptionLock: (() => Promise<void>) | null = null
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
       try {
-        releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
-        const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
-        if (fresh) {
-          Object.assign(sub, fresh)
-        }
         if (!this.isEligibleForRenewal(sub, now)) {
           continue
         }
@@ -516,7 +518,7 @@ export class TasksService {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
       } finally {
-        await releaseSubscriptionLock?.()
+        await release()
       }
     }
 
@@ -544,16 +546,14 @@ export class TasksService {
 
     let retried = 0
     for (const sub of retryableSubscriptions) {
-      if (sub.retryCount >= this.MAX_RETRY) continue
+      // Looked at before the lock too, so a pass does not lock every past-due row.
+      if (!this.isDueForRetry(sub)) continue
 
-      // Backoff exponencial: 24h, 48h, 72h
-      const hoursToWait = (sub.retryCount + 1) * 24
-      const lastAttempt = sub.updatedAt || sub.createdAt
-      const nextRetry = new Date(lastAttempt.getTime() + hoursToWait * 60 * 60 * 1000)
-
-      if (new Date() < nextRetry) continue
-
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
       try {
+        if (!this.isDueForRetry(sub)) continue
+
         if (sub.provider === 'wallet') {
           if (await this.renewFromWallet(sub)) {
             retried++
@@ -566,6 +566,8 @@ export class TasksService {
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
+      } finally {
+        await release()
       }
     }
 
@@ -782,7 +784,7 @@ export class TasksService {
   ): Promise<'expired' | 'rejected' | 'skipped'> {
     let releaseSubscriptionLock: (() => Promise<void>) | null = null
     try {
-      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub)
       const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
       if (fresh) {
         Object.assign(sub, fresh)
@@ -1614,6 +1616,16 @@ export class TasksService {
     return true
   }
 
+  private isDueForRetry(sub: Subscription): boolean {
+    if (sub.status !== SubscriptionStatus.PAST_DUE || !sub.autoRenew) return false
+    if (sub.retryCount >= this.MAX_RETRY) return false
+
+    // Backoff exponencial: 24h, 48h, 72h
+    const hoursToWait = (sub.retryCount + 1) * 24
+    const lastAttempt = sub.updatedAt || sub.createdAt
+    return new Date() >= new Date(lastAttempt.getTime() + hoursToWait * 60 * 60 * 1000)
+  }
+
   private isPostponementGraceExceeded(sub: Subscription, now = new Date()): boolean {
     if (!sub.nextBillingDate) {
       return false
@@ -1626,7 +1638,29 @@ export class TasksService {
     return now.getTime() - billingTime >= graceMs
   }
 
-  private async acquireSubscriptionLock(subId: string): Promise<() => Promise<void>> {
+  /**
+   * Takes the brand's plan lock and refreshes `sub` from the primary, returning what releases the
+   * lock. Returns null, with the lock released, if either failed: nothing was charged, so that is
+   * no failed payment and the next pass retries the row.
+   */
+  private async lockAndReread(sub: Subscription): Promise<(() => Promise<void>) | null> {
+    let release: (() => Promise<void>) | null = null
+    try {
+      release = await this.acquireSubscriptionLock(sub)
+      const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
+      if (fresh) {
+        Object.assign(sub, fresh)
+      }
+      return release
+    } catch (error) {
+      logger.log('error', `[CRON] Could not lock subscription ${sub.id}: ${error?.message}`)
+      await release?.().catch(() => undefined)
+      return null
+    }
+  }
+
+  private async acquireSubscriptionLock(sub: Subscription): Promise<() => Promise<void>> {
+    const subId = sub.id
     const previous = this.subscriptionLocks.get(subId) ?? Promise.resolve()
     let releaseLock!: () => void
     const current = new Promise<void>((resolve) => {
@@ -1674,9 +1708,7 @@ export class TasksService {
           queryRunner = candidate
           await queryRunner.connect()
           await queryRunner.startTransaction()
-          await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-            `subscription:${subId}`,
-          ])
+          await lockBrandPlan(queryRunner, sub.brandId)
         }
       }
       return () => release(true)

@@ -233,7 +233,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   (`src/checkout/checkout.service.ts:583-589`, `src/checkout/wallet-payment-reconciliation.ts:460-466`);
   (e) un pago `failed` con débito que lleva más de 30 días (`WALLET_FAILED_DEBIT_LOOKBACK_MS`) sin poder
   acreditarse; (f) dos compras de planes distintos que se solapan y la más vieja cierra primero
-  (`src/checkout/wallet-payment-close.ts:53-76`); (g) un `failed` con débito cuyo plan ya se aplicó
+  (`src/checkout/wallet-payment-close.ts:61-79`); (g) un `failed` con débito cuyo plan ya se aplicó
   (`src/checkout/wallet-payment-reconciliation.ts:567-572`).
 - **Qué rompe**: (a) si `walletService.credit` falla al devolver un pago superado por otro plan más nuevo,
   `refundSupersededWalletPayment` (`src/checkout/wallet-payment-reconciliation.ts:315-387`) registra
@@ -346,3 +346,32 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Qué rompe**: la pasada lanza `Query runner already released`, que tapa su resultado; se ve un error de más en el
   log. No toca la plata: `claimGiveUp` y el reclamo por estado del cierre siguen siendo exclusivos.
 - **Estado**: abierto — lo cierra que liberar un candado muerto no lance.
+
+## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
+
+- **Dónde**: `src/checkout/wallet-payment-close.ts:56` (`lockBrandPlan`);
+  `src/tasks/tasks.service.ts:1646`, `:1711` (`lockAndReread`, `acquireSubscriptionLock`)
+- **Qué lo dispara**: bajo el candado corren `getPlanPrice`, `renewPlanForBrand` y `degradarEnRoles` (roles),
+  `resolveAmountAndCurrency` y `createCheckout` (proveedor, en `issueExternalCharge`) y `confirmarContraElProveedor`
+  (ConfioPagos). Basta un checkout o un webhook de la marca mientras un cron procesa su fila; y, para agotar el pool,
+  tantos cierres esperando como conexiones tiene (10: default de `pg-pool`, `node_modules/pg-pool/index.js:89`; `src/orm`
+  no fija otro).
+- **Qué rompe**: un cierre de esa marca espera lo que dure esa fila. Si el pool se agota, **todo el servicio** queda sin
+  conexión hasta que venza la espera, porque el cron no consigue una para escribir y soltar el candado.
+- **Estado**: mitigado por `lock_timeout` de 30 s en `lockBrandPlan`: la traba dura como mucho eso. Quien vence falla:
+  un cierre de wallet queda para el barrido, y un cron no lo cuenta como pago fallido, salvo
+  `expireLockedSubscription` (`src/tasks/tasks.service.ts:787`), cuya pasada se corta y sigue a la hora siguiente. Una
+  espera legítima de más de 30 s (proveedor lento) también falla; un webhook externo depende de su reintento.
+  Agotar el pool de esta forma no se ejercitó: E9 prueba sólo el vencimiento de un cierre. Abierto lo que lo
+  cierra del todo: escribir por la conexión del candado, que pide cambiar `WalletService.debit`.
+
+## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
+
+- **Dónde**: `src/tasks/tasks.service.ts:1289-1295`, `:1354` (llave de ciclo con `nextBillingDate`, `renewFromWallet`),
+  `:1576` (`renewPlanForBrand`)
+- **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
+  la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
+- **Qué rompe**: dos cobros y una extensión. Medido sobre Postgres real: 39.800 descontados y 30 días, con precio 19.900.
+  No es la carrera del candado: son dos pasadas separadas.
+- **Estado**: abierto — lo cierra decidir qué se hace con esa plata (días o crédito, y si el plan cambió); en
+  `planning/inbox/deuda/backend-payments-debito-de-renovacion-huerfano.md`.

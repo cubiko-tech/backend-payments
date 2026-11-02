@@ -48,8 +48,13 @@ export interface WalletCloseDeps {
   ) => Promise<{ subscription: Subscription; extended: boolean }>
 }
 
-/** Serializes the closes that decide a brand's plan, until `runner`'s transaction ends. */
-export async function lockBrandPlan(runner: QueryRunner, brandId: string) {
+/**
+ * Serializes whatever decides a brand's plan (closes and crons), until `runner`'s transaction ends.
+ * Throws after 30 s of waiting: the cron holds this lock while writing through other connections,
+ * so waiters that never gave up could exhaust the pool it needs. Applies to the whole transaction.
+ */
+export async function lockBrandPlan(runner: Pick<QueryRunner, 'query'>, brandId: string) {
+  await runner.query(`SET LOCAL lock_timeout = '30s'`)
   await runner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`wallet-plan:${brandId}`])
 }
 

@@ -94,6 +94,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -127,6 +128,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -151,6 +153,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -170,6 +173,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: 'w1',
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
       },
     ])
@@ -204,6 +208,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: 'w1',
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
       },
     ])
@@ -227,6 +232,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: null,
       },
@@ -263,6 +269,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
       },
@@ -288,6 +295,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
       },
@@ -299,6 +307,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: null,
       },
