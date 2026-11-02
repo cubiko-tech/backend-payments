@@ -369,8 +369,9 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
 
-- **Dónde**: `src/tasks/renewal-debit-refund.ts` (`canStillExtend`, `refundRenewalDebit`), `src/tasks/tasks.service.ts`
-  (`renewFromWallet`, `extendSubscriptionPeriod`, `refundOrphanRenewalDebits`)
+- **Dónde**: `src/tasks/renewal-debit-refund.ts:53`, `:75` (`canStillExtend`, `refundRenewalDebit`),
+  `src/tasks/tasks.service.ts:615`, `:1393`, `:1700` (`refundOrphanRenewalDebits`, `renewFromWallet`,
+  `extendSubscriptionPeriod`)
 - **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
   la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
 - **Qué rompe**: dos cobros y una extensión. Medido sobre Postgres real: 39.800 descontados y 30 días, con precio 19.900.
