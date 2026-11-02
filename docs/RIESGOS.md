@@ -443,3 +443,15 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Qué lo dispara**: un `failed` de wallet con débito y sin acreditar, que se reintenta antes de que el barrido lo acredite.
 - **Qué rompe**: la compra cierra al precio que ya se cobró, sin segundo débito, en vez de responder vencido.
 - **Estado**: mitigado por la exención: decirle «pedido nuevo» a quien ya pagó lo haría pagar dos veces.
+
+## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
+
+- **Dónde**: `src/tasks/tasks.service.ts:1352` (`renewFromWallet`), `:474` (`processSubscriptionRenewals`), `:923`
+  (`expireSubscriptions`); `src/subscription/subscription.controller.ts:128-134` (`create`), que deja la fecha opcional.
+- **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, que sale de `POST /subscription` sin el campo o de una
+  corrección a mano.
+- **Qué rompe**: la fila no paga y sigue viva: el contador de reintentos no sube, así que no vence. En `past_due` deja un log
+  de error en cada reintento; en `active` no la toma ninguna consulta, ni deja log. Si conserva el plan en roles, es servicio
+  sin cobrar y sin límite. Hipótesis: el vencimiento del plan en roles no se abrió (otro repositorio), y ese `create` no llama
+  a roles, así que acá no consta que tenga uno.
+- **Estado**: abierto — lo cierra decidir qué se hace con esas filas (darles fecha o cerrarlas) y exigir la fecha en el alta.

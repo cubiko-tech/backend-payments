@@ -176,6 +176,7 @@ describe('TasksService — processTrialConversions', () => {
         status: SubscriptionStatus.TRIAL,
         autoRenew: true,
         retryCount: 0,
+        nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
       },
     ])
 
@@ -187,7 +188,7 @@ describe('TasksService — processTrialConversions', () => {
       expect.objectContaining({
         referenceType: 'subscription',
         referenceId: 's1',
-        idempotencyKey: 'subscription:s1:current',
+        idempotencyKey: 'subscription:s1:2026-09-01T00:00:00.000Z',
       }),
       'COP',
     )
@@ -196,6 +197,48 @@ describe('TasksService — processTrialConversions', () => {
     )
     expect(clientRoles.renewPlanForBrand).toHaveBeenCalled()
     expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'free')
+  })
+
+  describe('wallet row without nextBillingDate', () => {
+    const undatedRow = () => ({
+      id: 's-undated',
+      brandId: 'b1',
+      planSlug: 'pro',
+      provider: 'wallet',
+      walletId: 'w1',
+      status: SubscriptionStatus.PAST_DUE,
+      autoRenew: true,
+      retryCount: 1,
+      nextBillingDate: null,
+      updatedAt: new Date(Date.now() - 72 * 60 * 60 * 1000),
+    })
+
+    it('does not charge, leaves the row untouched and logs an error', async () => {
+      // Red if the guard in renewFromWallet goes: the key falls back to a literal and it charges.
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      const logSpy = jest.spyOn(logger, 'log')
+      const sub = undatedRow()
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await service.retryFailedPayments()
+
+      expect(walletService.debit).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(sub.retryCount).toBe(1)
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('s-undated'))
+    })
+
+    it('does not extend a free plan either, since there is no cycle to extend from', async () => {
+      // Red if the guard moves below the zero price branch: the period is extended for free.
+      clientRoles.getPlanPrice.mockResolvedValue(0)
+      subscriptionRepo.find.mockResolvedValue([undatedRow()])
+
+      await service.retryFailedPayments()
+
+      expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
   })
 
   it('marca past_due si el cobro de wallet falla por saldo insuficiente', async () => {
@@ -211,6 +254,7 @@ describe('TasksService — processTrialConversions', () => {
         status: SubscriptionStatus.TRIAL,
         autoRenew: true,
         retryCount: 0,
+        nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
       },
     ])
 
@@ -1376,6 +1420,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 
@@ -1414,6 +1459,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 
@@ -1521,6 +1567,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 

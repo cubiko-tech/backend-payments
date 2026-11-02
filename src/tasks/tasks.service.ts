@@ -1347,12 +1347,20 @@ export class TasksService {
       )
     }
 
+    // No date means no cycle to key the debit on, and a shared key would hand out later cycles free.
+    // A data defect, not a failed payment: no retry and no notice, so the row is left untouched.
+    if (!sub.nextBillingDate) {
+      logger.log(
+        'error',
+        `[CRON] Wallet subscription ${sub.id} has no nextBillingDate: not charged`,
+      )
+      return false
+    }
+
     const billingCycleKey =
       sub.nextBillingDate instanceof Date
         ? sub.nextBillingDate.toISOString()
-        : sub.nextBillingDate
-          ? String(sub.nextBillingDate)
-          : 'current'
+        : String(sub.nextBillingDate)
     const idempotencyKey = `subscription:${sub.id}:${billingCycleKey}`
 
     if (!(await this.hasCycleDebit(sub.walletId, idempotencyKey))) {
