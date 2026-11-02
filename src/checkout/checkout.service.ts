@@ -5,7 +5,7 @@
  */
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, EntityManager, Raw, Repository } from 'typeorm'
+import { DataSource, EntityManager, In, Raw, Repository } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -29,6 +29,7 @@ import {
   SubscriptionProvider,
 } from '../subscription/entities/subscription.entity'
 import {
+  PLAN_APPLYING_EVENTS,
   SubscriptionEvent,
   SubscriptionEventType,
 } from '../subscription/entities/subscriptionEvent.entity'
@@ -1494,7 +1495,7 @@ export class CheckoutService implements OnModuleInit {
     if (subscription) {
       if (payment?.id) {
         const existingEvent = await subscriptionEventRepo.findOne({
-          where: { paymentId: payment.id },
+          where: { paymentId: payment.id, eventType: In(PLAN_APPLYING_EVENTS) },
         })
         if (subscription.lastPaymentId === payment.id || existingEvent) {
           return {

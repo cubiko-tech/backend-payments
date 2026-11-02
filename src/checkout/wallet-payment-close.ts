@@ -14,9 +14,9 @@ import {
 const log = new Logger('WalletPaymentClose')
 
 /**
- * How long after applying its plan, by its subscription event, a purchase can still lose to a
- * newer one. Counted from there and not from `paidAt`, which a stuck purchase gets only when it
- * completes: past this the brand has been using what it bought.
+ * How long a purchase can have been in use and still be credited when another one replaces its
+ * plan: from its applying event to that change. Counted from the event and not from `paidAt`,
+ * which a stuck purchase gets only when it completes. Proposed value, see `docs/RIESGOS.md`.
  */
 export const PLAN_YIELD_WINDOW_MS = 24 * 60 * 60 * 1000
 

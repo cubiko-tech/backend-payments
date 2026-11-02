@@ -1,9 +1,10 @@
-import { DataSource, EntityManager, QueryRunner, Repository } from 'typeorm'
+import { DataSource, EntityManager, In, QueryRunner, Repository } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import {
+  PLAN_APPLYING_EVENTS,
   SubscriptionEvent,
   SubscriptionEventType,
 } from '../subscription/entities/subscriptionEvent.entity'
@@ -65,14 +66,30 @@ async function inBrandPlanLock<T>(
   }
 }
 
-/** Whether a purchase with another plan moved the subscription after this one applied its own. */
-async function planMovedAfter(event: SubscriptionEvent, manager: EntityManager) {
+function findPlanApplyingEvent(paymentId: string, manager: EntityManager) {
+  return manager.getRepository(SubscriptionEvent).findOne({
+    where: { paymentId, eventType: In(PLAN_APPLYING_EVENTS) },
+  })
+}
+
+/**
+ * Whether another purchase changed the plan within `PLAN_YIELD_WINDOW_MS` of this one applying it.
+ * Stored times only: a retry days later must reach the verdict a timely one would have reached.
+ */
+async function displacedWithinWindow(event: SubscriptionEvent, manager: EntityManager) {
+  const appliedAt = new Date(event.createdAt).getTime()
   const rows = await manager.query(
     `SELECT 1 FROM subscription_events
      WHERE "subscriptionId" = $1 AND "eventType" = $2 AND "paymentId" IS NOT NULL
-       AND "paymentId" <> $3 AND "createdAt" > $4
+       AND "paymentId" <> $3 AND "createdAt" > $4 AND "createdAt" <= $5
      LIMIT 1`,
-    [event.subscriptionId, SubscriptionEventType.PLAN_CHANGED, event.paymentId, event.createdAt],
+    [
+      event.subscriptionId,
+      SubscriptionEventType.PLAN_CHANGED,
+      event.paymentId,
+      event.createdAt,
+      new Date(appliedAt + PLAN_YIELD_WINDOW_MS),
+    ],
   )
   return rows.length > 0
 }
@@ -80,6 +97,8 @@ async function planMovedAfter(event: SubscriptionEvent, manager: EntityManager) 
 /**
  * Whether a newer purchase beat this one. Reads the row under the lock: a stale copy could
  * miss that it was already judged, and that verdict stands even if the newer one is refunded.
+ * A purchase that applied only loses if its days were replaced within the window; one that did
+ * not apply loses to any newer purchase of another plan.
  */
 async function hasLostToNewerPurchase(payment: Payment, manager: EntityManager) {
   const paymentRepo = manager.getRepository(Payment)
@@ -100,20 +119,16 @@ async function hasLostToNewerPurchase(payment: Payment, manager: EntityManager) 
   if (await isHandedBackPurchase(current, { subscriptionRepo, subscriptionEventRepo })) {
     return true
   }
-  const event = await subscriptionEventRepo.findOne({ where: { paymentId: payment.id } })
-  if (event && Date.now() - new Date(event.createdAt).getTime() > PLAN_YIELD_WINDOW_MS) {
-    return false
+  const applied = await findPlanApplyingEvent(payment.id, manager)
+  if (applied) {
+    return displacedWithinWindow(applied, manager)
   }
   if (await findConflictingPlanSubscription(current, { subscriptionRepo, paymentRepo })) {
     return true
   }
 
   const sub = await subscriptionRepo.findOne({ where: { brandId: payment.brandId } })
-  if (sub?.lastPaymentId === payment.id) {
-    return false
-  }
-  // Already applied, its days are in the subscription: it yields when the debited one closes.
-  return event ? planMovedAfter(event, manager) : hasNewerDebitedPurchase(current, manager)
+  return sub?.lastPaymentId !== payment.id && hasNewerDebitedPurchase(current, manager)
 }
 
 /** Written as one key so that a concurrent writer of `metadata` cannot lose it. */
@@ -146,7 +161,10 @@ export function closeExternalPlanPurchase(
       await markLost(payment.id, manager)
       return { outcome: 'superseded' as const }
     }
-    await yieldOverlappedOlderPurchase(payment, manager)
+    // Yielding and applying share this transaction: one that already applied already yielded.
+    if (!(await findPlanApplyingEvent(payment.id, manager))) {
+      await yieldOverlappedOlderPurchase(payment, manager)
+    }
     const closed = await createOrRenewSubscription(req, payment, manager)
     return { outcome: 'applied' as const, ...closed }
   })

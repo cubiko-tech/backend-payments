@@ -295,7 +295,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una compra externa perdedora no se puede acreditar: wallet cerrada o tope de wallets (LOC-101)
 
-- **Dónde**: `src/checkout/external-payment-close.ts:179`, `:211` (`resolveRefundWallet`, `settleLostExternalPurchase`)
+- **Dónde**: `src/checkout/external-payment-close.ts:202`, `:234` (`resolveRefundWallet`, `settleLostExternalPurchase`)
 - **Qué lo dispara**: la compra perdió contra una más nueva y la wallet `internal` de esa marca y moneda está cerrada, o
   no existe y la marca ya tiene 10 wallets.
 - **Qué rompe**: la plata cobrada por el proveedor no vuelve: la compra queda `processing` con `lostToNewerPurchase`, sin
@@ -303,9 +303,17 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: abierto — lo cierra que quien aprueba decida si se reabre la wallet, se acredita a otra o se devuelve por
   el proveedor.
 
+## Una compra desplazada se devuelve entera con hasta 24 h de uso (LOC-101)
+
+- **Dónde**: `src/checkout/wallet-payment-close.ts:21` (`PLAN_YIELD_WINDOW_MS`);
+  `src/checkout/external-payment-close.ts:79` (`displacedWithinWindow`)
+- **Qué lo dispara**: otra compra cambia el plan dentro de las 24 h de que ésta aplicó el suyo.
+- **Qué rompe**: la marca recibe el total en la wallet aunque usó el plan hasta 24 h. Pasado el tope no se devuelve nada.
+- **Estado**: abierto — el valor es una propuesta; lo cierra que quien aprueba lo confirme o lo cambie.
+
 ## Una compra externa devuelta a la wallet conserva su factura (LOC-101)
 
-- **Dónde**: `src/checkout/checkout.service.ts:904` (`finalizeProcessingPayment`), `src/checkout/wallet-payment-close.ts:75`
+- **Dónde**: `src/checkout/checkout.service.ts:905` (`finalizeProcessingPayment`), `src/checkout/wallet-payment-close.ts:83`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: la compra ya facturó cuando pierde: cedió después de `completed`, o una más nueva cerró durante las
   llamadas de factura.
@@ -315,7 +323,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## La página de retorno dice «no pudo completarse» de una compra devuelta a la wallet (LOC-101)
 
-- **Dónde**: `src/checkout/checkout.service.ts:974` (`confirmedPaymentAnswer`)
+- **Dónde**: `src/checkout/checkout.service.ts:975` (`confirmedPaymentAnswer`)
 - **Qué lo dispara**: quien compró vuelve del proveedor con una compra que perdió contra una más nueva.
 - **Qué rompe**: responde `failed` con `refundedToWallet: true`, y el front aún no lee ese campo: no se avisa que la plata
   está en la wallet. No se pierde plata.
