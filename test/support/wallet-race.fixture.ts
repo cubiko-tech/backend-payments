@@ -251,6 +251,20 @@ export function parkFirstCall(target: any, method: string, gate: Gate): jest.Spy
   })
 }
 
+/** True once some session is blocked on a row lock; false if none blocks in time. */
+export async function someoneWaitsOnRowLock(dataSource: DataSource, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const rows = await dataSource.query(
+      `SELECT 1 FROM pg_stat_activity
+       WHERE wait_event_type = 'Lock' AND datname = current_database()`,
+    )
+    if (rows.length > 0) return true
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  return false
+}
+
 /** True once some session is blocked on an advisory lock; false if none blocks in time. */
 export async function someoneWaitsOnAdvisoryLock(dataSource: DataSource, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs

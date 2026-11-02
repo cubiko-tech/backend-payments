@@ -608,43 +608,51 @@ export class AdminController {
     },
     @Req() req?: any,
   ) {
-    const wallet = await this.walletWriteRepo.findOne({ where: { id } })
-    if (!wallet) return { error: 'Wallet no encontrada' }
-    if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada' }
-    if (wallet.status === WalletStatus.FROZEN && body.type === 'debit') {
-      return { error: 'Wallet congelada — no se permiten débitos' }
-    }
-
-    const amount = Math.abs(Number(body.amount))
-    if (!amount || amount <= 0) return { error: 'Monto inválido' }
-
-    const balanceBefore = Number(wallet.balance)
-    const balanceAfter = body.type === 'credit' ? balanceBefore + amount : balanceBefore - amount
-
-    if (body.type === 'debit' && balanceAfter < 0) {
-      return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
-    }
-
     const actor = req?.user?.id || 'admin'
-    // Crear transacción
-    const transaction = this.transactionWriteRepo.create({
-      walletId: id,
-      brandId: wallet.brandId,
-      type: body.type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT,
-      amount,
-      balanceBefore,
-      balanceAfter,
-      status: TransactionStatus.COMPLETED,
-      category: body.category || 'admin_adjustment',
-      description: body.description || `Ajuste manual (${body.type})`,
-      referenceType: 'admin',
-      referenceId: actor,
-    })
-    await this.transactionWriteRepo.save(transaction)
+    // The row lock serializes this with every other movement, so the balance read stays current.
+    const outcome = await this.walletWriteRepo.manager.transaction(async (manager) => {
+      const wallet = await manager.findOne(Wallet, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!wallet) return { error: 'Wallet no encontrada' }
+      if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada' }
+      if (wallet.status === WalletStatus.FROZEN && body.type === 'debit') {
+        return { error: 'Wallet congelada — no se permiten débitos' }
+      }
 
-    // Actualizar balance de la wallet
-    wallet.balance = balanceAfter as any
-    await this.walletWriteRepo.save(wallet)
+      const amount = Math.abs(Number(body.amount))
+      if (!amount || amount <= 0) return { error: 'Monto inválido' }
+
+      const balanceBefore = Number(wallet.balance)
+      const balanceAfter = body.type === 'credit' ? balanceBefore + amount : balanceBefore - amount
+
+      if (body.type === 'debit' && balanceAfter < 0) {
+        return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
+      }
+
+      const transaction = this.transactionWriteRepo.create({
+        walletId: id,
+        brandId: wallet.brandId,
+        type: body.type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT,
+        amount,
+        balanceBefore,
+        balanceAfter,
+        status: TransactionStatus.COMPLETED,
+        category: body.category || 'admin_adjustment',
+        description: body.description || `Ajuste manual (${body.type})`,
+        referenceType: 'admin',
+        referenceId: actor,
+      })
+      await manager.save(Transaction, transaction)
+
+      wallet.balance = balanceAfter as any
+      await manager.save(Wallet, wallet)
+
+      return { wallet, transaction, amount, balanceBefore, balanceAfter }
+    })
+    if ('error' in outcome) return { error: outcome.error }
+    const { wallet, transaction, amount, balanceBefore, balanceAfter } = outcome
 
     await this.auditService.log(
       actor,

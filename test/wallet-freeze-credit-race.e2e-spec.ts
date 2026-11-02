@@ -1,4 +1,4 @@
-import { DataSource, Repository } from 'typeorm'
+import { Repository } from 'typeorm'
 
 import { AdminController } from '../src/admin/admin.controller'
 import { AuditService } from '../src/audit/audit.service'
@@ -10,6 +10,7 @@ import {
   PLAN_PRICE,
   RaceInstance,
   seedWallet,
+  someoneWaitsOnRowLock,
   startInstance,
   stopInstance,
 } from './support/wallet-race.fixture'
@@ -26,19 +27,6 @@ function landAfterNextRead(repo: Repository<Wallet>, action: () => Promise<unkno
     await action()
     return row
   })
-}
-
-async function someoneWaitsOnRowLock(dataSource: DataSource, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rows = await dataSource.query(
-      `SELECT 1 FROM pg_stat_activity
-       WHERE wait_event_type = 'Lock' AND datname = current_database()`,
-    )
-    if (rows.length > 0) return true
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  return false
 }
 
 describe('Freezing a wallet while its balance moves (PostgreSQL, LOC-107)', () => {
