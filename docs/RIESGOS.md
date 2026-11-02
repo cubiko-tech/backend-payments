@@ -447,11 +447,18 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
 - **Dónde**: `src/tasks/tasks.service.ts:1352` (`renewFromWallet`), `:474` (`processSubscriptionRenewals`), `:923`
-  (`expireSubscriptions`); `src/subscription/subscription.controller.ts:128-134` (`create`), que deja la fecha opcional.
+  (`expireSubscriptions`), `:1364` y `:1450` (llave del ciclo, `hasCycleDebit`);
+  `src/subscription/subscription.controller.ts:128-134` (`create`), que deja la fecha opcional.
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, que sale de `POST /subscription` sin el campo o de una
-  corrección a mano.
+  corrección a mano. Entre ellas, las que ya pagaron: el código anterior a LOC-91 les dejó un débito con llave
+  `subscription:<id>:current`.
 - **Qué rompe**: la fila no paga y sigue viva: el contador de reintentos no sube, así que no vence. En `past_due` deja un log
   de error en cada reintento; en `active` no la toma ninguna consulta, ni deja log. Si conserva el plan en roles, es servicio
   sin cobrar y sin límite. Hipótesis: el vencimiento del plan en roles no se abrió (otro repositorio), y ese `create` no llama
-  a roles, así que acá no consta que tenga uno.
+  a roles, así que acá no consta que tenga uno. La fila con débito `…:current` ya pagó y no recibe período, porque la guarda
+  corta antes de `hasCycleDebit`. Y darle fecha la cobra dos veces: la llave cambia, no encuentra ese débito y debita de nuevo.
+  Medido sobre Postgres real: saldo esperado 200000, saldo final 150000.
 - **Estado**: abierto — lo cierra decidir qué se hace con esas filas (darles fecha o cerrarlas) y exigir la fecha en el alta.
+  Antes de darle fecha a una fila se busca su llave `subscription:<id>:current`. Si existe, ese ciclo ya está pagado y no se
+  vuelve a cobrar: la corrección tiene que reconocer ese débito. Una fecha futura sola no alcanza en `past_due`, porque el
+  reintento no mira la fecha (`retryFailedPayments`, `tasks.service.ts:552-557`) y cobraría con la llave nueva.
