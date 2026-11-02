@@ -571,21 +571,26 @@ export class AdminController {
       return { error: 'Wallet cerrada, no se puede modificar' }
 
     const previousStatus = wallet.status
-    wallet.status =
-      wallet.status === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
+    const newStatus =
+      previousStatus === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
 
-    await this.walletWriteRepo.save(wallet)
+    // Writes only the status, and only over the status read: never a stale balance or a closed row.
+    const toggled = await this.walletWriteRepo.update(
+      { id, status: previousStatus },
+      { status: newStatus },
+    )
+    if (!toggled.affected) return { error: 'La wallet cambió de estado, vuelva a intentar' }
 
     await this.auditService.log(
       req?.user?.id || 'admin',
-      wallet.status === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
+      newStatus === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
       'wallet',
       id,
-      { previousStatus, newStatus: wallet.status },
-      `Wallet ${wallet.status === WalletStatus.FROZEN ? 'congelada' : 'descongelada'} manualmente`,
+      { previousStatus, newStatus },
+      `Wallet ${newStatus === WalletStatus.FROZEN ? 'congelada' : 'descongelada'} manualmente`,
     )
 
-    return { data: wallet }
+    return { data: await this.walletWriteRepo.findOne({ where: { id } }) }
   }
 
   @Post('wallets/:id/adjust')

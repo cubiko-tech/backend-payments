@@ -1,7 +1,7 @@
 // R6: One responsibility, the wallet ledger: every balance movement shares its locks and checks.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, Not } from 'typeorm'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
   Transaction,
@@ -543,17 +543,25 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status === WalletStatus.CLOSED) {
-      throw new RequestException(
+    const closed = () =>
+      new RequestException(
         { code: 'WALLET_CLOSED', message: 'No se puede congelar una wallet cerrada' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status === WalletStatus.CLOSED) {
+      throw closed()
     }
 
-    wallet.status = WalletStatus.FROZEN
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const frozen = await this.walletRepository.update(
+      { id: walletId, status: Not(WalletStatus.CLOSED) },
+      { status: WalletStatus.FROZEN },
+    )
+    if (!frozen.affected) {
+      throw closed()
+    }
     this.logger.log(`Wallet ${walletId} congelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
   /**
@@ -567,17 +575,25 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status !== WalletStatus.FROZEN) {
-      throw new RequestException(
+    const notFrozen = () =>
+      new RequestException(
         { code: 'WALLET_NOT_FROZEN', message: 'Solo se pueden descongelar wallets congeladas' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status !== WalletStatus.FROZEN) {
+      throw notFrozen()
     }
 
-    wallet.status = WalletStatus.ACTIVE
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const unfrozen = await this.walletRepository.update(
+      { id: walletId, status: WalletStatus.FROZEN },
+      { status: WalletStatus.ACTIVE },
+    )
+    if (!unfrozen.affected) {
+      throw notFrozen()
+    }
     this.logger.log(`Wallet ${walletId} descongelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
   /**

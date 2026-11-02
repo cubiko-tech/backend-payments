@@ -36,6 +36,7 @@ const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
   findOne: jest.fn(),
   save: jest.fn((d: any) => Promise.resolve(d)),
+  update: jest.fn().mockResolvedValue({ affected: 1 }),
   create: jest.fn((d: any) => d),
   count: jest.fn().mockResolvedValue(0),
   createQueryBuilder: jest.fn(() => mockQueryBuilder()),
