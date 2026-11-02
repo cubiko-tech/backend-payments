@@ -85,9 +85,16 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   finito mayor que cero antes de abrir la transacción (`src/wallet/wallet.service.ts:197-209`), verifica
   que la wallet bloqueada pertenezca a `txData.brandId` cuando se informa la marca (`:238-243`), rechaza
   wallets o cobros en `TKN` (`:245-255`), y `processSubscriptionRenewals` / `retryFailedPayments`
-  encaminan toda suscripción `provider === 'wallet'` a `renewFromWallet`
-  (`src/tasks/tasks.service.ts:456-459`, `:528-531`), donde un `walletId` nulo falla con
-  `MISSING_WALLET_ID` (`:1124-1129`).
+  no le pasan a `renewFromWallet` una suscripción `provider === 'wallet'` con `walletId` nulo
+  (`src/tasks/tasks.service.ts:491-496`, `:571-576`), y si alguna llega ahí falla con
+  `MISSING_WALLET_ID` (`:1343-1348`).
+
+## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
+- **Dónde**: `src/tasks/tasks.service.ts:491-496`, `:571-576`
+- **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo
+- **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet
+- **Estado**: abierto — lo cierra corregir cada fila; el log de error con su id y el contador de la
+  pasada la señalan en cada corrida. Cuántas filas hay por ambiente no se contó: se cuenta en la entrega.
 
 ## La renovación por wallet pide precio fijo en COP, omite la moneda en `debit` y `processWalletPayment` oculta fallos del débito (C3)
 
