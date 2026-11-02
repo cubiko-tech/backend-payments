@@ -112,6 +112,57 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     expect(await creditsOf(external.id)).toHaveLength(1)
   })
 
+  it('H2 credits from the sweep a purchase stuck after applying its plan that then lost it', async () => {
+    // R15: red if the sweep skips purchases with their own event: it stays processing, uncredited.
+    const external = await olderExternal()
+    await appliedWithoutCompleting(external.id)
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    await buy(wallet.id, 'stuck-newer')
+
+    await a.tasks.settleLostExternalPayments()
+
+    expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.REFUNDED)
+    expect(await creditsOf(external.id)).toHaveLength(1)
+    expect((await subscriptionOf(a.dataSource, BRAND_ID))!.planSlug).toBe(NEW_PLAN)
+  })
+
+  it('H2 completes from the sweep a purchase stuck after applying its plan that kept it', async () => {
+    // R15: red if the sweep skips purchases with their own event: it stays processing forever.
+    const external = await olderExternal()
+    await appliedWithoutCompleting(external.id)
+
+    await a.tasks.settleLostExternalPayments()
+
+    expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await creditsOf(external.id)).toHaveLength(0)
+    expect((await subscriptionOf(a.dataSource, BRAND_ID))!.lastPaymentId).toBe(external.id)
+  })
+
+  it('H1 keeps a purchase paid days ago and in use when a newer one confirms late', async () => {
+    // R15: red without the yield window: the used purchase is handed back and credited in full.
+    const older = await seedExternalPurchase(a.dataSource, BRAND_ID, OLD_PLAN, { age: '21 days' })
+    const newer = await seedExternalPurchase(a.dataSource, BRAND_ID, NEW_PLAN, {
+      age: '20 days 1 hour',
+    })
+    await confirm(older.id)
+    // Twenty days of use and an expired checkout: the clock is the only thing written by hand.
+    await a.dataSource.query(
+      `UPDATE payments SET "paidAt" = NOW() - INTERVAL '20 days' WHERE id = $1`,
+      [older.id],
+    )
+    await a.dataSource.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [newer.id])
+
+    await confirm(newer.id)
+    await a.tasks.settleLostExternalPayments()
+
+    expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await creditsOf(older.id)).toHaveLength(0)
+    expect(await statusOf(a.dataSource, newer.id)).toBe(PaymentStatus.COMPLETED)
+    const sub = (await subscriptionOf(a.dataSource, BRAND_ID))!
+    expect(sub.planSlug).toBe(NEW_PLAN)
+    expect(sub.lastPaymentId).toBe(newer.id)
+  })
+
   it('E14 does not credit an applied purchase for a newer debit that has not closed', async () => {
     // R15: red if an applied purchase loses to the open debit: credited and it keeps the plan.
     const external = await olderExternal()

@@ -13,6 +13,9 @@ import {
 
 const log = new Logger('WalletPaymentClose')
 
+/** How long after being paid a purchase still yields to a newer one that overlapped with it. */
+export const PLAN_YIELD_WINDOW_MS = 24 * 60 * 60 * 1000
+
 /** Rolls back without ever throwing, so the error that caused it is the one the caller sees. */
 export async function rollbackQuietly(runner: QueryRunner) {
   try {
@@ -69,7 +72,8 @@ export async function hasNewerDebitedPurchase(payment: Payment, manager: EntityM
 /**
  * Hands back to its sweep every older purchase of another plan, from any provider, that closed
  * while this one was already open: they overlapped, so the newer wins and the older is credited.
- * Purchases that did not overlap are plain plan changes and keep their money spent.
+ * Purchases that did not overlap are plain plan changes and keep their money spent, and so do
+ * those paid more than `PLAN_YIELD_WINDOW_MS` ago: the brand has been using what they bought.
  * Looks in the subscription events because `lastPaymentId` only names the newest purchase.
  */
 export async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityManager) {
@@ -78,7 +82,8 @@ export async function yieldOverlappedOlderPurchase(payment: Payment, manager: En
      FROM subscriptions s
      JOIN subscription_events e ON e."subscriptionId" = s.id
      WHERE s."brandId" = $2 AND p.id = e."paymentId" AND p.status = $3
-       AND p.purpose = $4 AND p."purposeId" <> $5 AND p."paidAt" > $6 AND p."createdAt" < $6`,
+       AND p.purpose = $4 AND p."purposeId" <> $5 AND p."paidAt" > $6 AND p."createdAt" < $6
+       AND p."paidAt" > $7`,
     [
       PaymentStatus.PROCESSING,
       payment.brandId,
@@ -86,6 +91,7 @@ export async function yieldOverlappedOlderPurchase(payment: Payment, manager: En
       PaymentPurpose.PLAN_PURCHASE,
       payment.purposeId,
       payment.createdAt,
+      new Date(Date.now() - PLAN_YIELD_WINDOW_MS),
     ],
   )
 }

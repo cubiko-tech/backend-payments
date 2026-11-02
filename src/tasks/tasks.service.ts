@@ -624,8 +624,9 @@ export class TasksService {
   }
 
   /**
-   * Finishes external plan purchases that lost to a newer one, from any provider: handed back
-   * after `completed` (they keep `paidAt`) or judged lost with the credit still to be made.
+   * Finishes external plan purchases that may have lost to a newer one, from any provider: handed
+   * back after `completed` (they keep `paidAt`), judged lost with the credit still to be made, or
+   * stuck after applying their plan (they have their event), which complete if they did not lose.
    */
   @Cron('*/5 * * * *')
   async settleLostExternalPayments() {
@@ -641,6 +642,12 @@ export class TasksService {
         {
           ...base,
           metadata: Raw((metadata) => `(${metadata})->>'${LOST_TO_NEWER_PURCHASE_FLAG}' = 'true'`),
+        },
+        {
+          ...base,
+          id: Raw(
+            (id) => `EXISTS (SELECT 1 FROM subscription_events e WHERE e."paymentId" = ${id})`,
+          ),
         },
       ],
     })
