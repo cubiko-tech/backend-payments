@@ -159,6 +159,7 @@ describe('InvoiceService.create on a real primary (Postgres)', () => {
       const service = buildService({
         prepareRunner: (runner) => {
           failRollback(runner)
+          // R17: a double, because this save has no real constraint to break without a winner.
           runner.manager.save = jest.fn().mockRejectedValue(new Error('save failed'))
         },
       })
