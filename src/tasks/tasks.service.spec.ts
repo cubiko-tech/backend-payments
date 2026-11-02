@@ -3,7 +3,7 @@ import { In, Not } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
 import { PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
-import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
@@ -21,7 +21,11 @@ const mockRepo = () => ({
 })
 
 // R17: the marks of a renewal debit are asserted over real PostgreSQL in the e2e.
-const dataSourceForMarks = () => ({ getRepository: () => mockRepo() })
+const dataSourceForMarks = (subscriptionRepo: ReturnType<typeof mockRepo>) => {
+  const getRepository = (entity: unknown) =>
+    entity === Subscription ? subscriptionRepo : mockRepo()
+  return { getRepository, transaction: async (work: any) => work({ getRepository }) }
+}
 
 describe('TasksService — processTrialConversions', () => {
   let service: TasksService
@@ -78,7 +82,7 @@ describe('TasksService — processTrialConversions', () => {
       subscriptionRepo as any,
       subscriptionEventRepo as any,
       mockRepo() as any, // webhookEventRepo
-      dataSourceForMarks() as any,
+      dataSourceForMarks(subscriptionRepo) as any,
       walletService as any,
       {} as any, // auditService
       providerFactory as any,
@@ -1318,7 +1322,7 @@ describe('TasksService — processTrialConversions', () => {
         subscriptionRepo as any,
         subscriptionEventRepo as any,
         mockRepo() as any,
-        dataSourceForMarks() as any,
+        dataSourceForMarks(subscriptionRepo) as any,
         realWalletService,
         {} as any,
         providerFactory as any,
@@ -1864,7 +1868,7 @@ describe('TasksService — processTrialConversions', () => {
           subscriptionRepo as any,
           subscriptionEventRepo as any,
           mockRepo() as any,
-          dataSourceForMarks() as any,
+          dataSourceForMarks(subscriptionRepo) as any,
           realWalletService,
           {} as any,
           providerFactory as any,
@@ -2239,7 +2243,7 @@ describe('TasksService — processTrialConversions', () => {
       }
 
       const lockDataSourceMock: any = {
-        ...dataSourceForMarks(),
+        ...dataSourceForMarks(subscriptionRepo),
         createQueryRunner: jest.fn(() => {
           const qr: any = {
             isTransactionActive: false,

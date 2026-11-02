@@ -1507,18 +1507,25 @@ export class TasksService {
       return false
     }
 
-    // Registrar evento
-    await this.subscriptionEventRepo.save(
-      this.subscriptionEventRepo.create({
-        subscriptionId: sub.id,
-        eventType: SubscriptionEventType.RENEWED,
-        toPlanSlug: sub.planSlug,
-        fromStatus: sub.status,
-        toStatus: SubscriptionStatus.ACTIVE,
-        triggeredBy: 'system',
-        reason: 'Renovación automática desde wallet',
-      }),
-    )
+    // The renewal is already saved: reporting this as a failed payment would charge the next cycle.
+    try {
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: sub.id,
+          eventType: SubscriptionEventType.RENEWED,
+          toPlanSlug: sub.planSlug,
+          fromStatus: sub.status,
+          toStatus: SubscriptionStatus.ACTIVE,
+          triggeredBy: 'system',
+          reason: 'Renovación automática desde wallet',
+        }),
+      )
+    } catch (error) {
+      logger.log(
+        'error',
+        `[CRON] Subscription ${sub.id} renewed without its history row: ${error?.message}`,
+      )
+    }
 
     // Publicar evento de renovación
     this.eventBus.publishSubscriptionRenewed({
@@ -1738,23 +1745,27 @@ export class TasksService {
       return false
     }
 
-    // Ahead of the save: a crash in between keeps the date, so the next pass extends. The other way
-    // round the date moves with the debit still pending, and the sweep refunds an extended cycle.
-    if (debitKey) {
-      await markCycleDebit(
-        this.dataSource.getRepository(Transaction),
-        { idempotencyKey: debitKey },
-        CycleExtension.EXTENDED,
-      )
+    const extension = {
+      currentPeriodStart: newPeriodStart,
+      currentPeriodEnd: newPeriodEnd,
+      nextBillingDate: newPeriodEnd,
+      status: SubscriptionStatus.ACTIVE,
+      retryCount: 0,
     }
 
-    sub.currentPeriodStart = newPeriodStart
-    sub.currentPeriodEnd = newPeriodEnd
-    sub.nextBillingDate = newPeriodEnd
-    sub.status = SubscriptionStatus.ACTIVE
-    sub.retryCount = 0
-
-    await this.subscriptionRepo.save(sub)
+    // `sub` moves only after the commit: handleRenewalFailure saves it, and a new date there is a
+    // new debit key, so the next retry charges again.
+    await this.dataSource.transaction(async (manager) => {
+      if (debitKey) {
+        await markCycleDebit(
+          manager.getRepository(Transaction),
+          { idempotencyKey: debitKey },
+          CycleExtension.EXTENDED,
+        )
+      }
+      await manager.getRepository(Subscription).save({ ...sub, ...extension })
+    })
+    Object.assign(sub, extension)
     return true
   }
 
