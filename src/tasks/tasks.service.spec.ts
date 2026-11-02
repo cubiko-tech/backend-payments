@@ -20,6 +20,9 @@ const mockRepo = () => ({
   delete: jest.fn().mockResolvedValue({ affected: 0 }),
 })
 
+// R17: the marks of a renewal debit are asserted over real PostgreSQL in the e2e.
+const dataSourceForMarks = () => ({ getRepository: () => mockRepo() })
+
 describe('TasksService — processTrialConversions', () => {
   let service: TasksService
   let subscriptionRepo: ReturnType<typeof mockRepo>
@@ -75,7 +78,7 @@ describe('TasksService — processTrialConversions', () => {
       subscriptionRepo as any,
       subscriptionEventRepo as any,
       mockRepo() as any, // webhookEventRepo
-      {} as any, // dataSource
+      dataSourceForMarks() as any,
       walletService as any,
       {} as any, // auditService
       providerFactory as any,
@@ -1315,7 +1318,7 @@ describe('TasksService — processTrialConversions', () => {
         subscriptionRepo as any,
         subscriptionEventRepo as any,
         mockRepo() as any,
-        {} as any,
+        dataSourceForMarks() as any,
         realWalletService,
         {} as any,
         providerFactory as any,
@@ -1861,7 +1864,7 @@ describe('TasksService — processTrialConversions', () => {
           subscriptionRepo as any,
           subscriptionEventRepo as any,
           mockRepo() as any,
-          {} as any,
+          dataSourceForMarks() as any,
           realWalletService,
           {} as any,
           providerFactory as any,
@@ -2236,6 +2239,7 @@ describe('TasksService — processTrialConversions', () => {
       }
 
       const lockDataSourceMock: any = {
+        ...dataSourceForMarks(),
         createQueryRunner: jest.fn(() => {
           const qr: any = {
             isTransactionActive: false,

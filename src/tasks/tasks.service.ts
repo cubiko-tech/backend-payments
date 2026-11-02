@@ -62,6 +62,14 @@ import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.uti
 import { CheckoutService } from '../checkout/checkout.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { logger } from '../shared/logger/logger'
+import {
+  canStillExtend,
+  cycleDebitKey,
+  CycleExtension,
+  markCycleDebit,
+  PENDING_CYCLE_DEBITS,
+  refundRenewalDebit,
+} from './renewal-debit-refund'
 
 /**
  * Los crons del servicio. Qué hace este archivo con `SubscriptionStatus.PENDING`
@@ -595,6 +603,49 @@ export class TasksService {
         'error',
         `[CRON] retryFailedPayments: ${withoutWallet} wallet subscriptions without walletId`,
       )
+    }
+  }
+
+  /**
+   * Credits back the renewal debits no pass can extend any more. Each one is decided under the
+   * brand's plan lock, with row and debit reread from the primary, so a pass or a checkout in flight
+   * finishes first. A failure on one debit leaves it pending and does not stop the rest.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async refundOrphanRenewalDebits() {
+    const transactionRepo = this.dataSource.getRepository(Transaction)
+    const pending = await transactionRepo.find({ where: PENDING_CYCLE_DEBITS })
+
+    let refunded = 0
+    for (const { id, referenceId } of pending) {
+      try {
+        const sub = await this.subscriptionRepo.findOne({ where: { id: referenceId } })
+        if (!sub) {
+          logger.log('error', `[CRON] Renewal debit ${id}: subscription ${referenceId} not found`)
+          continue
+        }
+        const release = await this.lockAndReread(sub)
+        if (!release) continue
+        try {
+          const debit = await transactionRepo.findOne({ where: { id } })
+          if (debit?.metadata?.cycleExtension !== CycleExtension.PENDING) continue
+          if (canStillExtend(debit, sub)) continue
+          const done = await refundRenewalDebit(debit, {
+            walletService: this.walletService,
+            auditService: this.auditService,
+            transactionRepo,
+          })
+          if (done) refunded++
+        } finally {
+          await release()
+        }
+      } catch (error) {
+        logger.log('error', `[CRON] Error refunding renewal debit ${id}: ${error.message}`)
+      }
+    }
+
+    if (refunded > 0) {
+      logger.log('warn', `[CRON] refundOrphanRenewalDebits: ${refunded} refunded`)
     }
   }
 
@@ -1357,13 +1408,21 @@ export class TasksService {
       return false
     }
 
-    const billingCycleKey =
-      sub.nextBillingDate instanceof Date
-        ? sub.nextBillingDate.toISOString()
-        : String(sub.nextBillingDate)
-    const idempotencyKey = `subscription:${sub.id}:${billingCycleKey}`
+    const idempotencyKey = cycleDebitKey(sub)
 
-    if (!(await this.hasCycleDebit(sub.walletId, idempotencyKey))) {
+    if (await this.hasCycleDebit(sub.walletId, idempotencyKey)) {
+      // The key is unique, so this cycle cannot be charged again, and extending would be free.
+      const debit = await this.dataSource
+        .getRepository(Transaction)
+        .findOne({ where: { idempotencyKey } })
+      if (debit?.metadata?.cycleExtension === CycleExtension.REFUNDED) {
+        logger.log(
+          'error',
+          `[CRON] Subscription ${sub.id} is live on a cycle already refunded: not extended`,
+        )
+        return false
+      }
+    } else {
       const currency = await this.resolveWalletCurrency(sub.walletId)
       const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
 
@@ -1406,6 +1465,7 @@ export class TasksService {
           referenceType: 'subscription',
           referenceId: sub.id,
           idempotencyKey,
+          metadata: { cycleExtension: CycleExtension.PENDING },
         },
         currency,
       )
@@ -1420,7 +1480,7 @@ export class TasksService {
     }
 
     // Renovar periodo
-    if (!(await this.extendSubscriptionPeriod(sub))) {
+    if (!(await this.extendSubscriptionPeriod(sub, idempotencyKey))) {
       return false
     }
 
@@ -1637,7 +1697,7 @@ export class TasksService {
   /**
    * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
-  private async extendSubscriptionPeriod(sub: Subscription): Promise<boolean> {
+  private async extendSubscriptionPeriod(sub: Subscription, debitKey?: string): Promise<boolean> {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
     newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
@@ -1653,6 +1713,16 @@ export class TasksService {
         `[CRON] backend-roles returned false when renewing subscription ${sub.id} (brand=${sub.brandId}, plan=${sub.planSlug})`,
       )
       return false
+    }
+
+    // Ahead of the save: a crash in between keeps the date, so the next pass extends. The other way
+    // round the date moves with the debit still pending, and the sweep refunds an extended cycle.
+    if (debitKey) {
+      await markCycleDebit(
+        this.dataSource.getRepository(Transaction),
+        { idempotencyKey: debitKey },
+        CycleExtension.EXTENDED,
+      )
     }
 
     sub.currentPeriodStart = newPeriodStart
