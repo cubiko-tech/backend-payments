@@ -370,7 +370,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 ## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
 
 - **Dónde**: `src/tasks/renewal-debit-refund.ts:52`, `:74` (`canStillExtend`, `refundRenewalDebit`),
-  `src/tasks/tasks.service.ts:615`, `:1393`, `:1418-1424`, `:1700`, `:1721`, `:1734` (`refundOrphanRenewalDebits`,
+  `src/tasks/tasks.service.ts:615`, `:1416`, `:1441-1447`, `:1730`, `:1766` (`refundOrphanRenewalDebits`,
   `renewFromWallet`, `extendSubscriptionPeriod`)
 - **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
   la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
@@ -378,14 +378,33 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   No es la carrera del candado: son dos pasadas separadas.
 - **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez a su wallet (LOC-105). Queda
   abierto:
-  - Una caída entre marcar `extended` (`:1721`) y guardar la fila (`:1734`) deja ese débito sin devolver si, antes de la
-    pasada siguiente, un checkout, una extensión de admin o el cierre de la baja le quitan la extensión: el barrido sólo
-    lista `pending`.
-  - La guarda de `renewFromWallet` (`:1418-1424`) deja una fila viva sobre un ciclo ya devuelto sin cobrar, sin extender y
+  - Marca y fila se guardan en una sola transacción (`:1730`, LOC-108), así que una caída antes del commit deja `pending`
+    y la fecha sin mover. Hipótesis, sin ejercitar: si la conexión cae durante el COMMIT y éste se aplicó,
+    `handleRenewalFailure` escribe la fecha vieja sobre lo confirmado y queda `extended` con la fecha sin mover. Ese débito
+    no se devuelve si antes de la pasada siguiente un checkout, una extensión de admin o el cierre de la baja le quitan la
+    extensión: el barrido sólo lista `pending`.
+  - La guarda de `renewFromWallet` (`:1441-1447`) deja una fila viva sobre un ciclo ya devuelto sin cobrar, sin extender y
     sin vencer, sólo con un log por hora. Hipótesis, sin ejercitar: se llega por una baja cerrada y devuelta, un `ACTIVE`
     tardío de Confío (`src/webhook/confio-subscription-webhook.service.ts:766-771`) y `reactivate`.
   - Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se devuelve el débito y
     quedan los días regalados.
+
+## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
+
+- **Dónde**: `src/tasks/tasks.service.ts:1730` (`extendSubscriptionPeriod`), `:480-483`, `:919`
+- **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`. La fila vuelve a ser elegible
+  en cada pasada horaria, que no mira el backoff.
+- **Qué rompe**: en unas tres horas se agotan los reintentos: la marca recibe avisos de pago fallido y queda vencida.
+- **Estado**: aceptado (E8): el cobro se devuelve una vez al cerrar, nunca hay dos. Abierto — lo cierra respetar el backoff en
+  esa pasada, si hiciera falta.
+
+## Una renovación cobrada y extendida puede quedar sin su fila en el historial (LOC-108)
+
+- **Dónde**: `src/tasks/tasks.service.ts:1511-1529` (`renewFromWallet`)
+- **Qué lo dispara**: falla el guardado del evento `RENEWED` con la extensión ya confirmada.
+- **Qué rompe**: el historial de esa suscripción no muestra la renovación; queda sólo el log de error con su id.
+- **Estado**: mitigado por ese log; se prefiere a tratarlo como pago fallido, que cobraría dos veces. Abierto — no hay
+  reintento del evento.
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 
