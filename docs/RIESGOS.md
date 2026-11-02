@@ -369,17 +369,23 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
 
-- **Dónde**: `src/tasks/renewal-debit-refund.ts:53`, `:75` (`canStillExtend`, `refundRenewalDebit`),
-  `src/tasks/tasks.service.ts:615`, `:1393`, `:1700` (`refundOrphanRenewalDebits`, `renewFromWallet`,
-  `extendSubscriptionPeriod`)
+- **Dónde**: `src/tasks/renewal-debit-refund.ts:52`, `:74` (`canStillExtend`, `refundRenewalDebit`),
+  `src/tasks/tasks.service.ts:615`, `:1393`, `:1418-1424`, `:1700`, `:1721`, `:1734` (`refundOrphanRenewalDebits`,
+  `renewFromWallet`, `extendSubscriptionPeriod`)
 - **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
   la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
 - **Qué rompe**: dos cobros y una extensión. Medido sobre Postgres real: 39.800 descontados y 30 días, con precio 19.900.
   No es la carrera del candado: son dos pasadas separadas.
 - **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez a su wallet (LOC-105). Queda
-  abierto: una caída entre marcar `extended` y guardar la fila, más un checkout antes de la pasada siguiente, deja ese
-  débito sin devolver. Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se
-  devuelve el débito y quedan los días regalados.
+  abierto:
+  - Una caída entre marcar `extended` (`:1721`) y guardar la fila (`:1734`) deja ese débito sin devolver si, antes de la
+    pasada siguiente, un checkout, una extensión de admin o el cierre de la baja le quitan la extensión: el barrido sólo
+    lista `pending`.
+  - La guarda de `renewFromWallet` (`:1418-1424`) deja una fila viva sobre un ciclo ya devuelto sin cobrar, sin extender y
+    sin vencer, sólo con un log por hora. Hipótesis, sin ejercitar: se llega por una baja cerrada y devuelta, un `ACTIVE`
+    tardío de Confío (`src/webhook/confio-subscription-webhook.service.ts:766-771`) y `reactivate`.
+  - Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se devuelve el débito y
+    quedan los días regalados.
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 
