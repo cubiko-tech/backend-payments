@@ -400,7 +400,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
 
-- **Dónde**: `src/provider/dropi/dropi.provider.ts:62`, `src/provider/confio/confio.provider.ts:129`,
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:62`, `src/provider/confio/confio.provider.ts:130`,
   `src/provider/stripe/stripe.provider.ts:86` (`ProviderPaymentNotFoundError`)
 - **Qué lo dispara**: una URL de API equivocada, o que Dropi no tenga `/charges/:id`: no se probó contra su API. Un 404 se lee
   como «el pago no existe».
