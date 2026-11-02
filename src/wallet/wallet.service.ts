@@ -568,18 +568,27 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (Number(wallet.balance) !== 0) {
-      throw new RequestException(
+    const hasBalance = () =>
+      new RequestException(
         {
           code: 'WALLET_HAS_BALANCE',
           message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.',
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (Number(wallet.balance) !== 0) {
+      throw hasBalance()
     }
 
+    // Conditional on the balance: a credit committing after the read above keeps the wallet open.
+    const closed = await this.walletRepository.update(
+      { id: walletId, balance: 0 },
+      { status: WalletStatus.CLOSED },
+    )
+    if (!closed.affected) {
+      throw hasBalance()
+    }
     wallet.status = WalletStatus.CLOSED
-    await this.walletRepository.save(wallet)
     this.logger.log(`Wallet ${walletId} cerrada`)
     return { data: wallet }
   }
