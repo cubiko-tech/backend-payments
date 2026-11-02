@@ -164,6 +164,7 @@ describe('Wallet subscription without walletId against a real database (e2e)', (
     )
 
   it('keeps an active row unchanged over repeated renewal passes and an expiration pass', async () => {
+    // Red if the walletId check in processSubscriptionRenewals goes: the row ends past_due.
     const { service, roles, eventBus } = createService()
     const sub = await createSubscription()
 
@@ -180,6 +181,7 @@ describe('Wallet subscription without walletId against a real database (e2e)', (
   })
 
   it('does not add a retry to a past-due row over repeated retry passes', async () => {
+    // Red if the walletId check in retryFailedPayments goes: retryCount rises to 2.
     const { service, roles, eventBus } = createService()
     const sub = await createSubscription({ status: SubscriptionStatus.PAST_DUE, retryCount: 1 })
     await backdateUpdate(sub.id)
@@ -196,6 +198,7 @@ describe('Wallet subscription without walletId against a real database (e2e)', (
   })
 
   it('still renews a row with wallet that shares the pass with a row without one', async () => {
+    // Red if the walletId check in processSubscriptionRenewals goes: the row without one fails.
     const { service, roles } = createService()
     const userId = randomUUID()
     const brandId = `brand-with-wallet-${randomUUID()}`
@@ -215,6 +218,7 @@ describe('Wallet subscription without walletId against a real database (e2e)', (
   })
 
   it('renews a row that got its walletId after the pass read it, because the lock rereads it', async () => {
+    // Red if lockAndReread stops copying the fresh row: the stale null walletId skips the charge.
     const { service } = createService()
     const userId = randomUUID()
     const brandId = `brand-late-wallet-${randomUUID()}`
@@ -222,6 +226,7 @@ describe('Wallet subscription without walletId against a real database (e2e)', (
     const sub = await createSubscription({ userId, brandId })
     const stale = await originalFind({ where: { id: sub.id } })
     await subscriptionRepo.update({ id: sub.id }, { walletId: wallet.id })
+    // R17: fixes what the pass read, so the walletId only appears on the reread under the lock.
     jest.spyOn(subscriptionRepo, 'find').mockResolvedValue(stale)
 
     await service.processSubscriptionRenewals()
