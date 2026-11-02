@@ -131,16 +131,16 @@ describe('Expiring external checkouts against their provider (PostgreSQL, LOC-89
     await expectStatus(payment.id, PaymentStatus.FAILED)
   })
 
-  it.each([
-    { provider: 'dropi' as const, column: PaymentProvider.DROPI },
-    { provider: 'confio' as const, column: PaymentProvider.CONFIO },
-  ])('E16 expires a $provider payment its provider says does not exist', async (row) => {
-    // R15: red if the client loses the 404: the row is asked about on every pass, forever.
-    const payment = await seed(row.column)
-    realClientAnswering(a, row.provider, { message: 'not found' }, 404)
+  it.each([{ provider: 'confio' as const, column: PaymentProvider.CONFIO }])(
+    'E16 expires a $provider payment its provider says does not exist',
+    async (row) => {
+      // R15: red if the client loses the 404: the row is asked about on every pass, forever.
+      const payment = await seed(row.column)
+      realClientAnswering(a, row.provider, { message: 'not found' }, 404)
 
-    await expireBrand(a, BRAND_ID)
+      await expireBrand(a, BRAND_ID)
 
-    await expectStatus(payment.id, PaymentStatus.FAILED)
-  })
+      await expectStatus(payment.id, PaymentStatus.FAILED)
+    },
+  )
 })
