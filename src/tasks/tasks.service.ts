@@ -130,6 +130,9 @@ import {
  * contador de intentos: no hay estado que persistir, que se desincronice, ni que se
  * pierda en un reinicio.
  */
+/** Rolls back the mark of a renewal debit, so the sweep refunds it, when the row was closed. */
+class RowNoLongerLiveError extends Error {}
+
 const TRAMOS_DE_REPESCA = [
   /** La primera hora: cada pasada. Es cuando el pago está ocurriendo de verdad. */
   { hastaMinutos: 60, cada: 5 },
@@ -1753,18 +1756,35 @@ export class TasksService {
       retryCount: 0,
     }
 
-    // `sub` moves only after the commit: handleRenewalFailure saves it, and a new date there is a
-    // new debit key, so the next retry charges again.
-    await this.dataSource.transaction(async (manager) => {
-      if (debitKey) {
-        await markCycleDebit(
-          manager.getRepository(Transaction),
-          { idempotencyKey: debitKey },
-          CycleExtension.EXTENDED,
+    // `sub` moves only after the commit: a new date is a new debit key, so a retry would charge
+    // again. Only these columns are written: `sub` was read before roles answered.
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        if (debitKey) {
+          await markCycleDebit(
+            manager.getRepository(Transaction),
+            { idempotencyKey: debitKey },
+            CycleExtension.EXTENDED,
+          )
+        }
+        const subscriptions = manager.getRepository(Subscription)
+        const written = await subscriptions.update(
+          { id: sub.id, status: In(LIVE_SUBSCRIPTION_STATUSES) },
+          extension,
         )
-      }
-      await manager.getRepository(Subscription).save({ ...sub, ...extension })
-    })
+        if (!written.affected) throw new RowNoLongerLiveError()
+        // A cancellation that came meanwhile dated the cut at the old period, already over: left
+        // there, the sweep would retire the cycle just paid for.
+        await subscriptions.update(
+          { id: sub.id, accessEndsAt: Not(IsNull()) },
+          { accessEndsAt: newPeriodEnd },
+        )
+      })
+    } catch (error) {
+      if (!(error instanceof RowNoLongerLiveError)) throw error
+      logger.log('error', `[CRON] Subscription ${sub.id} closed during its renewal: not extended`)
+      return false
+    }
     Object.assign(sub, extension)
     return true
   }
@@ -1898,7 +1918,18 @@ export class TasksService {
     const previousStatus = sub.status
     sub.retryCount = (sub.retryCount || 0) + 1
     sub.status = SubscriptionStatus.PAST_DUE
-    await this.subscriptionRepo.save(sub)
+    // Only these columns: `sub` was read before the wait, and saving it would undo a cancellation.
+    const written = await this.subscriptionRepo.update(
+      { id: sub.id, status: In(LIVE_SUBSCRIPTION_STATUSES) },
+      { retryCount: sub.retryCount, status: sub.status },
+    )
+    if (!written.affected) {
+      logger.log(
+        'error',
+        `[CRON] Subscription ${sub.id} closed during its renewal: no failure kept`,
+      )
+      return
+    }
 
     const baseReason = `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`
     await this.subscriptionEventRepo.save(

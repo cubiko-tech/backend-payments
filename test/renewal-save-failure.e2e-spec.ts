@@ -30,27 +30,28 @@ const BRAND_ID = 'a7108001-2222-4333-8444-555555555555'
 const BALANCE = 100000
 const CHARGED_ONCE = BALANCE - PLAN_PRICE
 
-/** Rejects each `save` that `decide` picks; the rest reach PostgreSQL. */
-function failSaves(decide: (repo: Repository<any>) => boolean) {
-  const save = Repository.prototype.save
+/** Rejects each call of `method` that `decide` picks; the rest reach PostgreSQL. */
+function failWrites(method: 'save' | 'update', decide: (repo: Repository<any>) => boolean) {
+  const write = Repository.prototype[method]
   // R17: a database failure exactly at this statement cannot be provoked on demand.
-  return jest.spyOn(Repository.prototype, 'save').mockImplementation(async function (
+  return jest.spyOn(Repository.prototype, method as any).mockImplementation(async function (
     this: Repository<any>,
     ...args: any[]
   ) {
     if (decide(this)) throw new Error('connection lost')
-    return (save as any).apply(this, args)
+    return (write as any).apply(this, args)
   } as any)
 }
 
-function failFirstSaves(target: unknown, times: number) {
+/** Fails the first writes of the row: the extension, then the record of the failed attempt. */
+function failFirstRowWrites(times: number) {
   let left = times
-  return failSaves((repo) => repo.target === target && left-- > 0)
+  return failWrites('update', (repo) => repo.target === Subscription && left-- > 0)
 }
 
-/** Every save of the extension fails, while the one that records the failed attempt goes through. */
-const failExtensionSaves = () =>
-  failSaves((repo) => repo.target === Subscription && !!repo.manager.queryRunner)
+/** Every write of the extension fails, while the one that records the failed attempt goes through. */
+const failExtensionWrites = () =>
+  failWrites('update', (repo) => repo.target === Subscription && !!repo.manager.queryRunner)
 
 /** A failed renewal must leave one debit, and either one extension or the money back. */
 describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)', () => {
@@ -125,7 +126,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
   /** The cron pass that charged the row while the save of the row failed once. */
   const renewalWithFailedSave = async () => {
     const wallet = await seedDueRow()
-    const saves = failFirstSaves(Subscription, 1)
+    const saves = failFirstRowWrites(1)
     await renewalPass()
     saves.mockRestore()
     return wallet
@@ -240,7 +241,8 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
     // R15: red if the event failure is rethrown: the row goes past due on the new date and pays again.
     const wallet = await seedDueRow()
     const logSpy = jest.spyOn(logger, 'log')
-    const saves = failFirstSaves(SubscriptionEvent, 1)
+    let left = 1
+    const saves = failWrites('save', (repo) => repo.target === SubscriptionEvent && left-- > 0)
 
     await renewalPass()
     saves.mockRestore()
@@ -264,7 +266,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
       publishSubscriptionExpired: jest.fn(),
       notifySubscriptionExpired: jest.fn().mockResolvedValue(null),
     })
-    const saves = failExtensionSaves()
+    const saves = failExtensionWrites()
 
     await renewalPass()
     await renewalPass()
@@ -288,7 +290,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
   it('E9: when recording the failure fails too, the row is untouched and the charge stays single', async () => {
     // R15: red if the mark leaves the transaction: the debit says extended on an unmoved date.
     const wallet = await seedDueRow()
-    const saves = failFirstSaves(Subscription, 2)
+    const saves = failFirstRowWrites(2)
 
     await expect(renewalPass()).rejects.toThrow('connection lost')
     saves.mockRestore()

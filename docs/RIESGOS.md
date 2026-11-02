@@ -389,6 +389,15 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   - Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se devuelve el débito y
     quedan los días regalados.
 
+## Una renovación que llega a roles después de la degradación deja plan pago sobre una fila cerrada (LOC-111)
+
+- **Dónde**: `src/tasks/tasks.service.ts:1738` (`renewPlanForBrand`), `:1102` (`degradarEnRoles`)
+- **Qué lo dispara**: una baja durante la espera a roles y el barrido de acceso, que no toma el candado de plan, cierra la
+  fila antes de que la extensión escriba; en roles, la renovación se aplica después de la degradación.
+- **Qué rompe**: la marca conserva el plan pago en roles con la fila `cancelled`. El dinero vuelve: el débito queda
+  pendiente y el barrido de huérfanos lo devuelve una vez.
+- **Estado**: abierto — lo cierra que el barrido de acceso tome el candado de plan, o degradar al abortar la extensión.
+
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
 - **Dónde**: `src/tasks/tasks.service.ts:1730` (`extendSubscriptionPeriod`), `:480-483`, `:919`

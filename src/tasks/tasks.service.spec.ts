@@ -199,7 +199,8 @@ describe('TasksService — processTrialConversions', () => {
       }),
       'COP',
     )
-    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+    expect(subscriptionRepo.update).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
     )
     expect(clientRoles.renewPlanForBrand).toHaveBeenCalled()
@@ -267,7 +268,8 @@ describe('TasksService — processTrialConversions', () => {
 
     await service.processTrialConversions()
 
-    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+    expect(subscriptionRepo.update).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),
     )
     expect(eventBus.notifyPaymentFailed).toHaveBeenCalled()
@@ -1436,12 +1438,9 @@ describe('TasksService — processTrialConversions', () => {
       expect(walletBrandB.balance).toBe(200000)
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-wrong-brand',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-wrong-brand' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
     })
@@ -1474,12 +1473,9 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(walletBrandA.balance).toBe(150000)
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-own-wallet',
-          status: SubscriptionStatus.ACTIVE,
-          retryCount: 0,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-own-wallet' }),
+        expect.objectContaining({ status: SubscriptionStatus.ACTIVE, retryCount: 0 }),
       )
       expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1523,13 +1519,10 @@ describe('TasksService — processTrialConversions', () => {
       expect(walletUSD.balance).toBe(200000)
       expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('pro', 'USD')
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-usd-wallet',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-          currentPeriodEnd: originalPeriodEnd,
-        }),
+      // The exact patch is what proves the period stays: no period column is written.
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-usd-wallet' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1583,12 +1576,9 @@ describe('TasksService — processTrialConversions', () => {
       expect(lockedUsdWallet.balance).toBe(200000)
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-locked-usd',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-locked-usd' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1634,16 +1624,13 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-cut-conn',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-          currentPeriodEnd: originalPeriodEnd,
-          nextBillingDate: originalPeriodEnd,
-        }),
+      // The exact patch is what proves the period and billing date stay.
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-cut-conn' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
-      expect(subscriptionRepo.save).not.toHaveBeenCalledWith(
+      expect(subscriptionRepo.update).not.toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
       )
       expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
@@ -2353,7 +2340,11 @@ describe('TasksService — processTrialConversions', () => {
         return sub
       })
       subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
-        if (criteria.status && sub.status !== criteria.status) {
+        if (criteria.accessEndsAt && !sub.accessEndsAt) return { affected: 0 }
+        if (
+          criteria.status &&
+          ![criteria.status.value ?? criteria.status].flat().includes(sub.status)
+        ) {
           return { affected: 0 }
         }
         Object.assign(sub, patch)
@@ -2410,7 +2401,11 @@ describe('TasksService — processTrialConversions', () => {
         return sub
       })
       subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
-        if (criteria.status && sub.status !== criteria.status) {
+        if (criteria.accessEndsAt && !sub.accessEndsAt) return { affected: 0 }
+        if (
+          criteria.status &&
+          ![criteria.status.value ?? criteria.status].flat().includes(sub.status)
+        ) {
           return { affected: 0 }
         }
         Object.assign(sub, patch)

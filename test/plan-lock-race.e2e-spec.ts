@@ -10,6 +10,7 @@ import {
   daysLeft,
   elapseRetryBackoff,
   parkFirstSubscriptionSave,
+  parkFirstSubscriptionUpdate,
   rivalWaitsOrEnds,
   seedSubscription,
   sweepOnlyBrands,
@@ -83,7 +84,7 @@ describe('Purchases and crons of one plan share one lock (PostgreSQL, LOC-88)', 
   /** A checkout on `b` while a cron pass on `a` is parked between reading its row and saving it. */
   const checkoutWhileCronSaves = async (walletId: string, cron: () => Promise<void>) => {
     const gate = createGate()
-    parkFirstSubscriptionSave(gate)
+    parkFirstSubscriptionUpdate(gate)
     sweepOnlyBrands(a, [BRAND_ID])
     const pass = cron()
     await gate.reached

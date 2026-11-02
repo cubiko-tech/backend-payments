@@ -70,6 +70,24 @@ export function parkFirstSubscriptionSave(gate: Gate) {
   } as any)
 }
 
+/** Parks the first subscription update of any instance: after reading the row, before writing it. */
+export function parkFirstSubscriptionUpdate(gate: Gate) {
+  const update = Repository.prototype.update
+  let parked = false
+  // R17: The race lives between reading and updating, and only a held call can land in it on demand.
+  return jest.spyOn(Repository.prototype, 'update').mockImplementation(async function (
+    this: Repository<any>,
+    ...args: any[]
+  ) {
+    if (!parked && this.target === Subscription) {
+      parked = true
+      gate.arrive()
+      await gate.wait
+    }
+    return (update as any).apply(this, args)
+  } as any)
+}
+
 /** Resolves once `rival` either blocks on a lock or ends, so the parked work can go on. */
 export function rivalWaitsOrEnds(rival: Promise<unknown>, dataSource: DataSource) {
   return Promise.race([rival.catch(() => undefined), someoneWaitsOnAdvisoryLock(dataSource)])
