@@ -16,9 +16,9 @@ const log = new Logger('WalletPaymentClose')
 /**
  * How long a purchase can have been in use and still be credited when another one replaces its
  * plan: from its applying event to that change. Counted from the event and not from `paidAt`,
- * which a stuck purchase gets only when it completes. Proposed value, see `docs/RIESGOS.md`.
+ * which a stuck purchase gets only when it completes. Risk it bounds: `docs/RIESGOS.md`.
  */
-export const PLAN_YIELD_WINDOW_MS = 24 * 60 * 60 * 1000
+export const PLAN_YIELD_WINDOW_MS = 15 * 60 * 1000
 
 /** Rolls back without ever throwing, so the error that caused it is the one the caller sees. */
 export async function rollbackQuietly(runner: QueryRunner) {

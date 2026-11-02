@@ -140,12 +140,12 @@ describe('What a purchase that lost its plan ends as (PostgreSQL, LOC-101)', () 
   })
 
   it('T8-late credits a purchase replaced within the window although judged days later', async () => {
-    // R15: red if the window is measured against now: charged, with its days replaced in an hour.
+    // R15: red if the window is measured against now: charged, with its days replaced in minutes.
     const stuck = await external(PLAN_A, '4 days')
     await appliedWithoutCompleting(stuck.id)
     const newer = await external(PLAN_B, '3 days')
     await confirm(newer.id)
-    await backdateEvent(a.dataSource, stuck.id, '3 days 1 hour')
+    await backdateEvent(a.dataSource, stuck.id, '3 days 10 minutes')
     await backdateEvent(a.dataSource, newer.id, '3 days')
 
     await settleBrand(a, BRAND_ID)
@@ -163,8 +163,8 @@ describe('What a purchase that lost its plan ends as (PostgreSQL, LOC-101)', () 
     const newest = await external(PLAN_A, '30 minutes')
     await confirm(winner.id)
     // Only the refunded winner replaced it in time: the newest change falls outside the window.
-    await backdateEvent(a.dataSource, stuck.id, '30 hours')
-    await backdateEvent(a.dataSource, winner.id, '20 hours')
+    await backdateEvent(a.dataSource, stuck.id, '20 minutes')
+    await backdateEvent(a.dataSource, winner.id, '10 minutes')
     await confirm(newest.id)
     await confirm(winner.id)
     expect(await statusOf(a.dataSource, winner.id)).toBe(PaymentStatus.REFUNDED)

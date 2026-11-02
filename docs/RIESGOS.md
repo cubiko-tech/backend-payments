@@ -310,13 +310,14 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: abierto — lo cierra que quien aprueba decida si se reabre la wallet, se acredita a otra o se devuelve por
   el proveedor.
 
-## Una compra desplazada se devuelve entera con hasta 24 h de uso (LOC-101)
+## Una compra desplazada se devuelve entera con hasta 15 minutos de uso (LOC-101, LOC-103)
 
 - **Dónde**: `src/checkout/wallet-payment-close.ts:21` (`PLAN_YIELD_WINDOW_MS`);
   `src/checkout/external-payment-close.ts:79` (`displacedWithinWindow`)
-- **Qué lo dispara**: otra compra cambia el plan dentro de las 24 h de que ésta aplicó el suyo.
-- **Qué rompe**: la marca recibe el total en la wallet aunque usó el plan hasta 24 h. Pasado el tope no se devuelve nada.
-- **Estado**: abierto — el valor es una propuesta; lo cierra que quien aprueba lo confirme o lo cambie.
+- **Qué lo dispara**: otra compra cambia el plan dentro de los 15 minutos de que ésta aplicó el suyo.
+- **Qué rompe**: la marca recibe el total en la wallet aunque usó el plan hasta 15 minutos. Pasado el tope no se devuelve
+  nada.
+- **Estado**: mitigado por el tope de 15 minutos, confirmado por quien aprueba el 2026-11-02.
 
 ## Una compra externa devuelta a la wallet conserva su factura (LOC-101)
 
