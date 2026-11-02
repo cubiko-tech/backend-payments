@@ -1,6 +1,5 @@
 import { HttpStatus } from '@nestjs/common'
 import { DataSource } from 'typeorm'
-
 import { buildIdempotencyFingerprint } from '../src/checkout/checkout-idempotency'
 import { CheckoutRequest } from '../src/checkout/checkout.service'
 import * as paymentEntities from '../src/payment/entities/payment.entity'
@@ -130,6 +129,7 @@ describe('Checkout retry window (PostgreSQL)', () => {
   beforeAll(async () => {
     instance = await startInstance()
     dataSource = instance.dataSource
+    // R17: A real provider is external; the cases assert whether it gets called and force its failure.
     createCheckout = jest.fn()
     isProviderAvailable = instance.moduleRef.get(ProviderConfigService)
       .isProviderAvailable as unknown as jest.Mock
