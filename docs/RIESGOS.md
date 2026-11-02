@@ -361,7 +361,10 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: mitigado por `lock_timeout` de 30 s en `lockBrandPlan`: la traba dura como mucho eso. Quien vence falla:
   un cierre de wallet queda para el barrido, y un cron no lo cuenta como pago fallido, salvo
   `expireLockedSubscription` (`src/tasks/tasks.service.ts:787`), cuya pasada se corta y sigue a la hora siguiente. Una
-  espera legítima de más de 30 s (proveedor lento) también falla; un webhook externo depende de su reintento.
+  espera legítima de más de 30 s (proveedor lento) también falla. **Abierto**: un pago externo confirmado que vence el
+  candado queda `processing`, cobrado y sin plan, hasta que un barrido lo termine. Nadie lo reintenta: el webhook se
+  procesa sin esperar y responde éxito (`src/webhook/webhook.service.ts:95`), así que el proveedor no lo repite. El caso
+  y el barrido van en LOC-89.
   Agotar el pool de esta forma no se ejercitó: E9 prueba sólo el vencimiento de un cierre. Abierto lo que lo
   cierra del todo: escribir por la conexión del candado, que pide cambiar `WalletService.debit`.
 
