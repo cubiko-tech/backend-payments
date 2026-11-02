@@ -2093,6 +2093,7 @@ describe('TasksService — processTrialConversions', () => {
 
   describe('reconcileExternalPayments', () => {
     it('queries pending and processing payments of every external provider and retries a processing payment via completeExternalPayment', async () => {
+      // R15: red if the sweep filters one provider again: the query no longer excludes only wallet.
       providerFactory.getProvider.mockReturnValue({
         getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
       })

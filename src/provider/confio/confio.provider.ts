@@ -1,3 +1,4 @@
+// R6: one adapter of one provider API: payments, plans, subscriptions and webhooks share its client.
 import { Injectable } from '@nestjs/common'
 import { timingSafeEqual } from 'crypto'
 import {
