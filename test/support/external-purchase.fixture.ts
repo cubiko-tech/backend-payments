@@ -15,7 +15,12 @@ export async function seedExternalPurchase(
   dataSource: DataSource,
   brandId: string,
   planSlug: string,
-  options: { age?: string; idempotencyKey?: string; checkoutUrl?: string } = {},
+  options: {
+    age?: string
+    idempotencyKey?: string
+    checkoutUrl?: string
+    overrides?: Partial<Payment>
+  } = {},
 ): Promise<Payment> {
   const repo = dataSource.getRepository(Payment)
   const payment = await repo.save(
@@ -31,6 +36,7 @@ export async function seedExternalPurchase(
       metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
       ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
       ...(options.checkoutUrl ? { checkoutUrl: options.checkoutUrl } : {}),
+      ...options.overrides,
     }),
   )
   if (options.age) {
@@ -47,8 +53,8 @@ export function backdateEvent(dataSource: DataSource, paymentId: string, interva
   )
 }
 
-/** Runs the real sweep query over one brand's rows only. */
-export function settleBrand(instance: RaceInstance, brandId: string) {
+/** Makes the next payment query of the crons of `instance` see only one brand's rows. */
+export function onlyBrandPayments(instance: RaceInstance, brandId: string) {
   const repo = (instance.tasks as any).paymentRepo
   const find = repo.find.bind(repo)
   // R17: The sweep reads all brands, and a spec in another worker must not close this one's rows.
@@ -56,6 +62,11 @@ export function settleBrand(instance: RaceInstance, brandId: string) {
     const rows: Payment[] = await find(options)
     return rows.filter((row) => row.brandId === brandId)
   })
+}
+
+/** Runs the real sweep query over one brand's rows only. */
+export function settleBrand(instance: RaceInstance, brandId: string) {
+  onlyBrandPayments(instance, brandId)
   return instance.tasks.settleLostExternalPayments()
 }
 

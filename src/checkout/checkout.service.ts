@@ -79,6 +79,7 @@ import {
 import {
   closeExternalPlanPurchase,
   completeExternalPlanPurchase,
+  hasPaymentTakenEffect,
   LOST_TO_NEWER_PURCHASE_FLAG,
   settleLostExternalPurchase,
 } from './external-payment-close'
@@ -742,9 +743,11 @@ export class CheckoutService implements OnModuleInit {
   /**
    * Completar pago externo (llamado desde webhook).
    * Este es el flujo que ejecuta el webhook cuando Stripe/MP/Dropi confirma el pago.
+   *
+   * @returns true only if this call left the payment `completed`.
    */
-  async completeExternalPayment(paymentId: string, providerData?: any): Promise<void> {
-    if (this.inFlightCompletions.has(paymentId)) return
+  async completeExternalPayment(paymentId: string, providerData?: any): Promise<boolean> {
+    if (this.inFlightCompletions.has(paymentId)) return false
     this.inFlightCompletions.add(paymentId)
     try {
       const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
@@ -755,7 +758,7 @@ export class CheckoutService implements OnModuleInit {
         payment.status === PaymentStatus.REFUNDED ||
         this.hasAmountMismatchMark(payment)
       ) {
-        return
+        return false
       }
 
       const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
@@ -775,9 +778,9 @@ export class CheckoutService implements OnModuleInit {
           ...(providerData ? { metadata } : {}),
         },
       )
-      if (!claimed.affected) return
+      if (!claimed.affected) return false
 
-      await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
+      return await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
     } finally {
       this.inFlightCompletions.delete(paymentId)
     }
@@ -788,7 +791,7 @@ export class CheckoutService implements OnModuleInit {
     paymentId: string,
     providerData?: any,
     metadata?: any,
-  ): Promise<void> {
+  ): Promise<boolean> {
     payment.status = PaymentStatus.PROCESSING
     if (providerData) {
       payment.metadata = metadata
@@ -818,7 +821,7 @@ export class CheckoutService implements OnModuleInit {
       )
       if (closed.outcome === 'superseded') {
         await this.settleLostPurchase(paymentId)
-        return
+        return false
       }
       if (closed.extended && closed.subscription?.currentPeriodEnd) {
         extendedUntil = closed.subscription.currentPeriodEnd
@@ -905,9 +908,9 @@ export class CheckoutService implements OnModuleInit {
       const outcome = await completeExternalPlanPurchase(payment, paidAt, this.dataSource)
       if (outcome === 'superseded') {
         await this.settleLostPurchase(paymentId)
-        return
+        return false
       }
-      if (outcome !== 'completed') return
+      if (outcome !== 'completed') return false
     } else {
       const completed = await this.paymentRepo.update(
         { id: paymentId, status: PaymentStatus.PROCESSING },
@@ -916,7 +919,7 @@ export class CheckoutService implements OnModuleInit {
           paidAt,
         },
       )
-      if (!completed.affected) return
+      if (!completed.affected) return false
     }
 
     payment.status = PaymentStatus.COMPLETED
@@ -955,6 +958,7 @@ export class CheckoutService implements OnModuleInit {
     }
 
     this.log.log(`Pago externo completado: payment=${payment.id} brand=${payment.brandId}`)
+    return true
   }
 
   private settleLostPurchase(paymentId: string) {
@@ -1037,7 +1041,7 @@ export class CheckoutService implements OnModuleInit {
 
     try {
       const provider = this.providerFactory.getProvider(payment.provider)
-      const real = await provider.getPaymentStatus(payment.providerPaymentId)
+      const real = await provider.getPaymentStatus(payment.providerPaymentId, payment.id)
 
       if (real.status === 'completed') {
         await this.completeExternalPayment(paymentId, {
@@ -1880,11 +1884,14 @@ export class CheckoutService implements OnModuleInit {
       verifiesAmount: true,
       unit: 'major',
       extractConfirmedAmount: (providerData: any) =>
-        providerData?.amount ?? providerData?.data?.amount,
+        providerData?.amount ?? providerData?.data?.amount ?? providerData?.providerStatus?.amount,
     },
+    // Its webhook omits the amount; only its status answer brings it.
     [PaymentProvider.MERCADOPAGO]: {
-      verifiesAmount: false,
-      reason: 'provider_webhook_omits_confirmed_amount',
+      verifiesAmount: true,
+      unit: 'major',
+      extractConfirmedAmount: (providerData: any) =>
+        providerData?.providerStatus?.transactionAmount,
     },
   }
 
@@ -1972,6 +1979,8 @@ export class CheckoutService implements OnModuleInit {
       }
       this.log.error(message)
       winstonLogger.log('error', message, mismatch)
+      // What was given stays given: `failed` would leave it in place with nothing to revert it.
+      if (await hasPaymentTakenEffect(payment.id, this.dataSource)) return
       await this.markPaymentAmountMismatch(payment, providerData, mismatch)
       throw new RequestException(
         {

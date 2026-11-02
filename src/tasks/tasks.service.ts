@@ -54,6 +54,7 @@ import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription
 import { WalletService } from '../wallet/wallet.service'
 import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
+import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
@@ -576,17 +577,17 @@ export class TasksService {
     }
   }
 
-  // =============================================================
-  // 2b. Reconciliar pagos Confío pendientes (cada 5 min)
-  //     Red de seguridad: si el webhook se perdió y el usuario no volvió,
-  //     consulta el estado real y completa los pagos ya pagados.
-  // =============================================================
+  /**
+   * Safety net for a lost webhook: asks each provider about its unsettled payments and completes
+   * what it confirms. A `processing` payment with its plan applied is closed by
+   * `settleLostExternalPayments`; one without it waits here for the provider to confirm.
+   */
   @Cron('*/5 * * * *')
   async reconcileExternalPayments() {
-    const cutoff = new Date(Date.now() - 2 * 60 * 1000) // pagos de más de 2 min
+    const cutoff = new Date(Date.now() - 2 * 60 * 1000)
     const pending = await this.paymentRepo.find({
       where: {
-        provider: 'confio' as any,
+        provider: Not(PaymentProvider.WALLET),
         status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         createdAt: LessThan(cutoff),
       },
@@ -598,30 +599,43 @@ export class TasksService {
     for (const p of pending) {
       try {
         if (!p.providerPaymentId) {
-          if (p.status === PaymentStatus.PROCESSING) {
-            await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+          if (
+            p.status === PaymentStatus.PROCESSING &&
+            (await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' }))
+          ) {
             completed++
           }
           continue
         }
         const real = await this.providerFactory
-          .getProvider('confio')
-          .getPaymentStatus(p.providerPaymentId)
+          .getProvider(p.provider)
+          .getPaymentStatus(p.providerPaymentId, p.id)
         if (real.status === 'completed') {
-          await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
-          completed++
+          const closed = await this.checkoutService.completeExternalPayment(p.id, {
+            source: 'cron-reconcile',
+            providerStatus: real.metadata,
+          })
+          if (closed) completed++
+        } else if (
+          p.status === PaymentStatus.PROCESSING &&
+          (real.status === 'failed' || real.status === 'refunded')
+        ) {
+          logger.log(
+            'error',
+            `[CRON] reconcileExternalPayments: payment ${p.id} was confirmed but ${p.provider} now answers ${real.status}`,
+          )
         }
       } catch (error) {
         logger.log(
           'warn',
-          `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`,
+          `[CRON] reconcileExternalPayments: error with payment ${p.id}: ${error.message}`,
         )
       }
     }
 
     logger.log(
       'info',
-      `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`,
+      `[CRON] reconcileExternalPayments: ${pending.length} checked, ${completed} completed`,
     )
   }
 
@@ -751,7 +765,7 @@ export class TasksService {
         transactionReadRepo: this.transactionReadRepo,
         dataSource: this.dataSource,
       })
-      if (!debited) {
+      if (!debited && (await this.providerLetsExpire(payment))) {
         expirableIds.push(payment.id)
       }
     }
@@ -773,6 +787,24 @@ export class TasksService {
 
     if ((result?.affected ?? 0) > 0) {
       logger.log('info', `[CRON] expirePendingCheckouts: ${result.affected} checkouts expirados`)
+    }
+  }
+
+  /** Only what the provider did not confirm expires; no answer leaves it for a later pass. */
+  private async providerLetsExpire(payment: Payment): Promise<boolean> {
+    if (payment.provider === PaymentProvider.WALLET || !payment.providerPaymentId) return true
+    try {
+      const real = await this.providerFactory
+        .getProvider(payment.provider)
+        .getPaymentStatus(payment.providerPaymentId, payment.id)
+      return real.status !== 'completed' && real.status !== 'processing'
+    } catch (error) {
+      if (error instanceof ProviderPaymentNotFoundError) return true
+      logger.log(
+        'warn',
+        `[CRON] expirePendingCheckouts: no answer for payment ${payment.id}: ${error.message}`,
+      )
+      return false
     }
   }
 

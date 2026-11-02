@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common'
 import { createHmac, timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   CreateCheckoutParams,
   CheckoutResult,
   PaymentStatusResult,
@@ -57,6 +58,9 @@ export class DropiProvider implements PaymentProvider {
       signal: AbortSignal.timeout(15000),
     })
 
+    if (response.status === 404) {
+      throw new ProviderPaymentNotFoundError(`Dropi error 404 on ${path}`)
+    }
     const body = await response.json()
     if (!response.ok) {
       throw new Error(`Dropi error: ${body.message || response.statusText}`)
@@ -115,6 +119,7 @@ export class DropiProvider implements PaymentProvider {
       metadata: {
         dropiStatus: charge.status,
         dropiUserId: charge.userId,
+        amount: charge.amount,
       },
     }
   }

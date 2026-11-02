@@ -361,10 +361,9 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: mitigado por `lock_timeout` de 30 s en `lockBrandPlan`: la traba dura como mucho eso. Quien vence falla:
   un cierre de wallet queda para el barrido, y un cron no lo cuenta como pago fallido, salvo
   `expireLockedSubscription` (`src/tasks/tasks.service.ts:787`), cuya pasada se corta y sigue a la hora siguiente. Una
-  espera legítima de más de 30 s (proveedor lento) también falla. **Abierto**: un pago externo confirmado que vence el
-  candado queda `processing`, cobrado y sin plan, hasta que un barrido lo termine. Nadie lo reintenta: el webhook se
-  procesa sin esperar y responde éxito (`src/webhook/webhook.service.ts:95`), así que el proveedor no lo repite. El caso
-  y el barrido van en LOC-89.
+  espera legítima de más de 30 s (proveedor lento) también falla. Un pago externo confirmado que vence el candado queda
+  `processing` hasta que lo termina un barrido (LOC-89): `reconcileExternalPayments` si no tiene plan, cuando el proveedor
+  lo confirma, y `settleLostExternalPayments` si ya lo tiene.
   Agotar el pool de esta forma no se ejercitó: E9 prueba sólo el vencimiento de un cierre. Abierto lo que lo
   cierra del todo: escribir por la conexión del candado, que pide cambiar `WalletService.debit`.
 
@@ -378,3 +377,45 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   No es la carrera del candado: son dos pasadas separadas.
 - **Estado**: abierto — lo cierra decidir qué se hace con esa plata (días o crédito, y si el plan cambió); en
   `planning/inbox/deuda/backend-payments-debito-de-renovacion-huerfano.md`.
+
+## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
+
+- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:117`, `:139` (`external_reference`, `getPaymentStatus`)
+- **Qué lo dispara**: `payments/search` por `external_reference` devuelve una lista vacía. Pasa con un pago creado antes de
+  LOC-89, cuya referencia era `marca:propósito:ts` y no se puede reconstruir, o si la forma real de la respuesta difiere de
+  la del falso: no se probó contra una cuenta de prueba.
+- **Qué rompe**: el barrido no hace nada y la expiración lo vence a las 24 h, así que un pago cobrado queda `failed`. Tampoco
+  lo rescata el webhook, que busca por un id que la fila no guarda (`src/webhook/webhook.service.ts:206-213`).
+- **Estado**: abierto — lo cierra probar la búsqueda contra una cuenta de prueba y arreglar el webhook. Una respuesta sin
+  `results` lanza y no expira nada.
+
+## Un pago sin respuesta del proveedor se pregunta en cada pasada y no expira (LOC-89)
+
+- **Dónde**: `src/tasks/tasks.service.ts:586`, `:794` (`reconcileExternalPayments`, `providerLetsExpire`)
+- **Qué lo dispara**: un proveedor caído, sin configurar o sin registrar en ese ambiente, con filas `pending` o `processing`.
+- **Qué rompe**: las filas no salen y avisan en cada pasada. Las llamadas son en serie, con un tope de 15 a 30 s por fila, así
+  que una caída con muchas filas alarga la pasada hasta solaparse con la siguiente. La plata no se toca: el solape lo cubren
+  los reclamos por estado y el candado de marca.
+- **Estado**: abierto — lo cierra un corte por proveedor dentro de la pasada, si una caída real lo pide.
+
+## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
+
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:62`, `src/provider/confio/confio.provider.ts:129`,
+  `src/provider/stripe/stripe.provider.ts:86` (`ProviderPaymentNotFoundError`)
+- **Qué lo dispara**: una URL de API equivocada, o que Dropi no tenga `/charges/:id`: no se probó contra su API. Un 404 se lee
+  como «el pago no existe».
+- **Qué rompe**: los `pending` de ese proveedor expiran a las 24 h aunque estén cobrados, como antes de LOC-89.
+- **Estado**: abierto — lo cierra probar `/charges/:id` contra Dropi levantado.
+
+## Lo que el barrido no rescata o completa sin mirar (LOC-89)
+
+- **Dónde**: `src/tasks/tasks.service.ts:746`, `:648` (`expirePendingCheckouts`, `settleLostExternalPayments`);
+  `src/checkout/checkout.service.ts:1983` (`assertProviderConfirmedAmount`)
+- **Qué lo dispara**: (a) se paga justo después de que la expiración leyó `pending` y el webhook se pierde; (b) un `pending` sin
+  `providerPaymentId`, por una caída entre `createCheckout` y guardar; (c) un `processing` con plan que el proveedor reembolsó;
+  (d) llega un monto distinto cuando el pago ya dio plan, crédito o factura; (e) una instancia trae un monto distinto mientras
+  otra aplica el plan y todavía no se ve.
+- **Qué rompe**: (a) y (b) quedan `failed`, porque el barrido no mira `failed`; (c) se completa igual, y un `processing` sin
+  plan en ese caso sólo deja un log de error en cada pasada; (d) se completa con lo dado y un log de error, sin revertir nada;
+  (e) queda `failed` con el plan puesto.
+- **Estado**: abierto — (d) y (e) se ven por el log `PROVIDER_AMOUNT_MISMATCH`; lo demás lo cierra una conciliación de `failed`.

@@ -290,7 +290,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     }))
     await repo.save(seeds.map((seed) => repo.create(seed)))
 
-    await expect(confirm(external.id)).resolves.toBeUndefined()
+    await expect(confirm(external.id)).resolves.toBe(false)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.PROCESSING)
     expect(await creditsOf(external.id)).toHaveLength(0)
@@ -304,7 +304,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     // R17: A failing insert is a database failure that cannot be provoked on demand.
     jest.spyOn(a.wallet, 'create').mockResolvedValueOnce({ error: 'Insert failed' })
 
-    await expect(confirm(external.id)).resolves.toBeUndefined()
+    await expect(confirm(external.id)).resolves.toBe(false)
 
     expect(logged).toHaveBeenCalledWith(expect.stringContaining('Insert failed'))
 

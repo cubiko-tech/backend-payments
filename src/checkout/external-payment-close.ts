@@ -170,6 +170,18 @@ export function closeExternalPlanPurchase(
   })
 }
 
+/** Whether the payment already gave something: a plan, a credit or an invoice. */
+export async function hasPaymentTakenEffect(paymentId: string, dataSource: DataSource) {
+  const rows = await dataSource.query(
+    `SELECT 1 WHERE
+       EXISTS (SELECT 1 FROM subscription_events WHERE "paymentId" = $1::uuid)
+       OR EXISTS (SELECT 1 FROM transactions WHERE "idempotencyKey" = ANY($2::text[]))
+       OR EXISTS (SELECT 1 FROM invoices WHERE "paymentId" = $1::uuid)`,
+    [paymentId, [`payment:${paymentId}:credit`, getWalletRefundIdempotencyKey(paymentId)]],
+  )
+  return rows.length > 0
+}
+
 /**
  * Moves an applied external plan purchase to `completed`, judging it again under the lock: a
  * newer purchase may have closed during the invoice calls, and no later close can see this one.

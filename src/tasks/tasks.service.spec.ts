@@ -1,8 +1,8 @@
 // R6: one TasksService with many crons sharing this setup; splitting it is a task of its own.
-import { In } from 'typeorm'
+import { In, Not } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
-import { PaymentStatus } from '../payment/entities/payment.entity'
+import { PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
@@ -2092,7 +2092,7 @@ describe('TasksService — processTrialConversions', () => {
   })
 
   describe('reconcileExternalPayments', () => {
-    it('queries both pending and processing Confio payments and retries a processing payment via completeExternalPayment', async () => {
+    it('queries pending and processing payments of every external provider and retries a processing payment via completeExternalPayment', async () => {
       providerFactory.getProvider.mockReturnValue({
         getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
       })
@@ -2109,7 +2109,7 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(paymentRepo.find).toHaveBeenCalledWith({
         where: expect.objectContaining({
-          provider: 'confio',
+          provider: Not(PaymentProvider.WALLET),
           status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         }),
       })
