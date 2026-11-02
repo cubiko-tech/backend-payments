@@ -6,10 +6,14 @@ import { AuditService } from '../../src/audit/audit.service'
 import { AuditLog } from '../../src/audit/entities/auditLog.entity'
 import { BillingProfile } from '../../src/billing-profile/entities/billingProfile.entity'
 import { CheckoutService } from '../../src/checkout/checkout.service'
+import { CountryBillingConfigService } from '../../src/billing-profile/country-billing-config.service'
+import { CountryBillingConfig } from '../../src/billing-profile/entities/countryBillingConfig.entity'
 import { ClientPlatformService } from '../../src/client/client-platform.service'
 import { ClientRolesService } from '../../src/client/client-roles.service'
 import { DianService } from '../../src/dian/dian.service'
 import { EventBusService } from '../../src/event-bus/event-bus.service'
+import { Invoice } from '../../src/invoice/entities/invoice.entity'
+import { InvoiceItem } from '../../src/invoice/entities/invoiceItem.entity'
 import { InvoiceService } from '../../src/invoice/invoice.service'
 import { Payment } from '../../src/payment/entities/payment.entity'
 import { PaymentAttempt } from '../../src/payment/entities/paymentAttempt.entity'
@@ -30,9 +34,18 @@ import { ConfioSubscriptionWebhookService } from '../../src/webhook/confio-subsc
 import { WebhookEvent } from '../../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../../src/webhook/webhook.service'
 
-const READ_ENTITIES = [Payment, Wallet, Transaction, BillingProfile, AuditLog]
+const READ_ENTITIES = [
+  Payment,
+  Wallet,
+  Transaction,
+  BillingProfile,
+  AuditLog,
+  Invoice,
+  CountryBillingConfig,
+]
 const WRITE_ENTITIES = [
   ...READ_ENTITIES,
+  InvoiceItem,
   PaymentAttempt,
   WalletBalanceSnapshot,
   Subscription,
@@ -55,7 +68,10 @@ export interface RaceInstance {
   assignPlan: jest.Mock
 }
 
-export async function startInstance(): Promise<RaceInstance> {
+/** With `realBilling`, invoices and credit notes are rows and the DIAN answers through its mock. */
+export async function startInstance(
+  options: { realBilling?: boolean } = {},
+): Promise<RaceInstance> {
   const dataSource = new DataSource({
     type: 'postgres',
     host: process.env.POSTGRES_HOST || '127.0.0.1',
@@ -97,10 +113,17 @@ export async function startInstance(): Promise<RaceInstance> {
         assignPlanToBrand: assignPlan,
         renewPlanForBrand: jest.fn().mockResolvedValue(true),
       }),
-      provideVal(InvoiceService, { create: jest.fn().mockResolvedValue(invoice) }),
+      ...(options.realBilling
+        ? [InvoiceService, DianService, CountryBillingConfigService]
+        : [
+            provideVal(InvoiceService, {
+              create: jest.fn().mockResolvedValue(invoice),
+              findInvoiceOfPayment: jest.fn().mockResolvedValue(null),
+            }),
+            provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
+          ]),
       provideVal(SubscriptionService, {}),
       provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(DEFAULT_TAX) }),
-      provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
       provideVal(ProviderFactory, { getProvider: jest.fn() }),
       provideVal(ProviderConfigService, { isProviderAvailable: jest.fn().mockResolvedValue(true) }),
       provideVal(EnterprisePricingService, { getForBrand: jest.fn().mockResolvedValue(null) }),
@@ -115,6 +138,10 @@ export async function startInstance(): Promise<RaceInstance> {
       provideVal(ConfioSubscriptionWebhookService, {}),
     ],
   }).compile()
+  if (options.realBilling) {
+    // A configured .env must not reach the real Siigo from a test.
+    ;(moduleRef.get(DianService) as any).providers.delete('siigo')
+  }
 
   return {
     dataSource,

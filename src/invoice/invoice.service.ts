@@ -5,6 +5,24 @@ import { Invoice, InvoiceType, InvoiceStatus } from './entities/invoice.entity'
 import { InvoiceItem } from './entities/invoiceItem.entity'
 import { RequestException } from '../shared/exception/request.exception'
 
+/** Business fields only: saving an item with its `id` would move it off the original invoice. */
+function copyItemFields(item: InvoiceItem): Partial<InvoiceItem> {
+  const { description, quantity, unitPrice, subtotal, taxRate, taxAmount, total } = item
+  const { productType, referenceType, referenceId } = item
+  return {
+    description,
+    quantity,
+    unitPrice,
+    subtotal,
+    taxRate,
+    taxAmount,
+    total,
+    productType,
+    referenceType,
+    referenceId,
+  }
+}
+
 @Injectable()
 export class InvoiceService {
   private readonly logger = new Logger(InvoiceService.name)
@@ -172,46 +190,65 @@ export class InvoiceService {
     }
   }
 
+  /** The invoice of a payment, read from the primary. A credit note never carries `paymentId`. */
+  findInvoiceOfPayment(paymentId: string) {
+    return this.invoiceRepository.findOne({
+      where: { paymentId, type: InvoiceType.INVOICE },
+    })
+  }
+
   /**
-   * Crear nota crédito asociada a una factura y un reembolso
+   * Creates the only credit note of an invoice, reversing it in full. Safe to call again and from
+   * several instances: `created` is false when the note already existed. Leaves `paymentId` empty,
+   * which `UQ_invoices_payment_id` keeps for the invoice; `creditNoteForId` links them.
    */
-  async createCreditNote(invoiceId: string, refundId: string) {
+  async createCreditNote(
+    invoiceId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<{ data?: Invoice; created?: boolean; error?: string }> {
+    const findNote = () =>
+      this.invoiceRepository.findOne({
+        where: { creditNoteForId: invoiceId, type: InvoiceType.CREDIT_NOTE },
+      })
     try {
-      const originalInvoice = await this.invoiceReadRepository.findOne({
+      const existing = await findNote()
+      if (existing) {
+        return { data: existing, created: false }
+      }
+      const original = await this.invoiceRepository.findOne({
         where: { id: invoiceId },
         relations: ['items'],
       })
-
-      if (!originalInvoice) {
+      if (!original) {
         throw new RequestException(
           { code: 'INVOICE_NOT_FOUND', message: 'Factura original no encontrada' },
           HttpStatus.NOT_FOUND,
         )
       }
 
-      // Generar número de nota crédito
-      const creditNoteNumber = `NC-${originalInvoice.invoiceNumber}`
-
-      const creditNote = this.invoiceRepository.create({
-        brandId: originalInvoice.brandId,
-        paymentId: originalInvoice.paymentId,
-        subscriptionId: originalInvoice.subscriptionId,
-        billingProfileId: originalInvoice.billingProfileId,
+      const result = await this.create({
+        brandId: original.brandId,
+        subscriptionId: original.subscriptionId,
+        billingProfileId: original.billingProfileId,
         type: InvoiceType.CREDIT_NOTE,
         creditNoteForId: invoiceId,
-        invoiceNumber: creditNoteNumber,
-        subtotal: originalInvoice.subtotal,
-        taxTotal: originalInvoice.taxTotal,
-        total: originalInvoice.total,
-        currency: originalInvoice.currency,
+        invoiceNumber: `NC-${original.invoiceNumber}`,
+        subtotal: original.subtotal,
+        taxTotal: original.taxTotal,
+        total: original.total,
+        currency: original.currency,
         status: InvoiceStatus.ISSUED,
         issuedAt: new Date(),
-        metadata: { refundId },
+        metadata,
+        items: (original.items ?? []).map(copyItemFields),
       })
-      const saved = await this.invoiceRepository.save(creditNote)
-
-      this.logger.log(`Nota crédito creada: ${saved.id} para factura ${invoiceId}`)
-      return { data: saved }
+      if (result.error) {
+        // `create` answers a duplicate number as a plain message: the note decides, not the text.
+        const winner = await findNote()
+        return winner ? { data: winner, created: false } : { error: result.error }
+      }
+      this.logger.log(`Nota crédito creada: ${result.data.id} para factura ${invoiceId}`)
+      return { data: result.data, created: true }
     } catch (error) {
       if (error instanceof RequestException) throw error
       this.logger.error(`Error al crear nota crédito para factura ${invoiceId}: ${error.message}`)

@@ -4,7 +4,7 @@ import { Repository } from 'typeorm'
 import { createHash } from 'crypto'
 import { DianProvider, DianInvoiceData, DianResponse } from './dian.interface'
 import { SiigoProvider } from './providers/siigo.provider'
-import { Invoice, InvoiceType } from '../invoice/entities/invoice.entity'
+import { DIAN_PENDING_FLAG, Invoice, InvoiceType } from '../invoice/entities/invoice.entity'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
 import { CountryBillingConfigService } from '../billing-profile/country-billing-config.service'
 import { AuditService } from '../audit/audit.service'
@@ -100,7 +100,10 @@ export class DianService {
       ? await this.billingProfileRepo.findOne({ where: { id: invoice.billingProfileId } })
       : null
 
-    const data = this.buildDianData(invoice, billingProfile)
+    const credited = invoice.creditNoteForId
+      ? await this.invoiceRepo.findOne({ where: { id: invoice.creditNoteForId } })
+      : null
+    const data = this.buildDianData(invoice, billingProfile, credited?.invoiceNumber)
     const country = billingProfile?.country || 'CO'
 
     // Verificar si el país requiere facturación electrónica
@@ -110,6 +113,10 @@ export class DianService {
         'info',
         `DianService: país ${country} no requiere facturación electrónica, omitiendo`,
       )
+      if (invoice.metadata?.[DIAN_PENDING_FLAG]) {
+        delete invoice.metadata[DIAN_PENDING_FLAG]
+        await this.invoiceRepo.save(invoice)
+      }
       return {
         success: true,
         cufe: `no-required-${country}`,
@@ -129,6 +136,9 @@ export class DianService {
       invoice.dianCufe = response.cufe
       if (response.pdfUrl) {
         invoice.pdfUrl = response.pdfUrl
+      }
+      if (invoice.metadata) {
+        delete invoice.metadata[DIAN_PENDING_FLAG]
       }
       await this.invoiceRepo.save(invoice)
     }
@@ -176,11 +186,15 @@ export class DianService {
   /**
    * Construir datos DIAN desde factura + perfil.
    */
-  private buildDianData(invoice: Invoice, profile: BillingProfile | null): DianInvoiceData {
+  private buildDianData(
+    invoice: Invoice,
+    profile: BillingProfile | null,
+    creditNoteForNumber?: string,
+  ): DianInvoiceData {
     return {
       invoiceNumber: invoice.invoiceNumber,
       type: invoice.type as 'invoice' | 'credit_note',
-      creditNoteForNumber: invoice.creditNoteForId || undefined,
+      creditNoteForNumber,
       issuedAt: invoice.issuedAt || invoice.createdAt,
       dueAt: invoice.dueAt || undefined,
       subtotal: parseFloat(String(invoice.subtotal)),

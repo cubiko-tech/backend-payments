@@ -87,6 +87,7 @@ import {
   LOST_TO_NEWER_PURCHASE_FLAG,
   settleLostExternalPurchase,
 } from './external-payment-close'
+import { issueRefundCreditNote } from './refund-credit-note'
 
 /**
  * Servicio orquestador de checkout.
@@ -991,14 +992,31 @@ export class CheckoutService implements OnModuleInit {
     return true
   }
 
-  private settleLostPurchase(paymentId: string) {
-    return settleLostExternalPurchase(paymentId, {
+  private async settleLostPurchase(paymentId: string) {
+    const settled = await settleLostExternalPurchase(paymentId, {
       paymentRepo: this.paymentRepo,
       walletService: this.walletService,
       dataSource: this.dataSource,
       inProcessLocks: this.walletReconcileLocks,
       auditService: this.auditService,
       logger: this.log,
+    })
+    // Also on a noop: another instance may have refunded it before this one's invoice existed.
+    if (settled.status === PaymentStatus.REFUNDED) {
+      await this.issueRefundCreditNote(paymentId)
+    }
+    return settled
+  }
+
+  /** Reverses the invoice of a purchase refunded to the wallet, if it has one. Never throws. */
+  issueRefundCreditNote(paymentId: string) {
+    return issueRefundCreditNote(paymentId, {
+      invoiceService: this.invoiceService,
+      dianService: this.dianService,
+      auditService: this.auditService,
+      dataSource: this.dataSource,
+      logger: this.log,
+      canSendToDian: (invoiceId, currency) => this.canSendToDian(invoiceId, currency),
     })
   }
 
@@ -2027,6 +2045,15 @@ export class CheckoutService implements OnModuleInit {
    * Enviar factura a DIAN en background (no bloquea el checkout).
    */
   private sendToDianAsync(invoiceId: string, currency: string) {
+    if (!this.canSendToDian(invoiceId, currency)) return
+
+    // Fire and forget: the buyer's response does not wait for the DIAN.
+    this.dianService.sendInvoice(invoiceId).catch((error) => {
+      winstonLogger.log('error', `Error enviando factura ${invoiceId} a DIAN: ${error.message}`)
+    })
+  }
+
+  private canSendToDian(invoiceId: string, currency: string): boolean {
     // La facturación electrónica de este servicio es COLOMBIANA (DIAN/Siigo) y
     // `DianService.sendInvoice` decide el país por el perfil de facturación, que por
     // defecto es 'CO'. Desde que la moneda es un dato derivado del país de la marca,
@@ -2037,15 +2064,10 @@ export class CheckoutService implements OnModuleInit {
         `Factura ${invoiceId} emitida en ${currency}: no se envía a la DIAN ` +
           '(facturación electrónica colombiana)',
       )
-      return
+      return false
     }
 
-    if (!this.dianService.isConfigured()) return
-
-    // Fire and forget — no bloquea el response al usuario
-    this.dianService.sendInvoice(invoiceId).catch((error) => {
-      winstonLogger.log('error', `Error enviando factura ${invoiceId} a DIAN: ${error.message}`)
-    })
+    return this.dianService.isConfigured()
   }
 
   /**

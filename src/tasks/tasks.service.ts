@@ -751,6 +751,29 @@ export class TasksService {
     }
   }
 
+  /**
+   * Creates the credit note that a refund to the wallet left owing: its creation failed, the
+   * process died first, or the invoice appeared after the refund. Read from the rows, not a mark.
+   */
+  @Cron('*/5 * * * *')
+  async retryMissingCreditNotes() {
+    const owing = await this.paymentRepo.find({
+      where: {
+        provider: Not(PaymentProvider.WALLET),
+        purpose: PaymentPurpose.PLAN_PURCHASE,
+        status: PaymentStatus.REFUNDED,
+        id: Raw(
+          (id) =>
+            `EXISTS (SELECT 1 FROM invoices i WHERE i."paymentId" = ${id} AND i.type = 'invoice'
+             AND NOT EXISTS (SELECT 1 FROM invoices n WHERE n."creditNoteForId" = i.id))`,
+        ),
+      },
+    })
+    for (const p of owing ?? []) {
+      await this.checkoutService.issueRefundCreditNote(p.id)
+    }
+  }
+
   @Cron('*/5 * * * *')
   async reconcileWalletPayments() {
     const now = new Date()

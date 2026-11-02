@@ -502,3 +502,36 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   Antes de darle fecha a una fila se busca su llave `subscription:<id>:current`. Si existe, ese ciclo ya está pagado y no se
   vuelve a cobrar: la corrección tiene que reconocer ese débito. Una fecha futura sola no alcanza en `past_due`, porque el
   reintento no mira la fecha (`retryFailedPayments`, `tasks.service.ts:552-557`) y cobraría con la llave nueva.
+
+## Una nota crédito sin CUFE no se reenvía sola, y el orden del reenvío manual no se comprueba (LOC-106)
+
+- **Dónde**: `src/checkout/refund-credit-note.ts:67` (`sendToDian`); `src/dian/dian.controller.ts:21`
+  (POST /dian/send/:invoiceId); `src/dian/dian.service.ts:85`.
+- **Qué lo dispara**: la DIAN rechaza la factura o la nota, o el proceso muere tras crear la nota.
+- **Qué rompe**: la plata ya está devuelta, pero el documento fiscal no llega. Queda `metadata.dianPending` en la nota y, salvo
+  en la caída, `credit_note_dian_failed` en `audit_log`. El envío manual no mira el orden: reenviar la nota sin haber
+  mandado su factura la manda sobre un documento que la DIAN no conoce. Primero se envía la factura.
+- **Estado**: abierto — no se reintenta a propósito, porque una respuesta perdida duplicaría el documento. Lo cierra un envío
+  idempotente ante Siigo. Que admin muestre `dianPending` no se comprobó; `audit_log` sí se consulta ahí.
+
+## Una factura puede enviarse dos veces si cede mientras su primer envío sigue en curso (LOC-106)
+
+- **Dónde**: `src/checkout/refund-credit-note.ts:67` (`sendToDian`); `src/checkout/checkout.service.ts:2047` (`sendToDianAsync`).
+- **Qué lo dispara**: una compra completada cede a otra más nueva antes de que su envío a la DIAN, que corre sin esperarse, haya
+  guardado el CUFE. La devolución ve la factura sin CUFE y la manda otra vez.
+- **Qué rompe**: la factura llega dos veces a la DIAN. La ventana es lo que tarde Siigo (hasta 45 s por documento).
+- **Estado**: abierto — `sendInvoice` lee el CUFE sin candado. Lo cierra un reclamo del envío por documento.
+
+## El PDF de una nota crédito muestra el UUID de la factura, no su número (LOC-106)
+
+- **Dónde**: `src/invoice/invoice-pdf.service.ts:149`.
+- **Qué lo dispara**: descargar el PDF de cualquier nota crédito.
+- **Qué rompe**: el documento nombra la factura por un identificador interno. No afecta lo enviado a la DIAN.
+- **Estado**: abierto — lo cierra leer `invoiceNumber` de la factura al armar el PDF.
+
+## El payload de Siigo referencia la factura sólo en texto (LOC-106)
+
+- **Dónde**: `src/dian/providers/siigo.provider.ts:255-259`.
+- **Qué lo dispara**: cualquier nota crédito enviada a Siigo. Sólo se probó contra `DIAN_PROVIDER=mock`.
+- **Qué rompe**: hipótesis, no comprobada: si Siigo exige una referencia estructurada, rechazaría la nota.
+- **Estado**: abierto — lo cierra el contador con una prueba contra el sandbox de Siigo.
