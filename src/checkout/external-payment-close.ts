@@ -13,6 +13,7 @@ import type { CheckoutRequest } from './checkout.service'
 import {
   hasNewerDebitedPurchase,
   lockBrandPlan,
+  PLAN_YIELD_WINDOW_MS,
   rollbackQuietly,
   yieldOverlappedOlderPurchase,
 } from './wallet-payment-close'
@@ -96,9 +97,14 @@ async function hasLostToNewerPurchase(payment: Payment, manager: EntityManager) 
 
   const subscriptionRepo = manager.getRepository(Subscription)
   const subscriptionEventRepo = manager.getRepository(SubscriptionEvent)
-  const conflict = await findConflictingPlanSubscription(current, { subscriptionRepo, paymentRepo })
-  const repos = { subscriptionRepo, subscriptionEventRepo }
-  if (conflict || (await isHandedBackPurchase(current, repos))) {
+  if (await isHandedBackPurchase(current, { subscriptionRepo, subscriptionEventRepo })) {
+    return true
+  }
+  const event = await subscriptionEventRepo.findOne({ where: { paymentId: payment.id } })
+  if (event && Date.now() - new Date(event.createdAt).getTime() > PLAN_YIELD_WINDOW_MS) {
+    return false
+  }
+  if (await findConflictingPlanSubscription(current, { subscriptionRepo, paymentRepo })) {
     return true
   }
 
@@ -106,7 +112,6 @@ async function hasLostToNewerPurchase(payment: Payment, manager: EntityManager) 
   if (sub?.lastPaymentId === payment.id) {
     return false
   }
-  const event = await subscriptionEventRepo.findOne({ where: { paymentId: payment.id } })
   // Already applied, its days are in the subscription: it yields when the debited one closes.
   return event ? planMovedAfter(event, manager) : hasNewerDebitedPurchase(current, manager)
 }

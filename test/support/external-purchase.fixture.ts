@@ -39,6 +39,14 @@ export async function seedExternalPurchase(
   return repo.findOneByOrFail({ id: payment.id })
 }
 
+/** Moves the clock of the moment this purchase applied its plan. */
+export function backdateEvent(dataSource: DataSource, paymentId: string, interval: string) {
+  return dataSource.query(
+    `UPDATE subscription_events SET "createdAt" = NOW() - INTERVAL '${interval}' WHERE "paymentId" = $1`,
+    [paymentId],
+  )
+}
+
 export function subscriptionOf(dataSource: DataSource, brandId: string) {
   return dataSource.getRepository(Subscription).findOneBy({ brandId })
 }

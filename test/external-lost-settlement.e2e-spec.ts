@@ -5,6 +5,7 @@ import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEven
 import { TransactionType } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import {
+  backdateEvent,
   paymentRow,
   seedExternalPurchase,
   subscriptionOf,
@@ -150,6 +151,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
       `UPDATE payments SET "paidAt" = NOW() - INTERVAL '20 days' WHERE id = $1`,
       [older.id],
     )
+    await backdateEvent(a.dataSource, older.id, '20 days')
     await a.dataSource.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [newer.id])
 
     await confirm(newer.id)
@@ -161,6 +163,48 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     const sub = (await subscriptionOf(a.dataSource, BRAND_ID))!
     expect(sub.planSlug).toBe(NEW_PLAN)
     expect(sub.lastPaymentId).toBe(newer.id)
+  })
+
+  /** Plan applied twenty days ago and stuck since: the clock is what is written by hand. */
+  const stuckTwentyDays = async () => {
+    const external = await seedExternalPurchase(a.dataSource, BRAND_ID, OLD_PLAN, {
+      age: '21 days',
+    })
+    await appliedWithoutCompleting(external.id)
+    await backdateEvent(a.dataSource, external.id, '20 days')
+    return external
+  }
+
+  it('H1-a completes a purchase stuck in use for days when the brand changes plan', async () => {
+    // R15: red without the window in the loss decision: it is credited in full after 20 days of use.
+    const external = await stuckTwentyDays()
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+    await buy(wallet.id, 'days-later')
+    const newer = await findPaymentByKey(a.dataSource, 'days-later')
+
+    await a.tasks.settleLostExternalPayments()
+
+    expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await creditsOf(external.id)).toHaveLength(0)
+    const sub = (await subscriptionOf(a.dataSource, BRAND_ID))!
+    expect(sub.planSlug).toBe(NEW_PLAN)
+    expect(sub.lastPaymentId).toBe(newer.id)
+  })
+
+  it('H1-b counts the window from applying the plan, not from a paidAt written at the end', async () => {
+    // R15: red if the window goes back to paidAt: the purchase of 20 days ago yields and is credited.
+    const older = await stuckTwentyDays()
+    const newer = await seedExternalPurchase(a.dataSource, BRAND_ID, NEW_PLAN)
+    await a.tasks.settleLostExternalPayments()
+    expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
+
+    await confirm(newer.id)
+    await a.tasks.settleLostExternalPayments()
+
+    expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await creditsOf(older.id)).toHaveLength(0)
+    expect(await statusOf(a.dataSource, newer.id)).toBe(PaymentStatus.COMPLETED)
+    expect((await subscriptionOf(a.dataSource, BRAND_ID))!.planSlug).toBe(NEW_PLAN)
   })
 
   it('E14 does not credit an applied purchase for a newer debit that has not closed', async () => {
