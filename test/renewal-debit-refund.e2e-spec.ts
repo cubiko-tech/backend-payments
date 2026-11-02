@@ -90,12 +90,12 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
     })
 
   /** A due wallet row whose cron pass charged it while roles rejected the renewal. */
-  const debitedAndRejected = async (overrides: Partial<Subscription> = {}) => {
-    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
+  const debitedAndRejected = async (overrides: Partial<Subscription> = {}, balance = BALANCE) => {
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, balance)
     await seedSubscription(a.dataSource, BRAND_ID, { walletId: wallet.id, ...overrides })
     sweepOnlyBrands(a, [BRAND_ID])
     await a.tasks.processSubscriptionRenewals()
-    expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(balance - PLAN_PRICE)
     expect(await marks()).toEqual([CycleExtension.PENDING])
     return wallet
   }
@@ -282,17 +282,19 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
 
   it('E9: a closed wallet is reopened to take the credit', async () => {
     // R15: red without reopenClosed: credit refuses a closed wallet and the debit stays pending.
-    const wallet = await debitedAndRejected()
+    const wallet = await debitedAndRejected({}, PLAN_PRICE)
     await cancelAndClose()
-    await a.dataSource
-      .getRepository(Wallet)
-      .update({ id: wallet.id }, { status: WalletStatus.CLOSED })
+    await a.wallet.close(wallet.id)
+    expect(
+      (await a.dataSource.getRepository(Wallet).findOneByOrFail({ id: wallet.id })).status,
+    ).toBe(WalletStatus.CLOSED)
 
     await a.tasks.refundOrphanRenewalDebits()
 
     const stored = await a.dataSource.getRepository(Wallet).findOneByOrFail({ id: wallet.id })
     expect(stored.status).toBe(WalletStatus.ACTIVE)
-    expect(Number(stored.balance)).toBe(BALANCE)
+    expect(Number(stored.balance)).toBe(PLAN_PRICE)
+    expect(await refunds()).toHaveLength(1)
     expect(
       await a.dataSource
         .getRepository(AuditLog)
@@ -390,7 +392,7 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
 
   it('E14: a pass does not extend on a debit already refunded', async () => {
     // R15: red if renewFromWallet drops its guard: the existing key counts and the cycle is free.
-    // The refunded mark on a live row on the same date is written by hand: no known path reaches it.
+    // The mark is written by hand: the paths to this state are unexercised (docs/RIESGOS.md, LOC-88).
     const wallet = await debitedAndRejected()
     const [debit] = await renewalDebits()
     await markCycleDebit(
