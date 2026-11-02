@@ -191,6 +191,11 @@ async function resolvePaymentStateOutcome(
     throw createInProgressIdempotentCheckoutException(payment)
   }
 
+  // A purchase credited by the sweep may keep the `completed` it stored before being handed back.
+  if (payment.provider === PaymentProvider.WALLET && payment.status === PaymentStatus.REFUNDED) {
+    return null
+  }
+
   if (payment.metadata?.checkoutResult) {
     return payment.metadata.checkoutResult as CheckoutResult
   }

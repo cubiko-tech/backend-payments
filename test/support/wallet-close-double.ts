@@ -22,6 +22,7 @@ export function walletCloseManager(repos: () => WalletCloseRepos) {
 /** R17: DataSource double for unit specs that reach the wallet close through mocked repos. */
 export function walletCloseDataSource(repos: () => WalletCloseRepos) {
   return {
+    transaction: jest.fn((work: (manager: unknown) => unknown) => work(walletCloseManager(repos))),
     createQueryRunner: jest.fn(() => ({
       connect: jest.fn(),
       startTransaction: jest.fn(),

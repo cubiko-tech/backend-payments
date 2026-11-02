@@ -1,5 +1,5 @@
-import { HttpStatus } from '@nestjs/common'
-import { DataSource, EntityManager } from 'typeorm'
+import { HttpStatus, Logger } from '@nestjs/common'
+import { DataSource, EntityManager, QueryRunner } from 'typeorm'
 
 import {
   Payment,
@@ -11,7 +11,23 @@ import { lockPayment } from '../payment/payment-lock'
 import { RequestException } from '../shared/exception/request.exception'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import type { CheckoutRequest } from './checkout.service'
-import { findConflictingPlanSubscription } from './wallet-payment-reconciliation'
+import {
+  findConflictingPlanSubscription,
+  WALLET_CLOSE_GIVEN_UP_FLAG,
+} from './wallet-payment-reconciliation'
+
+const log = new Logger('WalletPaymentClose')
+
+/** Rolls back without ever throwing, so the error that caused it is the one the caller sees. */
+async function rollbackQuietly(runner: QueryRunner) {
+  try {
+    if (runner.isTransactionActive) {
+      await runner.rollbackTransaction()
+    }
+  } catch (error) {
+    log.error(`Rollback failed: ${error?.message ?? error}`)
+  }
+}
 
 /** The checkout lost its payment to the sweep, a cancellation or a newer purchase. */
 export class WalletCheckoutLostError extends RequestException {}
@@ -99,7 +115,11 @@ export async function claimFailedPaymentForRetry(
       'SELECT 1 FROM transactions WHERE "idempotencyKey" = $1 LIMIT 1',
       [`payment:${paymentId}:refund`],
     )
-    if (credits.length > 0) {
+    const givenUp = await runner.manager.query(
+      'SELECT 1 FROM payments WHERE id = $1 AND metadata->>$2 = $3 LIMIT 1',
+      [paymentId, WALLET_CLOSE_GIVEN_UP_FLAG, 'true'],
+    )
+    if (credits.length > 0 || givenUp.length > 0) {
       throw new WalletCheckoutLostError(
         { code: 'WALLET_DEBIT_FAILED', message: `Payment ${paymentId} was credited back` },
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -119,9 +139,7 @@ export async function claimFailedPaymentForRetry(
     await runner.commitTransaction()
     return { affected: claimed.affected, createdAt }
   } catch (error) {
-    if (runner.isTransactionActive) {
-      await runner.rollbackTransaction()
-    }
+    await rollbackQuietly(runner)
     throw error
   } finally {
     await runner.release()
@@ -137,9 +155,7 @@ export async function readPaymentAfterSweep(paymentId: string, dataSource: DataS
     await lockPayment(runner, paymentId)
     return await runner.manager.getRepository(Payment).findOne({ where: { id: paymentId } })
   } finally {
-    if (runner.isTransactionActive) {
-      await runner.rollbackTransaction()
-    }
+    await rollbackQuietly(runner)
     await runner.release()
   }
 }
@@ -200,9 +216,7 @@ export async function closeWalletPayment(
     await runner.commitTransaction()
     return { outcome: 'completed', paidAt, ...closed }
   } catch (error) {
-    if (runner.isTransactionActive) {
-      await runner.rollbackTransaction()
-    }
+    await rollbackQuietly(runner)
     throw error
   } finally {
     await runner.release()

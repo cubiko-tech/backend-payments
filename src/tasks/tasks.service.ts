@@ -27,6 +27,7 @@ import { Transaction } from '../transaction/entities/transaction.entity'
 import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import {
   hasWalletPaymentDebit,
+  WALLET_CLOSE_GIVEN_UP_FLAG,
   WALLET_FAILED_DEBIT_LOOKBACK_MS,
   WALLET_RECONCILE_MIN_AGE_MS,
 } from '../checkout/wallet-payment-reconciliation'
@@ -636,6 +637,13 @@ export class TasksService {
             (id) =>
               `EXISTS (SELECT 1 FROM transactions t WHERE t."idempotencyKey" = 'payment:' || ${id} || ':debit')`,
           ),
+        },
+        // A give-up already took the payment out of `processing`, which has no age floor.
+        {
+          provider: PaymentProvider.WALLET,
+          status: PaymentStatus.FAILED,
+          createdAt: LessThan(cutoff),
+          metadata: Raw((metadata) => `(${metadata})->>'${WALLET_CLOSE_GIVEN_UP_FLAG}' = 'true'`),
         },
       ],
     })

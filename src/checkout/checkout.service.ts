@@ -580,13 +580,8 @@ export class CheckoutService implements OnModuleInit {
         result.renewal = 'extended'
         result.currentPeriodEnd = sub.currentPeriodEnd
       }
-      // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
-      const current = await this.subscriptionRepo.findOne({ where: { brandId: req.brandId } })
-      await this.assignPlanInRoles(
-        req.brandId,
-        current?.planSlug ?? sub.planSlug,
-        current?.currentPeriodEnd ?? sub.currentPeriodEnd,
-      )
+      // Outside the brand lock: backend-roles is HTTP.
+      await this.assignCurrentPlanInRoles(req.brandId, sub.planSlug, sub.currentPeriodEnd)
     }
 
     await this.auditService.log(
@@ -822,16 +817,20 @@ export class CheckoutService implements OnModuleInit {
 
     // Si es compra de plan → crear/renovar suscripción
     if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      const { subscription, extended } = await this.createOrRenewSubscription(
-        {
-          brandId: payment.brandId,
-          userId: payment.userId,
-          provider: payment.provider as any,
-          purpose: 'plan_purchase',
-          planSlug: payment.purposeId,
-          walletId: payment.walletId,
-        },
-        payment,
+      // One transaction: a crash between the subscription and its event would add the days twice.
+      const { subscription, extended } = await this.dataSource.transaction((manager) =>
+        this.createOrRenewSubscription(
+          {
+            brandId: payment.brandId,
+            userId: payment.userId,
+            provider: payment.provider as any,
+            purpose: 'plan_purchase',
+            planSlug: payment.purposeId,
+            walletId: payment.walletId,
+          },
+          payment,
+          manager,
+        ),
       )
       if (extended && subscription?.currentPeriodEnd) {
         extendedUntil = subscription.currentPeriodEnd
@@ -1020,7 +1019,7 @@ export class CheckoutService implements OnModuleInit {
         logger: this.log,
         closeWalletPayment: (p, req) => this.closeWalletPayment(p, req),
         assignPlanInRoles: (brandId, planSlug, expiresAt) =>
-          this.assignPlanInRoles(brandId, planSlug, expiresAt),
+          this.assignCurrentPlanInRoles(brandId, planSlug, expiresAt),
         auditService: this.auditService,
         eventBus: this.eventBus,
       },
@@ -1967,6 +1966,26 @@ export class CheckoutService implements OnModuleInit {
       resolvedExpiresAt.setDate(resolvedExpiresAt.getDate() + this.BILLING_PERIOD_DAYS)
     }
     await this.clientRoles.assignPlanToBrand(brandId, planSlug, resolvedExpiresAt)
+  }
+
+  /**
+   * Sends the subscription's current plan and period to backend-roles, the given ones if it has
+   * none. Sends again if they changed during the call: two closes race over HTTP, and whichever
+   * answers last has seen the other's close, so the last write ends up being the current one.
+   */
+  private async assignCurrentPlanInRoles(brandId: string, planSlug: string, expiresAt?: Date) {
+    const read = () => this.subscriptionRepo.findOne({ where: { brandId } })
+    const current = await read()
+    const sentPlan = current?.planSlug ?? planSlug
+    const sentEnd = current?.currentPeriodEnd ?? expiresAt
+    await this.assignPlanInRoles(brandId, sentPlan, sentEnd)
+
+    const after = await read()
+    const samePeriod =
+      new Date(after?.currentPeriodEnd ?? 0).getTime() === new Date(sentEnd ?? 0).getTime()
+    if (after && (after.planSlug !== sentPlan || !samePeriod)) {
+      await this.assignPlanInRoles(brandId, after.planSlug, after.currentPeriodEnd)
+    }
   }
 
   /**

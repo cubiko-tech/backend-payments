@@ -39,6 +39,9 @@ export const WALLET_FAILED_DEBIT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000
 /** Age from which a close that still fails is given up: the sweep credits the debit back. */
 export const WALLET_CLOSE_GIVE_UP_MS = 60 * 60 * 1000
 
+/** `metadata` flag of a `failed` payment the sweep gave up on: only ever credited, at any age. */
+export const WALLET_CLOSE_GIVEN_UP_FLAG = 'closeGivenUp'
+
 export interface WalletPaymentReconciliationDeps {
   paymentRepo: Repository<Payment>
   subscriptionRepo?: Repository<Subscription>
@@ -312,18 +315,36 @@ async function isPlanAppliedByPayment(
   return !!event
 }
 
+/**
+ * Whether a newer purchase took this one's period when it closed. `paidAt` tells it apart: a
+ * purchase only reaches `processing` with it by being handed back from `completed`, and one
+ * that never closed has none. Its plan may be current again through a repurchase, so the plan
+ * does not decide; the days it paid for are gone either way.
+ */
+async function isHandedBackPurchase(
+  payment: Payment,
+  deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'subscriptionEventRepo'>,
+): Promise<boolean> {
+  if (!payment.paidAt) {
+    return false
+  }
+  const sub = await deps.subscriptionRepo?.findOne({ where: { brandId: payment.brandId } })
+  const event = await deps.subscriptionEventRepo?.findOne({ where: { paymentId: payment.id } })
+  return !!event && !!sub && sub.lastPaymentId !== payment.id
+}
+
 async function refundSupersededWalletPayment(
   payment: Payment,
   conflictingSub: Subscription | null,
   totalAmount: number,
   deps: WalletPaymentReconciliationDeps,
   refundRecorded = false,
-  closeFailure?: string,
+  reason?: string,
 ): Promise<WalletPaymentReconciliationResult> {
   const refundKey = getWalletRefundIdempotencyKey(payment.id)
   const fromStatus = payment.status
   const cause =
-    closeFailure ??
+    reason ??
     (fromStatus === PaymentStatus.FAILED
       ? 'its checkout failed after the debit'
       : `subscription is on newer plan ${conflictingSub?.planSlug ?? payment.purposeId}`)
@@ -389,7 +410,7 @@ async function refundSupersededWalletPayment(
 /**
  * Whether a payment whose close just failed gets credited instead of swept again: only past
  * the give-up age, still `processing` (a failed commit may have closed it) and with no plan
- * applied (a purchase handed back to the sweep keeps its period).
+ * applied. Filters only: `claimGiveUp` is what settles it against a close landing late.
  */
 async function shouldGiveUpOnClose(
   payment: Payment,
@@ -409,6 +430,28 @@ async function shouldGiveUpOnClose(
     )
     return false
   }
+  return true
+}
+
+/**
+ * Claims a payment for its give-up credit, so a close that lands late cannot also complete it:
+ * only one of them moves it out of `processing`. The flag keeps it from being retried.
+ */
+async function claimGiveUp(
+  payment: Payment,
+  failureReason: string,
+  deps: WalletPaymentReconciliationDeps,
+): Promise<boolean> {
+  const metadata = { ...(payment.metadata || {}), [WALLET_CLOSE_GIVEN_UP_FLAG]: true }
+  const claimed = await deps.paymentRepo.update(
+    { id: payment.id, status: PaymentStatus.PROCESSING },
+    { status: PaymentStatus.FAILED, failureReason, metadata },
+  )
+  if (!claimed.affected) {
+    return false
+  }
+  payment.status = PaymentStatus.FAILED
+  payment.metadata = metadata
   return true
 }
 
@@ -441,6 +484,10 @@ async function completeReconciledWalletPayment(
       throw error
     }
     const closeFailure = `its close kept failing: ${error?.message ?? error}`
+    if (!(await claimGiveUp(payment, closeFailure, deps))) {
+      const latest = await deps.paymentRepo.findOne({ where: { id: payment.id } })
+      return { outcome: 'noop', status: latest?.status ?? payment.status }
+    }
     return refundSupersededWalletPayment(payment, null, totalAmount, deps, false, closeFailure)
   }
   if (closed.outcome === 'superseded') {
@@ -457,13 +504,8 @@ async function completeReconciledWalletPayment(
       result.renewal = 'extended'
       result.currentPeriodEnd = sub.currentPeriodEnd
     }
-    // Outside the brand lock: backend-roles is HTTP. Sends the plan that ended up current.
-    const current = await deps.subscriptionRepo?.findOne({ where: { brandId: payment.brandId } })
-    await deps.assignPlanInRoles(
-      payment.brandId,
-      current?.planSlug ?? sub.planSlug,
-      current?.currentPeriodEnd ?? sub.currentPeriodEnd,
-    )
+    // Outside the brand lock: backend-roles is HTTP.
+    await deps.assignPlanInRoles(payment.brandId, sub.planSlug, sub.currentPeriodEnd)
   }
 
   await deps.auditService.log(
@@ -599,6 +641,10 @@ export async function reconcileWalletPayment(
         deps,
         refundRecorded,
       )
+    }
+    if (await isHandedBackPurchase(payment, deps)) {
+      const reason = 'a newer purchase took its period'
+      return await refundSupersededWalletPayment(payment, null, totalAmount, deps, false, reason)
     }
 
     return await completeReconciledWalletPayment(payment, totalAmount, deps, now)

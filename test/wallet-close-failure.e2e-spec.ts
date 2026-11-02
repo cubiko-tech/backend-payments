@@ -205,7 +205,7 @@ describe('A wallet close that fails after the debit (PostgreSQL, LOC-99)', () =>
     failRefundedWriteOnce()
 
     await expect(sweepAfter(b, payment.id, TWO_HOURS_MS)).rejects.toThrow('Refunded write failed')
-    expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.PROCESSING)
+    expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.FAILED)
     expect(await creditsOf(payment.id)).toHaveLength(1)
 
     await sweepAfter(b, payment.id, TWO_HOURS_MS)
