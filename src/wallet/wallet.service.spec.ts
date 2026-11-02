@@ -222,7 +222,7 @@ describe('WalletService', () => {
           balanceAfter: 120,
         })
 
-      const result = await service.debit('w1', 80)
+      const result = await service.debit('w1', 80, { brandId: 'brand-1' })
 
       expect(wallet.balance).toBe(120)
       expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(
@@ -243,7 +243,9 @@ describe('WalletService', () => {
       const wallet = { id: 'w1', brandId: 'brand-1', balance: 30 }
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
 
-      await expect(service.debit('w1', 100)).rejects.toThrow(RequestException)
+      await expect(service.debit('w1', 100, { brandId: 'brand-1' })).rejects.toThrow(
+        RequestException,
+      )
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.release).toHaveBeenCalled()
     })
@@ -253,7 +255,7 @@ describe('WalletService', () => {
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
       mockQueryRunner.manager.save.mockResolvedValue(wallet)
 
-      await service.debit('w1', 100)
+      await service.debit('w1', 100, { brandId: 'brand-1' })
 
       expect(mockQueryRunner.manager.findOne).toHaveBeenCalledWith(Wallet, {
         where: { id: 'w1' },
@@ -275,7 +277,7 @@ describe('WalletService', () => {
 
       expect.assertions(6)
       try {
-        await service.debit('w1', 80, {}, 'USD')
+        await service.debit('w1', 80, { brandId: 'brand-1' }, 'USD')
       } catch (error) {
         expect((error as RequestException).code).toBe('WALLET_CURRENCY_MISMATCH')
         expect((error as RequestException).getStatus()).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
@@ -292,7 +294,7 @@ describe('WalletService', () => {
       const wallet = { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 200 }
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
 
-      const result = await service.debit('w1', 80, {}, 'COP')
+      const result = await service.debit('w1', 80, { brandId: 'brand-1' }, 'COP')
 
       expect(mockQueryRunner.manager.create).toHaveBeenCalledWith(
         Transaction,
@@ -311,7 +313,7 @@ describe('WalletService', () => {
       const wallet = { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 200 }
       mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
 
-      const result = await service.debit('w1', 80, {})
+      const result = await service.debit('w1', 80, { brandId: 'brand-1' })
 
       expect(result.data).toBeDefined()
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
@@ -384,7 +386,7 @@ describe('WalletService', () => {
           Object.assign(new Error('duplicate key value'), { driverError: { code: '23505' } }),
         )
 
-      const result = await service.debit('w1', 80, { idempotencyKey: 'k2' })
+      const result = await service.debit('w1', 80, { brandId: 'brand-1', idempotencyKey: 'k2' })
 
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
@@ -519,6 +521,27 @@ describe('WalletService', () => {
       expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
       expect(otherWallet.balance).toBe(200)
+    })
+
+    it('rejects a debit that names no brand and leaves the wallet unchanged', async () => {
+      // Red if the guard runs only when the brandId key arrives: the wallet is charged.
+      const wallet = {
+        id: 'w1',
+        brandId: 'brand-1',
+        currency: 'COP',
+        balance: 200,
+        status: WalletStatus.ACTIVE,
+      }
+      mockQueryRunner.manager.findOne.mockResolvedValue(wallet)
+
+      // @ts-expect-error Red if the signature lets brandId be optional again.
+      const debit = service.debit('w1', 80, { category: 'plan_payment' })
+
+      await expect(debit).rejects.toMatchObject({ code: 'WALLET_NOT_FOUND' })
+      expect(wallet.balance).toBe(200)
+      expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
+      expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
+      expect(mockQueryRunner.release).toHaveBeenCalled()
     })
 
     it('rejects a charge from brand A against brand B wallet and leaves brand B wallet unchanged', async () => {

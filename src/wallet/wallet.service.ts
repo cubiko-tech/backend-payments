@@ -180,14 +180,14 @@ export class WalletService {
    * existing movement by `idempotencyKey` alone (`findExistingMovement`) and, if
    * found, returns that movement as recorded along with the wallet of that
    * transaction (`existingTransaction.walletId || walletId`) without charging
-   * again. Rejects `TKN` wallets or charges, brand ownership mismatches when
-   * `data.brandId` is supplied, frozen or closed wallets, and currency
-   * mismatches when `expectedCurrency` is provided (used by checkout and wallet
-   * subscription renewals).
+   * again. Rejects `TKN` wallets or charges, a wallet that does not belong to
+   * `data.brandId`, frozen or closed wallets, and currency mismatches when
+   * `expectedCurrency` is provided (used by checkout and wallet subscription
+   * renewals).
    *
    * @param walletId Target wallet identifier.
    * @param amount Positive finite debit amount in the wallet currency.
-   * @param data Transaction metadata or referenceId string.
+   * @param data Transaction metadata; `brandId` is the brand the wallet must belong to.
    * @param expectedCurrency Expected ISO currency code for the charge; when provided
    * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
    * @param idempotencyKey Optional key looked up by key alone to return a repeated
@@ -196,7 +196,7 @@ export class WalletService {
   async debit(
     walletId: string,
     amount: number,
-    data: Partial<Transaction> | string = {},
+    data: Partial<Transaction> & { brandId: string },
     expectedCurrency?: string,
     idempotencyKey?: string,
   ) {
@@ -256,7 +256,7 @@ export class WalletService {
         )
       }
 
-      if ('brandId' in txData && (!txData.brandId || wallet.brandId !== txData.brandId)) {
+      if (!txData.brandId || wallet.brandId !== txData.brandId) {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet does not belong to the paying brand' },
           HttpStatus.NOT_FOUND,

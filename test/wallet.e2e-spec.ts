@@ -118,16 +118,33 @@ describe('WalletService idempotent movements (e2e)', () => {
     expect(second.data?.wallet?.balance).toBe(150)
   })
 
+  it('rejects a debit that names no brand without moving the balance or writing a movement', async () => {
+    // Red if the guard runs only when the brandId key arrives: the balance drops to 140.
+    const wallet = await createTestWallet(200)
+
+    // @ts-expect-error The signature requires brandId; this is an untyped caller at runtime.
+    const debit = walletService.debit(wallet.id, 60, { category: 'plan_payment' })
+
+    await expect(debit).rejects.toMatchObject({ code: 'WALLET_NOT_FOUND' })
+    const stored = await dataSource.getRepository(Wallet).findOneByOrFail({ id: wallet.id })
+    expect(Number(stored.balance)).toBe(200)
+    expect(
+      await dataSource.getRepository(Transaction).find({ where: { walletId: wallet.id } }),
+    ).toHaveLength(0)
+  })
+
   it('does not move the balance a second time and returns the original movement when repeating debit with k2', async () => {
     const wallet = await createTestWallet(200)
     const key = `k2-${randomUUID()}`
 
     const first = await walletService.debit(wallet.id, 60, {
+      brandId: wallet.brandId,
       category: 'plan_payment',
       description: 'First debit with k2',
       idempotencyKey: key,
     })
     const second = await walletService.debit(wallet.id, 60, {
+      brandId: wallet.brandId,
       category: 'plan_payment',
       description: 'Repeated debit with k2',
       idempotencyKey: key,
