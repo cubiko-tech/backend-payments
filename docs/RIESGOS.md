@@ -480,13 +480,13 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Con el claim `brand` del token se escribe en la suscripción sin consultar a platform y con cualquier rol (LOC-94)
 
-- **Dónde**: `src/subscription/subscription.controller.ts:363-383` (`resolveBrandId`, `sessionBrand`);
+- **Dónde**: `src/subscription/subscription.controller.ts:329-362` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
   `src/shared/auth/api-auth.guard.ts:93`, `:134` (`payload.brand`, `decodeClaims`)
-- **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel`, `/reactivate` o `PATCH /subscription/plan` de un
+- **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` de un
   usuario cuyo token trae `brand`, con esa misma marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura pasa sin mirar la membresía ni el rol, mientras la marca nombrada por otra vía exige
-  `superuser`, `admin` o `financial`. Un miembro de otro rol cancela o cambia el plan de su marca. Hipótesis: quien ya
+  `superuser`, `admin` o `financial`. Un miembro de otro rol cancela la suscripción de su marca. Hipótesis: quien ya
   salió de la marca sigue escribiendo mientras viva su token; no se abrió cuánto dura ni si auth revisa el claim de un
   token de cliente (otro repositorio).
 - **Estado**: abierto — lo cierra que quien aprueba decida si el claim basta para escribir. Si no basta,
@@ -494,7 +494,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un alta sobre una marca o un usuario ajenos (LOC-53, LOC-75, LOC-77)
 
-- **Dónde**: `src/subscription/subscription.controller.ts:123`, `:159`, `:193-194` (`RequireSuperAdmin`,
+- **Dónde**: `src/subscription/subscription.controller.ts:122`, `:158`, `:192-193` (`RequireSuperAdmin`,
   `resolveBrandId`, `req.user.id`); `src/checkout/checkout.controller.ts:79` (`req.user.id`)
 - **Qué lo dispara**: un usuario que manda en el cuerpo el `brandId` o el `userId` de otro en `POST /subscription`,
   `/subscription/paid`, `/subscription/trial` o `POST /checkout`.
@@ -507,7 +507,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 - **Dónde**: `src/tasks/tasks.service.ts:1352` (`renewFromWallet`), `:474` (`processSubscriptionRenewals`), `:923`
   (`expireSubscriptions`), `:1364` y `:1450` (llave del ciclo, `hasCycleDebit`);
-  `src/subscription/subscription.controller.ts:128-134` (`create`), que deja la fecha opcional.
+  `src/subscription/subscription.controller.ts:127-133` (`create`), que deja la fecha opcional.
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, que sale de `POST /subscription` sin el campo o de una
   corrección a mano. Entre ellas, las que ya pagaron: el código anterior a LOC-91 les dejó un débito con llave
   `subscription:<id>:current`.

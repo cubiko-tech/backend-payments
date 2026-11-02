@@ -39,7 +39,7 @@ interface TrazaDelMovimiento {
  *     y no entra en `webhook.module.ts`.
  *
  * (2) **Esta fila SE SIRVE POR API.** `GET /subscription/history`
- *     (`subscription.controller.ts:111` → `subscription.service.ts:606-620`)
+ *     (`subscription.controller.ts:110` → `subscription.service.ts:606-620`)
  *     hace `find()` sin `select` y devuelve las filas ENTERAS; el controller
  *     tiene autenticación SOLA —ningún `@RequirePermission` y ninguna validación
  *     de que el `brandId` pedido sea del que llama—. O sea que todo lo que caiga
