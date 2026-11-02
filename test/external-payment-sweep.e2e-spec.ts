@@ -1,4 +1,16 @@
+// R6: one responsibility, the sweep's outcome per scenario; each case provokes its own interleaving.
+import { In } from 'typeorm'
+
 import { lockBrandPlan } from '../src/checkout/wallet-payment-close'
+import {
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../src/subscription/entities/subscription.entity'
+import {
+  PLAN_APPLYING_EVENTS,
+  SubscriptionEvent,
+  SubscriptionEventType,
+} from '../src/subscription/entities/subscriptionEvent.entity'
 import { EventBusService } from '../src/event-bus/event-bus.service'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import {
@@ -11,7 +23,7 @@ import { logger } from '../src/shared/logger/logger'
 import { Payment } from '../src/payment/entities/payment.entity'
 import { TransactionType } from '../src/transaction/entities/transaction.entity'
 import { paymentRow, settleBrand, subscriptionOf } from './support/external-purchase.fixture'
-import { daysLeft } from './support/plan-lock.fixture'
+import { daysLeft, seedSubscription } from './support/plan-lock.fixture'
 import {
   ApiProvider,
   configureProviderClients,
@@ -352,6 +364,40 @@ describe('The sweep of external payments (PostgreSQL, LOC-89)', () => {
 
     await expectCompletedOnce(payment.id)
     expect((await paymentRow(a.dataSource, payment.id)).metadata.amountMismatch).toBeUndefined()
+  })
+
+  it('E18 does not renew a past-due plan whose payment link was paid with another amount', async () => {
+    // R15: red if any event counts as an effect: the event of the link hides the mismatch.
+    const sub = await seedSubscription(a.dataSource, BRAND_ID, {
+      status: SubscriptionStatus.PAST_DUE,
+      provider: SubscriptionProvider.STRIPE,
+    })
+    const payment = await seed(PaymentProvider.STRIPE)
+    const events = a.dataSource.getRepository(SubscriptionEvent)
+    await events.save(
+      events.create({
+        subscriptionId: sub.id,
+        eventType: SubscriptionEventType.PAYMENT_FAILED,
+        triggeredBy: 'system',
+        paymentId: payment.id,
+      }),
+    )
+    const invoices = a.moduleRef.get(InvoiceService).create as jest.Mock
+    invoices.mockClear()
+    stripeConfirms(a, WRONG_AMOUNT)
+
+    await sweepBrand(a, BRAND_ID)
+
+    const row = await paymentRow(a.dataSource, payment.id)
+    expect(row.status).toBe(PaymentStatus.FAILED)
+    expect(row.metadata.amountMismatch).toBeDefined()
+    const after = (await subscriptionOf(a.dataSource, BRAND_ID))!
+    expect(after.status).toBe(SubscriptionStatus.PAST_DUE)
+    expect(after.currentPeriodEnd).toEqual(sub.currentPeriodEnd)
+    expect(
+      await events.countBy({ paymentId: payment.id, eventType: In(PLAN_APPLYING_EVENTS) }),
+    ).toBe(0)
+    expect(invoices).not.toHaveBeenCalled()
   })
 
   it.each([

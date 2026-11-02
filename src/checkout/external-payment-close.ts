@@ -174,10 +174,17 @@ export function closeExternalPlanPurchase(
 export async function hasPaymentTakenEffect(paymentId: string, dataSource: DataSource) {
   const rows = await dataSource.query(
     `SELECT 1 WHERE
-       EXISTS (SELECT 1 FROM subscription_events WHERE "paymentId" = $1::uuid)
+       EXISTS (
+         SELECT 1 FROM subscription_events
+         WHERE "paymentId" = $1::uuid AND "eventType"::text = ANY($3::text[])
+       )
        OR EXISTS (SELECT 1 FROM transactions WHERE "idempotencyKey" = ANY($2::text[]))
        OR EXISTS (SELECT 1 FROM invoices WHERE "paymentId" = $1::uuid)`,
-    [paymentId, [`payment:${paymentId}:credit`, getWalletRefundIdempotencyKey(paymentId)]],
+    [
+      paymentId,
+      [`payment:${paymentId}:credit`, getWalletRefundIdempotencyKey(paymentId)],
+      PLAN_APPLYING_EVENTS,
+    ],
   )
   return rows.length > 0
 }
