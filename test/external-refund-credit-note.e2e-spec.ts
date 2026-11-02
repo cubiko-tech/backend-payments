@@ -115,6 +115,8 @@ describe('Credit note of an invoiced external purchase refunded to the wallet (P
     const confirming = confirm(older.id)
     await gate.reached
     await confirm(newer.id)
+    // Its send runs in the background: a spy on the provider set before it ends would catch it.
+    await until(async () => !!(await invoiceOf(newer.id))?.dianCufe)
     return { older, newer, finish: () => (gate.release(), confirming) }
   }
 

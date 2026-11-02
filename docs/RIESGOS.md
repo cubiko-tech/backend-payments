@@ -505,7 +505,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una nota crédito sin CUFE no se reenvía sola, y el orden del reenvío manual no se comprueba (LOC-106)
 
-- **Dónde**: `src/checkout/refund-credit-note.ts:67` (`sendToDian`); `src/dian/dian.controller.ts:21`
+- **Dónde**: `src/checkout/refund-credit-note.ts:109` (`sendToDian`); `src/dian/dian.controller.ts:21`
   (POST /dian/send/:invoiceId); `src/dian/dian.service.ts:85`.
 - **Qué lo dispara**: la DIAN rechaza la factura o la nota, o el proceso muere tras crear la nota.
 - **Qué rompe**: la plata ya está devuelta, pero el documento fiscal no llega. Queda `metadata.dianPending` en la nota y, salvo
@@ -514,13 +514,13 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: abierto — no se reintenta a propósito, porque una respuesta perdida duplicaría el documento. Lo cierra un envío
   idempotente ante Siigo. Que admin muestre `dianPending` no se comprobó; `audit_log` sí se consulta ahí.
 
-## Una factura puede enviarse dos veces si cede mientras su primer envío sigue en curso (LOC-106)
+## Un proceso que muere enviando a la DIAN deja el documento reclamado (LOC-106)
 
-- **Dónde**: `src/checkout/refund-credit-note.ts:67` (`sendToDian`); `src/checkout/checkout.service.ts:2047` (`sendToDianAsync`).
-- **Qué lo dispara**: una compra completada cede a otra más nueva antes de que su envío a la DIAN, que corre sin esperarse, haya
-  guardado el CUFE. La devolución ve la factura sin CUFE y la manda otra vez.
-- **Qué rompe**: la factura llega dos veces a la DIAN. La ventana es lo que tarde Siigo (hasta 45 s por documento).
-- **Estado**: abierto — `sendInvoice` lee el CUFE sin candado. Lo cierra un reclamo del envío por documento.
+- **Dónde**: `src/dian/dian.service.ts:191` (`claimSend`); `src/dian/dian.controller.ts:26` (`reclaimStale`).
+- **Qué lo dispara**: el proceso muere con `metadata.dianSendingAt` puesto. El reclamo ya impide el doble envío en vivo.
+- **Qué rompe**: el documento queda sin CUFE y su nota con `dianPending`, sin envío automático. Pasados cinco minutos sólo lo
+  retoma el envío manual, y si la DIAN sí lo había recibido, con la respuesta perdida, ese envío lo duplica.
+- **Estado**: abierto — lo cierra un envío idempotente ante Siigo. Antes de reenviar a mano se mira en Siigo si el documento llegó.
 
 ## El PDF de una nota crédito muestra el UUID de la factura, no su número (LOC-106)
 

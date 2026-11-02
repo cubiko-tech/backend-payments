@@ -1,8 +1,8 @@
 import { DataSource } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
-import { DianService } from '../dian/dian.service'
-import { DIAN_PENDING_FLAG, Invoice } from '../invoice/entities/invoice.entity'
+import { DianAlreadySentError, DianSendInFlightError, DianService } from '../dian/dian.service'
+import { DIAN_PENDING_FLAG, DIAN_SENDING_FLAG, Invoice } from '../invoice/entities/invoice.entity'
 import { InvoiceService } from '../invoice/invoice.service'
 
 /** `metadata` key of a refunded payment whose credit note could not be created yet. */
@@ -15,7 +15,10 @@ export interface RefundCreditNoteDeps {
   dataSource: DataSource
   logger: { error: (message: string) => void }
   canSendToDian: (invoiceId: string, currency: string) => boolean
+  dianInFlightWaitMs: number
 }
+
+const IN_FLIGHT_POLL_MS = 100
 
 /** Runs a step whose failure must not undo or hide what already happened. */
 async function quietly(step: () => Promise<unknown>, what: string, deps: RefundCreditNoteDeps) {
@@ -59,6 +62,45 @@ function clearCreationFailure(paymentId: string, deps: RefundCreditNoteDeps) {
   )
 }
 
+/** Waits out a send of the invoice started elsewhere. Answers why the note cannot go, or null. */
+async function waitForInFlightInvoice(paymentId: string, deps: RefundCreditNoteDeps) {
+  const deadline = Date.now() + deps.dianInFlightWaitMs
+  while (Date.now() < deadline) {
+    const current = await deps.invoiceService.findInvoiceOfPayment(paymentId)
+    if (current?.dianCufe) {
+      return null
+    }
+    if (!current?.metadata?.[DIAN_SENDING_FLAG]) {
+      return 'the invoice send in flight did not get it accepted'
+    }
+    await new Promise((resolve) => setTimeout(resolve, IN_FLIGHT_POLL_MS))
+  }
+  return `the invoice send in flight did not answer in ${deps.dianInFlightWaitMs} ms`
+}
+
+/** Gets the invoice to the DIAN, once. Answers why the note cannot go, or null if it can. */
+async function invoiceBlockingNote(
+  paymentId: string,
+  invoice: Invoice,
+  deps: RefundCreditNoteDeps,
+): Promise<string | null> {
+  if (invoice.dianCufe) {
+    return null
+  }
+  try {
+    const sent = await deps.dianService.sendInvoice(invoice.id)
+    return sent.success ? null : `invoice rejected: ${sent.dianMessage}`
+  } catch (error) {
+    if (error instanceof DianAlreadySentError) {
+      return null
+    }
+    if (error instanceof DianSendInFlightError) {
+      return waitForInFlightInvoice(paymentId, deps)
+    }
+    throw error
+  }
+}
+
 /**
  * The invoice goes first when it never reached the DIAN: a note over a document the DIAN does not
  * know means nothing. A failure leaves the note flagged and audited, with no automatic resend: a
@@ -84,11 +126,9 @@ async function sendToDian(
       deps,
     )
   try {
-    if (!invoice.dianCufe) {
-      const original = await deps.dianService.sendInvoice(invoice.id)
-      if (!original.success) {
-        return await reportFailure(`invoice rejected: ${original.dianMessage}`)
-      }
+    const blocked = await invoiceBlockingNote(paymentId, invoice, deps)
+    if (blocked) {
+      return await reportFailure(blocked)
     }
     const note = await deps.dianService.sendInvoice(noteId)
     if (!note.success) {

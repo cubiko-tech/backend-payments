@@ -162,6 +162,8 @@ export class CheckoutService implements OnModuleInit {
   private readonly inFlightCheckouts: InFlightCheckoutsMap = new Map()
   private readonly inFlightCompletions = new Set<string>()
   private readonly walletReconcileLocks = new Map<string, Promise<void>>()
+  // A credit note waits this long for an invoice already on its way: Siigo can take 45 s.
+  private readonly dianInFlightWaitMs = 2 * 60 * 1000
 
   constructor(
     @InjectRepository(Payment, 'DBWrite')
@@ -1017,6 +1019,7 @@ export class CheckoutService implements OnModuleInit {
       dataSource: this.dataSource,
       logger: this.log,
       canSendToDian: (invoiceId, currency) => this.canSendToDian(invoiceId, currency),
+      dianInFlightWaitMs: this.dianInFlightWaitMs,
     })
   }
 
