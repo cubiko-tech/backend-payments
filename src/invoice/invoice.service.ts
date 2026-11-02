@@ -1,6 +1,6 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, QueryRunner } from 'typeorm'
 import { Invoice, InvoiceType, InvoiceStatus } from './entities/invoice.entity'
 import { InvoiceItem } from './entities/invoiceItem.entity'
 import { RequestException } from '../shared/exception/request.exception'
@@ -35,7 +35,7 @@ export class InvoiceService {
           relations: ['items'],
         })
         if (existing) {
-          await queryRunner.rollbackTransaction()
+          await this.rollbackWithoutThrowing(queryRunner)
           return { data: existing }
         }
       }
@@ -56,8 +56,8 @@ export class InvoiceService {
 
       await queryRunner.commitTransaction()
 
-      // Recargar con relaciones
-      const result = await this.invoiceReadRepository.findOne({
+      // Primary only: a lagging replica has no row yet or a copy without its items.
+      const result = await this.invoiceRepository.findOne({
         where: { id: savedInvoice.id },
         relations: ['items'],
       })
@@ -65,7 +65,7 @@ export class InvoiceService {
       this.logger.log(`Factura creada: ${savedInvoice.id} (${savedInvoice.invoiceNumber})`)
       return { data: result || savedInvoice }
     } catch (error) {
-      await queryRunner.rollbackTransaction()
+      await this.rollbackWithoutThrowing(queryRunner)
       if (data.paymentId && this.isUniqueConstraintViolation(error)) {
         const existing = await this.findExistingByPaymentId(queryRunner, data.paymentId)
         if (existing) {
@@ -83,28 +83,38 @@ export class InvoiceService {
     return error?.code === '23505' || error?.driverError?.code === '23505'
   }
 
+  /** Logs a failed rollback instead of throwing, so it cannot replace the outcome being returned. */
+  private async rollbackWithoutThrowing(queryRunner: QueryRunner): Promise<void> {
+    try {
+      await queryRunner.rollbackTransaction()
+    } catch (rollbackError) {
+      this.logger.error(`Failed to roll back invoice transaction: ${rollbackError.message}`)
+    }
+  }
+
+  /**
+   * Finds the invoice that won a duplicate race. A read that fails moves on to the next source: after a
+   * failed rollback the query runner stays in an aborted transaction. Null means no source had it.
+   */
   private async findExistingByPaymentId(
-    queryRunner: { manager: { findOne?: DataSource['manager']['findOne'] } },
+    queryRunner: QueryRunner,
     paymentId: string,
   ): Promise<Invoice | null> {
-    if (typeof queryRunner.manager.findOne === 'function') {
-      const match = await queryRunner.manager.findOne(Invoice, {
-        where: { paymentId },
-        relations: ['items'],
-      })
-      if (match) return match
+    const query = { where: { paymentId }, relations: ['items'] }
+    const reads = [
+      () => queryRunner.manager.findOne(Invoice, query),
+      () => this.invoiceRepository.findOne(query),
+      () => this.invoiceReadRepository.findOne(query),
+    ]
+    for (const read of reads) {
+      try {
+        const match = await read()
+        if (match) return match
+      } catch (readError) {
+        this.logger.warn(`Failed to read the duplicate invoice: ${readError.message}`)
+      }
     }
-    const writeMatch = await this.invoiceRepository?.findOne({
-      where: { paymentId },
-      relations: ['items'],
-    })
-    if (writeMatch) return writeMatch
-    return (
-      (await this.invoiceReadRepository?.findOne({
-        where: { paymentId },
-        relations: ['items'],
-      })) ?? null
-    )
+    return null
   }
 
   /**
