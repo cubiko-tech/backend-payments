@@ -137,7 +137,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `:629`, `:1473-1531`), y el rechazo de `backend-roles` se registra en `error` con `sub.id`
   (`:1423-1428`). Abierto en convergencia: si `backend-roles` rechaza de forma permanente esa marca o
   plan tras el débito, la extensión local se reintenta cada hora sin cota hasta que
-  `renewPlanForBrand` devuelva `true`.
+  `renewPlanForBrand` devuelva `true`, y el débito queda retenido: `refundOrphanRenewalDebits` no lo
+  devuelve mientras la fila siga viva y en ese ciclo (LOC-105).
 
 ## El aplazamiento de renovación por falta de precios sólo corre con caché frío y el caché tibio sirve precios vencidos sin tope (LOC-16)
 
@@ -337,15 +338,6 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   está en la wallet. No se pierde plata.
 - **Estado**: abierto — lo cierra que `frontend-platform` lea `refundedToWallet`.
 
-## Un `failed` compensado a mano sin la llave se acredita otra vez (LOC-100)
-
-- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:608-617`, `src/tasks/tasks.service.ts:632-640`
-- **Qué lo dispara**: un pago de wallet `failed` con débito, de los últimos 30 días, compensado a mano sin
-  `payment:<id>:refund` ni `referenceId`.
-- **Qué rompe**: el barrido acredita de nuevo: la marca recibe la plata dos veces. El código no puede distinguirlo.
-- **Estado**: abierto — si hay filas así lo dice quien pueda consultar producción; lo cierra marcarlas antes de que
-  corra el barrido, o dejar constancia de que no las hay.
-
 ## Un barrido que pierde su candado termina en error aunque su trabajo haya quedado hecho (LOC-100)
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:104-124`, `:649-653` (`acquireWalletReconcileLock`,
@@ -377,14 +369,16 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1289-1295`, `:1354` (llave de ciclo con `nextBillingDate`, `renewFromWallet`),
-  `:1576` (`renewPlanForBrand`)
+- **Dónde**: `src/tasks/renewal-debit-refund.ts` (`canStillExtend`, `refundRenewalDebit`), `src/tasks/tasks.service.ts`
+  (`renewFromWallet`, `extendSubscriptionPeriod`, `refundOrphanRenewalDebits`)
 - **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
   la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
 - **Qué rompe**: dos cobros y una extensión. Medido sobre Postgres real: 39.800 descontados y 30 días, con precio 19.900.
   No es la carrera del candado: son dos pasadas separadas.
-- **Estado**: abierto — lo cierra decidir qué se hace con esa plata (días o crédito, y si el plan cambió); en
-  `planning/inbox/deuda/backend-payments-debito-de-renovacion-huerfano.md`.
+- **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez a su wallet (LOC-105). Queda
+  abierto: una caída entre marcar `extended` y guardar la fila, más un checkout antes de la pasada siguiente, deja ese
+  débito sin devolver. Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se
+  devuelve el débito y quedan los días regalados.
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 
