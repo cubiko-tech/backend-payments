@@ -1282,7 +1282,9 @@ describe('TasksService — processTrialConversions', () => {
       )
     })
 
-    it('does not debit any wallet and marks the renewal as failed when walletId is null', async () => {
+    it('does not debit, fail or notify a renewal without walletId, and logs its id and a count', async () => {
+      // Red if the walletId check in processSubscriptionRenewals goes: retryCount rises to 1.
+      const logSpy = jest.spyOn(logger, 'log')
       const otherWallet = {
         id: 'w-other',
         brandId: 'brand-a',
@@ -1292,44 +1294,66 @@ describe('TasksService — processTrialConversions', () => {
       }
       mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
       clientRoles.getPlanPrice.mockResolvedValue(50000)
-      subscriptionRepo.find.mockResolvedValue([
-        {
-          id: 'sub-null-wallet',
-          brandId: 'brand-a',
-          planSlug: 'pro',
-          provider: 'wallet',
-          walletId: null,
-          status: SubscriptionStatus.ACTIVE,
-          autoRenew: true,
-          retryCount: 0,
-        },
-      ])
+      const sub: any = {
+        id: 'sub-null-wallet',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: null,
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
 
       await serviceWithRealWallet.processSubscriptionRenewals()
 
+      expect(sub.retryCount).toBe(0)
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
       expect(otherWallet.balance).toBe(200000)
       expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-null-wallet',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
-      )
-      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subscriptionId: 'sub-null-wallet',
-          eventType: SubscriptionEventType.PAYMENT_FAILED,
-          toStatus: SubscriptionStatus.PAST_DUE,
-        }),
-      )
-      expect(eventBus.notifyPaymentFailed).toHaveBeenCalledWith(
-        'brand-a',
-        'sub-null-wallet',
-        expect.any(String),
-      )
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.save).not.toHaveBeenCalled()
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('sub-null-wallet'))
+      expect(logSpy).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('processSubscriptionRenewals: 1 wallet subscriptions'),
+      )
+      logSpy.mockRestore()
+    })
+
+    it('does not add a retry or notify a past-due retry without walletId, and logs its id and a count', async () => {
+      // Red if the walletId check in retryFailedPayments goes: retryCount rises to 2.
+      const logSpy = jest.spyOn(logger, 'log')
+      const sub: any = {
+        id: 'sub-null-wallet-due',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: null,
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 1,
+        updatedAt: new Date(Date.now() - 72 * 60 * 60 * 1000),
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.retryFailedPayments()
+
+      expect(sub.retryCount).toBe(1)
+      expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.save).not.toHaveBeenCalled()
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('sub-null-wallet-due'))
+      expect(logSpy).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('retryFailedPayments: 1 wallet subscriptions'),
+      )
+      logSpy.mockRestore()
     })
 
     it('rejects a renewal from brand A when the wallet belongs to brand B and leaves brand B wallet unchanged', async () => {

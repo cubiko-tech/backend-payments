@@ -477,6 +477,7 @@ export class TasksService {
     })
 
     let processed = 0
+    let withoutWallet = 0
     for (const sub of dueSubscriptions) {
       if (!this.hasAvailableRetries(sub)) continue
       const release = await this.lockAndReread(sub)
@@ -487,7 +488,10 @@ export class TasksService {
         }
 
         if (sub.provider === 'wallet') {
-          if (await this.renewFromWallet(sub)) {
+          if (!sub.walletId) {
+            this.logMissingWallet(sub)
+            withoutWallet++
+          } else if (await this.renewFromWallet(sub)) {
             processed++
           }
         } else if (esSuscripcionRecurrenteDeConfio(sub)) {
@@ -530,6 +534,12 @@ export class TasksService {
         `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`,
       )
     }
+    if (withoutWallet > 0) {
+      logger.log(
+        'error',
+        `[CRON] processSubscriptionRenewals: ${withoutWallet} wallet subscriptions without walletId`,
+      )
+    }
   }
 
   // =============================================================
@@ -547,6 +557,7 @@ export class TasksService {
     })
 
     let retried = 0
+    let withoutWallet = 0
     for (const sub of retryableSubscriptions) {
       // Looked at before the lock too, so a pass does not lock every past-due row.
       if (!this.isDueForRetry(sub)) continue
@@ -557,7 +568,10 @@ export class TasksService {
         if (!this.isDueForRetry(sub)) continue
 
         if (sub.provider === 'wallet') {
-          if (await this.renewFromWallet(sub)) {
+          if (!sub.walletId) {
+            this.logMissingWallet(sub)
+            withoutWallet++
+          } else if (await this.renewFromWallet(sub)) {
             retried++
           }
         } else if (sub.provider === 'confio') {
@@ -575,6 +589,12 @@ export class TasksService {
 
     if (retried > 0) {
       logger.log('info', `[CRON] retryFailedPayments: ${retried} reintentados`)
+    }
+    if (withoutWallet > 0) {
+      logger.log(
+        'error',
+        `[CRON] retryFailedPayments: ${withoutWallet} wallet subscriptions without walletId`,
+      )
     }
   }
 
@@ -1307,6 +1327,14 @@ export class TasksService {
   // =============================================================
   // Helpers
   // =============================================================
+
+  /**
+   * A wallet row without walletId is a data defect, not a failed payment: it adds no retry and sends
+   * no notice, so the brand does not lose its plan over it. The row is left untouched.
+   */
+  private logMissingWallet(sub: Subscription): void {
+    logger.log('error', `[CRON] Subscription ${sub.id} has provider wallet and no walletId`)
+  }
 
   /**
    * Renovar suscripción cobrando de wallet interna.
