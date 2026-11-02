@@ -300,15 +300,15 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   llega al cierre: se acredita (LOC-100, `src/checkout/wallet-payment-reconciliation.ts:645-648`). La renuncia reclama
   la fila antes de acreditar (`:440-456`), así que un cierre tardío no deja plan y crédito.
 
-## Una compra externa perdedora no se puede acreditar: wallet cerrada o tope de wallets (LOC-101)
+## Una compra externa perdedora no se puede acreditar: tope de wallets (LOC-101, LOC-104)
 
-- **Dónde**: `src/checkout/external-payment-close.ts:202`, `:234` (`resolveRefundWallet`, `settleLostExternalPurchase`)
-- **Qué lo dispara**: la compra perdió contra una más nueva y la wallet `internal` de esa marca y moneda está cerrada, o
-  no existe y la marca ya tiene 10 wallets.
+- **Dónde**: `src/checkout/external-payment-close.ts:221` (`resolveRefundWallet`)
+- **Qué lo dispara**: la compra perdió contra una más nueva, la marca no tiene wallet `internal` en esa moneda y ya tiene
+  10 wallets.
 - **Qué rompe**: la plata cobrada por el proveedor no vuelve: la compra queda `processing` con `lostToNewerPurchase`, sin
   plan ni crédito, y el barrido repite el log de error cada 5 minutos.
-- **Estado**: abierto — lo cierra que quien aprueba decida si se reabre la wallet, se acredita a otra o se devuelve por
-  el proveedor.
+- **Estado**: abierto — fuera de alcance por decisión de quien aprueba (2026-11-02): se resuelve a mano. Una wallet
+  `internal` cerrada ya no lo dispara: se reabre (LOC-104).
 
 ## Una compra desplazada se devuelve entera con hasta 15 minutos de uso (LOC-101, LOC-103)
 
