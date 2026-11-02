@@ -156,7 +156,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
     await expectOneChargeAndOneExtension(wallet.id)
   })
 
-  it('E1: the hourly pass, which has no backoff, also extends without a second charge', async () => {
+  it('E1: the hourly pass ignores the backoff and extends without a second charge', async () => {
     // R15: red if sub takes the new date before the save: the row skips the pass, past due.
     const wallet = await renewalWithFailedSave()
 
@@ -285,7 +285,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
     expect(await marks()).toEqual([CycleExtension.REFUNDED])
   })
 
-  it('E9: when recording the failure fails too, the row is untouched and no charge repeats', async () => {
+  it('E9: when recording the failure fails too, the row is untouched and the charge stays single', async () => {
     // R15: red if the mark leaves the transaction: the debit says extended on an unmoved date.
     const wallet = await seedDueRow()
     const saves = failFirstSaves(Subscription, 2)
