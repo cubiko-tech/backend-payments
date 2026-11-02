@@ -30,6 +30,7 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payment/entities/payment.entity'
+import { checkoutExpiryHours } from '../checkout/checkout-expiry'
 import { LOST_TO_NEWER_PURCHASE_FLAG } from '../checkout/external-payment-close'
 import { lockBrandPlan } from '../checkout/wallet-payment-close'
 import {
@@ -179,7 +180,7 @@ export class TasksService {
   private readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
   /** Candado de solapamiento: `@Cron` de Nest no impide que dos pasadas se pisen. */
   private repescaEnCurso = false
-  private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
+  private readonly CHECKOUT_EXPIRY_HOURS = checkoutExpiryHours()
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
   private readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
   private readonly subscriptionLocks = new Map<string, Promise<void>>()

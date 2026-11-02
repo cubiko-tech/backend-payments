@@ -57,12 +57,16 @@ import { RequestException } from '../shared/exception/request.exception'
 import { logger as winstonLogger } from '../shared/logger/logger'
 import {
   buildIdempotencyFingerprint,
+  createRetryExpiredException,
   handleConcurrentIdempotentCheckout,
   InFlightCheckoutsMap,
+  isRetryWindowOpen,
   isUniqueConstraintViolation,
   normalizeIdempotencyKey,
+  paymentBirth,
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
+import { checkoutExpiryHours } from './checkout-expiry'
 import {
   hasWalletPaymentDebit,
   isLastPaymentNewer,
@@ -239,14 +243,7 @@ export class CheckoutService implements OnModuleInit {
     // del país de la marca dejaba pasar un cobro en USD a un proveedor habilitado
     // sólo para CO y nunca validado para esa moneda.
     if (req.provider !== 'wallet') {
-      const gateCountry = country || (await this.getBillingCountry(req.brandId))
-      const available = await this.providerConfig.isProviderAvailable(gateCountry, req.provider)
-      if (!available) {
-        throw new RequestException({
-          code: 'PROVIDER_NOT_AVAILABLE',
-          message: `Proveedor '${req.provider}' no disponible para el país ${gateCountry}`,
-        })
-      }
+      await this.assertProviderAvailable(req, country)
     }
 
     // 3. Pre-validate wallet ownership, non-TKN currency, and currency match
@@ -365,6 +362,36 @@ export class CheckoutService implements OnModuleInit {
     )
   }
 
+  private async assertProviderAvailable(req: CheckoutRequest, country?: string) {
+    const gateCountry = country || (await this.getBillingCountry(req.brandId))
+    const available = await this.providerConfig.isProviderAvailable(gateCountry, req.provider)
+    if (!available) {
+      throw new RequestException({
+        code: 'PROVIDER_NOT_AVAILABLE',
+        message: `Proveedor '${req.provider}' no disponible para el país ${gateCountry}`,
+      })
+    }
+  }
+
+  /**
+   * Rejects, with nothing written, a retry that may not charge. A payment with a debit is exempt
+   * from the window: the retry charges nothing and only closes what the buyer already paid.
+   */
+  private async assertRetryAllowed(existing: Payment, req: CheckoutRequest) {
+    if (
+      !isRetryWindowOpen(existing) &&
+      !(await hasWalletPaymentDebit(existing, {
+        walletService: this.walletService,
+        dataSource: this.dataSource,
+      }))
+    ) {
+      throw createRetryExpiredException(existing)
+    }
+    if (req.provider !== 'wallet') {
+      await this.assertProviderAvailable(req, existing.metadata?.country)
+    }
+  }
+
   private async retryFailedIdempotentPayment(
     existing: Payment,
     req: CheckoutRequest,
@@ -372,8 +399,13 @@ export class CheckoutService implements OnModuleInit {
   ): Promise<CheckoutResult> {
     const inFlightKey = req.idempotencyKey ? `${req.brandId}:${req.idempotencyKey}` : undefined
     const runRetry = async (): Promise<CheckoutResult> => {
+      await this.assertRetryAllowed(existing, req)
+
       const retryNow = new Date()
-      const retryMetadata = { ...(existing.metadata || {}) }
+      const retryMetadata = {
+        ...(existing.metadata || {}),
+        firstAttemptAt: paymentBirth(existing).toISOString(),
+      }
       delete retryMetadata.checkoutResult
 
       const claimed = await claimFailedPaymentForRetry(
@@ -701,9 +733,7 @@ export class CheckoutService implements OnModuleInit {
       // Actualizar pago con datos del provider
       payment.providerPaymentId = checkout.providerPaymentId
       payment.checkoutUrl = checkout.checkoutUrl
-      payment.expiresAt = new Date(
-        Date.now() + parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24') * 3600000,
-      )
+      payment.expiresAt = new Date(Date.now() + checkoutExpiryHours() * 3600000)
       if (req.idempotencyKey) {
         payment.metadata = {
           ...(payment.metadata || {}),

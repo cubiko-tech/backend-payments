@@ -1,5 +1,4 @@
 import { HttpStatus } from '@nestjs/common'
-
 import {
   Payment,
   PaymentProvider,
@@ -57,6 +56,7 @@ describe('CheckoutService idempotency recovery and guards', () => {
       purposeId: 'dropi-roax',
       amount: 19900,
       currency: 'COP',
+      createdAt: new Date(),
       ...overrides,
     } as unknown as Payment)
   }
@@ -70,7 +70,7 @@ describe('CheckoutService idempotency recovery and guards', () => {
       p ? { ...p, metadata: p.metadata ? { ...p.metadata } : undefined } : null
     paymentRepo.create.mockImplementation((data: any) => ({
       id: 'pay-idem-1',
-      createdAt: new Date('2026-01-01T00:00:00.000Z'),
+      createdAt: new Date(),
       ...data,
     }))
     paymentRepo.save.mockImplementation(async (payment: Payment) => {

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm'
 import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import type { CheckoutRequest, CheckoutResult } from './checkout.service'
+import { checkoutExpiryHours } from './checkout-expiry'
 import { LOST_TO_NEWER_PURCHASE_FLAG } from './external-payment-close'
 
 export type InFlightCheckoutsMap = Map<
@@ -40,6 +41,32 @@ export function canRetryFailedIdempotentPayment(payment: Payment): boolean {
     typeof payment.metadata?.idempotencyFingerprint === 'string' &&
     payment.metadata.idempotencyFingerprint.length > 0
   return hasStoredFingerprint && !payment.providerPaymentId && !payment.metadata?.amountMismatch
+}
+
+/**
+ * When the payment was born. `createdAt` moves on a retry without a debit, so the first retry
+ * stores the original in `metadata.firstAttemptAt`.
+ */
+export function paymentBirth(payment: Payment): Date {
+  return new Date(payment.metadata?.firstAttemptAt ?? payment.createdAt)
+}
+
+/** Whether the stored price can still be charged. An unreadable birth closes the window. */
+export function isRetryWindowOpen(payment: Payment, now = new Date()): boolean {
+  const elapsedMs = now.getTime() - paymentBirth(payment).getTime()
+  return elapsedMs <= checkoutExpiryHours() * 60 * 60 * 1000
+}
+
+export function createRetryExpiredException(payment: Payment): RequestException {
+  return new RequestException(
+    {
+      code: 'IDEMPOTENT_RETRY_EXPIRED',
+      message:
+        'This payment can no longer be retried: place a new order with another Idempotency-Key',
+      paymentId: payment.id,
+    },
+    HttpStatus.CONFLICT,
+  )
 }
 
 export function createFailedExternalIdempotentPaymentException(payment: Payment): RequestException {
@@ -173,6 +200,9 @@ async function resolvePaymentStateOutcome(
 ): Promise<CheckoutResult | null> {
   if (payment.status === PaymentStatus.FAILED) {
     if (!canRetryFailedIdempotentPayment(payment)) {
+      if (!payment.metadata?.amountMismatch && !isRetryWindowOpen(payment)) {
+        throw createRetryExpiredException(payment)
+      }
       throw createFailedExternalIdempotentPaymentException(payment)
     }
     if (retryFailedPayment) {
