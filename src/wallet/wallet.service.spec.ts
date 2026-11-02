@@ -1,3 +1,4 @@
+// R6: one WalletService whose movements share this setup; splitting it is a task of its own.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { WalletService } from './wallet.service'
