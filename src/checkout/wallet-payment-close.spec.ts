@@ -23,6 +23,7 @@ function dataSourceWithFailingRollback(work: jest.Mock) {
 }
 
 describe('wallet payment close, when the rollback also fails', () => {
+  // R17: Forces the failure the rollback then runs on, the first query of each function.
   const failing = () => jest.fn().mockRejectedValue(new Error(ORIGINAL))
 
   it('closeWalletPayment surfaces the error that caused the rollback', async () => {
