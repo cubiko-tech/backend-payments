@@ -216,7 +216,7 @@ export function completeExternalPlanPurchase(
 /**
  * The brand's `internal` wallet in the payment's currency, created if it has none, or null if
  * that fails. Other providers' wallets are skipped: their balance may be mirrored. A closed one
- * is returned as is, and its credit refuses it.
+ * is returned as is, and its credit reopens it.
  */
 async function resolveRefundWallet(payment: Payment, deps: LostPurchaseDeps) {
   const unavailable = (why: string) => {
@@ -247,8 +247,9 @@ async function resolveRefundWallet(payment: Payment, deps: LostPurchaseDeps) {
 }
 
 /**
- * Credits a lost external purchase to the brand's wallet and moves it to `refunded`. Never throws
- * for a credit it cannot make: the payment stays `processing` and flagged, and the sweep retries.
+ * Credits a lost external purchase to the brand's wallet, reopening it if closed, and moves it to
+ * `refunded`. Never throws for a credit it cannot make: the payment stays `processing` and flagged,
+ * and the sweep retries.
  */
 export async function settleLostExternalPurchase(
   paymentId: string,
@@ -275,11 +276,23 @@ export async function settleLostExternalPurchase(
     }
     const totalAmount = Math.round(parseFloat(String(payment.amount || 0)) * 100) / 100
     const reason = 'a newer purchase took its plan'
+    const reopenClosed = {
+      userId: payment.userId || 'system',
+      reason: `refund of payment ${payment.id}`,
+    }
     return await refundSupersededWalletPayment(
       payment,
       null,
       totalAmount,
-      deps,
+      {
+        ...deps,
+        walletService: {
+          findDebitByIdempotencyKey: (...args) =>
+            deps.walletService.findDebitByIdempotencyKey(...args),
+          credit: (walletId, amount, data, key) =>
+            deps.walletService.credit(walletId, amount, data, key, reopenClosed),
+        },
+      },
       refundRecorded,
       reason,
     )

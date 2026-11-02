@@ -135,6 +135,7 @@ export async function stopInstance(instance?: RaceInstance): Promise<void> {
 export async function cleanBrand(dataSource: DataSource, brandId: string): Promise<void> {
   for (const sql of [
     'DELETE FROM audit_log WHERE "entityType" = \'payment\' AND "entityId" IN (SELECT id::text FROM payments WHERE "brandId" = $1)',
+    'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = $1)',
     'DELETE FROM subscription_events WHERE "subscriptionId" IN (SELECT id FROM subscriptions WHERE "brandId" = $1)',
     'DELETE FROM subscriptions WHERE "brandId" = $1',
     'DELETE FROM payment_attempts WHERE "paymentId" IN (SELECT id FROM payments WHERE "brandId" = $1)',

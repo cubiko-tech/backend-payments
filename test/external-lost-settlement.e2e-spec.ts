@@ -55,14 +55,32 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     a.dataSource.getRepository(Wallet).update({ id }, { status })
   const confirm = (id: string) => a.checkout.completeExternalPayment(id, { source: 'webhook' })
 
-  /** A newer wallet purchase closes, then the wallet closes too: the loser cannot be credited. */
-  const lostWithClosedWallet = async (options = {}) => {
+  /** A newer external purchase wins, and the brand has no `internal` wallet to credit. */
+  const lostWithoutWallet = async (options = {}) => {
     const external = await olderExternal(options)
-    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
-    await buy(wallet.id, 'closed-newer')
-    await setWalletStatus(wallet.id, WalletStatus.CLOSED)
+    const newer = await seedExternalPurchase(a.dataSource, BRAND_ID, NEW_PLAN, { age: '5 minutes' })
+    await confirm(newer.id)
+    return external
+  }
+
+  const fillWalletLimit = () => {
+    const repo = a.dataSource.getRepository(Wallet)
+    const seeds = Array.from({ length: 10 }, (_, index) => ({
+      brandId: BRAND_ID,
+      userId: BRAND_ID,
+      provider: `other-${index}`,
+      currency: 'COP',
+      balance: 0,
+    }))
+    return repo.save(seeds.map((seed) => repo.create(seed)))
+  }
+
+  /** The loser cannot be credited: creating its wallet hits the limit. `seedWallet` skips it. */
+  const lostAtWalletLimit = async (options = {}) => {
+    const external = await lostWithoutWallet(options)
+    await fillWalletLimit()
     await confirm(external.id)
-    return { external, wallet }
+    return external
   }
 
   /** Plan applied and the confirmation died in the invoice, so the purchase stays `processing`. */
@@ -74,9 +92,9 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     expect(await statusOf(a.dataSource, externalId)).toBe(PaymentStatus.PROCESSING)
   }
 
-  it('E5 leaves it flagged and uncredited with a closed wallet, and answers processing', async () => {
+  it('E5 leaves it flagged and uncredited at the wallet limit, and answers processing', async () => {
     // R15: red if the close does not flag the loser: a later pass could not tell it lost.
-    const { external } = await lostWithClosedWallet()
+    const external = await lostAtWalletLimit()
 
     const row = await paymentRow(a.dataSource, external.id)
     expect(row.status).toBe(PaymentStatus.PROCESSING)
@@ -88,8 +106,8 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
 
   it('E5 credits it from the sweep once the wallet can take it, even without a conflict left', async () => {
     // R15: red if the flag stops deciding: with its plan current again it applies a free plan.
-    const { external, wallet } = await lostWithClosedWallet()
-    await setWalletStatus(wallet.id, WalletStatus.ACTIVE)
+    const external = await lostAtWalletLimit()
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     await buy(wallet.id, 'closed-same-plan', OLD_PLAN)
 
     await settleBrand(a, BRAND_ID)
@@ -234,8 +252,8 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
 
   it('E15 keeps the lost flag against a confirmation that read the row before it was set', async () => {
     // R15: red without the guard of the claim: the stale metadata erases the flag.
-    const { external, wallet } = await lostWithClosedWallet()
-    await setWalletStatus(wallet.id, WalletStatus.ACTIVE)
+    const external = await lostAtWalletLimit()
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     await buy(wallet.id, 'stale-same-plan', OLD_PLAN)
     const stale = await paymentRow(a.dataSource, external.id)
     delete stale.metadata.lostToNewerPurchase
@@ -269,26 +287,10 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     expect(await creditsOf(external.id)).toHaveLength(1)
   })
 
-  /** A newer external purchase wins, and the brand has no `internal` wallet to credit. */
-  const lostWithoutWallet = async () => {
-    const external = await olderExternal()
-    const newer = await seedExternalPurchase(a.dataSource, BRAND_ID, NEW_PLAN, { age: '5 minutes' })
-    await confirm(newer.id)
-    return external
-  }
-
   it('E17 does not throw when the brand is at its wallet limit', async () => {
     // R15: red without the catch of resolveRefundWallet: MAX_WALLETS reaches the provider.
     const external = await lostWithoutWallet()
-    const repo = a.dataSource.getRepository(Wallet)
-    const seeds = Array.from({ length: 10 }, (_, index) => ({
-      brandId: BRAND_ID,
-      userId: BRAND_ID,
-      provider: `other-${index}`,
-      currency: 'COP',
-      balance: 0,
-    }))
-    await repo.save(seeds.map((seed) => repo.create(seed)))
+    await fillWalletLimit()
 
     await expect(confirm(external.id)).resolves.toBe(false)
 
@@ -324,7 +326,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
 
   it('E19 answers 409 to the same key on a lost purchase still without its credit', async () => {
     // R15: red without the flag in the idempotency guard: it replays the stored pending result.
-    const { external } = await lostWithClosedWallet({ idempotencyKey: 'lost-key' })
+    const external = await lostAtWalletLimit({ idempotencyKey: 'lost-key' })
     await a.dataSource.query(
       `UPDATE payments SET metadata = metadata || '{"checkoutResult":{"status":"pending"}}' WHERE id = $1`,
       [external.id],

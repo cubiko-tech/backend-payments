@@ -12,6 +12,7 @@ import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
+import { AuditLog } from '../audit/entities/auditLog.entity'
 
 @Injectable()
 export class WalletService {
@@ -97,12 +98,17 @@ export class WalletService {
   /**
    * Acreditar fondos a una wallet con bloqueo pesimista.
    * Operación atómica: actualiza balance y crea transacción.
+   *
+   * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
+   * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
+   * failed or duplicate credit leaves the wallet closed.
    */
   async credit(
     walletId: string,
     amount: number,
     data: Partial<Transaction> | string = {},
     idempotencyKey?: string,
+    reopenClosed?: { userId: string; reason: string },
   ) {
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
@@ -124,10 +130,24 @@ export class WalletService {
       }
 
       // Wallet cerrada no acepta ninguna operación
-      if (wallet.status === WalletStatus.CLOSED) {
+      const reopening = wallet.status === WalletStatus.CLOSED
+      if (reopening && !reopenClosed) {
         throw new RequestException(
           { code: 'WALLET_CLOSED', message: 'Wallet cerrada, no acepta operaciones' },
           HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+      if (reopening) {
+        wallet.status = WalletStatus.ACTIVE
+        await queryRunner.manager.save(
+          AuditLog,
+          queryRunner.manager.create(AuditLog, {
+            userId: reopenClosed.userId,
+            action: 'wallet_reopened',
+            entityType: 'wallet',
+            entityId: walletId,
+            description: `Wallet reopened to take a credit: ${reopenClosed.reason}`,
+          }),
         )
       }
 
@@ -154,6 +174,9 @@ export class WalletService {
 
       await queryRunner.commitTransaction()
 
+      if (reopening) {
+        this.logger.warn(`Wallet ${walletId} reopened to take a credit: ${reopenClosed.reason}`)
+      }
       this.logger.log(
         `Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
       )
