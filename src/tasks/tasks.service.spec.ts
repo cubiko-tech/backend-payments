@@ -1,3 +1,4 @@
+// R6: one TasksService with many crons sharing this setup; splitting it is a task of its own.
 import { In } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
