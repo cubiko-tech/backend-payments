@@ -250,7 +250,7 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
     expect(await marks()).toEqual([CycleExtension.EXTENDED])
   })
 
-  it('E7: a pending cancellation keeps the debit, and reactivating extends with no new charge', async () => {
+  it('E7: a pending cancellation keeps the debit, and reactivating extends without a new charge', async () => {
     // R15: red if canStillExtend asks for autoRenew: the debit goes back and the cycle is free.
     const wallet = await debitedAndRejected()
     await subscriptions().cancel(BRAND_ID, { reason: 'test', triggeredBy: 'user-loc105' })
@@ -340,7 +340,7 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
     expect(await marks()).toEqual([CycleExtension.REFUNDED])
   })
 
-  it('E12: a cycle debit with no mark is left alone', async () => {
+  it('E12: an unmarked cycle debit is left alone', async () => {
     // R15: red if the sweep drops the mark filter and its recheck: an extended debit goes back.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const sub = await seedSubscription(a.dataSource, BRAND_ID, { walletId: wallet.id })
@@ -364,7 +364,7 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE)
   })
 
-  it('E13: a trial whose renewal was rejected keeps the debit and extends with no new charge', async () => {
+  it('E13: a trial whose renewal was rejected keeps the debit and extends without a new charge', async () => {
     // R15: red if canStillExtend leaves trial out: the debit goes back and the next pass is free.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     await seedSubscription(a.dataSource, BRAND_ID, {

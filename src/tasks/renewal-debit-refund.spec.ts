@@ -83,7 +83,9 @@ describe('refundRenewalDebit', () => {
   })
 
   it.each([
+    // R17: how the real credit reports a database failure, not provokable here.
     ['returns an error', jest.fn().mockResolvedValue({ error: 'db down' })],
+    // R17: how the real credit reports a missing wallet, not provokable with a double wallet.
     ['throws', jest.fn().mockRejectedValue(new Error('wallet not found'))],
   ])('neither audits nor marks when the credit %s', async (_label, credit) => {
     // Red if the failure is not caught: the debit is marked with no money back.
