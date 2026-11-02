@@ -127,7 +127,7 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
   })
 
-  it('E7: an external purchase landing inside the close waits for it, with no index collision', async () => {
+  it('E7: an external purchase landing inside the close waits for it, avoiding an index collision', async () => {
     // R15: red if the external close drops the brand lock: it does not wait and hits the index.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const paymentRepo = a.dataSource.getRepository(Payment)

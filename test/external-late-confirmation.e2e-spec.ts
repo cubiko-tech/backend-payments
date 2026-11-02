@@ -109,7 +109,7 @@ describe('An external purchase confirmed late against a newer one (PostgreSQL, L
     expect(await creditsOf(external.id)).toHaveLength(1)
   })
 
-  it('E2 ignores a repeated webhook on a refunded purchase even with no conflict left', async () => {
+  it('E2 ignores a repeated webhook on a refunded purchase even without a conflict left', async () => {
     // R15: red without the refunded exit of completeExternalPayment: a second refund audit.
     const { external, wallet } = await lateAfterWalletPurchase()
     await a.checkout.completeExternalPayment(external.id, { source: 'webhook' })

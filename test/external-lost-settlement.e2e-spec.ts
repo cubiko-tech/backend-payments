@@ -84,7 +84,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     expect(await a.checkout.reconcilePayment(external.id)).toEqual({ status: 'processing' })
   })
 
-  it('E5 credits it from the sweep once the wallet can take it, even with no conflict left', async () => {
+  it('E5 credits it from the sweep once the wallet can take it, even without a conflict left', async () => {
     // R15: red if the flag stops deciding: with its plan current again it applies a free plan.
     const { external, wallet } = await lostWithClosedWallet()
     await setWalletStatus(wallet.id, WalletStatus.ACTIVE)
@@ -237,7 +237,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     await expect(replay('lost-key')).rejects.toMatchObject({ status: 409 })
   })
 
-  it('E20 answers its status and no checkout URL to the same key on a refunded purchase', async () => {
+  it('E20 answers its status without a checkout URL to the same key on a refunded purchase', async () => {
     // R15: red if a refunded purchase replays its result: the buyer is sent back to pay.
     const external = await olderExternal({
       idempotencyKey: 'refunded-key',
