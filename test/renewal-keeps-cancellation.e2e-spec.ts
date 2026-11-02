@@ -12,6 +12,7 @@ import { CycleExtension } from '../src/tasks/renewal-debit-refund'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
 import {
   daysLeft,
+  loseNextCommitAnswer,
   rivalWaitsOrEnds,
   seedSubscription,
   sweepOnlyBrands,
@@ -363,5 +364,22 @@ describe('A renewal does not lose a cancellation confirmed during the pass', () 
     expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
     expect(sub.accessEndsAt).toEqual(sub.currentPeriodEnd)
     expect(b.assignPlan).toHaveBeenLastCalledWith(BRAND_ID, sub.planSlug, sub.currentPeriodEnd)
+  })
+
+  it('E12: a commit whose answer is lost keeps the cancellation and the single charge', async () => {
+    // R15: red if the failure ignores the cycle read: the extended row goes past due.
+    const [pass, gate] = await passHeldInRoles()
+    await cancel()
+    loseNextCommitAnswer(a)
+    gate.release()
+    await pass
+
+    const sub = await expectCancellationKept()
+    expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+    expect(sub.retryCount).toBe(0)
+    expect(daysLeft(sub)).toBe(30)
+    expect(await debits()).toHaveLength(1)
+    expect(await marks()).toEqual([CycleExtension.EXTENDED])
+    expect(await balanceOf(a.dataSource, walletId)).toBe(CHARGED_ONCE)
   })
 })

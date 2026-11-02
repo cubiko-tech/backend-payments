@@ -88,6 +88,18 @@ export function parkFirstSubscriptionUpdate(gate: Gate) {
   } as any)
 }
 
+/** The next transaction of `instance` commits, and its answer never comes back. */
+export function loseNextCommitAnswer(instance: RaceInstance) {
+  const transaction = instance.dataSource.transaction.bind(instance.dataSource) as any
+  // R17: A connection dropping right after COMMIT cannot be provoked on demand.
+  return jest.spyOn(instance.dataSource, 'transaction').mockImplementationOnce((async (
+    ...args: unknown[]
+  ) => {
+    await transaction(...args)
+    throw new Error('Connection lost after COMMIT')
+  }) as any)
+}
+
 /** Resolves once `rival` either blocks on a lock or ends, so the parked work can go on. */
 export function rivalWaitsOrEnds(rival: Promise<unknown>, dataSource: DataSource) {
   return Promise.race([rival.catch(() => undefined), someoneWaitsOnAdvisoryLock(dataSource)])

@@ -10,6 +10,7 @@ import { Transaction, TransactionType } from '../src/transaction/entities/transa
 import {
   daysLeft,
   elapseRetryBackoff,
+  loseNextCommitAnswer,
   rivalWaitsOrEnds,
   seedSubscription,
   sweepOnlyBrands,
@@ -149,7 +150,7 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
   }
 
   it('E1: the retry after a failed save extends without a second charge', async () => {
-    // R15: red if sub takes the new date before the save: the retry charges and leaves 60200.
+    // R15: red if sub takes the new date before the commit: no failure is kept and the retry skips it.
     const wallet = await renewalWithFailedSave()
 
     await retryAfterBackoff()
@@ -158,9 +159,28 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
   })
 
   it('E1: the hourly pass ignores the backoff and extends without a second charge', async () => {
-    // R15: red if sub takes the new date before the save: the row skips the pass, past due.
+    // R15: red if the hourly pass leaves past-due rows out: the row stays on its cycle, past due.
     const wallet = await renewalWithFailedSave()
 
+    await renewalPass()
+
+    await expectOneChargeAndOneExtension(wallet.id)
+  })
+
+  it('E10: a commit whose answer is lost does not charge again on the retry', async () => {
+    // R15: red if the failure ignores the cycle read: past due on the new date, a new debit key.
+    const wallet = await seedDueRow()
+    renewA.mockImplementation(async () => {
+      loseNextCommitAnswer(a)
+      return true
+    })
+
+    await renewalPass()
+    renewA.mockResolvedValue(true)
+
+    await expectOneChargeAndOneExtension(wallet.id)
+
+    await retryAfterBackoff()
     await renewalPass()
 
     await expectOneChargeAndOneExtension(wallet.id)
