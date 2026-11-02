@@ -8,6 +8,7 @@ import {
   backdateEvent,
   paymentRow,
   seedExternalPurchase,
+  settleBrand,
   subscriptionOf,
 } from './support/external-purchase.fixture'
 import {
@@ -91,7 +92,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     await setWalletStatus(wallet.id, WalletStatus.ACTIVE)
     await buy(wallet.id, 'closed-same-plan', OLD_PLAN)
 
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.REFUNDED)
     expect(await creditsOf(external.id)).toHaveLength(1)
@@ -120,7 +121,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     await buy(wallet.id, 'stuck-newer')
 
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.REFUNDED)
     expect(await creditsOf(external.id)).toHaveLength(1)
@@ -132,7 +133,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     const external = await olderExternal()
     await appliedWithoutCompleting(external.id)
 
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
     expect(await creditsOf(external.id)).toHaveLength(0)
@@ -155,7 +156,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     await a.dataSource.query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [newer.id])
 
     await confirm(newer.id)
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
     expect(await creditsOf(older.id)).toHaveLength(0)
@@ -182,7 +183,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     await buy(wallet.id, 'days-later')
     const newer = await findPaymentByKey(a.dataSource, 'days-later')
 
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
     expect(await creditsOf(external.id)).toHaveLength(0)
@@ -195,11 +196,11 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     // R15: red if the window goes back to paidAt: the purchase of 20 days ago yields and is credited.
     const older = await stuckTwentyDays()
     const newer = await seedExternalPurchase(a.dataSource, BRAND_ID, NEW_PLAN)
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
     expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
 
     await confirm(newer.id)
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, older.id)).toBe(PaymentStatus.COMPLETED)
     expect(await creditsOf(older.id)).toHaveLength(0)
@@ -224,7 +225,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
 
     gate.release()
     await newer
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.REFUNDED)
     expect(await creditsOf(external.id)).toHaveLength(1)

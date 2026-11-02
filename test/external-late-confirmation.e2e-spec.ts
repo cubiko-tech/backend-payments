@@ -7,6 +7,7 @@ import {
   paymentRow,
   refundAudits,
   seedExternalPurchase,
+  settleBrand,
   subscriptionOf,
 } from './support/external-purchase.fixture'
 import {
@@ -240,7 +241,7 @@ describe('An external purchase confirmed late against a newer one (PostgreSQL, L
     await newer
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.PROCESSING)
 
-    await a.tasks.settleLostExternalPayments()
+    await settleBrand(a, BRAND_ID)
 
     expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.REFUNDED)
     expect(await creditsOf(external.id)).toHaveLength(1)

@@ -8,7 +8,7 @@ import {
   PaymentStatus,
 } from '../../src/payment/entities/payment.entity'
 import { Subscription } from '../../src/subscription/entities/subscription.entity'
-import { backdate, PLAN_PRICE } from './wallet-race.fixture'
+import { backdate, PLAN_PRICE, RaceInstance } from './wallet-race.fixture'
 
 /** An external plan purchase waiting for its provider's confirmation. */
 export async function seedExternalPurchase(
@@ -45,6 +45,18 @@ export function backdateEvent(dataSource: DataSource, paymentId: string, interva
     `UPDATE subscription_events SET "createdAt" = NOW() - INTERVAL '${interval}' WHERE "paymentId" = $1`,
     [paymentId],
   )
+}
+
+/** Runs the real sweep query over one brand's rows only. */
+export function settleBrand(instance: RaceInstance, brandId: string) {
+  const repo = (instance.tasks as any).paymentRepo
+  const find = repo.find.bind(repo)
+  // R17: The sweep reads all brands, and a spec in another worker must not close this one's rows.
+  jest.spyOn(repo, 'find').mockImplementationOnce(async (options: unknown) => {
+    const rows: Payment[] = await find(options)
+    return rows.filter((row) => row.brandId === brandId)
+  })
+  return instance.tasks.settleLostExternalPayments()
 }
 
 export function subscriptionOf(dataSource: DataSource, brandId: string) {
