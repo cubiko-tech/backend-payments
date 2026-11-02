@@ -1,12 +1,7 @@
 import { HttpStatus, Logger } from '@nestjs/common'
 import { DataSource, EntityManager, QueryRunner } from 'typeorm'
 
-import {
-  Payment,
-  PaymentProvider,
-  PaymentPurpose,
-  PaymentStatus,
-} from '../payment/entities/payment.entity'
+import { Payment, PaymentPurpose, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { RequestException } from '../shared/exception/request.exception'
 import { Subscription } from '../subscription/entities/subscription.entity'
@@ -19,7 +14,7 @@ import {
 const log = new Logger('WalletPaymentClose')
 
 /** Rolls back without ever throwing, so the error that caused it is the one the caller sees. */
-async function rollbackQuietly(runner: QueryRunner) {
+export async function rollbackQuietly(runner: QueryRunner) {
   try {
     if (runner.isTransactionActive) {
       await runner.rollbackTransaction()
@@ -46,8 +41,13 @@ export interface WalletCloseDeps {
   ) => Promise<{ subscription: Subscription; extended: boolean }>
 }
 
+/** Serializes the closes that decide a brand's plan, until `runner`'s transaction ends. */
+export async function lockBrandPlan(runner: QueryRunner, brandId: string) {
+  await runner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`wallet-plan:${brandId}`])
+}
+
 /** A newer purchase of another plan, already debited, that has not finished closing. */
-async function hasNewerDebitedPurchase(payment: Payment, manager: EntityManager) {
+export async function hasNewerDebitedPurchase(payment: Payment, manager: EntityManager) {
   const rows = await manager.query(
     `SELECT 1 FROM payments p
      JOIN transactions t ON t."idempotencyKey" = 'payment:' || p.id || ':debit'
@@ -67,23 +67,22 @@ async function hasNewerDebitedPurchase(payment: Payment, manager: EntityManager)
 }
 
 /**
- * Hands back to the sweep every older purchase of another plan that closed while this
- * one was already open: they overlapped, so the newer wins and the sweep credits the older.
+ * Hands back to its sweep every older purchase of another plan, from any provider, that closed
+ * while this one was already open: they overlapped, so the newer wins and the older is credited.
  * Purchases that did not overlap are plain plan changes and keep their money spent.
  * Looks in the subscription events because `lastPaymentId` only names the newest purchase.
  */
-async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityManager) {
+export async function yieldOverlappedOlderPurchase(payment: Payment, manager: EntityManager) {
   await manager.query(
     `UPDATE payments p SET status = $1
      FROM subscriptions s
      JOIN subscription_events e ON e."subscriptionId" = s.id
-     WHERE s."brandId" = $2 AND p.id = e."paymentId" AND p.status = $3 AND p.provider = $4
-       AND p.purpose = $5 AND p."purposeId" <> $6 AND p."paidAt" > $7 AND p."createdAt" < $7`,
+     WHERE s."brandId" = $2 AND p.id = e."paymentId" AND p.status = $3
+       AND p.purpose = $4 AND p."purposeId" <> $5 AND p."paidAt" > $6 AND p."createdAt" < $6`,
     [
       PaymentStatus.PROCESSING,
       payment.brandId,
       PaymentStatus.COMPLETED,
-      PaymentProvider.WALLET,
       PaymentPurpose.PLAN_PURCHASE,
       payment.purposeId,
       payment.createdAt,
@@ -181,9 +180,7 @@ export async function closeWalletPayment(
   await runner.connect()
   await runner.startTransaction()
   try {
-    await runner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-      `wallet-plan:${payment.brandId}`,
-    ])
+    await lockBrandPlan(runner, payment.brandId)
     const paymentRepo = runner.manager.getRepository(Payment)
     const isPlanPurchase = payment.purpose === PaymentPurpose.PLAN_PURCHASE && !!payment.purposeId
     if (isPlanPurchase) {

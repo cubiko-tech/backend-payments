@@ -24,7 +24,13 @@ import {
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
-import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
+import {
+  Payment,
+  PaymentProvider,
+  PaymentPurpose,
+  PaymentStatus,
+} from '../payment/entities/payment.entity'
+import { LOST_TO_NEWER_PURCHASE_FLAG } from '../checkout/external-payment-close'
 import {
   hasWalletPaymentDebit,
   WALLET_CLOSE_GIVEN_UP_FLAG,
@@ -615,6 +621,39 @@ export class TasksService {
       'info',
       `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`,
     )
+  }
+
+  /**
+   * Finishes external plan purchases that lost to a newer one, from any provider: handed back
+   * after `completed` (they keep `paidAt`) or judged lost with the credit still to be made.
+   */
+  @Cron('*/5 * * * *')
+  async settleLostExternalPayments() {
+    const base = {
+      provider: Not(PaymentProvider.WALLET),
+      purpose: PaymentPurpose.PLAN_PURCHASE,
+      status: PaymentStatus.PROCESSING,
+      createdAt: LessThan(new Date(Date.now() - WALLET_RECONCILE_MIN_AGE_MS)),
+    }
+    const lost = await this.paymentRepo.find({
+      where: [
+        { ...base, paidAt: Not(IsNull()) },
+        {
+          ...base,
+          metadata: Raw((metadata) => `(${metadata})->>'${LOST_TO_NEWER_PURCHASE_FLAG}' = 'true'`),
+        },
+      ],
+    })
+    for (const p of lost ?? []) {
+      try {
+        await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-settle-lost' })
+      } catch (error) {
+        logger.log(
+          'warn',
+          `[CRON] settleLostExternalPayments: error with payment ${p.id}: ${error.message}`,
+        )
+      }
+    }
   }
 
   @Cron('*/5 * * * *')

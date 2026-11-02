@@ -5,7 +5,7 @@
  */
 import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, EntityManager, Repository } from 'typeorm'
+import { DataSource, EntityManager, Raw, Repository } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -75,6 +75,12 @@ import {
   WalletCheckoutLostError,
   WalletCloseResult,
 } from './wallet-payment-close'
+import {
+  closeExternalPlanPurchase,
+  completeExternalPlanPurchase,
+  LOST_TO_NEWER_PURCHASE_FLAG,
+  settleLostExternalPurchase,
+} from './external-payment-close'
 
 /**
  * Servicio orquestador de checkout.
@@ -745,6 +751,7 @@ export class CheckoutService implements OnModuleInit {
         !payment ||
         payment.provider === PaymentProvider.WALLET ||
         payment.status === PaymentStatus.COMPLETED ||
+        payment.status === PaymentStatus.REFUNDED ||
         this.hasAmountMismatchMark(payment)
       ) {
         return
@@ -752,7 +759,16 @@ export class CheckoutService implements OnModuleInit {
 
       const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
       const claimed = await this.paymentRepo.update(
-        { id: paymentId, status: payment.status },
+        // This write replaces `metadata`: from a stale read it would erase the lost flag.
+        {
+          id: paymentId,
+          status: payment.status,
+          ...(providerData && !payment.metadata?.[LOST_TO_NEWER_PURCHASE_FLAG]
+            ? {
+                metadata: Raw((column) => `(${column})->>'${LOST_TO_NEWER_PURCHASE_FLAG}' IS NULL`),
+              }
+            : {}),
+        },
         {
           status: PaymentStatus.PROCESSING,
           ...(providerData ? { metadata } : {}),
@@ -779,6 +795,39 @@ export class CheckoutService implements OnModuleInit {
 
     const totalAmount = parseFloat(String(payment.amount))
     await this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
+
+    const isPlanPurchase = payment.purpose === PaymentPurpose.PLAN_PURCHASE && !!payment.purposeId
+    let extendedUntil: Date | undefined
+
+    // Ahead of the taxes: a purchase that lost gets its money back without needing an invoice.
+    if (isPlanPurchase) {
+      // One transaction: a crash between the subscription and its event would add the days twice.
+      const closed = await closeExternalPlanPurchase(
+        payment,
+        {
+          brandId: payment.brandId,
+          userId: payment.userId,
+          provider: payment.provider as any,
+          purpose: 'plan_purchase',
+          planSlug: payment.purposeId,
+          walletId: payment.walletId,
+        },
+        this.dataSource,
+        (req, p, manager) => this.createOrRenewSubscription(req, p, manager),
+      )
+      if (closed.outcome === 'superseded') {
+        await this.settleLostPurchase(paymentId)
+        return
+      }
+      if (closed.extended && closed.subscription?.currentPeriodEnd) {
+        extendedUntil = closed.subscription.currentPeriodEnd
+      }
+      await this.assignCurrentPlanInRoles(
+        payment.brandId,
+        closed.subscription?.planSlug || payment.purposeId,
+        closed.subscription?.currentPeriodEnd,
+      )
+    }
 
     // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
     // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
@@ -812,35 +861,6 @@ export class CheckoutService implements OnModuleInit {
     }
 
     const { subtotal, taxAmount } = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
-
-    let extendedUntil: Date | undefined
-
-    // Si es compra de plan → crear/renovar suscripción
-    if (payment.purpose === PaymentPurpose.PLAN_PURCHASE && payment.purposeId) {
-      // One transaction: a crash between the subscription and its event would add the days twice.
-      const { subscription, extended } = await this.dataSource.transaction((manager) =>
-        this.createOrRenewSubscription(
-          {
-            brandId: payment.brandId,
-            userId: payment.userId,
-            provider: payment.provider as any,
-            purpose: 'plan_purchase',
-            planSlug: payment.purposeId,
-            walletId: payment.walletId,
-          },
-          payment,
-          manager,
-        ),
-      )
-      if (extended && subscription?.currentPeriodEnd) {
-        extendedUntil = subscription.currentPeriodEnd
-      }
-      await this.assignPlanInRoles(
-        payment.brandId,
-        subscription?.planSlug || payment.purposeId,
-        subscription?.currentPeriodEnd,
-      )
-    }
 
     if (isWalletRecharge && payment.walletId) {
       const creditResult = await this.walletService.credit(payment.walletId, totalAmount, {
@@ -880,14 +900,23 @@ export class CheckoutService implements OnModuleInit {
     )
 
     const paidAt = new Date()
-    const completed = await this.paymentRepo.update(
-      { id: paymentId, status: PaymentStatus.PROCESSING },
-      {
-        status: PaymentStatus.COMPLETED,
-        paidAt,
-      },
-    )
-    if (!completed.affected) return
+    if (isPlanPurchase) {
+      const outcome = await completeExternalPlanPurchase(payment, paidAt, this.dataSource)
+      if (outcome === 'superseded') {
+        await this.settleLostPurchase(paymentId)
+        return
+      }
+      if (outcome !== 'completed') return
+    } else {
+      const completed = await this.paymentRepo.update(
+        { id: paymentId, status: PaymentStatus.PROCESSING },
+        {
+          status: PaymentStatus.COMPLETED,
+          paidAt,
+        },
+      )
+      if (!completed.affected) return
+    }
 
     payment.status = PaymentStatus.COMPLETED
     payment.paidAt = paidAt
@@ -927,6 +956,40 @@ export class CheckoutService implements OnModuleInit {
     this.log.log(`Pago externo completado: payment=${payment.id} brand=${payment.brandId}`)
   }
 
+  private settleLostPurchase(paymentId: string) {
+    return settleLostExternalPurchase(paymentId, {
+      paymentRepo: this.paymentRepo,
+      walletService: this.walletService,
+      dataSource: this.dataSource,
+      inProcessLocks: this.walletReconcileLocks,
+      auditService: this.auditService,
+      logger: this.log,
+    })
+  }
+
+  /**
+   * What the return page gets once the provider confirmed. A credited purchase answers `failed`,
+   * which that page already ends on, plus the flag; `processing` while its credit is pending.
+   */
+  private confirmedPaymentAnswer(
+    current: Payment | null,
+    planSlug?: string,
+  ): { status: string; planSlug?: string; refundedToWallet?: boolean } {
+    if (current?.status === PaymentStatus.REFUNDED) {
+      return { status: 'failed', refundedToWallet: true }
+    }
+    if (current?.status === PaymentStatus.FAILED || this.hasAmountMismatchMark(current)) {
+      return { status: 'failed' }
+    }
+    if (
+      current?.status === PaymentStatus.PROCESSING &&
+      (current.paidAt || current.metadata?.[LOST_TO_NEWER_PURCHASE_FLAG])
+    ) {
+      return { status: 'processing' }
+    }
+    return { status: 'completed', planSlug }
+  }
+
   /**
    * Reconciliar un pago consultando el estado REAL en el proveedor.
    *
@@ -934,12 +997,17 @@ export class CheckoutService implements OnModuleInit {
    * si el proveedor confirma el pago, lo completa (idempotente con el webhook).
    * No depende de que el webhook llegue — robusto en cualquier ambiente.
    */
-  async reconcilePayment(paymentId: string): Promise<{ status: string; planSlug?: string }> {
+  async reconcilePayment(
+    paymentId: string,
+  ): Promise<{ status: string; planSlug?: string; refundedToWallet?: boolean }> {
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment) {
       throw new RequestException({ code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' }, 404)
     }
 
+    if (payment.status === PaymentStatus.REFUNDED && payment.provider !== PaymentProvider.WALLET) {
+      return this.confirmedPaymentAnswer(payment)
+    }
     if (payment.status === PaymentStatus.COMPLETED) {
       return { status: 'completed', planSlug: payment.purposeId || undefined }
     }
@@ -954,14 +1022,7 @@ export class CheckoutService implements OnModuleInit {
         try {
           await this.completeExternalPayment(paymentId, { source: 'reconcile' })
           const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
-          if (
-            afterReconcile &&
-            (afterReconcile.status === PaymentStatus.FAILED ||
-              this.hasAmountMismatchMark(afterReconcile))
-          ) {
-            return { status: 'failed' }
-          }
-          return { status: 'completed', planSlug: payment.purposeId || undefined }
+          return this.confirmedPaymentAnswer(afterReconcile, payment.purposeId || undefined)
         } catch (error) {
           this.log.warn(
             `reconcilePayment: error completing processing payment ${paymentId}: ${error.message}`,
@@ -983,14 +1044,7 @@ export class CheckoutService implements OnModuleInit {
           providerStatus: real.metadata,
         })
         const afterReconcile = await this.paymentRepo.findOne({ where: { id: paymentId } })
-        if (
-          afterReconcile &&
-          (afterReconcile.status === PaymentStatus.FAILED ||
-            this.hasAmountMismatchMark(afterReconcile))
-        ) {
-          return { status: 'failed' }
-        }
-        return { status: 'completed', planSlug: payment.purposeId || undefined }
+        return this.confirmedPaymentAnswer(afterReconcile, payment.purposeId || undefined)
       }
 
       return { status: real.status }

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm'
 import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import type { CheckoutRequest, CheckoutResult } from './checkout.service'
+import { LOST_TO_NEWER_PURCHASE_FLAG } from './external-payment-close'
 
 export type InFlightCheckoutsMap = Map<
   string,
@@ -187,12 +188,17 @@ async function resolvePaymentStateOutcome(
   }
 
   // Ahead of the stored result: a purchase handed back to the sweep keeps its old `completed`.
-  if (payment.provider === PaymentProvider.WALLET && payment.status === PaymentStatus.PROCESSING) {
+  if (
+    payment.status === PaymentStatus.PROCESSING &&
+    (payment.provider === PaymentProvider.WALLET ||
+      payment.paidAt ||
+      payment.metadata?.[LOST_TO_NEWER_PURCHASE_FLAG])
+  ) {
     throw createInProgressIdempotentCheckoutException(payment)
   }
 
-  // A purchase credited by the sweep may keep the `completed` it stored before being handed back.
-  if (payment.provider === PaymentProvider.WALLET && payment.status === PaymentStatus.REFUNDED) {
+  // A credited purchase may keep the `completed` or the pending checkout it stored before.
+  if (payment.status === PaymentStatus.REFUNDED) {
     return null
   }
 
@@ -263,7 +269,10 @@ export async function resolveExistingIdempotentPayment(
   return {
     paymentId: existing.id,
     status: existing.status,
-    ...(existing.checkoutUrl ? { checkoutUrl: existing.checkoutUrl } : {}),
+    // A credited purchase must not send the buyer back to pay.
+    ...(existing.checkoutUrl && existing.status !== PaymentStatus.REFUNDED
+      ? { checkoutUrl: existing.checkoutUrl }
+      : {}),
   }
 }
 

@@ -293,13 +293,33 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   llega al cierre: se acredita (LOC-100, `src/checkout/wallet-payment-reconciliation.ts:645-648`). La renuncia reclama
   la fila antes de acreditar (`:440-456`), así que un cierre tardío no deja plan y crédito.
 
-## Una compra externa confirmada tarde pisa a una de wallet más nueva (LOC-100)
+## Una compra externa perdedora no se puede acreditar: wallet cerrada o tope de wallets (LOC-101)
 
-- **Dónde**: `src/checkout/checkout.service.ts:821-833`, `:1485-1497` (`finalizeProcessingPayment`,
-  `createOrRenewSubscription`)
-- **Qué lo dispara**: una compra externa de otro plan, creada antes que una de wallet, confirma después de ella.
-- **Qué rompe**: la suscripción pasa al plan de la externa y la de wallet queda `completed`, sin días ni crédito.
-- **Estado**: abierto — lo cierra decidir quién gana entre proveedores, con la plata de un tercero ya cobrada.
+- **Dónde**: `src/checkout/external-payment-close.ts:179`, `:211` (`resolveRefundWallet`, `settleLostExternalPurchase`)
+- **Qué lo dispara**: la compra perdió contra una más nueva y la wallet `internal` de esa marca y moneda está cerrada, o
+  no existe y la marca ya tiene 10 wallets.
+- **Qué rompe**: la plata cobrada por el proveedor no vuelve: la compra queda `processing` con `lostToNewerPurchase`, sin
+  plan ni crédito, y el barrido repite el log de error cada 5 minutos.
+- **Estado**: abierto — lo cierra que quien aprueba decida si se reabre la wallet, se acredita a otra o se devuelve por
+  el proveedor.
+
+## Una compra externa devuelta a la wallet conserva su factura (LOC-101)
+
+- **Dónde**: `src/checkout/checkout.service.ts:904` (`finalizeProcessingPayment`), `src/checkout/wallet-payment-close.ts:75`
+  (`yieldOverlappedOlderPurchase`)
+- **Qué lo dispara**: la compra ya facturó cuando pierde: cedió después de `completed`, o una más nueva cerró durante las
+  llamadas de factura.
+- **Qué rompe**: queda una factura, quizá ya enviada a la DIAN, por una compra cuya plata volvió a la wallet; este camino
+  no emite nota crédito. La que pierde antes de facturar no genera factura.
+- **Estado**: abierto — lo cierra que quien aprueba decida si la devolución exige nota crédito.
+
+## La página de retorno dice «no pudo completarse» de una compra devuelta a la wallet (LOC-101)
+
+- **Dónde**: `src/checkout/checkout.service.ts:974` (`confirmedPaymentAnswer`)
+- **Qué lo dispara**: quien compró vuelve del proveedor con una compra que perdió contra una más nueva.
+- **Qué rompe**: responde `failed` con `refundedToWallet: true`, y el front aún no lee ese campo: no se avisa que la plata
+  está en la wallet. No se pierde plata.
+- **Estado**: abierto — lo cierra que `frontend-platform` lea `refundedToWallet`.
 
 ## Un `failed` compensado a mano sin la llave se acredita otra vez (LOC-100)
 

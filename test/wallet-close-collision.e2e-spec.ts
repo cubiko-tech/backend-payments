@@ -1,5 +1,3 @@
-import { Repository } from 'typeorm'
-
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
 import {
   Payment,
@@ -129,8 +127,8 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(BALANCE - PLAN_PRICE)
   })
 
-  it('E7: a real unique index collision against an external purchase ends with the plan', async () => {
-    // R15: red if a failed close does not hand over: the payment stays pending, not processing.
+  it('E7: an external purchase landing inside the close waits for it, with no index collision', async () => {
+    // R15: red if the external close drops the brand lock: it does not wait and hits the index.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const paymentRepo = a.dataSource.getRepository(Payment)
     const external = await paymentRepo.save(
@@ -146,34 +144,17 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
         metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
       }),
     )
-    const realSave = Repository.prototype.save
-    let collided = false
-    // R17: The external path takes no brand lock; this fixes when it lands inside the close.
-    jest.spyOn(Repository.prototype, 'save').mockImplementation(async function (
-      this: Repository<any>,
-      ...args: any[]
-    ) {
-      if (!collided && this.metadata.target === Subscription) {
-        collided = true
-        await a.checkout.completeExternalPayment(external.id)
-      }
-      return (realSave as any).apply(this, args)
-    } as any)
+    const { gate, purchase, payment } = await buyAndParkHoldingBrandLock(wallet.id, 'loc99-e7')
 
-    await expect(buy(a, wallet.id, 'loc99-e7')).rejects.toMatchObject({
-      driverError: { code: '23505' },
-    })
-    jest.restoreAllMocks()
-
-    const payment = await findPaymentByKey(a.dataSource, 'loc99-e7')
-    expect(payment.status).toBe(PaymentStatus.PROCESSING)
-    expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
-
-    await backdate(a.dataSource, payment.id)
-    await b.tasks.reconcileWalletPayments()
+    const confirming = b.checkout.completeExternalPayment(external.id)
+    expect(await someoneWaitsOnAdvisoryLock(a.dataSource)).toBe(true)
+    gate.release()
+    await Promise.all([purchase, confirming])
 
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.COMPLETED)
+    expect(await statusOf(a.dataSource, external.id)).toBe(PaymentStatus.COMPLETED)
     expect(await eventsOf(payment.id)).toBe(1)
+    expect(await eventsOf(external.id)).toBe(1)
     expect(await debitsOf(payment.id)).toHaveLength(1)
     expect(await creditsOf(payment.id)).toHaveLength(0)
   })

@@ -50,7 +50,7 @@ export interface WalletPaymentReconciliationDeps {
   transactionReadRepo?: Repository<Transaction>
   dataSource?: DataSource
   inProcessLocks?: Map<string, Promise<void>>
-  logger?: { error: (message: string) => void }
+  logger?: { error: (message: string) => void; warn?: (message: string) => void }
   closeWalletPayment: (payment: Payment, req: CheckoutRequest) => Promise<WalletCloseResult>
   assignPlanInRoles: (brandId: string, planSlug: string, expiresAt?: Date) => Promise<void>
   auditService: Pick<AuditService, 'log'>
@@ -321,7 +321,7 @@ async function isPlanAppliedByPayment(
  * that never closed has none. Its plan may be current again through a repurchase, so the plan
  * does not decide; the days it paid for are gone either way.
  */
-async function isHandedBackPurchase(
+export async function isHandedBackPurchase(
   payment: Payment,
   deps: Pick<WalletPaymentReconciliationDeps, 'subscriptionRepo' | 'subscriptionEventRepo'>,
 ): Promise<boolean> {
@@ -333,11 +333,14 @@ async function isHandedBackPurchase(
   return !!event && !!sub && sub.lastPaymentId !== payment.id
 }
 
-async function refundSupersededWalletPayment(
+export async function refundSupersededWalletPayment(
   payment: Payment,
   conflictingSub: Subscription | null,
   totalAmount: number,
-  deps: WalletPaymentReconciliationDeps,
+  deps: Pick<
+    WalletPaymentReconciliationDeps,
+    'paymentRepo' | 'walletService' | 'auditService' | 'logger'
+  >,
   refundRecorded = false,
   reason?: string,
 ): Promise<WalletPaymentReconciliationResult> {
@@ -390,7 +393,7 @@ async function refundSupersededWalletPayment(
       amount: totalAmount,
       walletId: payment.walletId,
       idempotencyKey: refundKey,
-      provider: 'wallet',
+      provider: payment.provider,
       reconciled: true,
     },
     `Wallet payment refunded via reconciliation because ${cause}: ${payment.currency} ${totalAmount}`,
@@ -404,6 +407,7 @@ async function refundSupersededWalletPayment(
     const latest = await deps.paymentRepo.findOne({ where: { id: payment.id } })
     return { outcome: 'noop', status: latest?.status ?? fromStatus }
   }
+  deps.logger?.warn?.(`Payment ${payment.id} (${payment.provider}) refunded: ${cause}`)
   return { outcome: 'refunded', status: PaymentStatus.REFUNDED }
 }
 
