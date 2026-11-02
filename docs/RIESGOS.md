@@ -409,7 +409,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 - **Dónde**: `src/provider/confio/confio.provider.ts:130`, `src/provider/stripe/stripe.provider.ts:86`
   (`ProviderPaymentNotFoundError`)
-- **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado. Un 404 se lee como «el pago no existe».
+- **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado. Un 404 se lee como
+  «el pago no existe».
 - **Qué rompe**: los `pending` de ese proveedor expiran a las 24 h aunque estén cobrados, como antes de LOC-89.
 - **Estado**: abierto — lo cierra comprobar la configuración de cada uno, por ambiente, contra su API.
 
@@ -417,11 +418,13 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:61` (`dropiFetch`); `src/tasks/tasks.service.ts:815`
   (`providerLetsExpire`); `src/admin/admin.controller.ts:288`
-- **Qué lo dispara**: Dropi responde 404 a `/charges/:id`, por una ruta que no existe o por un cobro que de verdad no existe:
-  no se distinguen. La QA de LOC-89 lo midió contra el core-back local; qué sirve la API real de Dropi no se sabe.
-- **Qué rompe**: un `pending` abandonado no vence y la acumulación no tiene tope, hasta que el usuario lo cancela. Cada fila es
-  una llamada y un log `error` cada 5 minutos desde los 2 minutos de edad, más uno en cada expiración después de las 24 h, y
-  alarga la pasada. `GET admin/payments/pending` muestra los 100 más nuevos, así que puede dejar afuera a los demás.
+- **Qué lo dispara**: Dropi responde 404 a `/charges/:id`, por una ruta que no existe o por un cobro que de verdad no
+  existe: no se distinguen. La QA de LOC-89 lo midió contra el core-back local; qué sirve la API real de Dropi no se
+  sabe.
+- **Qué rompe**: un `pending` abandonado no vence y la acumulación no tiene tope, hasta que el usuario lo cancela. Cada
+  fila es una llamada y un log `error` cada 5 minutos desde los 2 minutos de edad, más uno en cada expiración después de
+  las 24 h, y alarga la pasada. `GET admin/payments/pending` muestra los 100 más nuevos, así que puede dejar afuera a
+  los demás.
 - **Estado**: abierto — lo cierra confirmar la ruta real con el dueño de Dropi.
 
 ## Lo que el barrido no rescata o completa sin mirar (LOC-89)
