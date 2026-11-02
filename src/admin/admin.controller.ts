@@ -1,3 +1,4 @@
+// R6: One responsibility, the single /admin HTTP surface; splitting it by domain is its own task.
 import {
   Controller,
   Get,
