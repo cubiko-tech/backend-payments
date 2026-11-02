@@ -419,3 +419,20 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   plan en ese caso sólo deja un log de error en cada pasada; (d) se completa con lo dado y un log de error, sin revertir nada;
   (e) queda `failed` con el plan puesto.
 - **Estado**: abierto — (d) y (e) se ven por el log `PROVIDER_AMOUNT_MISMATCH`; lo demás lo cierra una conciliación de `failed`.
+
+## El precio viejo todavía se puede pagar pasadas las 24 h (LOC-98)
+
+- **Dónde**: `src/checkout/checkout.service.ts:715` (`createCheckout` no recibe vencimiento), `:407` (`firstAttemptAt`);
+  `src/checkout/checkout-idempotency.ts:235` (el `pending` repite su `checkoutResult`)
+- **Qué lo dispara**: (a) un reintento externo aceptado dentro de plazo abre una sesión cuya vida pone el proveedor; (b) un
+  `pending` que el barrido no vence porque el proveedor no contesta sigue repitiendo su `checkoutUrl` con la misma llave.
+- **Qué rompe**: la compra se completa al monto guardado después de las 24 h. El tope es hipótesis: depende de cada proveedor,
+  no se comprobó en ninguno y `expiresAt` no lo acota, porque sólo se escribe. Ninguno de los dos crea un cobro nuevo por sí solo.
+- **Estado**: abierto — lo cierra pasarle el vencimiento a cada proveedor, si quien aprueba lo pide.
+
+## Un pago con débito se cierra pasadas las 24 h si se reintenta (LOC-98)
+
+- **Dónde**: `src/checkout/checkout.service.ts:380` (`assertRetryAllowed`)
+- **Qué lo dispara**: un `failed` de wallet con débito y sin acreditar, que se reintenta antes de que el barrido lo acredite.
+- **Qué rompe**: la compra cierra al precio que ya se cobró, sin segundo débito, en vez de responder vencido.
+- **Estado**: mitigado por la exención: decirle «pedido nuevo» a quien ya pagó lo haría pagar dos veces.
