@@ -1,8 +1,9 @@
-import { In } from 'typeorm'
+// R6: one TasksService with many crons sharing this setup; splitting it is a task of its own.
+import { In, Not } from 'typeorm'
 
 import { TasksService, franjasDeRepesca } from './tasks.service'
-import { PaymentStatus } from '../payment/entities/payment.entity'
-import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import { PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
+import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
@@ -18,6 +19,13 @@ const mockRepo = () => ({
   update: jest.fn().mockResolvedValue({ affected: 0 }),
   delete: jest.fn().mockResolvedValue({ affected: 0 }),
 })
+
+// R17: the marks of a renewal debit are asserted over real PostgreSQL in the e2e.
+const dataSourceForMarks = (subscriptionRepo: ReturnType<typeof mockRepo>) => {
+  const getRepository = (entity: unknown) =>
+    entity === Subscription ? subscriptionRepo : mockRepo()
+  return { getRepository, transaction: async (work: any) => work({ getRepository }) }
+}
 
 describe('TasksService — processTrialConversions', () => {
   let service: TasksService
@@ -74,7 +82,7 @@ describe('TasksService — processTrialConversions', () => {
       subscriptionRepo as any,
       subscriptionEventRepo as any,
       mockRepo() as any, // webhookEventRepo
-      {} as any, // dataSource
+      dataSourceForMarks(subscriptionRepo) as any,
       walletService as any,
       {} as any, // auditService
       providerFactory as any,
@@ -94,6 +102,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -127,6 +136,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -151,6 +161,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
       },
     ])
 
@@ -170,7 +181,9 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: 'w1',
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
+        nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
       },
     ])
 
@@ -182,15 +195,58 @@ describe('TasksService — processTrialConversions', () => {
       expect.objectContaining({
         referenceType: 'subscription',
         referenceId: 's1',
-        idempotencyKey: 'subscription:s1:current',
+        idempotencyKey: 'subscription:s1:2026-09-01T00:00:00.000Z',
       }),
       'COP',
     )
-    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+    expect(subscriptionRepo.update).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
     )
     expect(clientRoles.renewPlanForBrand).toHaveBeenCalled()
     expect(clientRoles.assignPlanToBrand).not.toHaveBeenCalledWith('b1', 'free')
+  })
+
+  describe('wallet row without nextBillingDate', () => {
+    const undatedRow = () => ({
+      id: 's-undated',
+      brandId: 'b1',
+      planSlug: 'pro',
+      provider: 'wallet',
+      walletId: 'w1',
+      status: SubscriptionStatus.PAST_DUE,
+      autoRenew: true,
+      retryCount: 1,
+      nextBillingDate: null,
+      updatedAt: new Date(Date.now() - 72 * 60 * 60 * 1000),
+    })
+
+    it('does not charge, leaves the row untouched and logs an error', async () => {
+      // Red if the guard in renewFromWallet goes: the key falls back to a literal and it charges.
+      clientRoles.getPlanPrice.mockResolvedValue(50000)
+      const logSpy = jest.spyOn(logger, 'log')
+      const sub = undatedRow()
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await service.retryFailedPayments()
+
+      expect(walletService.debit).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(sub.retryCount).toBe(1)
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('s-undated'))
+    })
+
+    it('does not extend a free plan either, since there is no cycle to extend from', async () => {
+      // Red if the guard moves below the zero price branch: the period is extended for free.
+      clientRoles.getPlanPrice.mockResolvedValue(0)
+      subscriptionRepo.find.mockResolvedValue([undatedRow()])
+
+      await service.retryFailedPayments()
+
+      expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+    })
   })
 
   it('marca past_due si el cobro de wallet falla por saldo insuficiente', async () => {
@@ -204,13 +260,16 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'wallet',
         walletId: 'w1',
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
+        nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
       },
     ])
 
     await service.processTrialConversions()
 
-    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+    expect(subscriptionRepo.update).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),
     )
     expect(eventBus.notifyPaymentFailed).toHaveBeenCalled()
@@ -227,6 +286,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: null,
       },
@@ -263,6 +323,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
       },
@@ -288,6 +349,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: new Date('2026-08-10T00:00:00Z'),
       },
@@ -299,6 +361,7 @@ describe('TasksService — processTrialConversions', () => {
         provider: 'confio',
         walletId: null,
         status: SubscriptionStatus.TRIAL,
+        autoRenew: true,
         retryCount: 0,
         initialPaymentLinkIssuedAt: null,
       },
@@ -1261,7 +1324,7 @@ describe('TasksService — processTrialConversions', () => {
         subscriptionRepo as any,
         subscriptionEventRepo as any,
         mockRepo() as any,
-        {} as any,
+        dataSourceForMarks(subscriptionRepo) as any,
         realWalletService,
         {} as any,
         providerFactory as any,
@@ -1272,7 +1335,9 @@ describe('TasksService — processTrialConversions', () => {
       )
     })
 
-    it('does not debit any wallet and marks the renewal as failed when walletId is null', async () => {
+    it('does not debit, fail or notify a renewal without walletId, and logs its id and a count', async () => {
+      // Red if the walletId check in processSubscriptionRenewals goes: retryCount rises to 1.
+      const logSpy = jest.spyOn(logger, 'log')
       const otherWallet = {
         id: 'w-other',
         brandId: 'brand-a',
@@ -1282,44 +1347,66 @@ describe('TasksService — processTrialConversions', () => {
       }
       mockQueryRunner.manager.findOne.mockResolvedValue(otherWallet)
       clientRoles.getPlanPrice.mockResolvedValue(50000)
-      subscriptionRepo.find.mockResolvedValue([
-        {
-          id: 'sub-null-wallet',
-          brandId: 'brand-a',
-          planSlug: 'pro',
-          provider: 'wallet',
-          walletId: null,
-          status: SubscriptionStatus.ACTIVE,
-          autoRenew: true,
-          retryCount: 0,
-        },
-      ])
+      const sub: any = {
+        id: 'sub-null-wallet',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: null,
+        status: SubscriptionStatus.ACTIVE,
+        autoRenew: true,
+        retryCount: 0,
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
 
       await serviceWithRealWallet.processSubscriptionRenewals()
 
+      expect(sub.retryCount).toBe(0)
+      expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
       expect(otherWallet.balance).toBe(200000)
       expect(mockQueryRunner.manager.findOne).not.toHaveBeenCalled()
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-null-wallet',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
-      )
-      expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subscriptionId: 'sub-null-wallet',
-          eventType: SubscriptionEventType.PAYMENT_FAILED,
-          toStatus: SubscriptionStatus.PAST_DUE,
-        }),
-      )
-      expect(eventBus.notifyPaymentFailed).toHaveBeenCalledWith(
-        'brand-a',
-        'sub-null-wallet',
-        expect.any(String),
-      )
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.save).not.toHaveBeenCalled()
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('sub-null-wallet'))
+      expect(logSpy).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('processSubscriptionRenewals: 1 wallet subscriptions'),
+      )
+      logSpy.mockRestore()
+    })
+
+    it('does not add a retry or notify a past-due retry without walletId, and logs its id and a count', async () => {
+      // Red if the walletId check in retryFailedPayments goes: retryCount rises to 2.
+      const logSpy = jest.spyOn(logger, 'log')
+      const sub: any = {
+        id: 'sub-null-wallet-due',
+        brandId: 'brand-a',
+        planSlug: 'pro',
+        provider: 'wallet',
+        walletId: null,
+        status: SubscriptionStatus.PAST_DUE,
+        autoRenew: true,
+        retryCount: 1,
+        updatedAt: new Date(Date.now() - 72 * 60 * 60 * 1000),
+      }
+      subscriptionRepo.find.mockResolvedValue([sub])
+
+      await serviceWithRealWallet.retryFailedPayments()
+
+      expect(sub.retryCount).toBe(1)
+      expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
+      expect(subscriptionRepo.save).not.toHaveBeenCalled()
+      expect(subscriptionEventRepo.save).not.toHaveBeenCalled()
+      expect(eventBus.notifyPaymentFailed).not.toHaveBeenCalled()
+      expect(logSpy).toHaveBeenCalledWith('error', expect.stringContaining('sub-null-wallet-due'))
+      expect(logSpy).toHaveBeenCalledWith(
+        'error',
+        expect.stringContaining('retryFailedPayments: 1 wallet subscriptions'),
+      )
+      logSpy.mockRestore()
     })
 
     it('rejects a renewal from brand A when the wallet belongs to brand B and leaves brand B wallet unchanged', async () => {
@@ -1342,6 +1429,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 
@@ -1350,12 +1438,9 @@ describe('TasksService — processTrialConversions', () => {
       expect(walletBrandB.balance).toBe(200000)
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-wrong-brand',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-wrong-brand' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(eventBus.publishSubscriptionRenewed).not.toHaveBeenCalled()
     })
@@ -1380,6 +1465,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 
@@ -1387,12 +1473,9 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(walletBrandA.balance).toBe(150000)
       expect(mockQueryRunner.commitTransaction).toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-own-wallet',
-          status: SubscriptionStatus.ACTIVE,
-          retryCount: 0,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-own-wallet' }),
+        expect.objectContaining({ status: SubscriptionStatus.ACTIVE, retryCount: 0 }),
       )
       expect(eventBus.publishSubscriptionRenewed).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1436,13 +1519,10 @@ describe('TasksService — processTrialConversions', () => {
       expect(walletUSD.balance).toBe(200000)
       expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('pro', 'USD')
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-usd-wallet',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-          currentPeriodEnd: originalPeriodEnd,
-        }),
+      // The exact patch is what proves the period stays: no period column is written.
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-usd-wallet' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1487,6 +1567,7 @@ describe('TasksService — processTrialConversions', () => {
           status: SubscriptionStatus.ACTIVE,
           autoRenew: true,
           retryCount: 0,
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
         },
       ])
 
@@ -1495,12 +1576,9 @@ describe('TasksService — processTrialConversions', () => {
       expect(lockedUsdWallet.balance).toBe(200000)
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.manager.save).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-locked-usd',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-        }),
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-locked-usd' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
       expect(subscriptionEventRepo.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1546,16 +1624,13 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(mockQueryRunner.rollbackTransaction).toHaveBeenCalled()
       expect(mockQueryRunner.commitTransaction).not.toHaveBeenCalled()
-      expect(subscriptionRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'sub-cut-conn',
-          status: SubscriptionStatus.PAST_DUE,
-          retryCount: 1,
-          currentPeriodEnd: originalPeriodEnd,
-          nextBillingDate: originalPeriodEnd,
-        }),
+      // The exact patch is what proves the period and billing date stay.
+      expect(subscriptionRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sub-cut-conn' }),
+        { status: SubscriptionStatus.PAST_DUE, retryCount: 1 },
       )
-      expect(subscriptionRepo.save).not.toHaveBeenCalledWith(
+      expect(subscriptionRepo.update).not.toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ status: SubscriptionStatus.ACTIVE }),
       )
       expect(clientRoles.renewPlanForBrand).not.toHaveBeenCalled()
@@ -1780,7 +1855,7 @@ describe('TasksService — processTrialConversions', () => {
           subscriptionRepo as any,
           subscriptionEventRepo as any,
           mockRepo() as any,
-          {} as any,
+          dataSourceForMarks(subscriptionRepo) as any,
           realWalletService,
           {} as any,
           providerFactory as any,
@@ -2082,7 +2157,8 @@ describe('TasksService — processTrialConversions', () => {
   })
 
   describe('reconcileExternalPayments', () => {
-    it('queries both pending and processing Confio payments and retries a processing payment via completeExternalPayment', async () => {
+    it('queries pending and processing payments of every external provider and retries a processing payment via completeExternalPayment', async () => {
+      // R15: red if the sweep filters one provider again: the query no longer excludes only wallet.
       providerFactory.getProvider.mockReturnValue({
         getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
       })
@@ -2099,7 +2175,7 @@ describe('TasksService — processTrialConversions', () => {
 
       expect(paymentRepo.find).toHaveBeenCalledWith({
         where: expect.objectContaining({
-          provider: 'confio',
+          provider: Not(PaymentProvider.WALLET),
           status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         }),
       })
@@ -2154,6 +2230,7 @@ describe('TasksService — processTrialConversions', () => {
       }
 
       const lockDataSourceMock: any = {
+        ...dataSourceForMarks(subscriptionRepo),
         createQueryRunner: jest.fn(() => {
           const qr: any = {
             isTransactionActive: false,
@@ -2263,7 +2340,11 @@ describe('TasksService — processTrialConversions', () => {
         return sub
       })
       subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
-        if (criteria.status && sub.status !== criteria.status) {
+        if (criteria.accessEndsAt && !sub.accessEndsAt) return { affected: 0 }
+        if (
+          criteria.status &&
+          ![criteria.status.value ?? criteria.status].flat().includes(sub.status)
+        ) {
           return { affected: 0 }
         }
         Object.assign(sub, patch)
@@ -2320,7 +2401,11 @@ describe('TasksService — processTrialConversions', () => {
         return sub
       })
       subscriptionRepo.update.mockImplementation(async (criteria: any, patch: any) => {
-        if (criteria.status && sub.status !== criteria.status) {
+        if (criteria.accessEndsAt && !sub.accessEndsAt) return { affected: 0 }
+        if (
+          criteria.status &&
+          ![criteria.status.value ?? criteria.status].flat().includes(sub.status)
+        ) {
           return { affected: 0 }
         }
         Object.assign(sub, patch)

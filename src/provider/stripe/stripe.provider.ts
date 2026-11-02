@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common'
 import Stripe from 'stripe'
 import {
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   CreateCheckoutParams,
   CheckoutResult,
   PaymentStatusResult,
@@ -79,7 +80,12 @@ export class StripeProvider implements PaymentProvider {
   async getPaymentStatus(providerPaymentId: string): Promise<PaymentStatusResult> {
     this.ensureConfigured()
 
-    const session = await this.stripe.checkout.sessions.retrieve(providerPaymentId)
+    const session = await this.stripe.checkout.sessions
+      .retrieve(providerPaymentId)
+      .catch((error) => {
+        if (error?.statusCode === 404) throw new ProviderPaymentNotFoundError(error.message)
+        throw error
+      })
 
     const statusMap: Record<string, PaymentStatusResult['status']> = {
       complete: 'completed',

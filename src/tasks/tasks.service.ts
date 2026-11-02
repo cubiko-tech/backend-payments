@@ -1,13 +1,44 @@
+/**
+ * R6: TasksService groups the scheduled @Cron entrypoints of backend-payments in a
+ * single NestJS injectable while delegating domain logic such as wallet payment
+ * reconciliation to dedicated helpers.
+ */
 import { Injectable, HttpStatus } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, LessThan, In, Between, IsNull, Not, QueryRunner, Repository } from 'typeorm'
+import {
+  And,
+  Between,
+  DataSource,
+  In,
+  IsNull,
+  LessThan,
+  MoreThanOrEqual,
+  Not,
+  QueryRunner,
+  Raw,
+  Repository,
+} from 'typeorm'
 
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import {
+  Payment,
+  PaymentProvider,
+  PaymentPurpose,
+  PaymentStatus,
+} from '../payment/entities/payment.entity'
+import { checkoutExpiryHours } from '../checkout/checkout-expiry'
+import { LOST_TO_NEWER_PURCHASE_FLAG } from '../checkout/external-payment-close'
+import { lockBrandPlan } from '../checkout/wallet-payment-close'
+import {
+  hasWalletPaymentDebit,
+  WALLET_CLOSE_GIVEN_UP_FLAG,
+  WALLET_FAILED_DEBIT_LOOKBACK_MS,
+  WALLET_RECONCILE_MIN_AGE_MS,
+} from '../checkout/wallet-payment-reconciliation'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
 import {
   Subscription,
@@ -24,12 +55,21 @@ import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription
 import { WalletService } from '../wallet/wallet.service'
 import { AuditService } from '../audit/audit.service'
 import { ProviderFactory } from '../provider/provider.factory'
+import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
 import { CheckoutService } from '../checkout/checkout.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { logger } from '../shared/logger/logger'
+import {
+  canStillExtend,
+  cycleDebitKey,
+  CycleExtension,
+  markCycleDebit,
+  PENDING_CYCLE_DEBITS,
+  refundRenewalDebit,
+} from './renewal-debit-refund'
 
 /**
  * Los crons del servicio. Qué hace este archivo con `SubscriptionStatus.PENDING`
@@ -76,6 +116,9 @@ import { logger } from '../shared/logger/logger'
  * (`subscription.service.ts`, el guard de `accessEndsAt`), que es donde lo va a leer
  * quien lo toque; acá sólo queda el puntero.
  */
+/** Rolls back the mark of a renewal debit, so the sweep refunds it, when the row was closed. */
+class RowNoLongerLiveError extends Error {}
+
 /**
  * Cadencia de la repesca por ANTIGÜEDAD del alta.
  *
@@ -148,7 +191,7 @@ export class TasksService {
   private readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
   /** Candado de solapamiento: `@Cron` de Nest no impide que dos pasadas se pisen. */
   private repescaEnCurso = false
-  private readonly CHECKOUT_EXPIRY_HOURS = parseInt(process.env.CHECKOUT_EXPIRY_HOURS || '24')
+  private readonly CHECKOUT_EXPIRY_HOURS = checkoutExpiryHours()
   private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
   private readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
   private readonly subscriptionLocks = new Map<string, Promise<void>>()
@@ -285,36 +328,41 @@ export class TasksService {
     let linked = 0
     let skipped = 0
     for (const sub of trials) {
-      // Wallet interna: cobrar si hay saldo; sin walletId (trial sin tarjeta) → degradar a free.
-      if (sub.provider === 'wallet') {
-        if (!sub.walletId) {
-          if (await this.endTrialWithoutPayment(sub)) downgraded++
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
+      try {
+        if (sub.status !== SubscriptionStatus.TRIAL || !sub.autoRenew) continue
+
+        // Internal wallet: charge if funded; no walletId (trial without a card) goes down to free.
+        if (sub.provider === 'wallet') {
+          if (!sub.walletId) {
+            if (await this.endTrialWithoutPayment(sub)) downgraded++
+            continue
+          }
+          try {
+            if (await this.renewFromWallet(sub)) {
+              converted++
+            }
+          } catch (error) {
+            logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
+            await this.handleRenewalFailure(sub, error.message)
+          }
           continue
         }
-        try {
-          if (await this.renewFromWallet(sub)) {
-            converted++
-          }
-        } catch (error) {
-          logger.log('error', `[CRON] Error cobrando trial wallet ${sub.id}: ${error.message}`)
-          await this.handleRenewalFailure(sub, error.message)
+
+        // Signup issued this row's only initial link: another would open a second charge rail.
+        // The row stays in TRIAL on purpose; downgrading by `trialEnd` belongs elsewhere.
+        if (sub.initialPaymentLinkIssuedAt) {
+          skipped++
+          continue
         }
-        continue
-      }
 
-      // El alta ya emitió el único link inicial de esta fila: emitir otro abriría un riel de
-      // cobro paralelo al de la suscripción recurrente. Se discrimina por el marcador y NO por
-      // `providerSubscriptionId`. La fila queda en TRIAL a propósito: la degradación por
-      // `trialEnd` es de otra tarea.
-      if (sub.initialPaymentLinkIssuedAt) {
-        skipped++
-        continue
+        // External provider (ConfioPagos): issue the link; the webhook reactivates on payment.
+        await this.issueExternalCharge(sub, false)
+        linked++
+      } finally {
+        await release()
       }
-
-      // Proveedor externo (ConfioPagos): emitir link de pago y notificar.
-      // El webhook reactiva la suscripción cuando el usuario paga.
-      await this.issueExternalCharge(sub, false)
-      linked++
     }
 
     logger.log(
@@ -440,21 +488,21 @@ export class TasksService {
     })
 
     let processed = 0
+    let withoutWallet = 0
     for (const sub of dueSubscriptions) {
       if (!this.hasAvailableRetries(sub)) continue
-      let releaseSubscriptionLock: (() => Promise<void>) | null = null
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
       try {
-        releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
-        const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
-        if (fresh) {
-          Object.assign(sub, fresh)
-        }
         if (!this.isEligibleForRenewal(sub, now)) {
           continue
         }
 
         if (sub.provider === 'wallet') {
-          if (await this.renewFromWallet(sub)) {
+          if (!sub.walletId) {
+            this.logMissingWallet(sub)
+            withoutWallet++
+          } else if (await this.renewFromWallet(sub)) {
             processed++
           }
         } else if (esSuscripcionRecurrenteDeConfio(sub)) {
@@ -487,7 +535,7 @@ export class TasksService {
         logger.log('error', `[CRON] Error renovando suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
       } finally {
-        await releaseSubscriptionLock?.()
+        await release()
       }
     }
 
@@ -495,6 +543,12 @@ export class TasksService {
       logger.log(
         'info',
         `[CRON] processSubscriptionRenewals: ${processed}/${dueSubscriptions.length} procesadas`,
+      )
+    }
+    if (withoutWallet > 0) {
+      logger.log(
+        'error',
+        `[CRON] processSubscriptionRenewals: ${withoutWallet} wallet subscriptions without walletId`,
       )
     }
   }
@@ -514,19 +568,21 @@ export class TasksService {
     })
 
     let retried = 0
+    let withoutWallet = 0
     for (const sub of retryableSubscriptions) {
-      if (sub.retryCount >= this.MAX_RETRY) continue
+      // Looked at before the lock too, so a pass does not lock every past-due row.
+      if (!this.isDueForRetry(sub)) continue
 
-      // Backoff exponencial: 24h, 48h, 72h
-      const hoursToWait = (sub.retryCount + 1) * 24
-      const lastAttempt = sub.updatedAt || sub.createdAt
-      const nextRetry = new Date(lastAttempt.getTime() + hoursToWait * 60 * 60 * 1000)
-
-      if (new Date() < nextRetry) continue
-
+      const release = await this.lockAndReread(sub)
+      if (!release) continue
       try {
+        if (!this.isDueForRetry(sub)) continue
+
         if (sub.provider === 'wallet') {
-          if (await this.renewFromWallet(sub)) {
+          if (!sub.walletId) {
+            this.logMissingWallet(sub)
+            withoutWallet++
+          } else if (await this.renewFromWallet(sub)) {
             retried++
           }
         } else if (sub.provider === 'confio') {
@@ -537,25 +593,76 @@ export class TasksService {
       } catch (error) {
         logger.log('error', `[CRON] Reintento fallido para suscripción ${sub.id}: ${error.message}`)
         await this.handleRenewalFailure(sub, error.message)
+      } finally {
+        await release()
       }
     }
 
     if (retried > 0) {
       logger.log('info', `[CRON] retryFailedPayments: ${retried} reintentados`)
     }
+    if (withoutWallet > 0) {
+      logger.log(
+        'error',
+        `[CRON] retryFailedPayments: ${withoutWallet} wallet subscriptions without walletId`,
+      )
+    }
   }
 
-  // =============================================================
-  // 2b. Reconciliar pagos Confío pendientes (cada 5 min)
-  //     Red de seguridad: si el webhook se perdió y el usuario no volvió,
-  //     consulta el estado real y completa los pagos ya pagados.
-  // =============================================================
+  /**
+   * Credits back the renewal debits no pass can extend any more. Each one is decided under the
+   * brand's plan lock, with row and debit reread from the primary, so a pass or a checkout in flight
+   * finishes first. A failure on one debit leaves it pending and does not stop the rest.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async refundOrphanRenewalDebits() {
+    const transactionRepo = this.dataSource.getRepository(Transaction)
+    const pending = await transactionRepo.find({ where: PENDING_CYCLE_DEBITS })
+
+    let refunded = 0
+    for (const { id, referenceId } of pending) {
+      try {
+        const sub = await this.subscriptionRepo.findOne({ where: { id: referenceId } })
+        if (!sub) {
+          logger.log('error', `[CRON] Renewal debit ${id}: subscription ${referenceId} not found`)
+          continue
+        }
+        const release = await this.lockAndReread(sub)
+        if (!release) continue
+        try {
+          const debit = await transactionRepo.findOne({ where: { id } })
+          if (debit?.metadata?.cycleExtension !== CycleExtension.PENDING) continue
+          if (canStillExtend(debit, sub)) continue
+          const done = await refundRenewalDebit(debit, {
+            walletService: this.walletService,
+            auditService: this.auditService,
+            transactionRepo,
+          })
+          if (done) refunded++
+        } finally {
+          await release()
+        }
+      } catch (error) {
+        logger.log('error', `[CRON] Error refunding renewal debit ${id}: ${error.message}`)
+      }
+    }
+
+    if (refunded > 0) {
+      logger.log('warn', `[CRON] refundOrphanRenewalDebits: ${refunded} refunded`)
+    }
+  }
+
+  /**
+   * Safety net for a lost webhook: asks each provider about its unsettled payments and completes
+   * what it confirms. A `processing` payment with its plan applied is closed by
+   * `settleLostExternalPayments`; one without it waits here for the provider to confirm.
+   */
   @Cron('*/5 * * * *')
   async reconcileExternalPayments() {
-    const cutoff = new Date(Date.now() - 2 * 60 * 1000) // pagos de más de 2 min
+    const cutoff = new Date(Date.now() - 2 * 60 * 1000)
     const pending = await this.paymentRepo.find({
       where: {
-        provider: 'confio' as any,
+        provider: Not(PaymentProvider.WALLET),
         status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
         createdAt: LessThan(cutoff),
       },
@@ -567,30 +674,166 @@ export class TasksService {
     for (const p of pending) {
       try {
         if (!p.providerPaymentId) {
-          if (p.status === PaymentStatus.PROCESSING) {
-            await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
+          if (
+            p.status === PaymentStatus.PROCESSING &&
+            (await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' }))
+          ) {
             completed++
           }
           continue
         }
         const real = await this.providerFactory
-          .getProvider('confio')
-          .getPaymentStatus(p.providerPaymentId)
+          .getProvider(p.provider)
+          .getPaymentStatus(p.providerPaymentId, p.id)
         if (real.status === 'completed') {
-          await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-reconcile' })
-          completed++
+          const closed = await this.checkoutService.completeExternalPayment(p.id, {
+            source: 'cron-reconcile',
+            providerStatus: real.metadata,
+          })
+          if (closed) completed++
+        } else if (
+          p.status === PaymentStatus.PROCESSING &&
+          (real.status === 'failed' || real.status === 'refunded')
+        ) {
+          logger.log(
+            'error',
+            `[CRON] reconcileExternalPayments: payment ${p.id} was confirmed but ${p.provider} now answers ${real.status}`,
+          )
         }
       } catch (error) {
         logger.log(
           'warn',
-          `[CRON] reconcileExternalPayments: error con pago ${p.id}: ${error.message}`,
+          `[CRON] reconcileExternalPayments: error with payment ${p.id}: ${error.message}`,
         )
       }
     }
 
     logger.log(
       'info',
-      `[CRON] reconcileExternalPayments: ${pending.length} revisados, ${completed} completados`,
+      `[CRON] reconcileExternalPayments: ${pending.length} checked, ${completed} completed`,
+    )
+  }
+
+  /**
+   * Finishes external plan purchases that may have lost to a newer one, from any provider: handed
+   * back after `completed` (they keep `paidAt`), judged lost with the credit still to be made, or
+   * stuck after applying their plan (they have their event), which complete if they did not lose.
+   */
+  @Cron('*/5 * * * *')
+  async settleLostExternalPayments() {
+    const base = {
+      provider: Not(PaymentProvider.WALLET),
+      purpose: PaymentPurpose.PLAN_PURCHASE,
+      status: PaymentStatus.PROCESSING,
+      createdAt: LessThan(new Date(Date.now() - WALLET_RECONCILE_MIN_AGE_MS)),
+    }
+    const lost = await this.paymentRepo.find({
+      where: [
+        { ...base, paidAt: Not(IsNull()) },
+        {
+          ...base,
+          metadata: Raw((metadata) => `(${metadata})->>'${LOST_TO_NEWER_PURCHASE_FLAG}' = 'true'`),
+        },
+        {
+          ...base,
+          id: Raw(
+            (id) => `EXISTS (SELECT 1 FROM subscription_events e WHERE e."paymentId" = ${id})`,
+          ),
+        },
+      ],
+    })
+    for (const p of lost ?? []) {
+      try {
+        await this.checkoutService.completeExternalPayment(p.id, { source: 'cron-settle-lost' })
+      } catch (error) {
+        logger.log(
+          'warn',
+          `[CRON] settleLostExternalPayments: error with payment ${p.id}: ${error.message}`,
+        )
+      }
+    }
+  }
+
+  /**
+   * Creates the credit note that a refund to the wallet left owing: its creation failed, the
+   * process died first, or the invoice appeared after the refund. Read from the rows, not a mark.
+   */
+  @Cron('*/5 * * * *')
+  async retryMissingCreditNotes() {
+    const owing = await this.paymentRepo.find({
+      where: {
+        provider: Not(PaymentProvider.WALLET),
+        purpose: PaymentPurpose.PLAN_PURCHASE,
+        status: PaymentStatus.REFUNDED,
+        id: Raw(
+          (id) =>
+            `EXISTS (SELECT 1 FROM invoices i WHERE i."paymentId" = ${id} AND i.type = 'invoice'
+             AND NOT EXISTS (SELECT 1 FROM invoices n WHERE n."creditNoteForId" = i.id))`,
+        ),
+      },
+    })
+    for (const p of owing ?? []) {
+      await this.checkoutService.issueRefundCreditNote(p.id)
+    }
+  }
+
+  @Cron('*/5 * * * *')
+  async reconcileWalletPayments() {
+    const now = new Date()
+    const cutoff = new Date(now.getTime() - WALLET_RECONCILE_MIN_AGE_MS)
+    const failedFloor = new Date(now.getTime() - WALLET_FAILED_DEBIT_LOOKBACK_MS)
+    const pending = await this.paymentRepo.find({
+      where: [
+        {
+          provider: PaymentProvider.WALLET,
+          status: In([PaymentStatus.PENDING, PaymentStatus.PROCESSING]),
+          createdAt: LessThan(cutoff),
+        },
+        {
+          provider: PaymentProvider.WALLET,
+          status: PaymentStatus.FAILED,
+          createdAt: And(LessThan(cutoff), MoreThanOrEqual(failedFloor)),
+          id: Raw(
+            (id) =>
+              `EXISTS (SELECT 1 FROM transactions t WHERE t."idempotencyKey" = 'payment:' || ${id} || ':debit')`,
+          ),
+        },
+        // A give-up already took the payment out of `processing`, which has no age floor.
+        {
+          provider: PaymentProvider.WALLET,
+          status: PaymentStatus.FAILED,
+          createdAt: LessThan(cutoff),
+          metadata: Raw((metadata) => `(${metadata})->>'${WALLET_CLOSE_GIVEN_UP_FLAG}' = 'true'`),
+        },
+      ],
+    })
+
+    if (!pending || pending.length === 0) return
+
+    let completed = 0
+    let failed = 0
+    let refunded = 0
+    for (const p of pending) {
+      try {
+        const res = await this.checkoutService.reconcileWalletPayment(p.id, now)
+        if (res?.outcome === 'completed') {
+          completed++
+        } else if (res?.outcome === 'failed_without_debit') {
+          failed++
+        } else if (res?.outcome === 'refunded') {
+          refunded++
+        }
+      } catch (error) {
+        logger.log(
+          'warn',
+          `[CRON] reconcileWalletPayments: error with payment ${p.id}: ${error.message}`,
+        )
+      }
+    }
+
+    logger.log(
+      'info',
+      `[CRON] reconcileWalletPayments: ${pending.length} checked, ${completed} completed, ${failed} failed, ${refunded} refunded`,
     )
   }
 
@@ -602,10 +845,37 @@ export class TasksService {
     const expiryTime = new Date()
     expiryTime.setHours(expiryTime.getHours() - this.CHECKOUT_EXPIRY_HOURS)
 
-    const result = await this.paymentRepo.update(
-      {
+    const expiredPending = await this.paymentRepo.find({
+      where: {
         status: PaymentStatus.PENDING,
         createdAt: LessThan(expiryTime),
+      },
+    })
+
+    if (!expiredPending || expiredPending.length === 0) {
+      return
+    }
+
+    const expirableIds: string[] = []
+    for (const payment of expiredPending) {
+      const debited = await hasWalletPaymentDebit(payment, {
+        walletService: this.walletService,
+        transactionReadRepo: this.transactionReadRepo,
+        dataSource: this.dataSource,
+      })
+      if (!debited && (await this.providerLetsExpire(payment))) {
+        expirableIds.push(payment.id)
+      }
+    }
+
+    if (expirableIds.length === 0) {
+      return
+    }
+
+    const result = await this.paymentRepo.update(
+      {
+        id: In(expirableIds),
+        status: PaymentStatus.PENDING,
       },
       {
         status: PaymentStatus.FAILED,
@@ -613,8 +883,26 @@ export class TasksService {
       },
     )
 
-    if (result.affected > 0) {
+    if ((result?.affected ?? 0) > 0) {
       logger.log('info', `[CRON] expirePendingCheckouts: ${result.affected} checkouts expirados`)
+    }
+  }
+
+  /** Only what the provider did not confirm expires; no answer leaves it for a later pass. */
+  private async providerLetsExpire(payment: Payment): Promise<boolean> {
+    if (payment.provider === PaymentProvider.WALLET || !payment.providerPaymentId) return true
+    try {
+      const real = await this.providerFactory
+        .getProvider(payment.provider)
+        .getPaymentStatus(payment.providerPaymentId, payment.id)
+      return real.status !== 'completed' && real.status !== 'processing'
+    } catch (error) {
+      if (error instanceof ProviderPaymentNotFoundError) return true
+      logger.log(
+        'warn',
+        `[CRON] expirePendingCheckouts: no answer for payment ${payment.id}: ${error.message}`,
+      )
+      return false
     }
   }
 
@@ -626,7 +914,7 @@ export class TasksService {
   ): Promise<'expired' | 'rejected' | 'skipped'> {
     let releaseSubscriptionLock: (() => Promise<void>) | null = null
     try {
-      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub.id)
+      releaseSubscriptionLock = await this.acquireSubscriptionLock(sub)
       const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
       if (fresh) {
         Object.assign(sub, fresh)
@@ -1118,6 +1406,14 @@ export class TasksService {
   // =============================================================
 
   /**
+   * A wallet row without walletId is a data defect, not a failed payment: it adds no retry and sends
+   * no notice, so the brand does not lose its plan over it. The row is left untouched.
+   */
+  private logMissingWallet(sub: Subscription): void {
+    logger.log('error', `[CRON] Subscription ${sub.id} has provider wallet and no walletId`)
+  }
+
+  /**
    * Renovar suscripción cobrando de wallet interna.
    */
   private async renewFromWallet(sub: Subscription): Promise<boolean> {
@@ -1128,15 +1424,31 @@ export class TasksService {
       )
     }
 
-    const billingCycleKey =
-      sub.nextBillingDate instanceof Date
-        ? sub.nextBillingDate.toISOString()
-        : sub.nextBillingDate
-          ? String(sub.nextBillingDate)
-          : 'current'
-    const idempotencyKey = `subscription:${sub.id}:${billingCycleKey}`
+    // No date means no cycle to key the debit on, and a shared key would hand out later cycles free.
+    // A data defect, not a failed payment: no retry and no notice, so the row is left untouched.
+    if (!sub.nextBillingDate) {
+      logger.log(
+        'error',
+        `[CRON] Wallet subscription ${sub.id} has no nextBillingDate: not charged`,
+      )
+      return false
+    }
 
-    if (!(await this.hasCycleDebit(sub.walletId, idempotencyKey))) {
+    const idempotencyKey = cycleDebitKey(sub)
+
+    if (await this.hasCycleDebit(sub.walletId, idempotencyKey)) {
+      // The key is unique, so this cycle cannot be charged again, and extending would be free.
+      const debit = await this.dataSource
+        .getRepository(Transaction)
+        .findOne({ where: { idempotencyKey } })
+      if (debit?.metadata?.cycleExtension === CycleExtension.REFUNDED) {
+        logger.log(
+          'error',
+          `[CRON] Subscription ${sub.id} is live on a cycle already refunded: not extended`,
+        )
+        return false
+      }
+    } else {
       const currency = await this.resolveWalletCurrency(sub.walletId)
       const amount = await this.clientRoles.getPlanPrice(sub.planSlug, currency)
 
@@ -1179,6 +1491,7 @@ export class TasksService {
           referenceType: 'subscription',
           referenceId: sub.id,
           idempotencyKey,
+          metadata: { cycleExtension: CycleExtension.PENDING },
         },
         currency,
       )
@@ -1193,22 +1506,29 @@ export class TasksService {
     }
 
     // Renovar periodo
-    if (!(await this.extendSubscriptionPeriod(sub))) {
+    if (!(await this.extendSubscriptionPeriod(sub, idempotencyKey))) {
       return false
     }
 
-    // Registrar evento
-    await this.subscriptionEventRepo.save(
-      this.subscriptionEventRepo.create({
-        subscriptionId: sub.id,
-        eventType: SubscriptionEventType.RENEWED,
-        toPlanSlug: sub.planSlug,
-        fromStatus: sub.status,
-        toStatus: SubscriptionStatus.ACTIVE,
-        triggeredBy: 'system',
-        reason: 'Renovación automática desde wallet',
-      }),
-    )
+    // The renewal is already saved: reporting this as a failed payment would charge the next cycle.
+    try {
+      await this.subscriptionEventRepo.save(
+        this.subscriptionEventRepo.create({
+          subscriptionId: sub.id,
+          eventType: SubscriptionEventType.RENEWED,
+          toPlanSlug: sub.planSlug,
+          fromStatus: sub.status,
+          toStatus: SubscriptionStatus.ACTIVE,
+          triggeredBy: 'system',
+          reason: 'Renovación automática desde wallet',
+        }),
+      )
+    } catch (error) {
+      logger.log(
+        'error',
+        `[CRON] Subscription ${sub.id} renewed without its history row: ${error?.message}`,
+      )
+    }
 
     // Publicar evento de renovación
     this.eventBus.publishSubscriptionRenewed({
@@ -1410,7 +1730,7 @@ export class TasksService {
   /**
    * Extender periodo de la suscripción BILLING_PERIOD_DAYS días.
    */
-  private async extendSubscriptionPeriod(sub: Subscription): Promise<boolean> {
+  private async extendSubscriptionPeriod(sub: Subscription, debitKey?: string): Promise<boolean> {
     const newPeriodStart = new Date()
     const newPeriodEnd = new Date()
     newPeriodEnd.setDate(newPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
@@ -1428,13 +1748,44 @@ export class TasksService {
       return false
     }
 
-    sub.currentPeriodStart = newPeriodStart
-    sub.currentPeriodEnd = newPeriodEnd
-    sub.nextBillingDate = newPeriodEnd
-    sub.status = SubscriptionStatus.ACTIVE
-    sub.retryCount = 0
+    const extension = {
+      currentPeriodStart: newPeriodStart,
+      currentPeriodEnd: newPeriodEnd,
+      nextBillingDate: newPeriodEnd,
+      status: SubscriptionStatus.ACTIVE,
+      retryCount: 0,
+    }
 
-    await this.subscriptionRepo.save(sub)
+    // `sub` moves only after the commit: handleRenewalFailure compares the row against this date to
+    // tell a failure from a lost commit. Only these columns: `sub` was read before roles answered.
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        if (debitKey) {
+          await markCycleDebit(
+            manager.getRepository(Transaction),
+            { idempotencyKey: debitKey },
+            CycleExtension.EXTENDED,
+          )
+        }
+        const subscriptions = manager.getRepository(Subscription)
+        const written = await subscriptions.update(
+          { id: sub.id, status: In(LIVE_SUBSCRIPTION_STATUSES) },
+          extension,
+        )
+        if (!written.affected) throw new RowNoLongerLiveError()
+        // A cancellation that came meanwhile dated the cut at the old period, already over: left
+        // there, the sweep would retire the cycle just paid for.
+        await subscriptions.update(
+          { id: sub.id, accessEndsAt: Not(IsNull()) },
+          { accessEndsAt: newPeriodEnd },
+        )
+      })
+    } catch (error) {
+      if (!(error instanceof RowNoLongerLiveError)) throw error
+      logger.log('error', `[CRON] Subscription ${sub.id} closed during its renewal: not extended`)
+      return false
+    }
+    Object.assign(sub, extension)
     return true
   }
 
@@ -1458,6 +1809,16 @@ export class TasksService {
     return true
   }
 
+  private isDueForRetry(sub: Subscription): boolean {
+    if (sub.status !== SubscriptionStatus.PAST_DUE || !sub.autoRenew) return false
+    if (sub.retryCount >= this.MAX_RETRY) return false
+
+    // Backoff exponencial: 24h, 48h, 72h
+    const hoursToWait = (sub.retryCount + 1) * 24
+    const lastAttempt = sub.updatedAt || sub.createdAt
+    return new Date() >= new Date(lastAttempt.getTime() + hoursToWait * 60 * 60 * 1000)
+  }
+
   private isPostponementGraceExceeded(sub: Subscription, now = new Date()): boolean {
     if (!sub.nextBillingDate) {
       return false
@@ -1470,7 +1831,29 @@ export class TasksService {
     return now.getTime() - billingTime >= graceMs
   }
 
-  private async acquireSubscriptionLock(subId: string): Promise<() => Promise<void>> {
+  /**
+   * Takes the brand's plan lock and refreshes `sub` from the primary, returning what releases the
+   * lock. Returns null, with the lock released, if either failed: nothing was charged, so that is
+   * no failed payment and the next pass retries the row.
+   */
+  private async lockAndReread(sub: Subscription): Promise<(() => Promise<void>) | null> {
+    let release: (() => Promise<void>) | null = null
+    try {
+      release = await this.acquireSubscriptionLock(sub)
+      const fresh = await this.subscriptionRepo.findOne?.({ where: { id: sub.id } })
+      if (fresh) {
+        Object.assign(sub, fresh)
+      }
+      return release
+    } catch (error) {
+      logger.log('error', `[CRON] Could not lock subscription ${sub.id}: ${error?.message}`)
+      await release?.().catch(() => undefined)
+      return null
+    }
+  }
+
+  private async acquireSubscriptionLock(sub: Subscription): Promise<() => Promise<void>> {
+    const subId = sub.id
     const previous = this.subscriptionLocks.get(subId) ?? Promise.resolve()
     let releaseLock!: () => void
     const current = new Promise<void>((resolve) => {
@@ -1518,9 +1901,7 @@ export class TasksService {
           queryRunner = candidate
           await queryRunner.connect()
           await queryRunner.startTransaction()
-          await queryRunner.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-            `subscription:${subId}`,
-          ])
+          await lockBrandPlan(queryRunner, sub.brandId)
         }
       }
       return () => release(true)
@@ -1537,7 +1918,27 @@ export class TasksService {
     const previousStatus = sub.status
     sub.retryCount = (sub.retryCount || 0) + 1
     sub.status = SubscriptionStatus.PAST_DUE
-    await this.subscriptionRepo.save(sub)
+    // Saving the stale `sub` would undo a cancellation. A row on a new date lost the answer of a
+    // commit that applied, and past due there would charge again under a new debit key.
+    const cycleStart = new Date(sub.nextBillingDate).getTime()
+    const written = await this.subscriptionRepo.update(
+      {
+        id: sub.id,
+        status: In(LIVE_SUBSCRIPTION_STATUSES),
+        // A range: the column keeps microseconds and `sub` only milliseconds.
+        nextBillingDate: sub.nextBillingDate
+          ? And(MoreThanOrEqual(new Date(cycleStart)), LessThan(new Date(cycleStart + 1)))
+          : IsNull(),
+      },
+      { retryCount: sub.retryCount, status: sub.status },
+    )
+    if (!written.affected) {
+      logger.log(
+        'error',
+        `[CRON] Subscription ${sub.id} closed or moved during its renewal: no failure kept`,
+      )
+      return
+    }
 
     const baseReason = `Intento de pago fallido (${sub.retryCount}/${this.MAX_RETRY})`
     await this.subscriptionEventRepo.save(

@@ -194,6 +194,31 @@ describe('isProductionEnv — sus tres consumidores', () => {
       }
     })
 
+    const riskSection = (titleStart: string): string => {
+      const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
+      return risksDoc.split(/^## /m).find((section) => section.startsWith(titleStart)) ?? ''
+    }
+
+    it('keeps the session brand claim risk open with its anchor in resolveBrandId', () => {
+      // Mutation: mark this entry `mitigado`, or drop `resolveBrandId` from its anchor, and this case goes red.
+      const section = riskSection('Con el claim `brand` del token')
+
+      expect(section).toMatch(/- \*\*Estado\*\*: abierto\b/)
+      expect(section).toMatch(
+        /- \*\*Dónde\*\*: `src\/subscription\/subscription\.controller\.ts:[^;]*`resolveBrandId`/,
+      )
+    })
+
+    it('records foreign brand and user signups as closed with the commit of each task', () => {
+      // Mutation: mark this entry `abierto`, or remove one task's commit from it, and this case goes red.
+      const section = riskSection('Un alta sobre una marca o un usuario ajenos')
+
+      expect(section).toMatch(/- \*\*Estado\*\*: cerrado\b/)
+      expect(section).toContain('LOC-53, `d43148c`')
+      expect(section).toContain('LOC-75, `27a4a45`')
+      expect(section).toContain('LOC-77, `d7a404d`')
+    })
+
     it('keeps comments on isProductionEnv, WalletService.debit, and assertWalletCurrency aligned with the contract in English', () => {
       const isProductionSource = fs.readFileSync(
         path.join(repoRoot, 'src/shared/env/is-production.ts'),

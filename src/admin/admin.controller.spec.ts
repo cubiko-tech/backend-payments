@@ -36,6 +36,8 @@ const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
   findOne: jest.fn(),
   save: jest.fn((d: any) => Promise.resolve(d)),
+  // R17: These specs check routes and audit; test/wallet-freeze-credit-race measures the write.
+  update: jest.fn().mockResolvedValue({ affected: 1 }),
   create: jest.fn((d: any) => d),
   count: jest.fn().mockResolvedValue(0),
   createQueryBuilder: jest.fn(() => mockQueryBuilder()),
@@ -159,6 +161,14 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     paymentWriteRepo = mockRepo()
     walletReadRepo = mockRepo()
     walletWriteRepo = mockRepo()
+    // R17: These specs check routes and audit; test/wallet-adjust-race measures the transaction.
+    ;(walletWriteRepo as any).manager = {
+      transaction: (work: (manager: any) => Promise<unknown>) =>
+        work({
+          findOne: (_entity: unknown, options: unknown) => walletWriteRepo.findOne(options),
+          save: (_entity: unknown, row: unknown) => Promise.resolve(row),
+        }),
+    }
     snapshotReadRepo = mockRepo()
     providerReadRepo = mockRepo()
     providerWriteRepo = mockRepo()

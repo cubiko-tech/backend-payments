@@ -13,6 +13,27 @@ import {
 import { logger } from '../../shared/logger/logger'
 import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
+const MP_STATUS: Record<string, PaymentStatusResult['status']> = {
+  approved: 'completed',
+  refunded: 'refunded',
+  charged_back: 'refunded',
+  in_process: 'processing',
+  pending: 'processing',
+  authorized: 'processing',
+}
+// A checkout can collect several attempts: what happened to the money outranks a live attempt.
+const MP_STATUS_PRECEDENCE = Object.keys(MP_STATUS)
+
+/** A non-2xx answer from Mercado Pago, with its status. */
+export class MercadoPagoApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
 /**
  * Implementación de MercadoPago como proveedor de pagos.
  * Soporta: tarjetas, PSE, Nequi, transferencia bancaria.
@@ -52,11 +73,14 @@ export class MercadoPagoProvider implements PaymentProvider {
       signal: AbortSignal.timeout(15000),
     })
 
-    const body = await response.json()
+    const text = await response.text()
     if (!response.ok) {
-      throw new Error(`MercadoPago error: ${body.message || response.statusText}`)
+      throw new MercadoPagoApiError(
+        response.status,
+        `MercadoPago error ${response.status}: ${text.slice(0, 300)}`,
+      )
     }
-    return body
+    return JSON.parse(text)
   }
 
   async createCheckout(params: CreateCheckoutParams): Promise<CheckoutResult> {
@@ -90,7 +114,8 @@ export class MercadoPagoProvider implements PaymentProvider {
           pending: `https://${process.env.DOMAIN}/payment/pending`,
         },
         auto_return: 'approved',
-        external_reference: `${params.brandId}:${params.purpose}:${Date.now()}`,
+        external_reference:
+          params.metadata?.paymentId ?? `${params.brandId}:${params.purpose}:${Date.now()}`,
         notification_url: `https://${process.env.SERVER}/webhook/mercadopago`,
         payment_methods: {
           excluded_payment_types: [],
@@ -106,37 +131,40 @@ export class MercadoPagoProvider implements PaymentProvider {
     }
   }
 
-  async getPaymentStatus(providerPaymentId: string): Promise<PaymentStatusResult> {
+  /**
+   * Finds the payment by the reference `createCheckout` set: our row keeps the preference id, which
+   * has no status of its own. Finding none means only that; it never reads as confirmed.
+   * @throws when Mercado Pago gives no usable answer, which says nothing about the payment.
+   */
+  async getPaymentStatus(
+    _providerPaymentId: string,
+    paymentId: string,
+  ): Promise<PaymentStatusResult> {
     this.ensureConfigured()
 
-    // providerPaymentId puede ser preference_id o payment_id
-    // Intentar como payment primero
-    try {
-      const payment = await this.mpFetch(`/v1/payments/${providerPaymentId}`)
+    const found = await this.mpFetch(
+      `/v1/payments/search?external_reference=${encodeURIComponent(paymentId)}&limit=50`,
+    )
+    if (!Array.isArray(found?.results)) {
+      throw new Error(`MercadoPago search for payment ${paymentId} returned no results list`)
+    }
 
-      const statusMap: Record<string, PaymentStatusResult['status']> = {
-        approved: 'completed',
-        rejected: 'failed',
-        pending: 'pending',
-        in_process: 'processing',
-        refunded: 'refunded',
-        cancelled: 'failed',
-        charged_back: 'refunded',
-      }
-
-      return {
-        status: statusMap[payment.status] || 'pending',
-        paidAt: payment.date_approved ? new Date(payment.date_approved) : undefined,
-        metadata: {
-          paymentMethodId: payment.payment_method_id,
-          paymentTypeId: payment.payment_type_id,
-          statusDetail: payment.status_detail,
-          transactionAmount: payment.transaction_amount,
-        },
-      }
-    } catch {
-      // Puede que sea un preference_id, buscar pagos asociados
-      return { status: 'pending' }
+    const deciding = MP_STATUS_PRECEDENCE.find((status) =>
+      found.results.some((payment: any) => payment.status === status),
+    )
+    if (!deciding) {
+      return { status: 'pending', metadata: { paymentsFound: found.results.length } }
+    }
+    const payment = found.results.find((candidate: any) => candidate.status === deciding)
+    return {
+      status: MP_STATUS[deciding],
+      paidAt: payment.date_approved ? new Date(payment.date_approved) : undefined,
+      metadata: {
+        paymentMethodId: payment.payment_method_id,
+        paymentTypeId: payment.payment_type_id,
+        statusDetail: payment.status_detail,
+        transactionAmount: payment.transaction_amount,
+      },
     }
   }
 

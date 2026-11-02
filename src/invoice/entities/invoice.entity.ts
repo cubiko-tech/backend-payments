@@ -13,6 +13,12 @@ export enum InvoiceStatus {
   VOID = 'void',
 }
 
+/** `metadata` flag of a credit note due at the DIAN: written before sending, gone once accepted. */
+export const DIAN_PENDING_FLAG = 'dianPending'
+
+/** `metadata` key holding when a send to the DIAN was claimed: present only while it runs. */
+export const DIAN_SENDING_FLAG = 'dianSendingAt'
+
 @Entity('invoices')
 @Index(['brandId', 'createdAt'])
 @Index(['invoiceNumber'], { unique: true })

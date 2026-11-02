@@ -53,7 +53,10 @@ export class CheckoutController {
   })
   @ApiResponse({
     status: 409,
-    description: 'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body',
+    description:
+      'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body. ' +
+      'IDEMPOTENT_RETRY_EXPIRED: the payment is past its retry window; nothing was charged, ' +
+      'place a new order with another Idempotency-Key',
   })
   @ApiResponse({
     status: 422,
@@ -83,7 +86,7 @@ export class CheckoutController {
       data: await this.checkoutService.processCheckout({
         ...body,
         userId,
-        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        idempotencyKey,
         renewal: undefined,
       }),
     }

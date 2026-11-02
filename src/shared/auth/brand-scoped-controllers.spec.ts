@@ -462,9 +462,6 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
   describe('PaymentController', () => {
     const buildSubject = (allowed = false) => {
       const paymentService = {
-        createCheckout: jest
-          .fn()
-          .mockResolvedValue({ data: { id: RESOURCE_ID, brandId: OWN_BRAND_ID } }),
         getPaymentById: jest.fn().mockResolvedValue({
           data: { id: RESOURCE_ID, brandId: allowed ? OWN_BRAND_ID : FOREIGN_BRAND_ID },
         }),
@@ -478,7 +475,8 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       return { controller, paymentService, platformClient }
     }
 
-    it('validates brandId UUID and checks brand membership on getPaymentsByBrand, createCheckout, getPaymentById, and cancelPayment', async () => {
+    it('validates brandId UUID and checks brand membership on getPaymentsByBrand, getPaymentById, and cancelPayment', async () => {
+      // R15 (Mutation): dropping assertBrandAccess or assertResourceBrandAccess in PaymentController turns this red.
       const { controller, paymentService } = buildSubject(false)
 
       await expect(controller.getPaymentsByBrand('not-a-uuid', {}, userReq)).rejects.toMatchObject({
@@ -489,13 +487,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       ).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,
       })
-      await expect(
-        controller.createCheckout({ amount: 100 } as any, userReq, FOREIGN_BRAND_ID),
-      ).rejects.toMatchObject({
-        status: HttpStatus.FORBIDDEN,
-      })
       expect(paymentService.getPaymentsByBrand).not.toHaveBeenCalled()
-      expect(paymentService.createCheckout).not.toHaveBeenCalled()
 
       await expect(controller.getPaymentById(RESOURCE_ID, userReq)).rejects.toMatchObject({
         status: HttpStatus.FORBIDDEN,

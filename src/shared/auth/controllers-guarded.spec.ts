@@ -176,7 +176,6 @@ describe('admin and metrics controllers require superadmin operator', () => {
     'getAcceptanceLink',
     'startTrial',
     'startPaid',
-    'changePlan',
     'cancel',
     'reactivate',
     'confirm',

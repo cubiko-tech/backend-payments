@@ -4,7 +4,6 @@ import {
   HttpStatus,
   Logger,
   Post,
-  Patch,
   Delete,
   Body,
   Param,
@@ -41,8 +40,8 @@ import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
  * - `GET /subscription`, `/acceptance-link`, `/history`, and `POST /confirm` resolve the
  *   caller brand via `assertBrandAccess` from the `brandId` query parameter (brand
  *   membership or privileged caller; 400 when `brandId` is missing or not a valid UUID).
- * - `POST /subscription/trial`, `POST /subscription/paid`, `PATCH /subscription/plan`,
- *   `POST /subscription/cancel`, and `POST /subscription/reactivate` resolve the target
+ * - `POST /subscription/trial`, `POST /subscription/paid`, `POST /subscription/cancel`,
+ *   and `POST /subscription/reactivate` resolve the target
  *   brand via `resolveBrandId` (session brand or body `brandId` verified via
  *   `ClientPlatformService.canViewBrandCredit`; only privileged service principals can
  *   target any brand).
@@ -193,25 +192,6 @@ export class SubscriptionController {
     const brandId = await this.resolveBrandId(data?.brandId, req)
     const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
     return this.subscriptionService.startPaid({ ...data, brandId, userId })
-  }
-
-  @Patch('plan')
-  @ApiOperation({ summary: 'Cambiar de plan' })
-  @ApiResponse({ status: 200, description: 'Plan cambiado correctamente' })
-  @ApiResponse({
-    status: 400,
-    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
-  })
-  @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
-  async changePlan(
-    @Body() data: { brandId: string; planSlug: string; triggeredBy: string },
-    @Req() req?: any,
-  ) {
-    const brandId = await this.resolveBrandId(data?.brandId, req)
-    return this.subscriptionService.changePlan(brandId, {
-      planSlug: data.planSlug,
-      triggeredBy: data.triggeredBy,
-    })
   }
 
   @Post('cancel')

@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
-import { DataSource } from 'typeorm'
+import { DataSource, QueryRunner } from 'typeorm'
 import { randomUUID } from 'crypto'
 import { WalletService } from '../src/wallet/wallet.service'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
@@ -118,16 +118,33 @@ describe('WalletService idempotent movements (e2e)', () => {
     expect(second.data?.wallet?.balance).toBe(150)
   })
 
+  it('rejects a debit that names no brand without moving the balance or writing a movement', async () => {
+    // Red if the guard runs only when the brandId key arrives: the balance drops to 140.
+    const wallet = await createTestWallet(200)
+
+    // @ts-expect-error The signature requires brandId; this is an untyped caller at runtime.
+    const debit = walletService.debit(wallet.id, 60, { category: 'plan_payment' })
+
+    await expect(debit).rejects.toMatchObject({ code: 'WALLET_NOT_FOUND' })
+    const stored = await dataSource.getRepository(Wallet).findOneByOrFail({ id: wallet.id })
+    expect(Number(stored.balance)).toBe(200)
+    expect(
+      await dataSource.getRepository(Transaction).find({ where: { walletId: wallet.id } }),
+    ).toHaveLength(0)
+  })
+
   it('does not move the balance a second time and returns the original movement when repeating debit with k2', async () => {
     const wallet = await createTestWallet(200)
     const key = `k2-${randomUUID()}`
 
     const first = await walletService.debit(wallet.id, 60, {
+      brandId: wallet.brandId,
       category: 'plan_payment',
       description: 'First debit with k2',
       idempotencyKey: key,
     })
     const second = await walletService.debit(wallet.id, 60, {
+      brandId: wallet.brandId,
       category: 'plan_payment',
       description: 'Repeated debit with k2',
       idempotencyKey: key,
@@ -168,25 +185,94 @@ describe('WalletService idempotent movements (e2e)', () => {
     expect(first.data?.transaction.id).not.toBe(second.data?.transaction.id)
   })
 
-  it('reverts and reapplies the idempotencyKey migration cleanly', async () => {
-    const migration = new AddTransactionIdempotencyKey1792728404940()
-    const queryRunner = dataSource.createQueryRunner()
-    await queryRunner.connect()
+  async function withDisposableMigrationRunner(
+    run: (queryRunner: QueryRunner) => Promise<void>,
+  ): Promise<void> {
+    const disposableDb = `payments_qa_payments_mig_${randomUUID().replace(/-/g, '')}`
+    const adminRunner = dataSource.createQueryRunner()
+    try {
+      await adminRunner.connect()
+      await adminRunner.query(`CREATE DATABASE "${disposableDb}"`)
+    } finally {
+      await adminRunner.release()
+    }
+
+    const migrationDataSource = new DataSource({
+      type: 'postgres',
+      host: process.env.POSTGRES_HOST,
+      port: Number(process.env.POSTGRES_PORT),
+      username: process.env.POSTGRES_USER,
+      password: process.env.POSTGRES_PASSWORD,
+      database: disposableDb,
+      synchronize: false,
+    })
 
     try {
-      await migration.down(queryRunner)
-      const afterDown = await queryRunner.query(
-        `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
-      )
-      expect(afterDown).toHaveLength(0)
+      await migrationDataSource.initialize()
+      const queryRunner = migrationDataSource.createQueryRunner()
+      try {
+        await queryRunner.connect()
+        const existingColumns = await queryRunner.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+        )
+        if (existingColumns.length === 0) {
+          await queryRunner.query(`
+            CREATE TABLE IF NOT EXISTS "transactions" (
+              "id" uuid NOT NULL DEFAULT gen_random_uuid(),
+              CONSTRAINT "PK_transactions" PRIMARY KEY ("id")
+            )
+          `)
+          await new AddTransactionIdempotencyKey1792728404940().up(queryRunner)
+        }
+        await run(queryRunner)
+      } finally {
+        await queryRunner.release()
+      }
+    } finally {
+      try {
+        if (migrationDataSource.isInitialized) {
+          await migrationDataSource.destroy()
+        }
+      } finally {
+        const cleanupRunner = dataSource.createQueryRunner()
+        try {
+          await cleanupRunner.connect()
+          await cleanupRunner.query(`DROP DATABASE IF EXISTS "${disposableDb}"`)
+        } finally {
+          await cleanupRunner.release()
+        }
+      }
+    }
+  }
 
-      await migration.up(queryRunner)
+  it('reverts and reapplies the idempotencyKey migration cleanly', async () => {
+    // Fails on targetDb/sharedColumnsWhileDown if queryRunner uses dataSource instead of the disposable DB.
+    const migration = new AddTransactionIdempotencyKey1792728404940()
+
+    await withDisposableMigrationRunner(async (queryRunner) => {
+      await migration.down(queryRunner)
+      try {
+        const [{ db: targetDb }] = await queryRunner.query(`SELECT current_database() AS db`)
+        const [{ db: sharedDb }] = await dataSource.query(`SELECT current_database() AS db`)
+        const afterDown = await queryRunner.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+        )
+        const sharedColumnsWhileDown = await dataSource.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
+        )
+
+        expect(targetDb).not.toBe('payments')
+        expect(targetDb).not.toBe(sharedDb)
+        expect(afterDown).toHaveLength(0)
+        expect(sharedColumnsWhileDown).toHaveLength(1)
+      } finally {
+        await migration.up(queryRunner)
+      }
+
       const afterUp = await queryRunner.query(
         `SELECT column_name FROM information_schema.columns WHERE table_name = 'transactions' AND column_name = 'idempotencyKey'`,
       )
       expect(afterUp).toHaveLength(1)
-    } finally {
-      await queryRunner.release()
-    }
+    })
   })
 })

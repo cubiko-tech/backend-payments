@@ -57,6 +57,11 @@ export class DropiProvider implements PaymentProvider {
       signal: AbortSignal.timeout(15000),
     })
 
+    // A missing route answers the same 404 as a missing charge, so it says nothing about the payment.
+    if (response.status === 404) {
+      logger.log('error', `Dropi answered 404 on ${path}: no answer about the payment`)
+      throw new Error(`Dropi error 404 on ${path}`)
+    }
     const body = await response.json()
     if (!response.ok) {
       throw new Error(`Dropi error: ${body.message || response.statusText}`)
@@ -115,6 +120,7 @@ export class DropiProvider implements PaymentProvider {
       metadata: {
         dropiStatus: charge.status,
         dropiUserId: charge.userId,
+        amount: charge.amount,
       },
     }
   }

@@ -24,7 +24,8 @@ export class DianController {
   @ApiResponse({ status: 200, description: 'Resultado del envío a DIAN' })
   @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async sendInvoice(@Param('invoiceId', ParseUUIDPipe) invoiceId: string) {
-    return this.dianService.sendInvoice(invoiceId)
+    // A person decides here, so a claim left by a dead process does not hold the document forever.
+    return this.dianService.sendInvoice(invoiceId, { reclaimStale: true })
   }
 
   @Get('status/:invoiceId')

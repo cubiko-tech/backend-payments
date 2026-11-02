@@ -34,6 +34,7 @@ import { EnterprisePricingService } from '../subscription/enterprise-pricing.ser
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { walletCloseDataSource } from '../../test/support/wallet-close-double'
 
 /**
  * Marca de agua para detectar caídas accidentales al camino legacy de precios
@@ -112,7 +113,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionRepo },
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
-        { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
+        {
+          provide: getDataSourceToken('DBWrite'),
+          useValue: walletCloseDataSource(() => service as any),
+        },
         {
           provide: WalletService,
           // `findById` es lo que lee el checkout para comparar la moneda de la wallet
@@ -1816,7 +1820,20 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         walletReadRepo as any,
         createMockRepo() as any,
         createMockRepo() as any,
-        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+        {
+          // R17: Doubled runner; the payment lock and its status re-read are proven in the e2e.
+          createQueryRunner: jest.fn(() => ({
+            ...mockQueryRunner,
+            query: jest.fn(),
+            manager: {
+              ...mockQueryRunner.manager,
+              findOne: (entity: unknown, opts: unknown) =>
+                entity === Payment
+                  ? Promise.resolve({ status: PaymentStatus.PENDING })
+                  : mockQueryRunner.manager.findOne(entity, opts),
+            },
+          })),
+        } as any,
       )
 
       walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
@@ -2052,6 +2069,12 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         }
         storedPayments.set(payment.id, { ...payment })
         return payment
+      })
+      paymentRepo.update.mockImplementation(async (criteria: any, partial: any) => {
+        const target = storedPayments.get(criteria.id)
+        if (!target) return { affected: 0 }
+        storedPayments.set(target.id, { ...target, ...partial })
+        return { affected: 1 }
       })
     })
 

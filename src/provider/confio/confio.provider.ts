@@ -1,7 +1,9 @@
+// R6: one adapter of one provider API: payments, plans, subscriptions and webhooks share its client.
 import { Injectable } from '@nestjs/common'
 import { timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   CreateCheckoutParams,
   CheckoutResult,
   PaymentStatusResult,
@@ -124,6 +126,10 @@ export class ConfioProvider implements PaymentProvider {
 
     const text = await response.text()
 
+    if (response.status === 404) {
+      throw new ProviderPaymentNotFoundError(`ConfioPagos error 404: ${text.slice(0, 300)}`)
+    }
+
     // ConfioPagos NO siempre responde JSON: algunos errores llegan como texto
     // plano. Parsear a ciegas ANTES de mirar `response.ok` convertía eso en un
     // `Unexpected token 'S'…` que se comía lo único que sirve —el status y lo que
@@ -203,7 +209,11 @@ export class ConfioProvider implements PaymentProvider {
     return {
       status: ConfioProvider.mapStatus(resp.status),
       paidAt: resp.completedAt ? new Date(resp.completedAt) : undefined,
-      metadata: { confioStatus: resp.status, paymentMethod: resp.paymentMethod },
+      metadata: {
+        confioStatus: resp.status,
+        paymentMethod: resp.paymentMethod,
+        amountCents: resp.amountCents,
+      },
     }
   }
 

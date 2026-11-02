@@ -15,7 +15,7 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { DianService } from '../dian/dian.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { InvoiceService } from '../invoice/invoice.service'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { PaymentAttempt } from '../payment/entities/paymentAttempt.entity'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ProviderFactory } from '../provider/provider.factory'
@@ -30,6 +30,7 @@ import { WalletService } from '../wallet/wallet.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { CheckoutController } from './checkout.controller'
 import { CheckoutRequest, CheckoutService } from './checkout.service'
+import { walletCloseDataSource } from '../../test/support/wallet-close-double'
 
 describe('CheckoutController', () => {
   let controller: CheckoutController
@@ -103,6 +104,29 @@ describe('CheckoutController', () => {
     expect(checkoutService.processCheckout).toHaveBeenCalledWith(
       expect.objectContaining({
         idempotencyKey: 'idem-key-123',
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        planSlug: 'dropi-roax',
+      }),
+    )
+  })
+
+  it('ignores body.idempotencyKey when no Idempotency-Key HTTP header is provided', async () => {
+    // R15 (Mutation): conditional spread of idempotencyKey in processCheckout turns this case red.
+    await controller.processCheckout(
+      {
+        brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
+        userId: 'u-1',
+        purpose: 'plan_purchase',
+        provider: 'wallet',
+        planSlug: 'dropi-roax',
+        idempotencyKey: 'spoofed-from-body',
+      },
+      { headers: {} },
+    )
+
+    expect(checkoutService.processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: undefined,
         brandId: '72a8463b-1111-4c2a-9f1a-66a0985a10e6',
         planSlug: 'dropi-roax',
       }),
@@ -244,7 +268,14 @@ describe('POST /checkout brand membership gate', () => {
           useValue: subscriptionEventRepo,
         },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
-        { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
+        {
+          provide: getDataSourceToken('DBWrite'),
+          useValue: walletCloseDataSource(() => ({
+            paymentRepo,
+            subscriptionRepo,
+            subscriptionEventRepo,
+          })),
+        },
         { provide: WalletService, useValue: walletService },
         {
           provide: InvoiceService,
@@ -537,7 +568,20 @@ describe('POST /checkout brand membership gate', () => {
         { findOne: jest.fn(() => Promise.resolve(brandBWallet)) } as any,
         createMockRepo() as any,
         createMockRepo() as any,
-        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+        {
+          // R17: Doubled runner; the payment lock and its status re-read are proven in the e2e.
+          createQueryRunner: jest.fn(() => ({
+            ...mockQueryRunner,
+            query: jest.fn(),
+            manager: {
+              ...mockQueryRunner.manager,
+              findOne: (entity: unknown, opts: unknown) =>
+                entity === Payment
+                  ? Promise.resolve({ status: PaymentStatus.PENDING })
+                  : mockQueryRunner.manager.findOne(entity, opts),
+            },
+          })),
+        } as any,
       )
 
       walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))

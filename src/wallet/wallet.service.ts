@@ -1,6 +1,7 @@
+// R6: One responsibility, the wallet ledger: every balance movement shares its locks and checks.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, Not } from 'typeorm'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
   Transaction,
@@ -9,6 +10,9 @@ import {
 } from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { lockPayment } from '../payment/payment-lock'
+import { AuditLog } from '../audit/entities/auditLog.entity'
 
 @Injectable()
 export class WalletService {
@@ -94,12 +98,17 @@ export class WalletService {
   /**
    * Acreditar fondos a una wallet con bloqueo pesimista.
    * Operación atómica: actualiza balance y crea transacción.
+   *
+   * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
+   * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
+   * failed or duplicate credit leaves the wallet closed.
    */
   async credit(
     walletId: string,
     amount: number,
     data: Partial<Transaction> | string = {},
     idempotencyKey?: string,
+    reopenClosed?: { userId: string; reason: string },
   ) {
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
@@ -121,10 +130,24 @@ export class WalletService {
       }
 
       // Wallet cerrada no acepta ninguna operación
-      if (wallet.status === WalletStatus.CLOSED) {
+      const reopening = wallet.status === WalletStatus.CLOSED
+      if (reopening && !reopenClosed) {
         throw new RequestException(
           { code: 'WALLET_CLOSED', message: 'Wallet cerrada, no acepta operaciones' },
           HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+      if (reopening) {
+        wallet.status = WalletStatus.ACTIVE
+        await queryRunner.manager.save(
+          AuditLog,
+          queryRunner.manager.create(AuditLog, {
+            userId: reopenClosed.userId,
+            action: 'wallet_reopened',
+            entityType: 'wallet',
+            entityId: walletId,
+            description: `Wallet reopened to take a credit: ${reopenClosed.reason}`,
+          }),
         )
       }
 
@@ -151,6 +174,9 @@ export class WalletService {
 
       await queryRunner.commitTransaction()
 
+      if (reopening) {
+        this.logger.warn(`Wallet ${walletId} reopened to take a credit: ${reopenClosed.reason}`)
+      }
       this.logger.log(
         `Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
       )
@@ -177,14 +203,14 @@ export class WalletService {
    * existing movement by `idempotencyKey` alone (`findExistingMovement`) and, if
    * found, returns that movement as recorded along with the wallet of that
    * transaction (`existingTransaction.walletId || walletId`) without charging
-   * again. Rejects `TKN` wallets or charges, brand ownership mismatches when
-   * `data.brandId` is supplied, frozen or closed wallets, and currency
-   * mismatches when `expectedCurrency` is provided (used by checkout and wallet
-   * subscription renewals).
+   * again. Rejects `TKN` wallets or charges, a wallet that does not belong to
+   * `data.brandId`, frozen or closed wallets, and currency mismatches when
+   * `expectedCurrency` is provided (used by checkout and wallet subscription
+   * renewals).
    *
    * @param walletId Target wallet identifier.
    * @param amount Positive finite debit amount in the wallet currency.
-   * @param data Transaction metadata or referenceId string.
+   * @param data Transaction metadata; `brandId` is the brand the wallet must belong to.
    * @param expectedCurrency Expected ISO currency code for the charge; when provided
    * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
    * @param idempotencyKey Optional key looked up by key alone to return a repeated
@@ -193,7 +219,7 @@ export class WalletService {
   async debit(
     walletId: string,
     amount: number,
-    data: Partial<Transaction> | string = {},
+    data: Partial<Transaction> & { brandId: string },
     expectedCurrency?: string,
     idempotencyKey?: string,
   ) {
@@ -217,6 +243,11 @@ export class WalletService {
     await queryRunner.startTransaction()
 
     try {
+      const paymentId = txData.referenceType === 'payment' ? txData.referenceId : undefined
+      if (paymentId) {
+        await lockPayment(queryRunner, paymentId)
+      }
+
       // Bloqueo pesimista para evitar condiciones de carrera
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
@@ -231,6 +262,16 @@ export class WalletService {
         }
       }
 
+      if (paymentId) {
+        const payment = await queryRunner.manager.findOne(Payment, { where: { id: paymentId } })
+        if (payment?.status !== PaymentStatus.PENDING) {
+          throw new RequestException(
+            { code: 'WALLET_DEBIT_FAILED', message: 'Payment is no longer pending' },
+            HttpStatus.INTERNAL_SERVER_ERROR,
+          )
+        }
+      }
+
       if (!wallet) {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
@@ -238,7 +279,7 @@ export class WalletService {
         )
       }
 
-      if ('brandId' in txData && (!txData.brandId || wallet.brandId !== txData.brandId)) {
+      if (!txData.brandId || wallet.brandId !== txData.brandId) {
         throw new RequestException(
           { code: 'WALLET_NOT_FOUND', message: 'Wallet does not belong to the paying brand' },
           HttpStatus.NOT_FOUND,
@@ -502,17 +543,25 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status === WalletStatus.CLOSED) {
-      throw new RequestException(
+    const closed = () =>
+      new RequestException(
         { code: 'WALLET_CLOSED', message: 'No se puede congelar una wallet cerrada' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status === WalletStatus.CLOSED) {
+      throw closed()
     }
 
-    wallet.status = WalletStatus.FROZEN
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const frozen = await this.walletRepository.update(
+      { id: walletId, status: Not(WalletStatus.CLOSED) },
+      { status: WalletStatus.FROZEN },
+    )
+    if (!frozen.affected) {
+      throw closed()
+    }
     this.logger.log(`Wallet ${walletId} congelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
   /**
@@ -526,17 +575,25 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status !== WalletStatus.FROZEN) {
-      throw new RequestException(
+    const notFrozen = () =>
+      new RequestException(
         { code: 'WALLET_NOT_FROZEN', message: 'Solo se pueden descongelar wallets congeladas' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status !== WalletStatus.FROZEN) {
+      throw notFrozen()
     }
 
-    wallet.status = WalletStatus.ACTIVE
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const unfrozen = await this.walletRepository.update(
+      { id: walletId, status: WalletStatus.FROZEN },
+      { status: WalletStatus.ACTIVE },
+    )
+    if (!unfrozen.affected) {
+      throw notFrozen()
+    }
     this.logger.log(`Wallet ${walletId} descongelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
   /**
@@ -550,18 +607,27 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (Number(wallet.balance) !== 0) {
-      throw new RequestException(
+    const hasBalance = () =>
+      new RequestException(
         {
           code: 'WALLET_HAS_BALANCE',
           message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.',
         },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (Number(wallet.balance) !== 0) {
+      throw hasBalance()
     }
 
+    // Conditional on the balance: a credit committing after the read above keeps the wallet open.
+    const closed = await this.walletRepository.update(
+      { id: walletId, balance: 0 },
+      { status: WalletStatus.CLOSED },
+    )
+    if (!closed.affected) {
+      throw hasBalance()
+    }
     wallet.status = WalletStatus.CLOSED
-    await this.walletRepository.save(wallet)
     this.logger.log(`Wallet ${walletId} cerrada`)
     return { data: wallet }
   }

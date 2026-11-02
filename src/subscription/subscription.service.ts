@@ -923,52 +923,6 @@ export class SubscriptionService {
   }
 
   /**
-   * Cambiar de plan
-   */
-  async changePlan(brandId: string, newPlan: { planSlug: string; triggeredBy: string }) {
-    const queryRunner = this.dataSource.createQueryRunner()
-    await queryRunner.connect()
-    await queryRunner.startTransaction()
-
-    try {
-      const subscription = await queryRunner.manager.findOne(Subscription, {
-        where: { brandId },
-      })
-
-      if (!subscription) {
-        throw new RequestException(
-          { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
-          HttpStatus.NOT_FOUND,
-        )
-      }
-
-      const fromPlan = subscription.planSlug
-      subscription.planSlug = newPlan.planSlug
-      await queryRunner.manager.save(Subscription, subscription)
-
-      // Registrar evento de cambio de plan
-      await queryRunner.manager.save(SubscriptionEvent, {
-        subscriptionId: subscription.id,
-        eventType: SubscriptionEventType.PLAN_CHANGED,
-        fromPlanSlug: fromPlan,
-        toPlanSlug: newPlan.planSlug,
-        triggeredBy: newPlan.triggeredBy,
-      })
-
-      await queryRunner.commitTransaction()
-      this.logger.log(`Plan cambiado de ${fromPlan} a ${newPlan.planSlug} para marca ${brandId}`)
-      return { data: subscription }
-    } catch (error) {
-      await queryRunner.rollbackTransaction()
-      if (error instanceof RequestException) throw error
-      this.logger.error(`Error al cambiar plan de marca ${brandId}: ${error.message}`)
-      return { error: error.message }
-    } finally {
-      await queryRunner.release()
-    }
-  }
-
-  /**
    * Hasta cuándo llega el acceso YA pagado de una fila a la que se le pide la baja.
    *
    * En trial es `trialEnd` y no `currentPeriodEnd`: el alta abre el período contra el

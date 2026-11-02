@@ -513,7 +513,6 @@ describe('SubscriptionController — brand resolution on subscription writes', (
   let service: {
     startTrial: jest.Mock
     startPaid: jest.Mock
-    changePlan: jest.Mock
     cancel: jest.Mock
     reactivate: jest.Mock
   }
@@ -534,7 +533,6 @@ describe('SubscriptionController — brand resolution on subscription writes', (
         data: { id: 'sub-1' },
         acceptanceUrl: 'https://pay/x',
       }),
-      changePlan: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
       cancel: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
       reactivate: jest.fn().mockResolvedValue({ data: { id: 'sub-1' } }),
     }
@@ -648,68 +646,6 @@ describe('SubscriptionController — brand resolution on subscription writes', (
         userId: 'other-user-id',
         planSlug: 'pro',
       })
-    })
-  })
-
-  describe('changePlan', () => {
-    it('allows caller to change plan on own brand via session or brand membership', async () => {
-      await controller.changePlan(
-        { brandId: OWN_BRAND_ID, planSlug: 'enterprise', triggeredBy: USER_ID },
-        { user: { id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID } },
-      )
-      expect(service.changePlan).toHaveBeenCalledWith(OWN_BRAND_ID, {
-        planSlug: 'enterprise',
-        triggeredBy: USER_ID,
-      })
-
-      service.changePlan.mockClear()
-
-      await controller.changePlan(
-        { brandId: MEMBER_BRAND_ID, planSlug: 'enterprise', triggeredBy: USER_ID },
-        { user: { id: USER_ID, isSuperAdmin: false, brand: null } },
-      )
-      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, MEMBER_BRAND_ID)
-      expect(service.changePlan).toHaveBeenCalledWith(MEMBER_BRAND_ID, {
-        planSlug: 'enterprise',
-        triggeredBy: USER_ID,
-      })
-    })
-
-    it('rejects foreign brand with 403 and does not call subscriptionService.changePlan', async () => {
-      await expectWriteException(
-        controller.changePlan(
-          { brandId: FOREIGN_BRAND_ID, planSlug: 'enterprise', triggeredBy: USER_ID },
-          { user: { id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID } },
-        ),
-        'forbidden',
-        HttpStatus.FORBIDDEN,
-      )
-      expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, FOREIGN_BRAND_ID)
-      expect(service.changePlan).not.toHaveBeenCalled()
-    })
-
-    it('allows service token to target any brand and requires brandId', async () => {
-      await controller.changePlan(
-        { brandId: FOREIGN_BRAND_ID, planSlug: 'enterprise', triggeredBy: 'server' },
-        { user: { ...SERVER_PRINCIPAL } },
-      )
-      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
-      expect(service.changePlan).toHaveBeenCalledWith(FOREIGN_BRAND_ID, {
-        planSlug: 'enterprise',
-        triggeredBy: 'server',
-      })
-
-      service.changePlan.mockClear()
-
-      await expectWriteException(
-        controller.changePlan(
-          { brandId: '', planSlug: 'enterprise', triggeredBy: 'server' },
-          { user: { ...SERVER_PRINCIPAL } },
-        ),
-        'BRAND_ID_REQUIRED',
-        HttpStatus.BAD_REQUEST,
-      )
-      expect(service.changePlan).not.toHaveBeenCalled()
     })
   })
 

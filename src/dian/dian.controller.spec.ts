@@ -35,6 +35,7 @@ describe('DianController operator authorization (LOC-78)', () => {
 
   let invoiceRepo: {
     findOne: jest.Mock
+    query: jest.Mock
     save: jest.Mock
   }
   let billingProfileRepo: {
@@ -64,6 +65,8 @@ describe('DianController operator authorization (LOC-78)', () => {
 
     invoiceRepo = {
       findOne: jest.fn(),
+      // R17: The claim is SQL; its exclusivity is proved on Postgres in the claim e2e.
+      query: jest.fn().mockResolvedValue([[{ id: 'claimed' }], 1]),
       save: jest.fn(async (entity) => entity),
     }
     billingProfileRepo = {
@@ -235,6 +238,16 @@ describe('DianController operator authorization (LOC-78)', () => {
       relations: ['items'],
     })
     expect(providerMock.sendInvoice).not.toHaveBeenCalled()
+  })
+
+  it('asks to take over a stale claim on a manual send', async () => {
+    // R15: red if the route stops asking: a dead process holds its document with no way out.
+    await request(app.getHttpServer())
+      .post(`/dian/send/${UNSENT_INVOICE_ID}`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+
+    const [, claimParams] = invoiceRepo.query.mock.calls[0]
+    expect(claimParams).toContain(true)
   })
 
   it('allows superadmin operator and service token on POST /dian/send and GET /dian/status', async () => {

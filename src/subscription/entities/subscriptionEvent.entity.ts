@@ -41,6 +41,16 @@ export enum SubscriptionEventType {
   CONFIRMATION_NOT_GRANTED = 'confirmation_not_granted',
 }
 
+/**
+ * The events that mean a purchase applied its plan. `PAYMENT_FAILED` can carry a `paymentId` too:
+ * it is written when a renewal link is issued, before anyone pays it.
+ */
+export const PLAN_APPLYING_EVENTS = [
+  SubscriptionEventType.CREATED,
+  SubscriptionEventType.PLAN_CHANGED,
+  SubscriptionEventType.RENEWED,
+]
+
 @Entity('subscription_events')
 @Index(['subscriptionId', 'createdAt'])
 @Index(['eventType', 'createdAt'])
