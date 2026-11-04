@@ -135,8 +135,12 @@ export class BillingProfileController {
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento verificado' })
-  async verifyDocument(@Param('id') id: string, @Body() data: { verifiedBy: string }) {
-    return this.legalDocumentService.verify(id, data.verifiedBy)
+  async verifyDocument(
+    @Param('id') id: string,
+    @Body() _data?: { verifiedBy?: string },
+    @Req() req?: any,
+  ) {
+    return this.legalDocumentService.verify(id, req?.user?.id)
   }
 
   @Post('admin/documents/:id/reject')
@@ -145,9 +149,10 @@ export class BillingProfileController {
   @ApiResponse({ status: 200, description: 'Documento rechazado' })
   async rejectDocument(
     @Param('id') id: string,
-    @Body() data: { verifiedBy: string; reason: string },
+    @Body() data: { verifiedBy?: string; reason: string },
+    @Req() req?: any,
   ) {
-    return this.legalDocumentService.reject(id, data.verifiedBy, data.reason)
+    return this.legalDocumentService.reject(id, req?.user?.id, data?.reason)
   }
 
   @Get(':brandId/documents')

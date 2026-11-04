@@ -203,13 +203,13 @@ export class SubscriptionController {
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async cancel(
-    @Body() data: { brandId: string; reason: string; triggeredBy: string },
+    @Body() data: { brandId: string; reason: string; triggeredBy?: string },
     @Req() req?: any,
   ) {
     const brandId = await this.resolveBrandId(data?.brandId, req)
     return this.subscriptionService.cancel(brandId, {
-      reason: data.reason,
-      triggeredBy: data.triggeredBy,
+      reason: data?.reason,
+      triggeredBy: req?.user?.id,
     })
   }
 
@@ -221,9 +221,9 @@ export class SubscriptionController {
     description: 'BRAND_ID_REQUIRED (service principal without brandId)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
-  async reactivate(@Body() data: { brandId: string; triggeredBy: string }, @Req() req?: any) {
+  async reactivate(@Body() data: { brandId: string; triggeredBy?: string }, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId, req)
-    return this.subscriptionService.reactivate(brandId, data.triggeredBy)
+    return this.subscriptionService.reactivate(brandId, req?.user?.id)
   }
 
   @Post('confirm')

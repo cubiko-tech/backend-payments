@@ -60,7 +60,11 @@ export class RefundController {
       resolveRequestBrandId(req, brandId),
       'POST /refund',
     )
-    return this.refundService.request({ ...data, brandId: validBrandId })
+    return this.refundService.request({
+      ...data,
+      brandId: validBrandId,
+      requestedBy: req?.user?.id,
+    })
   }
 
   @Get()

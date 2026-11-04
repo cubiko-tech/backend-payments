@@ -90,6 +90,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `MISSING_WALLET_ID` (`:1343-1348`).
 
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
+
 - **Dónde**: `src/tasks/tasks.service.ts:491-496`, `:571-576`
 - **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo
 - **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet
@@ -597,3 +598,15 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: en (a), aceptado (UUID v4 no adivinable) para no responderle un falso 404 («Pago no
   encontrado») a la marca dueña ante un parpadeo de `backend-platform`; en (b), abierto en el consumidor
   (`frontend-platform`).
+
+## `RefundService.request` sólo bloquea pagos `refunded` y reembolsos `pending` (LOC-115)
+
+- **Dónde**: `src/refund/refund.service.ts:64-102` (`createPendingRefund`) y `:139-141` (`approve`).
+- **Qué lo dispara**: (a) un `POST /v1/refund` sobre un pago en `pending` o `failed`; (b) un segundo
+  `POST /v1/refund` después de que `POST /v1/refund/:id/approve` pasó el primero a `processing` sin
+  ejecutar la devolución ni cambiar `payments.status` a `refunded`.
+- **Qué rompe**: en ambos casos se inserta una fila `pending` en `refunds` (sin mover saldo ni llamar al
+  proveedor, porque `approve` hoy sólo marca `processing`).
+- **Estado**: abierto — el alcance de LOC-115 cierra el reembolso sobre pagos `refunded`, el `pending`
+  repetido y el monto superior al pago; lo cierra exigir `payments.status = 'completed'` y bloquear o
+  sumar reembolsos en `processing`/`completed` cuando `approve` ejecute la devolución.
