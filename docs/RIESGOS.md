@@ -134,12 +134,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: mitigado en doble cobro, degradación y carrera entre crons (LOC-14 y LOC-33) —
   `hasCycleDebit` (`src/tasks/wallet-renewal.ts:60`, `:172-184`) evita debitar dos veces,
   `processSubscriptionRenewals` y `expireLockedSubscription` excluyen `retryCount >= MAX_RETRY` de la
-  renovación (`src/tasks/subscription-renewal.ts:97`, `:104`, `:295-307`) y toman `acquireSubscriptionLock` por suscripción (`src/tasks/subscription-lock.ts:17-101`),
+  renovación (`src/tasks/subscription-renewal.ts:97`, `:104`, `:295-307`) y toman
+  `acquireSubscriptionLock` por suscripción (`src/tasks/subscription-lock.ts:17-101`),
   y el rechazo de `backend-roles` se registra en `error` con `sub.id`
-  (`src/tasks/wallet-renewal.ts:254-260`). Abierto en convergencia: si `backend-roles` rechaza de forma permanente esa marca o
-  plan tras el débito, la extensión local se reintenta cada hora sin cota hasta que
-  `renewPlanForBrand` devuelva `true`, y el débito queda retenido: `refundOrphanRenewalDebits` no lo
-  devuelve mientras la fila siga viva y en ese ciclo (LOC-105).
+  (`src/tasks/wallet-renewal.ts:254-260`). Abierto en convergencia: si `backend-roles` rechaza de
+  forma permanente esa marca o plan tras el débito, la extensión local se reintenta cada hora sin
+  cota hasta que `renewPlanForBrand` devuelva `true`, y el débito queda retenido:
+  `refundOrphanRenewalDebits` no lo devuelve mientras la fila siga viva y en ese ciclo (LOC-105).
 
 ## El aplazamiento de renovación por falta de precios sólo corre con caché frío y el caché tibio sirve precios vencidos sin tope (LOC-16)
 
@@ -361,10 +362,11 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   conexión hasta que venza la espera, porque el cron no consigue una para escribir y soltar el candado.
 - **Estado**: mitigado por `lock_timeout` de 30 s en `lockBrandPlan`: la traba dura como mucho eso. Quien vence falla:
   un cierre de wallet queda para el barrido, y un cron no lo cuenta como pago fallido, salvo
-  `expireLockedSubscription` (`src/tasks/subscription-expiration.ts:27`), cuya pasada se corta y sigue a la hora siguiente. Una
-  espera legítima de más de 30 s (proveedor lento) también falla. Un pago externo confirmado que vence el candado queda
-  `processing` hasta que lo termina un barrido (LOC-89): `reconcileExternalPayments` si no tiene plan, cuando el proveedor
-  lo confirma, y `settleLostExternalPayments` si ya lo tiene.
+  `expireLockedSubscription` (`src/tasks/subscription-expiration.ts:27`), cuya pasada se corta y sigue
+  a la hora siguiente. Una espera legítima de más de 30 s (proveedor lento) también falla. Un pago
+  externo confirmado que vence el candado queda `processing` hasta que lo termina un barrido (LOC-89):
+  `reconcileExternalPayments` si no tiene plan, cuando el proveedor lo confirma, y
+  `settleLostExternalPayments` si ya lo tiene.
   Agotar el pool de esta forma no se ejercitó: E9 prueba sólo el vencimiento de un cierre. Abierto lo que lo
   cierra del todo: escribir por la conexión del candado, que pide cambiar `WalletService.debit`.
 
@@ -392,7 +394,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una renovación que llega a roles después de la degradación deja plan pago sobre una fila cerrada (LOC-111)
 
-- **Dónde**: `src/tasks/wallet-renewal.ts:250` (`renewPlanForBrand`), `src/tasks/subscription-expiration.ts:323` (`degradeInRoles`)
+- **Dónde**: `src/tasks/wallet-renewal.ts:250` (`renewPlanForBrand`),
+  `src/tasks/subscription-expiration.ts:323` (`degradeInRoles`)
 - **Qué lo dispara**: una baja durante la espera a roles y el barrido de acceso, que no toma el candado de plan, cierra la
   fila antes de que la extensión escriba; en roles, la renovación se aplica después de la degradación.
 - **Qué rompe**: la marca conserva el plan pago en roles con la fila `cancelled`. El dinero vuelve: el débito queda
@@ -401,8 +404,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
-- **Dónde**: `src/tasks/wallet-renewal.ts:242` (`extendSubscriptionPeriod`), `src/tasks/subscription-renewal.ts:132-135`,
-  `src/tasks/subscription-expiration.ts:38`
+- **Dónde**: `src/tasks/wallet-renewal.ts:242` (`extendSubscriptionPeriod`),
+  `src/tasks/subscription-renewal.ts:132-135`, `src/tasks/subscription-expiration.ts:38`
 - **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`. La fila vuelve a ser elegible
   en cada pasada horaria, que no mira el backoff.
 - **Qué rompe**: en unas tres horas se agotan los reintentos: la marca recibe avisos de pago fallido y queda vencida.
