@@ -583,3 +583,17 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   sin tope. Los 17 handlers de hoy usan `||` y caen al default.
 - **Estado**: mitigado por el contrato escrito en el encabezado de la fábrica y el caso
   `admin-extend-body.spec.ts` del default de `expiring`; abierto para el handler que no lo lea.
+
+## El retorno del checkout distingue con 503 si el `paymentId` existe cuando cae `platform`, y el BFF da 500 (LOC-116)
+
+- **Dónde**: `src/checkout/checkout.service.ts:1060-1064` (`reconcilePayment`) y
+  `src/checkout/checkout.controller.ts:134-142` (`paymentReturn`).
+- **Qué lo dispara**: (a) consultar `GET /v1/checkout/return` mientras `backend-platform` no responde;
+  (b) recibir un 400 o 404 desde el BFF de `frontend-platform`
+  (`src/app/api/bff/payments/return/route.js:28-30`).
+- **Qué rompe**: en (a), un `paymentId` inexistente corta antes con 404 y uno existente consulta
+  `canViewBrandCredit` y responde 503 `BRAND_LOOKUP_UNAVAILABLE`, diferenciando que el UUID existe durante la
+  caída. En (b), el BFF captura el error y responde 500 a `PaymentReturnView.jsx`.
+- **Estado**: en (a), aceptado (UUID v4 no adivinable) para no responderle un falso 404 («Pago no
+  encontrado») a la marca dueña ante un parpadeo de `backend-platform`; en (b), abierto en el consumidor
+  (`frontend-platform`).

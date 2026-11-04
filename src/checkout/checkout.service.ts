@@ -1055,9 +1055,10 @@ export class CheckoutService implements OnModuleInit {
    */
   async reconcilePayment(
     paymentId: string,
+    canAccessBrand?: (brandId: string) => Promise<boolean>,
   ): Promise<{ status: string; planSlug?: string; refundedToWallet?: boolean }> {
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
-    if (!payment) {
+    if (!payment || (canAccessBrand && !(await canAccessBrand(payment.brandId)))) {
       throw new RequestException({ code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' }, 404)
     }
 

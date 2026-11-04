@@ -3,6 +3,7 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { CheckoutService } from './checkout.service'
 import { CheckoutRequestDto } from './dto/checkout-request.dto'
+import { CheckoutReturnQueryDto } from './dto/checkout-return-query.dto'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
@@ -118,11 +119,26 @@ export class CheckoutController {
     summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)',
   })
   @ApiResponse({ status: 200, description: 'Estado reconciliado del pago' })
-  async paymentReturn(
-    @Query('paymentId') paymentId?: string,
-    @Query('correlation_id') correlationId?: string,
-  ) {
+  @ApiResponse({
+    status: 400,
+    description: 'INVALID_REQUEST: paymentId (or correlation_id) is missing or not a valid UUID',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'PAYMENT_NOT_FOUND: payment does not exist or belongs to another brand',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'BRAND_LOOKUP_UNAVAILABLE: backend-platform did not respond',
+  })
+  async paymentReturn(@Query() query: CheckoutReturnQueryDto, @Req() req?: any) {
     // ConfioPagos redirige con correlation_id = nuestro paymentId.
-    return { data: await this.checkoutService.reconcilePayment(paymentId || correlationId) }
+    const paymentId = query.paymentId || query.correlation_id
+    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : ''
+    return {
+      data: await this.checkoutService.reconcilePayment(paymentId, (brandId) =>
+        this.platformClient.canViewBrandCredit(userId, brandId),
+      ),
+    }
   }
 }
