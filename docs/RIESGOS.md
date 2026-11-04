@@ -415,6 +415,15 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: mitigado por ese log; se prefiere a tratarlo como pago fallido, que cobraría dos veces. Abierto — no hay
   reintento del evento.
 
+## Un aviso de Mercado Pago con `ts` a más de 5 minutos se rechaza con 401 (LOC-113)
+
+- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:261` (`SIGNATURE_WINDOW_MS`, `:283`)
+- **Qué lo dispara**: un reintento de Mercado Pago (cada 15 min, según su doc) que conserve el `ts` original, o un
+  `ts` que llegue en milisegundos: la doc no dice ninguna de las dos cosas y el código lo lee en segundos.
+- **Qué rompe**: el aviso no entra. El pago lo cierra el barrido `reconcileExternalPayments`
+  (`src/tasks/tasks.service.ts:660`), cada 5 min; con `ts` en milisegundos no entraría ningún aviso.
+- **Estado**: mitigado por el barrido para el reintento; abierto — lo cierra ver el primer aviso real de Mercado Pago.
+
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 
 - **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:117`, `:139` (`external_reference`, `getPaymentStatus`)

@@ -149,7 +149,7 @@ export class WebhookController {
     // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.type || payload?.action || 'unknown'
-    const providerEventId = payload?.id?.toString() || `mp_${Date.now()}`
+    const providerEventId = this.mercadoPagoProvider.webhookEventId(rawBody, signature)
 
     return this.webhookService.receive('mercadopago', eventType, providerEventId, payload)
   }
