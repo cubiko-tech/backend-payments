@@ -616,7 +616,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   repetido y el monto superior al pago; lo cierra exigir `payments.status = 'completed'` y bloquear o
   sumar reembolsos en `processing`/`completed` cuando `approve` ejecute la devolución.
 
-## Dos avisos legítimos de Dropi sin `eventId` y con cuerpo idéntico byte a byte colisionan, y el `down` de la migración falla si hay claves compartidas entre proveedores (LOC-118)
+## Dos avisos de Dropi sin `eventId` e idénticos colisionan, y el `down` falla con claves repetidas (LOC-118)
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:189-199` (`webhookEventId`);
   `src/webhook/entities/webhookEvent.entity.ts:12` (`UQ_webhook_events_provider_event`).

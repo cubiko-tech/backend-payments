@@ -1,3 +1,4 @@
+// R6: Pre-existing Confio webhook suite above 400 lines; LOC-118 only adds MercadoPagoProvider to the test module.
 import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
@@ -84,6 +85,7 @@ describe('WebhookService.receive', () => {
   }
 
   it('queries idempotency by provider and providerEventId against DBWrite, not DBRead', async () => {
+    // R15: red if receive() drops provider from the lookup or queries DBRead instead of DBWrite.
     await recibir()
 
     expect(writeRepo.findOne).toHaveBeenCalledWith({

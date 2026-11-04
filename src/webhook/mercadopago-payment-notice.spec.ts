@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common'
 import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import {
   MercadoPagoApiError,
@@ -32,8 +31,6 @@ describe('resolveMercadoPagoNotice', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv, MP_ACCESS_TOKEN: 'APP_USR-test-token' }
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
   })
 
   afterEach(() => {

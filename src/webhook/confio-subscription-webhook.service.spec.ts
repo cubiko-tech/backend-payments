@@ -1,3 +1,4 @@
+// R6: Pre-existing Confio subscription webhook suite; LOC-118 only adds MercadoPagoProvider to the test module.
 import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'

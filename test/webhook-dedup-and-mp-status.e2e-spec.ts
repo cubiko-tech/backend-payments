@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'crypto'
-import { INestApplication, Logger } from '@nestjs/common'
+import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import * as request from 'supertest'
 import { Repository } from 'typeorm'
@@ -159,9 +159,6 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
 
   beforeEach(async () => {
     await clean()
-    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
-    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
-    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
   })
 
   afterEach(() => jest.restoreAllMocks())
