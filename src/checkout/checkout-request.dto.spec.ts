@@ -32,6 +32,7 @@ describe('POST /checkout body validation', () => {
   let processCheckout: jest.Mock
 
   beforeAll(async () => {
+    // R17: records whether the body reached the service; the real checkout needs a database.
     processCheckout = jest.fn().mockResolvedValue({ paymentId: 'p-1', status: 'pending' })
     const moduleRef = await Test.createTestingModule({
       controllers: [CheckoutController],

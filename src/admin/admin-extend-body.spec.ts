@@ -46,6 +46,7 @@ describe('AdminController body and query conversion through the global pipe', ()
   beforeAll(async () => {
     subscriptionReadRepo = repo()
     subscriptionWriteRepo = repo()
+    // R17: the audit trail is not under test; the double only records that nothing was logged.
     auditService = { log: jest.fn().mockResolvedValue(undefined) }
     const moduleRef = await Test.createTestingModule({
       controllers: [AdminController, QueryProbeController],
