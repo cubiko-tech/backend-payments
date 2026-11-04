@@ -240,7 +240,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   }
 
   it('E1 answers 404 PAYMENT_NOT_FOUND for another brand pending payment and never reconciles it', async () => {
-    // R15 (Mutation): removing canAccessBrand in CheckoutService.reconcilePayment returns 200 and reconciles Brand B's payment.
+    // R15 (Mutation): removing canAccessBrand in reconcilePayment returns 200 and reconciles Brand B's payment.
     const payA = await seedPayment(BRAND_A)
     const payB = await seedPayment(BRAND_B)
 
@@ -257,7 +257,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E2 answers 404 PAYMENT_NOT_FOUND when querying another brand completed payment without leaking status or planSlug', async () => {
-    // R15 (Mutation): checking brand only before provider lookup instead of before status branches leaks completed status (200).
+    // R15 (Mutation): checking brand after status branches leaks the foreign payment completed status (200).
     const completedB = await seedPayment(BRAND_B, { status: PaymentStatus.COMPLETED })
 
     const res = await getReturnAsUser(USER_A, `paymentId=${completedB.id}`)
@@ -297,7 +297,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E5 reconciles the owning brand pending payment and returns 200 completed with planSlug for both paymentId and correlation_id', async () => {
-    // R15 (Mutation): reading the BFF server Bearer before the session cookie turns userId into empty and fails with 404.
+    // R15 (Mutation): reading the BFF server Bearer before the session cookie turns userId into '' and returns 404.
     const payA1 = await seedPayment(BRAND_A)
     const payA2 = await seedPayment(BRAND_A, { providerPaymentId: 'confio-a-2' })
 
@@ -314,7 +314,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E6 returns status failed with refundedToWallet true for the owning brand when an external payment was refunded to the wallet', async () => {
-    // R15 (Mutation): dropping the refunded branch in reconcilePayment stops returning refundedToWallet: true to the owner.
+    // R15 (Mutation): dropping the refunded branch in reconcilePayment omits refundedToWallet: true for the owner.
     const refundedA = await seedPayment(BRAND_A, { status: PaymentStatus.REFUNDED })
 
     const res = await getReturnAsUser(USER_A, `paymentId=${refundedA.id}`)
@@ -324,7 +324,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E7 answers 503 BRAND_LOOKUP_UNAVAILABLE fail-closed without reconciling when backend-platform is down', async () => {
-    // R15 (Mutation): swallowing platform errors or skipping canAccessBrand reconciles the payment instead of failing 503.
+    // R15 (Mutation): swallowing platform errors or skipping canAccessBrand reconciles instead of failing with 503.
     const payA = await seedPayment(BRAND_A)
     platformClient.invalidateCountryCache()
     expect((platformClient as any).countryCache.size).toBe(0)
@@ -345,7 +345,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E8 handles concurrent return requests: rejects foreign retries with 404 and applies the owning brand purchase only once', async () => {
-    // R15 (Mutation): removing canAccessBrand or the atomic status claim lets foreign calls or duplicate owner calls apply twice.
+    // R15 (Mutation): removing canAccessBrand or the atomic status claim lets foreign or duplicate calls apply.
     const payA = await seedPayment(BRAND_A)
     const payB = await seedPayment(BRAND_B)
 
@@ -371,7 +371,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
   })
 
   it('E9 rejects a foreign caller with 404 when the payment is in intermediate processing state and lets the owner finish it once', async () => {
-    // R15 (Mutation): skipping canAccessBrand on processing payments lets a foreign caller trigger completeExternalPayment.
+    // R15 (Mutation): skipping canAccessBrand on processing rows lets a foreign caller run completeExternalPayment.
     const processingB = await seedPayment(BRAND_B, {
       status: PaymentStatus.PROCESSING,
       providerPaymentId: null as unknown as string,

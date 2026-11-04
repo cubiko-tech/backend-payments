@@ -212,7 +212,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
   }
 
   it('answers 404 PAYMENT_NOT_FOUND without consulting the provider when the payment belongs to another brand', async () => {
-    // R15 (Mutation): removing canAccessBrand in CheckoutService.reconcilePayment returns 200 and reconciles the foreign payment.
+    // R15 (Mutation): removing canAccessBrand in reconcilePayment returns 200 and reconciles the foreign payment.
     findOnePayment.mockResolvedValue({
       id: PAYMENT_ID,
       brandId: BRAND_B,
@@ -231,7 +231,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
   })
 
   it('returns completed status and refundedToWallet for the owning brand when sent with both cookie and BFF server Bearer', async () => {
-    // R15 (Mutation): reading Bearer before cookie or dropping refundedToWallet breaks the owning brand return response.
+    // R15 (Mutation): reading Bearer before cookie or dropping refundedToWallet breaks the owner return response.
     findOnePayment.mockResolvedValueOnce({
       id: PAYMENT_ID,
       brandId: BRAND_A,
