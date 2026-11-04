@@ -615,3 +615,18 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: abierto — el alcance de LOC-115 cierra el reembolso sobre pagos `refunded`, el `pending`
   repetido y el monto superior al pago; lo cierra exigir `payments.status = 'completed'` y bloquear o
   sumar reembolsos en `processing`/`completed` cuando `approve` ejecute la devolución.
+
+## Dos avisos legítimos de Dropi sin `eventId` y con cuerpo idéntico byte a byte colisionan, y el `down` de la migración falla si hay claves compartidas entre proveedores (LOC-118)
+
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:189-199` (`webhookEventId`);
+  `src/webhook/entities/webhookEvent.entity.ts:12` (`UQ_webhook_events_provider_event`).
+- **Qué lo dispara**: (a) Dropi envía dos notificaciones distintas sin `eventId` cuyo cuerpo firmado
+  (`rawBody`) es idéntico byte a byte (mismo `event`, `chargeId` y resto de campos, sin marca temporal);
+  (b) correr `migration:revert` de `migrations/1793775625851-WebhookEventsUniquePerProvider.ts` cuando dos
+  proveedores distintos ya guardaron filas con la misma `providerEventId`.
+- **Qué rompe**: en (a), la segunda notificación se lee como duplicado de la primera; para un mismo
+  `chargeId` y `event` el efecto ya es idempotente. En (b), `ADD CONSTRAINT "UQ_webhook_events_provider_id"
+  UNIQUE ("providerEventId")` falla sin borrar filas para no perder historial de eventos.
+- **Estado**: aceptado en LOC-118 — cuando Dropi incluye `eventId` se usa ese valor; sin `eventId`, el
+  hash SHA-256 de `rawBody` es la única señal determinística cubierta por `x-dropi-signature`.
+

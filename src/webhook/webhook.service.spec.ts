@@ -16,6 +16,7 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { ClientRolesService } from '../client/client-roles.service'
 
 /**
@@ -70,6 +71,8 @@ describe('WebhookService.receive', () => {
         { provide: getQueueToken('webhook-retry'), useValue: queue },
         // El ramo firmado tiene su propio bloque más abajo, con el handler real.
         { provide: ConfioSubscriptionWebhookService, useValue: { handle: jest.fn() } },
+        // R17: `receive` tests only Confio idempotency; Mercado Pago is not called.
+        { provide: MercadoPagoProvider, useValue: { getNoticePayment: jest.fn() } },
       ],
     }).compile()
 
@@ -80,10 +83,12 @@ describe('WebhookService.receive', () => {
     return service.receive('confio', 'subscription.billingStatusChanged', EVENT_ID, { event: 'x' })
   }
 
-  it('consulta la idempotencia contra la escritura, no contra la réplica', async () => {
+  it('queries idempotency by provider and providerEventId against DBWrite, not DBRead', async () => {
     await recibir()
 
-    expect(writeRepo.findOne).toHaveBeenCalledWith({ where: { providerEventId: EVENT_ID } })
+    expect(writeRepo.findOne).toHaveBeenCalledWith({
+      where: { provider: 'confio', providerEventId: EVENT_ID },
+    })
     expect(readRepo.findOne).not.toHaveBeenCalled()
   })
 
@@ -261,6 +266,8 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: eventRepo },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: ConfioProvider, useValue: confio },
+        // R17: Only Confio subscription webhooks run in this block; Mercado Pago is not called.
+        { provide: MercadoPagoProvider, useValue: { getNoticePayment: jest.fn() } },
         // El corte de acceso en roles tiene su propio spec
         // (`confio-subscription-webhook.service.spec.ts`); acá el canal responde
         // OK para que estos casos midan sólo el estado local.

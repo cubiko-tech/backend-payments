@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { createHmac, timingSafeEqual } from 'crypto'
+import { createHash, createHmac, timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
   CreateCheckoutParams,
@@ -180,6 +180,22 @@ export class DropiProvider implements PaymentProvider {
     if (received.length !== expected.length) return false
 
     return timingSafeEqual(received, expected)
+  }
+
+  /**
+   * Deduplication key of a notification whose signature was already validated: keeps `payload.eventId`
+   * when it is a non-empty string or finite number, and falls back to the SHA-256 of the signed raw body.
+   */
+  webhookEventId(rawBody: Buffer, payload?: { eventId?: unknown } | null): string {
+    const rawId = payload?.eventId
+    if (typeof rawId === 'string' && rawId.trim() !== '') {
+      return rawId.trim()
+    }
+    if (typeof rawId === 'number' && Number.isFinite(rawId)) {
+      return String(rawId)
+    }
+    const digest = createHash('sha256').update(rawBody).digest('hex')
+    return `dropi:sha256:${digest}`
   }
 
   // ===========================================

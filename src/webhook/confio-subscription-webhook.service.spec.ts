@@ -21,6 +21,7 @@ import {
   SubscriptionEventType,
 } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { ClientRolesService } from '../client/client-roles.service'
 
 /**
@@ -1687,6 +1688,8 @@ describe('WebhookService — roles caído marca el webhook para reintento', () =
           useValue: { transaction: jest.fn((cb: any) => cb(manager)) },
         },
         { provide: ConfioProvider, useValue: { getSubscription: jest.fn() } },
+        // R17: Only Confio subscription webhooks run in this suite; Mercado Pago is not called.
+        { provide: MercadoPagoProvider, useValue: { getNoticePayment: jest.fn() } },
         {
           provide: ClientRolesService,
           useValue: {

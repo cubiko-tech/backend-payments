@@ -35,6 +35,12 @@ export class MercadoPagoApiError extends Error {
   }
 }
 
+export interface MercadoPagoNoticePayment {
+  status: string
+  externalReference: string | null
+  transactionAmount: number | null
+}
+
 /**
  * Implementación de MercadoPago como proveedor de pagos.
  * Soporta: tarjetas, PSE, Nequi, transferencia bancaria.
@@ -166,6 +172,33 @@ export class MercadoPagoProvider implements PaymentProvider {
         statusDetail: payment.status_detail,
         transactionAmount: payment.transaction_amount,
       },
+    }
+  }
+
+  /**
+   * Fetches the payment referenced by a webhook notification (`data.id`) directly from Mercado Pago
+   * (`GET /v1/payments/{id}`) so a notice never completes a payment without verifying its live status.
+   * @throws when Mercado Pago fails or returns no `status`.
+   */
+  async getNoticePayment(mpPaymentId: string): Promise<MercadoPagoNoticePayment> {
+    this.ensureConfigured()
+
+    const payment = await this.mpFetch(`/v1/payments/${encodeURIComponent(mpPaymentId)}`)
+    if (typeof payment?.status !== 'string' || payment.status.trim() === '') {
+      throw new Error(`MercadoPago payment ${mpPaymentId} returned no status`)
+    }
+
+    const externalReference =
+      typeof payment.external_reference === 'string' && payment.external_reference.trim() !== ''
+        ? payment.external_reference.trim()
+        : null
+    const rawAmount = Number(payment.transaction_amount)
+    const transactionAmount = Number.isFinite(rawAmount) ? rawAmount : null
+
+    return {
+      status: payment.status,
+      externalReference,
+      transactionAmount,
     }
   }
 

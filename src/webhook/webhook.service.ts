@@ -8,6 +8,8 @@ import { Payment } from '../payment/entities/payment.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
+import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
 
 const MAX_WEBHOOK_RETRIES = 3
 
@@ -33,6 +35,7 @@ export class WebhookService {
     @InjectQueue('webhook-retry')
     private readonly retryQueue: Queue,
     private readonly confioSubscriptions: ConfioSubscriptionWebhookService,
+    private readonly mercadoPagoProvider: MercadoPagoProvider,
   ) {}
 
   /**
@@ -47,14 +50,10 @@ export class WebhookService {
    */
   async receive(provider: string, eventType: string, providerEventId: string, payload: any) {
     try {
-      // Idempotencia. El chequeo previo existe para evitar un INSERT condenado,
-      // no para garantizar unicidad: entre el SELECT y el INSERT entra otra
-      // entrega. Quien garantiza es el índice único `UQ_webhook_events_provider_id`
-      // (`migrations/1742600000000-InitialSchema.ts:233`), así que el contrato de
-      // idempotencia es la rama del 23505 de abajo, no este SELECT. Va contra la
-      // escritura —no contra la réplica— para que el lag no entre en el argumento.
+      // Pre-check against DBWrite; concurrent uniqueness is enforced by
+      // `UQ_webhook_events_provider_event` on `(provider, providerEventId)` and the 23505 branch.
       const existing = await this.webhookEventRepository.findOne({
-        where: { providerEventId },
+        where: { provider, providerEventId },
       })
 
       if (existing) {
@@ -81,7 +80,7 @@ export class WebhookService {
         // La idempotencia en recepción alcanza porque el efecto aguas abajo también
         // lo es (`checkout.service.ts:411` corta si el pago ya está COMPLETED).
         const winner = await this.webhookEventRepository.findOne({
-          where: { providerEventId },
+          where: { provider, providerEventId },
         })
         this.logger.warn(
           `Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`,
@@ -204,13 +203,15 @@ export class WebhookService {
     // =============================================
     if (provider === 'mercadopago') {
       if (eventType === 'payment' && payload.action === 'payment.created') {
-        // Consultar estado del pago en MP
         const mpPaymentId = payload.data?.id
-        if (mpPaymentId) {
-          // Buscar nuestro payment por el external_reference o metadata
-          const paymentId = await this.findPaymentByProviderIds(String(mpPaymentId))
-          if (paymentId) {
-            await this.completePayment(paymentId, { mpPaymentId })
+        if (mpPaymentId !== undefined && mpPaymentId !== null && String(mpPaymentId) !== '') {
+          const resolved = await resolveMercadoPagoNotice(
+            this.mercadoPagoProvider,
+            this.paymentReadRepo,
+            String(mpPaymentId),
+          )
+          if (resolved) {
+            await this.completePayment(resolved.paymentId, resolved.providerData)
           }
         }
         return

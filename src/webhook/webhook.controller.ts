@@ -176,7 +176,7 @@ export class WebhookController {
     // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.event || payload?.type || 'unknown'
-    const providerEventId = payload?.eventId || `dropi_${Date.now()}`
+    const providerEventId = this.dropiProvider.webhookEventId(rawBody, payload)
 
     return this.webhookService.receive('dropi', eventType, providerEventId, payload)
   }

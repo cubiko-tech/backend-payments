@@ -80,6 +80,8 @@ describe('A Dropi 404 is no answer about the payment (PostgreSQL, LOC-102)', () 
       // R17: The retry queue needs Redis and only acts on a failure, which fails the case below.
       { add: jest.fn() } as any,
       {} as any,
+      // R17: Only Dropi is dispatched here; Mercado Pago's client is not reached.
+      {} as any,
     )
     webhook.setCheckoutService(a.checkout)
     const providerEventId = `${EVENT_PREFIX}${payment.id}`

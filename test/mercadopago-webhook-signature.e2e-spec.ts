@@ -79,6 +79,8 @@ describe('Mercado Pago webhook signature and deduplication (PostgreSQL, LOC-113)
       // R17: The retry queue needs Redis and only acts on a failed dispatch, which no case here has.
       { add: jest.fn() } as any,
       {} as any,
+      // R17: Signature cases do not send `type: 'payment'`, so Mercado Pago status is not queried here.
+      {} as any,
     )
 
     const moduleRef = await Test.createTestingModule({
