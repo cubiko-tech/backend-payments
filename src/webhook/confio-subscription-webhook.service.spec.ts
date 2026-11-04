@@ -1,4 +1,4 @@
-// R6: Pre-existing Confio subscription webhook suite; LOC-118 only adds MercadoPagoProvider to the test module.
+// R6: Single-responsibility unit suite for ConfioSubscriptionWebhookService plan access cut, restore, and audit trace.
 import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'

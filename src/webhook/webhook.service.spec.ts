@@ -1,4 +1,4 @@
-// R6: Pre-existing Confio webhook suite above 400 lines; LOC-118 only adds MercadoPagoProvider to the test module.
+// R6: Single-responsibility unit suite for WebhookService idempotency and Confio subscription event dispatch.
 import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
@@ -21,17 +21,16 @@ import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provide
 import { ClientRolesService } from '../client/client-roles.service'
 
 /**
- * Error tal como lo entrega el driver: `code` y `constraint` copiados de una
- * sonda real contra la BD de dev (insert duplicado en `webhook_events`, que
- * devolvió `code=23505 constraint=UQ_webhook_events_provider_id`). TypeORM
- * asigna las propiedades del error del driver sobre el `QueryFailedError`.
+ * Driver error shape for a duplicate insert on `webhook_events` (`code=23505`,
+ * `constraint=UQ_webhook_events_provider_event`); TypeORM copies the driver
+ * error properties onto `QueryFailedError`.
  */
 function violacionDeUnico(): Error {
   const driverError: any = new Error(
-    'duplicate key value violates unique constraint "UQ_webhook_events_provider_id"',
+    'duplicate key value violates unique constraint "UQ_webhook_events_provider_event"',
   )
   driverError.code = '23505'
-  driverError.constraint = 'UQ_webhook_events_provider_id'
+  driverError.constraint = 'UQ_webhook_events_provider_event'
   driverError.severity = 'ERROR'
   return new QueryFailedError('INSERT INTO webhook_events', [], driverError)
 }

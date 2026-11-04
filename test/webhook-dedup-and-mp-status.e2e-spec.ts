@@ -201,25 +201,29 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
     expect(third.body.duplicate).toBe(true)
   })
 
-  it('E2 deduplicates 2 concurrent deliveries of the same Dropi notice without eventId via the unique index', async () => {
-    // R15: red if the unique index or 23505 handler is missing: concurrent requests create 2 rows or 500.
+  it('E2 deduplicates a second Dropi delivery without eventId via UQ_webhook_events_provider_event and returns the dropi winner', async () => {
+    // R15: red if 23505 is not caught (returns error instead of duplicate) or winner lookup omits provider (returns stripe row).
     const marker = `${MARKER_PREFIX}e2`
     const body = { marker, event: 'charge.failed', chargeId: `${MARKER_PREFIX}ch-e2` }
     const expectedId = `dropi:sha256:${createHash('sha256').update(JSON.stringify(body)).digest('hex')}`
 
-    const [resA, resB] = await Promise.all([deliverDropi(body), deliverDropi(body)])
+    await webhook.receive('stripe', 'unknown.event', expectedId, { marker: `${marker}-stripe` })
+    await waitEventSettled('stripe', expectedId)
 
-    expect(resA.status).toBe(200)
-    expect(resB.status).toBe(200)
-    expect([Boolean(resA.body.duplicate), Boolean(resB.body.duplicate)].sort()).toEqual([
-      false,
-      true,
-    ])
-
+    const first = await deliverDropi(body)
+    expect(first.status).toBe(200)
     await waitEventSettled('dropi', expectedId)
-    const rows = await dropiRowsByMarker(marker)
 
-    expect(rows).toHaveLength(1)
+    // R17: Forces the second delivery past the pre-check SELECT so its INSERT collides with UQ_webhook_events_provider_event (23505).
+    jest.spyOn(events, 'findOne').mockResolvedValueOnce(null)
+    const second = await deliverDropi(body)
+
+    expect(second.status).toBe(200)
+    expect(second.body.error).toBeUndefined()
+    expect(second.body.duplicate).toBe(true)
+    expect(second.body.data.provider).toBe('dropi')
+    expect(second.body.data.id).toBe(first.body.data.id)
+    expect(await dropiRowsByMarker(marker)).toHaveLength(1)
   })
 
   it('E3 keeps payment pending and does not credit wallet when Mercado Pago payment.created has status pending', async () => {
@@ -326,9 +330,15 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
     await deliverMpCreated(mpPaymentId, ts1)
     await waitEventSettled('mercadopago', `mp:payment.created:${mpPaymentId}:${ts1}`)
 
-    await deliverMpCreated(mpPaymentId, ts2)
-    await waitEventSettled('mercadopago', `mp:payment.created:${mpPaymentId}:${ts2}`)
+    const second = await deliverMpCreated(mpPaymentId, ts2)
+    const secondEvent = await waitEventSettled(
+      'mercadopago',
+      `mp:payment.created:${mpPaymentId}:${ts2}`,
+    )
 
+    expect(second.status).toBe(200)
+    expect(second.body.duplicate).toBeUndefined()
+    expect(secondEvent?.status).toBe(WebhookStatus.PROCESSED)
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.COMPLETED)
     const sub = await subscriptionOf(a.dataSource, BRAND_ID)
     const subEvents = await a.dataSource
