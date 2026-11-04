@@ -250,7 +250,7 @@ export class MercadoPagoProvider implements PaymentProvider {
   }
 
   /**
-   * Checks the `x-signature` header (`ts=<seconds>,v1=<hex hmac>`): the HMAC of the manifest, compared in
+   * Checks the `x-signature` header (`ts=<seconds or ms>,v1=<hex hmac>`): the HMAC of the manifest, compared in
    * constant time, and a `ts` within {@link SIGNATURE_WINDOW_MS} of now. A body without `data.id` is rejected.
    */
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
@@ -258,7 +258,7 @@ export class MercadoPagoProvider implements PaymentProvider {
     const signed = readSignedFields(payload, signature)
     if (!secret || !signed) return false
 
-    if (Math.abs(Date.now() - Number(signed.ts) * 1000) > SIGNATURE_WINDOW_MS) return false
+    if (Math.abs(Date.now() - tsToMs(signed.ts)) > SIGNATURE_WINDOW_MS) return false
 
     const manifest = `id:${signed.dataId};request-id:;ts:${signed.ts};`
     const expected = createHmac('sha256', secret).update(manifest).digest('hex')
@@ -314,4 +314,9 @@ function readSignedFields(payload: Buffer, signature: string): SignedFields | nu
 /** Only strings and numbers become part of the manifest or the key; `String()` throws on some objects. */
 function isPrimitiveField(value: unknown): value is string | number {
   return typeof value === 'string' || typeof value === 'number'
+}
+
+/** Mercado Pago shows `ts` both in seconds (10 digits) and in milliseconds (13 digits). */
+function tsToMs(ts: string): number {
+  return ts.length >= 13 ? Number(ts) : Number(ts) * 1000
 }

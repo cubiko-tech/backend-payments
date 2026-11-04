@@ -418,11 +418,11 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 ## Un aviso de Mercado Pago con `ts` a más de 5 minutos se rechaza con 401 (LOC-113)
 
 - **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:261` (`SIGNATURE_WINDOW_MS`, `:283`)
-- **Qué lo dispara**: un reintento de Mercado Pago (cada 15 min, según su doc) que conserve el `ts` original, o un
-  `ts` que llegue en milisegundos: la doc no dice ninguna de las dos cosas y el código lo lee en segundos.
+- **Qué lo dispara**: un reintento de Mercado Pago (cada 15 min, según su doc) que conserve el `ts` original; la doc
+  no dice si lo conserva. El `ts` se lee en segundos con 10 dígitos y en milisegundos con 13 o más (`:320`).
 - **Qué rompe**: el aviso no entra. El pago lo cierra el barrido `reconcileExternalPayments`
-  (`src/tasks/tasks.service.ts:660`), cada 5 min; con `ts` en milisegundos no entraría ningún aviso.
-- **Estado**: mitigado por el barrido para el reintento; abierto — lo cierra ver el primer aviso real de Mercado Pago.
+  (`src/tasks/tasks.service.ts:660`), cada 5 min.
+- **Estado**: mitigado por el barrido; abierto — lo cierra ver el primer reintento real de Mercado Pago.
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 

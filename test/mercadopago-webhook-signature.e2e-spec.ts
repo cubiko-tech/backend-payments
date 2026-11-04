@@ -188,6 +188,32 @@ describe('Mercado Pago webhook signature and deduplication (PostgreSQL, LOC-113)
     expect(await settled(dataId)).toHaveLength(2)
   })
 
+  it('E12 accepts a fresh valid signature whose ts is in milliseconds', async () => {
+    // R15: red if a 13-digit ts is read as seconds again: the notice answers 401 and stores nothing.
+    const dataId = `${DATA_PREFIX}fresh-ms`
+
+    const res = await deliver(
+      { action: 'payment.updated', data: { id: dataId } },
+      sign(dataId, Date.now()),
+    )
+
+    expect(res.status).toBe(200)
+    expect(await settled(dataId)).toHaveLength(1)
+  })
+
+  it('E13 rejects a valid signature with a ts from 2001 in milliseconds', async () => {
+    // R15: red if the window skips millisecond ts: the 2001 signature answers 200 and stores a row.
+    const dataId = `${DATA_PREFIX}2001-ms`
+
+    const res = await deliver(
+      { action: 'payment.updated', data: { id: dataId } },
+      sign(dataId, TS_2001 * 1000),
+    )
+
+    expect(res.status).toBe(401)
+    expect(await settled(dataId)).toHaveLength(0)
+  })
+
   describe.each([
     { secret: 'configured', value: SECRET },
     { secret: 'not configured', value: undefined },

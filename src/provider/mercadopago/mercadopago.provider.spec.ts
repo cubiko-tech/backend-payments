@@ -106,6 +106,16 @@ describe('MercadoPagoProvider - validateWebhookSignature', () => {
     expect(provider().validateWebhookSignature(PAYLOAD, sign(SECRET))).toBe(false)
   })
 
+  it('U8 accepts a fresh valid signature whose ts is in milliseconds', () => {
+    // R15: red if a 13-digit ts is read as seconds again: every real millisecond notice is rejected.
+    expect(provider().validateWebhookSignature(PAYLOAD, sign(SECRET, NOW_MS))).toBe(true)
+  })
+
+  it('U9 rejects a valid signature whose ts is from 2001 in milliseconds', () => {
+    // R15: red if the window skips millisecond ts: a captured 2001 signature in ms is accepted.
+    expect(provider().validateWebhookSignature(PAYLOAD, sign(SECRET, 1000000000000))).toBe(false)
+  })
+
   it.each([
     { name: 'action', body: '{"action":{"toString":1},"data":{"id":"x"}}' },
     { name: 'type', body: '{"type":{"toString":1},"data":{"id":"x"}}' },
