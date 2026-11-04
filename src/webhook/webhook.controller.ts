@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Param,
+  ParseUUIDPipe,
   Query,
   Headers,
   RawBodyRequest,
@@ -18,6 +19,10 @@ import { Request } from 'express'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { WebhookService } from './webhook.service'
+import {
+  ListFailedWebhooksQueryDto,
+  ListWebhookEventsQueryDto,
+} from './dto/webhook-admin-query.dto'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
@@ -356,12 +361,12 @@ export class WebhookController {
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar todos los webhooks con filtros (Admin)' })
   @ApiResponse({ status: 200, description: 'Webhooks con stats' })
-  async getAllWebhooks(
-    @Query('status') status?: string,
-    @Query('provider') provider?: string,
-    @Query('limit') limit?: number,
-  ) {
-    return this.webhookService.getAllWebhooks({ status, provider, limit: limit || 100 })
+  async getAllWebhooks(@Query() query?: ListWebhookEventsQueryDto) {
+    return this.webhookService.getAllWebhooks({
+      status: query?.status,
+      provider: query?.provider,
+      limit: query?.limit || 100,
+    })
   }
 
   @Get('admin/failed')
@@ -369,8 +374,8 @@ export class WebhookController {
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar webhooks fallidos (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de webhooks fallidos' })
-  async getFailedWebhooks(@Query('limit') limit?: number) {
-    return this.webhookService.getFailedWebhooks(limit || 50)
+  async getFailedWebhooks(@Query() query?: ListFailedWebhooksQueryDto) {
+    return this.webhookService.getFailedWebhooks(query?.limit || 50)
   }
 
   @Post('admin/:id/retry')
@@ -378,7 +383,7 @@ export class WebhookController {
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
-  async retryWebhook(@Param('id') id: string) {
+  async retryWebhook(@Param('id', ParseUUIDPipe) id: string) {
     return this.webhookService.retryWebhook(id)
   }
 }

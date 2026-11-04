@@ -35,6 +35,8 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequirePermission, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
+import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
+import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
 
 /**
  * Controller admin centralizado para backend-payments.
@@ -513,18 +515,7 @@ export class AdminController {
   @Post('wallets')
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
-  async createWallet(
-    @Body()
-    body: {
-      brandId: string
-      userId?: string
-      provider: string
-      currency: string
-      label?: string
-      balance?: number
-    },
-    @Req() req?: any,
-  ) {
+  async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
     // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
@@ -600,13 +591,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Ajuste realizado' })
   async adjustWallet(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body()
-    body: {
-      type: 'credit' | 'debit'
-      amount: number
-      description?: string
-      category?: string
-    },
+    @Body() body: AdjustWalletDto,
     @Req() req?: any,
   ) {
     const actor = req?.user?.id || 'admin'
@@ -762,16 +747,7 @@ export class AdminController {
   @Post('providers')
   @ApiOperation({ summary: 'Crear configuración de proveedor' })
   @ApiResponse({ status: 201, description: 'Proveedor creado' })
-  async createProvider(
-    @Body()
-    body: {
-      country: string
-      provider: string
-      isActive?: boolean
-      priority?: number
-      metadata?: Record<string, any>
-    },
-  ) {
+  async createProvider(@Body() body: CreateProviderConfigDto) {
     const existing = await this.providerReadRepo.findOne({
       where: { country: body.country.toUpperCase(), provider: body.provider.toLowerCase() },
     })
@@ -796,7 +772,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Proveedor actualizado' })
   async updateProvider(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { isActive?: boolean; priority?: number; metadata?: Record<string, any> },
+    @Body() body: UpdateProviderConfigDto,
   ) {
     const config = await this.providerWriteRepo.findOne({ where: { id } })
     if (!config) return { error: 'Proveedor no encontrado' }

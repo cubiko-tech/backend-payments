@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   Req,
@@ -76,7 +77,7 @@ export class CreditController {
   @Get('preapproval/:brandId')
   @UseGuards(ApiAuthGuard)
   @ApiOperation({ summary: 'Pre-aprobado de crédito (informativo, curado para el cliente)' })
-  async preapproval(@Param('brandId') brandId: string, @Req() req: any) {
+  async preapproval(@Param('brandId', ParseUUIDPipe) brandId: string, @Req() req: any) {
     // Brand- y role-scope (defense-in-depth además del BFF): salvo el server/
     // superadmin, el usuario debe ser miembro de la marca con rol owner/admin/
     // financiero. La causa del 403 no distingue para no filtrar existencia.
@@ -109,7 +110,10 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Último score (o historial) de una marca' })
-  async getByBrand(@Param('brandId') brandId: string, @Query('latest') latest?: string) {
+  async getByBrand(
+    @Param('brandId', ParseUUIDPipe) brandId: string,
+    @Query('latest') latest?: string,
+  ) {
     const data = await this.creditService.getByBrand(brandId, latest !== 'false')
     return { data }
   }
@@ -140,7 +144,7 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:runs')
   @ApiOperation({ summary: 'Progreso/estado de un run' })
-  async getRun(@Param('id') id: string) {
+  async getRun(@Param('id', ParseUUIDPipe) id: string) {
     return { data: await this.creditRunService.getRun(id) }
   }
 
@@ -150,7 +154,7 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Perfil de crédito de una marca (documento + consentimiento)' })
-  async getProfile(@Param('brandId') brandId: string) {
+  async getProfile(@Param('brandId', ParseUUIDPipe) brandId: string) {
     return { data: await this.bureauService.getProfile(brandId) }
   }
 
@@ -158,7 +162,10 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Registrar/actualizar el documento legal del perfil' })
-  async registerProfile(@Param('brandId') brandId: string, @Body() body: RegisterProfileDto) {
+  async registerProfile(
+    @Param('brandId', ParseUUIDPipe) brandId: string,
+    @Body() body: RegisterProfileDto,
+  ) {
     return { data: await this.bureauService.upsertProfile(brandId, body) }
   }
 
@@ -167,7 +174,7 @@ export class CreditController {
   @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Registrar consentimiento habeas data del titular' })
   async grantConsent(
-    @Param('brandId') brandId: string,
+    @Param('brandId', ParseUUIDPipe) brandId: string,
     @Body() body: GrantConsentDto,
     @Req() req: any,
   ) {
@@ -179,7 +186,7 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:bureau')
   @ApiOperation({ summary: 'Historial de checks de buró de una marca' })
-  async bureauChecks(@Param('brandId') brandId: string) {
+  async bureauChecks(@Param('brandId', ParseUUIDPipe) brandId: string) {
     return { data: await this.bureauService.getChecksByBrand(brandId) }
   }
 

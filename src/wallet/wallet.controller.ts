@@ -14,6 +14,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { WalletService } from './wallet.service'
 import { CreateWalletDto } from './dto/create-wallet.dto'
 import { TransferWalletDto } from './dto/transfer-wallet.dto'
+import { ListWalletTransactionsQueryDto } from './dto/list-wallet-transactions-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
@@ -112,7 +113,7 @@ export class WalletController {
   @ApiResponse({ status: 200, description: 'Transacciones obtenidas correctamente' })
   async getTransactions(
     @Param('id', ParseUUIDPipe) id: string,
-    @Query() filters: { page?: number; limit?: number; type?: string },
+    @Query() filters: ListWalletTransactionsQueryDto,
     @Req() req?: any,
   ) {
     if (!isPrivilegedCaller(req)) {

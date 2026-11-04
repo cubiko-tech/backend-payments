@@ -7,6 +7,7 @@ import {
   Delete,
   Body,
   Param,
+  ParseUUIDPipe,
   Query,
   Req,
   UseGuards,
@@ -25,6 +26,9 @@ import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
 import { CreateSubscriptionDto } from './dto/create-subscription.dto'
 import { StartPaidSubscriptionDto } from './dto/start-paid-subscription.dto'
+import { StartTrialSubscriptionDto } from './dto/start-trial-subscription.dto'
+import { CancelSubscriptionDto, ReactivateSubscriptionDto } from './dto/cancel-subscription.dto'
+import { UpsertEnterprisePricingDto } from './dto/upsert-enterprise-pricing.dto'
 
 /**
  * Authenticated subscription endpoints guarded by `ApiAuthGuard` (session cookie or Bearer
@@ -141,22 +145,10 @@ export class SubscriptionController {
     description: 'BRAND_ID_REQUIRED (service principal without brandId)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
-  async startTrial(
-    @Body()
-    data: {
-      brandId: string
-      userId: string
-      planSlug: string
-      provider?: any
-      walletId?: string
-      /** Teléfono de la cuenta de ConfioPagos que va a pagar, si no es el del perfil. */
-      billingPhone?: string
-    },
-    @Req() req?: any,
-  ) {
+  async startTrial(@Body() data: StartTrialSubscriptionDto, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId, req)
     const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
-    return this.subscriptionService.startTrial({ ...data, brandId, userId })
+    return this.subscriptionService.startTrial({ ...(data as any), brandId, userId })
   }
 
   /**
@@ -202,13 +194,10 @@ export class SubscriptionController {
     description: 'BRAND_ID_REQUIRED (service principal without brandId)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
-  async cancel(
-    @Body() data: { brandId: string; reason: string; triggeredBy?: string },
-    @Req() req?: any,
-  ) {
-    const brandId = await this.resolveBrandId(data?.brandId, req)
+  async cancel(@Body() data: CancelSubscriptionDto, @Req() req?: any) {
+    const brandId = await this.resolveBrandId(data?.brandId as string, req)
     return this.subscriptionService.cancel(brandId, {
-      reason: data?.reason,
+      reason: data?.reason as string,
       triggeredBy: req?.user?.id,
     })
   }
@@ -221,8 +210,8 @@ export class SubscriptionController {
     description: 'BRAND_ID_REQUIRED (service principal without brandId)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
-  async reactivate(@Body() data: { brandId: string; triggeredBy?: string }, @Req() req?: any) {
-    const brandId = await this.resolveBrandId(data?.brandId, req)
+  async reactivate(@Body() data: ReactivateSubscriptionDto, @Req() req?: any) {
+    const brandId = await this.resolveBrandId(data?.brandId as string, req)
     return this.subscriptionService.reactivate(brandId, req?.user?.id)
   }
 
@@ -283,7 +272,7 @@ export class SubscriptionController {
   @ApiOperation({ summary: 'Get enterprise pricing for a brand (member or operator)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise obtenido' })
   @ApiResponse({ status: 403, description: 'forbidden (not a brand member or operator)' })
-  async getEnterprisePricing(@Param('brandId') brandId: string, @Req() req?: any) {
+  async getEnterprisePricing(@Param('brandId', ParseUUIDPipe) brandId: string, @Req() req?: any) {
     await assertResourceBrandAccess(
       this.platformClient,
       this.logger,
@@ -301,15 +290,8 @@ export class SubscriptionController {
   @ApiResponse({ status: 201, description: 'Precio enterprise guardado' })
   @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
   async upsertEnterprisePricing(
-    @Param('brandId') brandId: string,
-    @Body()
-    data: {
-      monthlyPrice: number
-      currency?: string
-      negotiatedBy?: string
-      validUntil?: string
-      notes?: string
-    },
+    @Param('brandId', ParseUUIDPipe) brandId: string,
+    @Body() data: UpsertEnterprisePricingDto,
   ) {
     return this.enterprisePricingService.upsert(brandId, {
       ...data,
@@ -322,7 +304,7 @@ export class SubscriptionController {
   @ApiOperation({ summary: 'Eliminar precio enterprise (volver a estándar) (Admin)' })
   @ApiResponse({ status: 200, description: 'Precio enterprise eliminado' })
   @ApiResponse({ status: 403, description: 'forbidden (operator required)' })
-  async removeEnterprisePricing(@Param('brandId') brandId: string) {
+  async removeEnterprisePricing(@Param('brandId', ParseUUIDPipe) brandId: string) {
     return this.enterprisePricingService.remove(brandId)
   }
 

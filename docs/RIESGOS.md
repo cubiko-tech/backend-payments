@@ -630,3 +630,16 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Estado**: aceptado en LOC-118 — cuando Dropi incluye `eventId` se usa ese valor; sin `eventId`, el
   hash SHA-256 de `rawBody` es la única señal determinística cubierta por `x-dropi-signature`.
 
+## `POST /billing-profile/:brandId/documents` exige `https://` pero no filtra el host de `documentUrl` (LOC-123)
+
+- **Dónde**: `src/billing-profile/dto/legal-document.dto.ts:62` (`UploadLegalDocumentDto`,
+  `documentUrl`) y `src/billing-profile/billing-profile.controller.ts:183` (`uploadDocument`).
+- **Qué lo dispara**: un llamador autenticado con acceso a `brandId` envía en `documentUrl` una URL `https://`
+  de un dominio externo arbitrario en lugar del bucket de documentos legales de ROAX.
+- **Qué rompe**: el enlace se persiste en `brand_legal_documents.documentUrl` y se muestra como enlace
+  externo al operador que revisa el documento en `admin`.
+- **Estado**: abierto — `UploadLegalDocumentDto` rechaza esquemas distintos de `https` (`http:`, `javascript:`,
+  `ftp:`) y textos que no son URL; la lista blanca de hosts de almacenamiento queda separada en INBOX
+  (aprobado 2026-11-04).
+
+
