@@ -72,10 +72,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## `WalletService.debit` no exige `walletId` ni pertenencia de la wallet a la marca (C3)
 
-- **Dónde**: `src/wallet/wallet.service.ts:190-255` (`debit`) y `src/tasks/tasks.service.ts:456-459`,
-  `:528-531`
+- **Dónde**: `src/wallet/wallet.service.ts:190-255` (`debit`) y `src/tasks/subscription-renewal.ts:113-117`,
+  `:173-177`
 - **Qué lo dispara**: una llamada directa a `walletService.debit` (por ejemplo desde `renewFromWallet` en
-  `src/tasks/tasks.service.ts:1172-1184` o desde un consumidor interno) con `walletId` vacío/`undefined`,
+  `src/tasks/wallet-renewal.ts:114-127` o desde un consumidor interno) con `walletId` vacío/`undefined`,
   con una wallet de otra `brandId` o con una wallet en `TKN`.
 - **Qué rompe**: TypeORM ignora condiciones `undefined` en `findOne({ where: { id: walletId } })` y
   bloquea la primera wallet de la tabla; además, sin validar `wallet.brandId` ni moneda `TKN`, `debit`
@@ -86,12 +86,12 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   que la wallet bloqueada pertenezca a `txData.brandId` cuando se informa la marca (`:238-243`), rechaza
   wallets o cobros en `TKN` (`:245-255`), y `processSubscriptionRenewals` / `retryFailedPayments`
   no le pasan a `renewFromWallet` una suscripción `provider === 'wallet'` con `walletId` nulo
-  (`src/tasks/tasks.service.ts:491-496`, `:571-576`), y si alguna llega ahí falla con
-  `MISSING_WALLET_ID` (`:1343-1348`).
+  (`src/tasks/subscription-renewal.ts:113-117`, `:173-177`), y si alguna llega ahí falla con
+  `MISSING_WALLET_ID` (`src/tasks/wallet-renewal.ts:36-41`).
 
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
-- **Dónde**: `src/tasks/tasks.service.ts:491-496`, `:571-576`
+- **Dónde**: `src/tasks/subscription-renewal.ts:113-117`, `:173-177`
 - **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo
 - **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet
 - **Estado**: abierto — lo cierra corregir cada fila; el log de error con su id y el contador de la
@@ -99,7 +99,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La renovación por wallet pide precio fijo en COP, omite la moneda en `debit` y `processWalletPayment` oculta fallos del débito (C3)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1123-1221` (`renewFromWallet`),
+- **Dónde**: `src/tasks/wallet-renewal.ts:34-169` (`renewFromWallet`),
   `src/checkout/checkout.service.ts:310-383` (`processWalletPayment`) y
   `src/wallet/wallet.service.ts:325-333` (`debit`)
 - **Qué lo dispara**: el cron de renovación cobrando por wallet una suscripción cuya marca tiene precio
@@ -110,40 +110,40 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `processWalletPayment` no inspeccionaba `debitResult.error` y reetiquetaba toda excepción como
   `INSUFFICIENT_BALANCE`, ocultaba el código real del rechazo o completaba pagos con débito fallido.
 - **Estado**: mitigado (criterio C3, LOC-6) — `renewFromWallet` resuelve la moneda de la wallet con
-  `resolveWalletCurrency` (`src/tasks/tasks.service.ts:1140`, `:1235-1249`), consulta
-  `getPlanPrice(sub.planSlug, currency)` (`:1141`), rechaza la moneda sin precio con
-  `WALLET_CURRENCY_MISMATCH` (`:1159-1165`) y pasa `currency` a `walletService.debit` verificando
-  `debitResult.error` (`:1172-1192`); `WalletService.debit` relanza errores tras el rollback
+  `resolveWalletCurrency` (`src/tasks/wallet-renewal.ts:62`, `:186-198`), consulta
+  `getPlanPrice(sub.planSlug, currency)` (`:74`), rechaza la moneda sin precio con
+  `WALLET_CURRENCY_MISMATCH` (`:94-100`) y pasa `currency` a `walletService.debit` verificando
+  `debitResult.error` (`:114-135`); `WalletService.debit` relanza errores tras el rollback
   (`src/wallet/wallet.service.ts:325-333`) y `processWalletPayment` preserva `RequestException` o
   envuelve fallos inesperados como `WALLET_DEBIT_FAILED` (`src/checkout/checkout.service.ts:347-354`,
   `:372-382`).
 
 ## Una renovación ya debitada en wallet queda sin extender su período local mientras `backend-roles` rechace el cambio de plan (LOC-14)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1139`, `:1196-1198`, `:1223-1233` (`renewFromWallet`,
-  `hasCycleDebit`) y `:1413-1439` (`extendSubscriptionPeriod`)
+- **Dónde**: `src/tasks/wallet-renewal.ts:60`, `:138-140`, `:172-184` (`renewFromWallet`,
+  `hasCycleDebit`) y `:242-300` (`extendSubscriptionPeriod`)
 - **Qué lo dispara**: una renovación por wallet cuyo débito del ciclo
   (`subscription:${sub.id}:${billingCycleKey}`) ya se asentó, pero `clientRoles.renewPlanForBrand`
-  (`src/tasks/tasks.service.ts:1418-1422`) devuelve `false`.
+  (`src/tasks/wallet-renewal.ts:249-253`) devuelve `false`.
 - **Qué rompe**: `extendSubscriptionPeriod` corta antes de avanzar `currentPeriodEnd` y
-  `nextBillingDate` (`src/tasks/tasks.service.ts:1423-1437`) para conservar la llave del ciclo y no
+  `nextBillingDate` (`src/tasks/wallet-renewal.ts:254-268`) para conservar la llave del ciclo y no
   enviar a `handleRenewalFailure` una suscripción que ya pagó. Mientras `backend-roles` siga devolviendo
-  `false`, `hasCycleDebit` (`:1139`) saltea la consulta de precio y la ventana de aplazamiento
-  (`:1140-1193`), dejando la suscripción con `nextBillingDate` vencida en `backend-payments` y
+  `false`, `hasCycleDebit` (`:60`) saltea la consulta de precio y la ventana de aplazamiento
+  (`:62-136`), dejando la suscripción con `nextBillingDate` vencida en `backend-payments` y
   reintentando `extendSubscriptionPeriod` en cada corrida horaria.
 - **Estado**: mitigado en doble cobro, degradación y carrera entre crons (LOC-14 y LOC-33) —
-  `hasCycleDebit` (`src/tasks/tasks.service.ts:1139`, `:1223-1233`) evita debitar dos veces,
+  `hasCycleDebit` (`src/tasks/wallet-renewal.ts:60`, `:172-184`) evita debitar dos veces,
   `processSubscriptionRenewals` y `expireLockedSubscription` excluyen `retryCount >= MAX_RETRY` de la
-  renovación (`:438`, `:444`, `:1441-1454`) y toman `acquireSubscriptionLock` por suscripción (`:447`,
-  `:629`, `:1473-1531`), y el rechazo de `backend-roles` se registra en `error` con `sub.id`
-  (`:1423-1428`). Abierto en convergencia: si `backend-roles` rechaza de forma permanente esa marca o
+  renovación (`src/tasks/subscription-renewal.ts:97`, `:104`, `:295-307`) y toman `acquireSubscriptionLock` por suscripción (`src/tasks/subscription-lock.ts:17-101`),
+  y el rechazo de `backend-roles` se registra en `error` con `sub.id`
+  (`src/tasks/wallet-renewal.ts:254-260`). Abierto en convergencia: si `backend-roles` rechaza de forma permanente esa marca o
   plan tras el débito, la extensión local se reintenta cada hora sin cota hasta que
   `renewPlanForBrand` devuelva `true`, y el débito queda retenido: `refundOrphanRenewalDebits` no lo
   devuelve mientras la fila siga viva y en ese ciclo (LOC-105).
 
 ## El aplazamiento de renovación por falta de precios sólo corre con caché frío y el caché tibio sirve precios vencidos sin tope (LOC-16)
 
-- **Dónde**: `src/tasks/tasks.service.ts:153`, `:1143-1166`, `:1461-1471` (`renewFromWallet`,
+- **Dónde**: `src/tasks/wallet-renewal.ts:19`, `:78-100`, `:302-309` (`renewFromWallet`,
   `isPostponementGraceExceeded`) y `src/client/client-roles.service.ts:94-96`, `:187-211`
   (`hasCachedPrices`, `getPlanRows`)
 - **Qué lo dispara**: una caída de `backend-roles` durante la renovación por wallet, ya sea con el
@@ -223,7 +223,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:206-259`, `:279-303`, `:336-408`,
   `:458-554`, `:556-654` (`hasWalletPaymentRefund`, `findConflictingPlanSubscription`,
   `refundSupersededWalletPayment`, `completeReconciledWalletPayment`, `reconcileWalletPayment`),
-  `src/tasks/tasks.service.ts:621-678`, `:684-729` (`reconcileWalletPayments`,
+  `src/tasks/payment-sweep.ts:242-292`, `:294-334` (`reconcileWalletPayments`,
   `expirePendingCheckouts`), `src/checkout/checkout.service.ts:466-629`, `:1961-1969`
   (`processWalletPayment`, `assignPlanInRoles`) y `src/client/client-roles.service.ts:314-321`,
   `:351-385` (`assignPlanToBrand`, `callRolesApi`)
@@ -351,8 +351,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 ## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
 
 - **Dónde**: `src/checkout/wallet-payment-close.ts:56` (`lockBrandPlan`);
-  `src/tasks/tasks.service.ts:1646`, `:1711` (`lockAndReread`, `acquireSubscriptionLock`)
-- **Qué lo dispara**: bajo el candado corren `getPlanPrice`, `renewPlanForBrand` y `degradarEnRoles` (roles),
+  `src/tasks/subscription-lock.ts:17`, `:79` (`lockAndReread`, `acquireSubscriptionLock`)
+- **Qué lo dispara**: bajo el candado corren `getPlanPrice`, `renewPlanForBrand` y `degradeInRoles` (roles),
   `resolveAmountAndCurrency` y `createCheckout` (proveedor, en `issueExternalCharge`) y `confirmarContraElProveedor`
   (ConfioPagos). Basta un checkout o un webhook de la marca mientras un cron procesa su fila; y, para agotar el pool,
   tantos cierres esperando como conexiones tiene (10: default de `pg-pool`, `node_modules/pg-pool/index.js:89`; `src/orm`
@@ -361,7 +361,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   conexión hasta que venza la espera, porque el cron no consigue una para escribir y soltar el candado.
 - **Estado**: mitigado por `lock_timeout` de 30 s en `lockBrandPlan`: la traba dura como mucho eso. Quien vence falla:
   un cierre de wallet queda para el barrido, y un cron no lo cuenta como pago fallido, salvo
-  `expireLockedSubscription` (`src/tasks/tasks.service.ts:787`), cuya pasada se corta y sigue a la hora siguiente. Una
+  `expireLockedSubscription` (`src/tasks/subscription-expiration.ts:27`), cuya pasada se corta y sigue a la hora siguiente. Una
   espera legítima de más de 30 s (proveedor lento) también falla. Un pago externo confirmado que vence el candado queda
   `processing` hasta que lo termina un barrido (LOC-89): `reconcileExternalPayments` si no tiene plan, cuando el proveedor
   lo confirma, y `settleLostExternalPayments` si ya lo tiene.
@@ -370,21 +370,21 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un débito de renovación sin extensión queda huérfano si un checkout mueve la fecha (LOC-88)
 
-- **Dónde**: `src/tasks/renewal-debit-refund.ts:52`, `:74` (`canStillExtend`, `refundRenewalDebit`),
-  `src/tasks/tasks.service.ts:615`, `:1416`, `:1441-1447`, `:1730`, `:1766` (`refundOrphanRenewalDebits`,
-  `renewFromWallet`, `extendSubscriptionPeriod`)
+- **Dónde**: `src/tasks/renewal-debit-refund.ts:52`, `:74`, `:131` (`canStillExtend`, `refundRenewalDebit`,
+  `refundOrphanRenewalDebits`), `src/tasks/wallet-renewal.ts:34`, `:52-58`, `:242`, `:271` (`renewFromWallet`,
+  `extendSubscriptionPeriod`)
 - **Qué lo dispara**: el cron debita, roles rechaza la renovación y la fila no se extiende; antes de la pasada siguiente
   la marca compra el mismo plan, y eso mueve `nextBillingDate`, de la que sale la llave del ciclo.
 - **Qué rompe**: dos cobros y una extensión. Medido sobre Postgres real: 39.800 descontados y 30 días, con precio 19.900.
   No es la carrera del candado: son dos pasadas separadas.
 - **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez a su wallet (LOC-105). Queda
   abierto:
-  - Marca y fila se guardan en una sola transacción (`:1730`, LOC-108), así que una caída antes del commit deja `pending`
+  - Marca y fila se guardan en una sola transacción (`:242`, LOC-108), así que una caída antes del commit deja `pending`
     y la fecha sin mover. Hipótesis, sin ejercitar: si la conexión cae durante el COMMIT y éste se aplicó,
     `handleRenewalFailure` escribe la fecha vieja sobre lo confirmado y queda `extended` con la fecha sin mover. Ese débito
     no se devuelve si antes de la pasada siguiente un checkout, una extensión de admin o el cierre de la baja le quitan la
     extensión: el barrido sólo lista `pending`.
-  - La guarda de `renewFromWallet` (`:1441-1447`) deja una fila viva sobre un ciclo ya devuelto sin cobrar, sin extender y
+  - La guarda de `renewFromWallet` (`:52-58`) deja una fila viva sobre un ciclo ya devuelto sin cobrar, sin extender y
     sin vencer, sólo con un log por hora. Hipótesis, sin ejercitar: se llega por una baja cerrada y devuelta, un `ACTIVE`
     tardío de Confío (`src/webhook/confio-subscription-webhook.service.ts:766-771`) y `reactivate`.
   - Una extensión a mano desde admin sobre una fila con débito `pending` también mueve la fecha: se devuelve el débito y
@@ -392,7 +392,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una renovación que llega a roles después de la degradación deja plan pago sobre una fila cerrada (LOC-111)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1738` (`renewPlanForBrand`), `:1102` (`degradarEnRoles`)
+- **Dónde**: `src/tasks/wallet-renewal.ts:250` (`renewPlanForBrand`), `src/tasks/subscription-expiration.ts:323` (`degradeInRoles`)
 - **Qué lo dispara**: una baja durante la espera a roles y el barrido de acceso, que no toma el candado de plan, cierra la
   fila antes de que la extensión escriba; en roles, la renovación se aplica después de la degradación.
 - **Qué rompe**: la marca conserva el plan pago en roles con la fila `cancelled`. El dinero vuelve: el débito queda
@@ -401,7 +401,8 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1730` (`extendSubscriptionPeriod`), `:480-483`, `:919`
+- **Dónde**: `src/tasks/wallet-renewal.ts:242` (`extendSubscriptionPeriod`), `src/tasks/subscription-renewal.ts:132-135`,
+  `src/tasks/subscription-expiration.ts:38`
 - **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`. La fila vuelve a ser elegible
   en cada pasada horaria, que no mira el backoff.
 - **Qué rompe**: en unas tres horas se agotan los reintentos: la marca recibe avisos de pago fallido y queda vencida.
@@ -410,7 +411,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una renovación cobrada y extendida puede quedar sin su fila en el historial (LOC-108)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1511-1529` (`renewFromWallet`)
+- **Dónde**: `src/tasks/wallet-renewal.ts:142-160` (`renewFromWallet`)
 - **Qué lo dispara**: falla el guardado del evento `RENEWED` con la extensión ya confirmada.
 - **Qué rompe**: el historial de esa suscripción no muestra la renovación; queda sólo el log de error con su id.
 - **Estado**: mitigado por ese log; se prefiere a tratarlo como pago fallido, que cobraría dos veces. Abierto — no hay
@@ -422,7 +423,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Qué lo dispara**: un reintento de Mercado Pago (cada 15 min, según su doc) que conserve el `ts` original; la doc
   no dice si lo conserva. El `ts` se lee en segundos con 10 dígitos y en milisegundos con 13 o más (`:320`).
 - **Qué rompe**: el aviso no entra. El pago lo cierra el barrido `reconcileExternalPayments`
-  (`src/tasks/tasks.service.ts:660`), cada 5 min.
+  (`src/tasks/payment-sweep.ts:26`), cada 5 min.
 - **Estado**: mitigado por el barrido; abierto — lo cierra ver el primer reintento real de Mercado Pago.
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
@@ -438,7 +439,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Un pago sin respuesta del proveedor se pregunta en cada pasada y no expira (LOC-89)
 
-- **Dónde**: `src/tasks/tasks.service.ts:586`, `:794` (`reconcileExternalPayments`, `providerLetsExpire`)
+- **Dónde**: `src/tasks/payment-sweep.ts:26`, `:190` (`reconcileExternalPayments`, `providerLetsExpire`)
 - **Qué lo dispara**: un proveedor caído, sin configurar o sin registrar en ese ambiente, con filas `pending` o `processing`.
 - **Qué rompe**: las filas no salen y avisan en cada pasada. Las llamadas son en serie, con un tope de 15 a 30 s por fila, así
   que una caída con muchas filas alarga la pasada hasta solaparse con la siguiente. La plata no se toca: el solape lo cubren
@@ -456,7 +457,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
-- **Dónde**: `src/provider/dropi/dropi.provider.ts:61` (`dropiFetch`); `src/tasks/tasks.service.ts:815`
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:61` (`dropiFetch`); `src/tasks/payment-sweep.ts:190`
   (`providerLetsExpire`); `src/admin/admin.controller.ts:288`
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id`, por una ruta que no existe o por un cobro que de verdad no
   existe: no se distinguen. La QA de LOC-89 lo midió contra el core-back local; qué sirve la API real de Dropi no se
@@ -469,7 +470,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Lo que el barrido no rescata o completa sin mirar (LOC-89)
 
-- **Dónde**: `src/tasks/tasks.service.ts:746`, `:648` (`expirePendingCheckouts`, `settleLostExternalPayments`);
+- **Dónde**: `src/tasks/payment-sweep.ts:294`, `:67` (`expirePendingCheckouts`, `settleLostExternalPayments`);
   `src/checkout/checkout.service.ts:1983` (`assertProviderConfirmedAmount`)
 - **Qué lo dispara**: (a) se paga justo después de que la expiración leyó `pending` y el webhook se pierde; (b) un `pending` sin
   `providerPaymentId`, por una caída entre `createCheckout` y guardar; (c) un `processing` con plan que el proveedor reembolsó;
@@ -524,8 +525,9 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
-- **Dónde**: `src/tasks/tasks.service.ts:1352` (`renewFromWallet`), `:474` (`processSubscriptionRenewals`), `:923`
-  (`expireSubscriptions`), `:1364` y `:1450` (llave del ciclo, `hasCycleDebit`);
+- **Dónde**: `src/tasks/wallet-renewal.ts:44` (`renewFromWallet`), `src/tasks/subscription-renewal.ts:104`
+  (`processSubscriptionRenewals`), `src/tasks/subscription-expiration.ts:74` (`expireSubscriptions`),
+  `src/tasks/wallet-renewal.ts:51` y `:172` (llave del ciclo, `hasCycleDebit`);
   `src/subscription/subscription.controller.ts:127-133` (`create`), que deja la fecha opcional.
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, que sale de `POST /subscription` sin el campo o de una
   corrección a mano. Entre ellas, las que ya pagaron: el código anterior a LOC-91 les dejó un débito con llave
