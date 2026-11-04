@@ -1,5 +1,5 @@
 import { createHmac } from 'crypto'
-import { INestApplication } from '@nestjs/common'
+import { INestApplication, Logger } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
 import * as request from 'supertest'
 import { Repository } from 'typeorm'
@@ -40,7 +40,8 @@ describe('Mercado Pago webhook signature and deduplication (PostgreSQL, LOC-113)
 
   const clean = () =>
     events.query(
-      `DELETE FROM webhook_events WHERE provider = 'mercadopago' AND payload -> 'data' ->> 'id' LIKE $1`,
+      `DELETE FROM webhook_events WHERE provider = 'mercadopago'
+         AND (payload -> 'data' ->> 'id' LIKE $1 OR payload ->> 'marker' LIKE $1)`,
       [`${DATA_PREFIX}%`],
     )
 
@@ -185,5 +186,45 @@ describe('Mercado Pago webhook signature and deduplication (PostgreSQL, LOC-113)
 
     expect(created.body.duplicate).toBeUndefined()
     expect(await settled(dataId)).toHaveLength(2)
+  })
+
+  describe.each([
+    { secret: 'configured', value: SECRET },
+    { secret: 'not configured', value: undefined },
+  ])('E11 with the secret $secret', ({ value }) => {
+    beforeEach(() => {
+      if (value) process.env.MP_WEBHOOK_SECRET = value
+      else delete process.env.MP_WEBHOOK_SECRET
+    })
+
+    afterEach(() => {
+      process.env.MP_WEBHOOK_SECRET = SECRET
+      jest.restoreAllMocks()
+    })
+
+    const marker = `${DATA_PREFIX}object-field`
+    const rowsWithMarker = () =>
+      events
+        .createQueryBuilder('e')
+        .where("e.provider = 'mercadopago'")
+        .andWhere(`e.payload ->> 'marker' = :marker`, { marker })
+        .getCount()
+
+    it.each([
+      { field: 'action', body: { marker, action: { toString: 1 }, data: { id: marker } } },
+      {
+        field: 'data.id',
+        body: { marker, action: 'payment.updated', data: { id: { toString: 1 } } },
+      },
+    ])('answers 401 to an object in $field, logs no error and stores nothing', async ({ body }) => {
+      // R15: red if the field reaches `String()` unchecked: the route answers 500 and logs an error.
+      const errors = jest.spyOn(Logger.prototype, 'error')
+
+      const res = await deliver(body, 'ts=1,v1=a')
+
+      expect(res.status).toBe(401)
+      expect(errors).not.toHaveBeenCalled()
+      expect(await rowsWithMarker()).toBe(0)
+    })
   })
 })

@@ -105,6 +105,18 @@ describe('MercadoPagoProvider - validateWebhookSignature', () => {
 
     expect(provider().validateWebhookSignature(PAYLOAD, sign(SECRET))).toBe(false)
   })
+
+  it.each([
+    { name: 'action', body: '{"action":{"toString":1},"data":{"id":"x"}}' },
+    { name: 'type', body: '{"type":{"toString":1},"data":{"id":"x"}}' },
+    { name: 'data.id', body: '{"action":"payment.created","data":{"id":{"toString":1}}}' },
+  ])('U10 rejects an object in $name without throwing', ({ body }) => {
+    // R15: red if the field reaches `String()` unchecked: it throws and the route answers 500.
+    const payload = Buffer.from(body, 'utf8')
+
+    expect(() => provider().validateWebhookSignature(payload, 'ts=1,v1=a')).not.toThrow()
+    expect(provider().validateWebhookSignature(payload, 'ts=1,v1=a')).toBe(false)
+  })
 })
 
 describe('MercadoPagoProvider - webhookEventId', () => {

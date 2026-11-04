@@ -305,7 +305,13 @@ function readSignedFields(payload: Buffer, signature: string): SignedFields | nu
     return null
   }
   const dataId = body?.data?.id
-  if (dataId === undefined || dataId === null || dataId === '') return null
+  const action = body?.action ?? body?.type ?? 'unknown'
+  if (!isPrimitiveField(dataId) || dataId === '' || !isPrimitiveField(action)) return null
 
-  return { ts, v1, dataId: String(dataId), action: String(body?.action || body?.type || 'unknown') }
+  return { ts, v1, dataId: String(dataId), action: String(action) }
+}
+
+/** Only strings and numbers become part of the manifest or the key; `String()` throws on some objects. */
+function isPrimitiveField(value: unknown): value is string | number {
+  return typeof value === 'string' || typeof value === 'number'
 }
