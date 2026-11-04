@@ -115,6 +115,7 @@ describe('Mercado Pago webhook signature and deduplication (PostgreSQL, LOC-113)
   })
 
   it('E7 accepts a fresh valid signature and stores one row', async () => {
+    // R15: red if the route rejects a genuine signature: it answers 401 and stores nothing.
     const dataId = `${DATA_PREFIX}fresh`
     const ts = Math.floor(Date.now() / 1000)
 

@@ -39,6 +39,7 @@ describe('MercadoPagoProvider - validateWebhookSignature', () => {
   })
 
   it('U1 accepts a fresh valid signature', () => {
+    // R15: red if the manifest or the window unit changes: a genuine fresh signature is rejected.
     expect(provider().validateWebhookSignature(PAYLOAD, sign(SECRET))).toBe(true)
   })
 
@@ -108,12 +109,14 @@ describe('MercadoPagoProvider - validateWebhookSignature', () => {
 
 describe('MercadoPagoProvider - webhookEventId', () => {
   it('builds the key from the signed data.id and ts plus the action', () => {
+    // R15: red if the key drops a signed field or the action: two notices would share one row.
     expect(new MercadoPagoProvider().webhookEventId(PAYLOAD, sign(SECRET))).toBe(
       `mp:payment.created:mp_pay_123:${TIMESTAMP}`,
     )
   })
 
   it('throws when the signed fields cannot be read', () => {
+    // R15: red if the null check goes away: a bare TypeError replaces the named error.
     expect(() => new MercadoPagoProvider().webhookEventId(PAYLOAD, 'v1=abc')).toThrow(
       'without signed fields',
     )
