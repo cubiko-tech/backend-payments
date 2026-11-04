@@ -1,3 +1,4 @@
+// R6: Keeps all refund guards and session authorship e2e cases against PostgreSQL in one suite.
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
@@ -7,6 +8,9 @@ import * as cookieParser from 'cookie-parser'
 import * as request from 'supertest'
 import { DataSource, Repository } from 'typeorm'
 
+import { AdminController } from '../src/admin/admin.controller'
+import { AuditService } from '../src/audit/audit.service'
+import { AuditLog } from '../src/audit/entities/auditLog.entity'
 import { BillingProfileController } from '../src/billing-profile/billing-profile.controller'
 import { BillingProfileService } from '../src/billing-profile/billing-profile.service'
 import {
@@ -16,6 +20,7 @@ import {
 import { LegalDocumentService } from '../src/billing-profile/legal-document.service'
 import { ClientPlatformService } from '../src/client/client-platform.service'
 import { ClientRolesService } from '../src/client/client-roles.service'
+import { CreditService } from '../src/credit/credit.service'
 import { EventBusService } from '../src/event-bus/event-bus.service'
 import {
   Payment,
@@ -23,6 +28,7 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../src/payment/entities/payment.entity'
+import { ProviderConfig } from '../src/provider/entities/providerConfig.entity'
 import { Refund, RefundReason, RefundStatus } from '../src/refund/entities/refund.entity'
 import { RefundController } from '../src/refund/refund.controller'
 import { RefundService } from '../src/refund/refund.service'
@@ -42,6 +48,9 @@ import {
 } from '../src/subscription/entities/subscriptionEvent.entity'
 import { SubscriptionController } from '../src/subscription/subscription.controller'
 import { SubscriptionService } from '../src/subscription/subscription.service'
+import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { Wallet } from '../src/wallet/entities/wallet.entity'
+import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
 
 const [BRAND_A, USER_A, SUPERADMIN_ID] = [
@@ -71,6 +80,9 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   const cleanBrand = async () => {
     if (!dataSource?.isInitialized) return
     for (const sql of [
+      'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = $1)',
+      'DELETE FROM transactions WHERE "brandId" = $1',
+      'DELETE FROM wallets WHERE "brandId" = $1',
       'DELETE FROM subscription_events WHERE "subscriptionId" IN (SELECT id FROM subscriptions WHERE "brandId" = $1)',
       'DELETE FROM subscriptions WHERE "brandId" = $1',
       'DELETE FROM refunds WHERE "brandId" = $1',
@@ -90,7 +102,18 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
       username: process.env.POSTGRES_USER || 'postgres',
       password: process.env.POSTGRES_PASSWORD || 'postgres',
       database: process.env.POSTGRES_DB,
-      entities: [Payment, Refund, Subscription, SubscriptionEvent, BrandLegalDocument],
+      entities: [
+        Payment,
+        Refund,
+        Subscription,
+        SubscriptionEvent,
+        BrandLegalDocument,
+        Wallet,
+        WalletBalanceSnapshot,
+        ProviderConfig,
+        Transaction,
+        AuditLog,
+      ],
       synchronize: false,
     })
     await dataSource.initialize()
@@ -110,11 +133,17 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
     })
 
     const moduleRef: TestingModule = await Test.createTestingModule({
-      controllers: [RefundController, SubscriptionController, BillingProfileController],
+      controllers: [
+        RefundController,
+        SubscriptionController,
+        BillingProfileController,
+        AdminController,
+      ],
       providers: [
         RefundService,
         SubscriptionService,
         LegalDocumentService,
+        AuditService,
         Reflector,
         ApiAuthGuard,
         { provide: JwtService, useValue: jwtService },
@@ -129,6 +158,16 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         provideRepo(SubscriptionEvent, 'DBRead'),
         provideRepo(BrandLegalDocument, 'DBWrite'),
         provideRepo(BrandLegalDocument, 'DBRead'),
+        provideRepo(Wallet, 'DBWrite'),
+        provideRepo(Wallet, 'DBRead'),
+        provideRepo(WalletBalanceSnapshot, 'DBRead'),
+        provideRepo(ProviderConfig, 'DBWrite'),
+        provideRepo(ProviderConfig, 'DBRead'),
+        provideRepo(Transaction, 'DBWrite'),
+        provideRepo(AuditLog, 'DBWrite'),
+        provideRepo(AuditLog, 'DBRead'),
+        // R17: unused by admin wallet endpoints; satisfies AdminController constructor.
+        { provide: CreditService, useValue: {} },
         // R17: external HTTP to backend-platform is out of scope; brand ownership is verified via session claim and stub.
         {
           provide: ClientPlatformService,
@@ -346,5 +385,46 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
     const afterReject = await docRepo.findOneByOrFail({ id: doc.id })
     expect(afterReject.status).toBe(DocumentStatus.REJECTED)
     expect(afterReject.verifiedBy).toBe(SUPERADMIN_ID)
+  })
+
+  it('creates and adjusts a wallet when body carries adminUserId and audits session actor', async () => {
+    // R15 (Mutation): dropping `adminUserId` from wallet DTOs rejects with 400 and writes nothing.
+    const createRes = await request(app.getHttpServer())
+      .post('/v1/admin/wallets')
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({
+        brandId: BRAND_A,
+        userId: USER_A,
+        provider: 'internal',
+        currency: 'COP',
+        label: 'Wallet principal',
+        balance: 0,
+        adminUserId: 'system',
+      })
+    expect(createRes.status).toBe(HttpStatus.CREATED)
+    const walletId = createRes.body.data.id
+
+    const adjustRes = await request(app.getHttpServer())
+      .post(`/v1/admin/wallets/${walletId}/adjust`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({
+        type: 'credit',
+        amount: 2500,
+        description: 'Initial credit',
+        category: 'admin_adjustment',
+        adminUserId: 'system',
+      })
+    expect(adjustRes.status).toBe(HttpStatus.CREATED)
+
+    const wallet = await dataSource.getRepository(Wallet).findOneByOrFail({ id: walletId })
+    expect(Number(wallet.balance)).toBe(2500)
+
+    const logs = await dataSource
+      .getRepository(AuditLog)
+      .find({ where: { entityType: 'wallet', entityId: walletId }, order: { createdAt: 'ASC' } })
+    expect(logs.map((l) => [l.action, l.userId])).toEqual([
+      ['wallet_created', SUPERADMIN_ID],
+      ['wallet_credit', SUPERADMIN_ID],
+    ])
   })
 })

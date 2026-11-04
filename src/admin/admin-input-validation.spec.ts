@@ -174,6 +174,50 @@ describe('AdminController, SubscriptionController & CreditController input valid
     expect(walletWriteRepo.manager.transaction).toHaveBeenCalledTimes(1)
   })
 
+  it('accepts POST /admin/wallets and /adjust with adminUserId and audits session actor', async () => {
+    // R15 (Mutation): Remove adminUserId from wallet DTOs -> returns 400 and skips write.
+    const res = await request(app.getHttpServer()).post('/admin/wallets').send({
+      brandId: BRAND_UUID,
+      userId: USER_UUID,
+      provider: 'internal',
+      currency: 'COP',
+      label: 'Wallet principal',
+      balance: 0,
+      adminUserId: 'system',
+    })
+
+    expect(res.status).toBe(201)
+    expect(walletWriteRepo.save).toHaveBeenCalledTimes(1)
+    expect(auditService.log).toHaveBeenCalledWith(
+      USER_UUID,
+      'wallet_created',
+      'wallet',
+      VALID_UUID,
+      expect.any(Object),
+      expect.any(String),
+    )
+
+    const adjustRes = await request(app.getHttpServer())
+      .post(`/admin/wallets/${VALID_UUID}/adjust`)
+      .send({
+        type: 'credit',
+        amount: 50,
+        description: 'Manual top-up',
+        category: 'admin_adjustment',
+        adminUserId: 'system',
+      })
+
+    expect(adjustRes.status).toBe(201)
+    expect(auditService.log).toHaveBeenLastCalledWith(
+      USER_UUID,
+      'wallet_credit',
+      'wallet',
+      VALID_UUID,
+      expect.any(Object),
+      expect.any(String),
+    )
+  })
+
   it('validates POST /admin/providers and PATCH /admin/providers/:id bodies with 400 on invalid fields', async () => {
     // R15 (Mutation): Revert provider @Body() to inline types -> writes invalid provider config.
     const badCreate = await request(app.getHttpServer())

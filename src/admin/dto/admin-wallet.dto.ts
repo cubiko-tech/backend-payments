@@ -48,6 +48,12 @@ export class AdminCreateWalletDto {
   @IsNumber()
   @Min(0)
   balance?: number
+
+  @ApiPropertyOptional({ description: 'Optional caller actor ignored in favor of session' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  adminUserId?: string
 }
 
 export class AdjustWalletDto {
@@ -57,6 +63,12 @@ export class AdjustWalletDto {
   @IsNotEmpty()
   @MaxLength(100)
   id?: string
+
+  @ApiPropertyOptional({ description: 'Optional caller actor ignored in favor of session' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  adminUserId?: string
 
   @ApiProperty({ description: 'Adjustment direction', enum: ['credit', 'debit'] })
   @IsIn(['credit', 'debit'])
