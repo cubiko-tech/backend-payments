@@ -31,6 +31,16 @@ describe('AdminController, SubscriptionController & CreditController input valid
 
   // R17: Repo and service doubles isolate HTTP pipe validation from DB and external services.
   const walletReadRepo = { findOne: jest.fn() }
+  const txManager = {
+    findOne: jest.fn().mockResolvedValue({
+      id: VALID_UUID,
+      brandId: BRAND_UUID,
+      currency: 'COP',
+      balance: 100,
+      status: WalletStatus.ACTIVE,
+    }),
+    save: jest.fn(async (_e: any, obj: any) => obj),
+  }
   const walletWriteRepo = {
     findOne: jest.fn(),
     create: jest.fn((x) => x),
@@ -40,7 +50,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
       }
       return { id: VALID_UUID, ...w }
     }),
-    manager: { transaction: jest.fn() },
+    manager: { transaction: jest.fn(async (cb: any) => cb(txManager)) },
   }
   const providerReadRepo = { findOne: jest.fn() }
   const providerWriteRepo = {
@@ -149,19 +159,6 @@ describe('AdminController, SubscriptionController & CreditController input valid
     expect(badRes.status).toBe(400)
     expect(badRes.body.code).toBe('INVALID_REQUEST')
     expect(walletWriteRepo.manager.transaction).not.toHaveBeenCalled()
-
-    walletWriteRepo.manager.transaction.mockImplementationOnce(async (cb: any) =>
-      cb({
-        findOne: jest.fn().mockResolvedValue({
-          id: VALID_UUID,
-          brandId: BRAND_UUID,
-          currency: 'COP',
-          balance: 100,
-          status: WalletStatus.ACTIVE,
-        }),
-        save: jest.fn().mockImplementation(async (_e: any, obj: any) => obj),
-      }),
-    )
 
     const okRes = await request(app.getHttpServer())
       .post(`/admin/wallets/${VALID_UUID}/adjust`)
