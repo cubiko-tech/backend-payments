@@ -572,3 +572,14 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
 - **Qué lo dispara**: cualquier nota crédito enviada a Siigo. Sólo se probó contra `DIAN_PROVIDER=mock`.
 - **Qué rompe**: hipótesis, no comprobada: si Siigo exige una referencia estructurada, rechazaría la nota.
 - **Estado**: abierto — lo cierra el contador con una prueba contra el sandbox de Siigo.
+
+## Un número de query ausente llega como `NaN` desde que el pipe global convierte tipos (LOC-114)
+
+- **Dónde**: `src/shared/validation/global-validation-pipe.ts:15` (`transform: true`).
+- **Qué lo dispara**: un handler nuevo con `@Query('x') x?: number` que pone su valor por defecto con `??`
+  o compara con `undefined`. Nest 10.4.22 convierte con `+value`, y `+undefined` es `NaN`
+  (`node_modules/@nestjs/common/pipes/validation.pipe.js:131-132`).
+- **Qué rompe**: el `NaN` pasa como número a una fecha o a un `take` y da una fecha inválida o un listado
+  sin tope. Los 17 handlers de hoy usan `||` y caen al default.
+- **Estado**: mitigado por el contrato escrito en el encabezado de la fábrica y el caso
+  `admin-extend-body.spec.ts` del default de `expiring`; abierto para el handler que no lo lea.

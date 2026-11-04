@@ -34,6 +34,7 @@ import {
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequirePermission, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
+import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 
 /**
  * Controller admin centralizado para backend-payments.
@@ -190,7 +191,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Suscripción extendida' })
   async extendSubscription(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { days: number; reason?: string },
+    @Body() body: ExtendSubscriptionDto,
     @Req() req?: any,
   ) {
     const sub = await this.subscriptionWriteRepo.findOne({ where: { id } })

@@ -1,7 +1,8 @@
 import { Controller, Get, Post, Body, Query, Req, UseGuards, HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
-import { CheckoutService, CheckoutRequest } from './checkout.service'
+import { CheckoutService } from './checkout.service'
+import { CheckoutRequestDto } from './dto/checkout-request.dto'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
@@ -68,7 +69,7 @@ export class CheckoutController {
     status: 503,
     description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
   })
-  async processCheckout(@Body() body: CheckoutRequest, @Req() req?: any) {
+  async processCheckout(@Body() body: CheckoutRequestDto, @Req() req?: any) {
     if (req?.user?.id !== 'server') {
       const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, body?.brandId)
       if (!allowed) {
@@ -77,11 +78,7 @@ export class CheckoutController {
     }
     const idempotencyKey = this.extractIdempotencyKey(req)
     const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : body?.userId
-    // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
-    // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
-    // global no tiene metatype contra el cual recortar y NO descarta claves
-    // desconocidas: sin este borrado un llamador HTTP podría pedir el camino de
-    // precios legacy y cobrarse en la moneda que él mande.
+    // The DTO accepts `renewal` only to discard it here: legacy renewal pricing belongs to the cron.
     return {
       data: await this.checkoutService.processCheckout({
         ...body,
