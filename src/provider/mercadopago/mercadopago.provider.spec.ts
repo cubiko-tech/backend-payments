@@ -273,6 +273,7 @@ describe('MercadoPagoProvider - getNoticePayment', () => {
   })
 
   it('keeps a numeric transaction_amount as the confirmed amount', async () => {
+    // R15 (Mutation): making getNoticePayment answer null for every amount drops the confirmed 19900.
     answer({ status: 'approved', external_reference: 'pay-1', transaction_amount: 19900 })
 
     const notice = await new MercadoPagoProvider().getNoticePayment('mp-1')
