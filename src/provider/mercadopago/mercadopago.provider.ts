@@ -192,7 +192,9 @@ export class MercadoPagoProvider implements PaymentProvider {
       typeof payment.external_reference === 'string' && payment.external_reference.trim() !== ''
         ? payment.external_reference.trim()
         : null
-    const rawAmount = Number(payment.transaction_amount)
+    // Number(null) and Number('') are 0: an absent amount must stay absent, not read as zero.
+    const raw = payment.transaction_amount
+    const rawAmount = raw === null || raw === undefined || raw === '' ? NaN : Number(raw)
     const transactionAmount = Number.isFinite(rawAmount) ? rawAmount : null
 
     return {

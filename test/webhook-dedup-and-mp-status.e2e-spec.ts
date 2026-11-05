@@ -405,6 +405,32 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.PENDING)
   })
 
+  it('E10 leaves a payment pending without an amount mismatch when an approved notice has transaction_amount null', async () => {
+    // R15 (Mutation): reverting getNoticePayment to plain Number(transaction_amount) reads 0 and fails the payment.
+    const mpPaymentId = `${MARKER_PREFIX}mp-null-amount-10`
+    const ts = Math.floor(Date.now() / 1000)
+    const payment = await seedExternalPurchase(a.dataSource, BRAND_ID, 'pro', {
+      overrides: { provider: PaymentProvider.MERCADOPAGO, providerPaymentId: 'pref_loc127_10' },
+    })
+
+    mockMpPaymentGet({
+      id: mpPaymentId,
+      status: 'approved',
+      external_reference: payment.id,
+      transaction_amount: null,
+    })
+
+    const res = await deliverMpCreated(mpPaymentId, ts)
+
+    expect(res.status).toBe(200)
+    const event = await waitEventSettled('mercadopago', `mp:payment.created:${mpPaymentId}:${ts}`)
+    expect(event?.status).toBe(WebhookStatus.PROCESSED)
+    const stored = await a.dataSource.getRepository(Payment).findOneByOrFail({ id: payment.id })
+    expect(stored.status).toBe(PaymentStatus.PENDING)
+    expect(stored.metadata?.amountMismatch).toBeUndefined()
+    expect(await subscriptionOf(a.dataSource, BRAND_ID)).toBeFalsy()
+  })
+
   it('E8 rejects a Confio signed webhook outside the 24h timestamp window with 401 and deduplicates unsigned field mutations within the window', async () => {
     // R15: red if verifyConfioWebhookSignature omits the 24h window or eventId reads unsigned fields.
     const subName = `stores/s/subscription-plans/p/subscriptions/${MARKER_PREFIX}sub-e8`

@@ -245,3 +245,38 @@ describe('MercadoPagoProvider - getPaymentStatus', () => {
     )
   })
 })
+
+describe('MercadoPagoProvider - getNoticePayment', () => {
+  const originalEnv = process.env
+  const answer = (body: unknown) =>
+    // R17: Mercado Pago is a third party; a real Response keeps what the client reads honest.
+    jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async () => new Response(JSON.stringify(body), { status: 200 }))
+
+  beforeEach(() => {
+    process.env = { ...originalEnv, MP_ACCESS_TOKEN: 'mp-test-token' }
+  })
+
+  afterEach(() => {
+    process.env = originalEnv
+    jest.restoreAllMocks()
+  })
+
+  it('reads a null transaction_amount as no amount, not as zero', async () => {
+    // R15 (Mutation): reverting to plain Number(transaction_amount) in getNoticePayment returns 0.
+    answer({ status: 'approved', external_reference: 'pay-1', transaction_amount: null })
+
+    const notice = await new MercadoPagoProvider().getNoticePayment('mp-1')
+
+    expect(notice.transactionAmount).toBeNull()
+  })
+
+  it('keeps a numeric transaction_amount as the confirmed amount', async () => {
+    answer({ status: 'approved', external_reference: 'pay-1', transaction_amount: 19900 })
+
+    const notice = await new MercadoPagoProvider().getNoticePayment('mp-1')
+
+    expect(notice.transactionAmount).toBe(19900)
+  })
+})
