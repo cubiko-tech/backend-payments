@@ -22,6 +22,7 @@ import {
 import { RequestException } from '../shared/exception/request.exception'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
+import { SubscriptionProvider } from './entities/subscription.entity'
 import { SubscriptionService } from './subscription.service'
 import { EnterprisePricingService } from './enterprise-pricing.service'
 import { CreateSubscriptionDto } from './dto/create-subscription.dto'
@@ -148,7 +149,15 @@ export class SubscriptionController {
   async startTrial(@Body() data: StartTrialSubscriptionDto, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId, req)
     const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : data?.userId
-    return this.subscriptionService.startTrial({ ...(data as any), brandId, userId })
+    return this.subscriptionService.startTrial({
+      brandId,
+      userId,
+      planSlug: data?.planSlug,
+      // startTrial rejects any provider other than CONFIO with 422, so the narrowing is checked there.
+      provider: data?.provider as SubscriptionProvider | undefined,
+      walletId: data?.walletId,
+      billingPhone: data?.billingPhone,
+    })
   }
 
   /**

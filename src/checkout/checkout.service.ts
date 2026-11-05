@@ -781,7 +781,7 @@ export class CheckoutService implements OnModuleInit {
    */
   async completeExternalPayment(
     paymentId: string,
-    providerData?: any,
+    providerData?: Record<string, unknown>,
     expectedProvider?: PaymentProvider | string,
   ): Promise<boolean> {
     if (this.inFlightCompletions.has(paymentId)) return false
@@ -848,7 +848,7 @@ export class CheckoutService implements OnModuleInit {
     metadata?: any,
     isNotice = false,
     previousStatus: PaymentStatus = PaymentStatus.PENDING,
-    previousMetadata?: any,
+    previousMetadata?: Payment['metadata'],
   ): Promise<boolean> {
     payment.status = PaymentStatus.PROCESSING
     if (providerData) {
@@ -2037,7 +2037,7 @@ export class CheckoutService implements OnModuleInit {
     providerData?: any,
     isNotice = false,
     previousStatus: PaymentStatus = PaymentStatus.PENDING,
-    previousMetadata?: any,
+    previousMetadata?: Payment['metadata'],
   ): Promise<boolean> {
     const providerKey = String(payment.provider || '').toLowerCase()
     const spec = this.providerConfirmedAmountSpecs[providerKey]

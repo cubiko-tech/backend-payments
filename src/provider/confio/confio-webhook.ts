@@ -111,6 +111,10 @@ export function buildConfioWebhookEventId(payload: ConfioWebhookPayload): string
  * Legacy pre-deploy idempotency key for `subscription.subscriptionStatusChanged`
  * when `updateTime` or `createTime` was used as the timestamp segment, so an
  * in-flight redelivery crossing the deploy still matches its `SubscriptionEvent`.
+ *
+ * @deprecated Replaced by the key `buildConfioWebhookEventId` derives. Remove it, and its lookup in
+ * `confio-subscription-webhook.service.ts`, once ConfioPagos' redelivery window has passed since the
+ * deploy that introduced that key: no redelivery can still carry a legacy-keyed event.
  */
 export function buildLegacyConfioStatusChangedEventId(
   payload: ConfioWebhookPayload,
