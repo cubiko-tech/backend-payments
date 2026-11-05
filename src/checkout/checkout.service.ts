@@ -1080,16 +1080,20 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Reconciliar un pago consultando el estado REAL en el proveedor.
-   *
-   * Lo usa la página de retorno (al volver del checkout) y el cron de barrido:
-   * si el proveedor confirma el pago, lo completa (idempotente con el webhook).
-   * No depende de que el webhook llegue — robusto en cualquier ambiente.
+   * Reconciles a payment against the provider's live status and completes it when confirmed
+   * (idempotent with the webhook). The return page calls it with the session's brand guard; the
+   * sweep does not call it (it uses `completeExternalPayment`).
+   * @param canAccessBrand brand guard of the caller's session, or `null` from an internal caller
+   *   without a session. `undefined` throws: skipping the guard has to be declared.
+   * @throws RequestException 404 PAYMENT_NOT_FOUND when the payment is missing or the guard denies it.
    */
   async reconcilePayment(
     paymentId: string,
-    canAccessBrand?: (brandId: string) => Promise<boolean>,
+    canAccessBrand: ((brandId: string) => Promise<boolean>) | null,
   ): Promise<{ status: string; planSlug?: string; refundedToWallet?: boolean }> {
+    if (canAccessBrand === undefined) {
+      throw new Error('reconcilePayment requires a brand guard or an explicit null')
+    }
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
     if (!payment || (canAccessBrand && !(await canAccessBrand(payment.brandId)))) {
       throw new RequestException({ code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' }, 404)

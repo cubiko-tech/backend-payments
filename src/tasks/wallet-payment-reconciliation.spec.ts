@@ -349,7 +349,7 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
     const state = buildState()
     state.seedPayment('pay-wallet-proc', { status: PaymentStatus.PROCESSING })
 
-    const reconcileRes = await state.checkoutService.reconcilePayment('pay-wallet-proc')
+    const reconcileRes = await state.checkoutService.reconcilePayment('pay-wallet-proc', null)
     await state.checkoutService.completeExternalPayment('pay-wallet-proc')
 
     expect(reconcileRes).toEqual({ status: PaymentStatus.PROCESSING })

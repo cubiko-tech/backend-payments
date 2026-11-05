@@ -123,6 +123,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
 
   let app: INestApplication
   let jwtService: JwtService
+  let checkoutService: CheckoutService
   let findOnePayment: jest.Mock
   let getProvider: jest.Mock
   let fetchMock: jest.Mock
@@ -172,6 +173,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
     }).compile()
 
     jwtService = moduleRef.get(JwtService)
+    checkoutService = moduleRef.get(CheckoutService)
     app = moduleRef.createNestApplication()
     app.use(cookieParser(JWT_SECRET))
     app.useGlobalPipes(createGlobalValidationPipe())
@@ -245,5 +247,13 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ data: { status: 'failed', refundedToWallet: true } })
+  })
+
+  it('rejects reconcilePayment without a declared brand guard before reading the payment', async () => {
+    // R15 (Mutation): dropping the `canAccessBrand === undefined` check in reconcilePayment reads the payment.
+    await expect(checkoutService.reconcilePayment(PAYMENT_ID, undefined)).rejects.toThrow(
+      'requires a brand guard',
+    )
+    expect(findOnePayment).not.toHaveBeenCalled()
   })
 })

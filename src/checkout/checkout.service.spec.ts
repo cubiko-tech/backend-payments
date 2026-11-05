@@ -1491,7 +1491,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       await service.completeExternalPayment('pay-mismatch-99', {
         data: { status: 'Pagado', amountCents: 10000000 },
       })
-      const returnPageResult = await service.reconcilePayment('pay-mismatch-99')
+      const returnPageResult = await service.reconcilePayment('pay-mismatch-99', null)
 
       const persistedRow = getDbRow()
       expect(walletService.credit).toHaveBeenCalledTimes(0)
@@ -1666,7 +1666,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         }),
       })
 
-      const reconciled = await service.reconcilePayment('pay-mp-1')
+      const reconciled = await service.reconcilePayment('pay-mp-1', null)
       expect(reconciled.status).toBe('completed')
       expect(getDbRow().status).toBe(PaymentStatus.COMPLETED)
       expect(walletService.credit).toHaveBeenCalledTimes(1)

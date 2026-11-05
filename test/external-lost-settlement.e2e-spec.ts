@@ -101,7 +101,7 @@ describe('Settling an external purchase that lost to a newer one (PostgreSQL, LO
     expect(row.metadata.lostToNewerPurchase).toBe(true)
     expect(await creditsOf(external.id)).toHaveLength(0)
     expect((await subscriptionOf(a.dataSource, BRAND_ID))!.planSlug).toBe(NEW_PLAN)
-    expect(await a.checkout.reconcilePayment(external.id)).toEqual({ status: 'processing' })
+    expect(await a.checkout.reconcilePayment(external.id, null)).toEqual({ status: 'processing' })
   })
 
   it('E5 credits it from the sweep once the wallet can take it, even without a conflict left', async () => {

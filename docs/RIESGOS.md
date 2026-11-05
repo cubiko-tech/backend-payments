@@ -604,17 +604,26 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   encontrado») a la marca dueña ante un parpadeo de `backend-platform`; en (b), abierto en el consumidor
   (`frontend-platform`).
 
-## `RefundService.request` sólo bloquea pagos `refunded` y reembolsos `pending` (LOC-115)
+## La devolución a la wallet no mira los reembolsos en curso del mismo pago (LOC-127)
 
-- **Dónde**: `src/refund/refund.service.ts:64-102` (`createPendingRefund`) y `:139-141` (`approve`).
-- **Qué lo dispara**: (a) un `POST /v1/refund` sobre un pago en `pending` o `failed`; (b) un segundo
-  `POST /v1/refund` después de que `POST /v1/refund/:id/approve` pasó el primero a `processing` sin
-  ejecutar la devolución ni cambiar `payments.status` a `refunded`.
-- **Qué rompe**: en ambos casos se inserta una fila `pending` en `refunds` (sin mover saldo ni llamar al
-  proveedor, porque `approve` hoy sólo marca `processing`).
-- **Estado**: abierto — el alcance de LOC-115 cierra el reembolso sobre pagos `refunded`, el `pending`
-  repetido y el monto superior al pago; lo cierra exigir `payments.status = 'completed'` y bloquear o
-  sumar reembolsos en `processing`/`completed` cuando `approve` ejecute la devolución.
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336` (`refundSupersededWalletPayment`);
+  `src/refund/refund.service.ts:65` (`createPendingRefund`).
+- **Qué lo dispara**: un `POST /v1/refund` sobre un pago `completed` que queda `pending` o `processing`, y
+  después la conciliación devuelve ese mismo pago a la wallet y lo pasa a `refunded`.
+- **Qué rompe**: quedan dos devoluciones posibles del mismo pago (la de la wallet y la del reembolso);
+  hoy `approve` sólo marca `processing` y no mueve plata, así que el doble pago aparece cuando se ejecute.
+- **Estado**: abierto — lo cierra leer `refunds` bajo el mismo candado en la devolución y frenar o cancelar
+  una de las dos.
+
+## Mercado Pago sin monto en la consulta de estado completa sin verificar el monto (LOC-127)
+
+- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:173` (`getPaymentStatus` pasa
+  `transaction_amount` crudo); `src/checkout/checkout.service.ts:2064` (`assertProviderConfirmedAmount`
+  devuelve `true` con `!isNotice`).
+- **Qué lo dispara**: un aviso `approved` sin monto se difiere y deja el pago `pending`; el retorno o el
+  barrido consultan el estado y Mercado Pago responde también `transaction_amount: null`.
+- **Qué rompe**: el pago se completa sin comprobar que el monto cobrado sea el del pago.
+- **Estado**: abierto — lo cierra tratar la ausencia de monto como «no confirmado» también fuera del aviso.
 
 ## Dos avisos de Dropi sin `eventId` e idénticos colisionan, y el `down` falla con claves repetidas (LOC-118)
 
