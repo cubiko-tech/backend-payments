@@ -413,4 +413,15 @@ describe('The sweep of external payments (PostgreSQL, LOC-89)', () => {
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.PENDING)
     expect(await subscriptionOf(a.dataSource, BRAND_ID)).toBeNull()
   })
+
+  it('completes nothing when a Stripe checkout session is complete but payment_status is unpaid', async () => {
+    // R15: red if StripeProvider.getPaymentStatus maps complete + unpaid to completed.
+    const payment = await seed(PaymentProvider.STRIPE)
+    realStripeClient(a, async () => stripeSession(PLAN_PRICE, 'unpaid'))
+
+    await sweepBrand(a, BRAND_ID)
+
+    expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.PENDING)
+    expect(await subscriptionOf(a.dataSource, BRAND_ID)).toBeNull()
+  })
 })

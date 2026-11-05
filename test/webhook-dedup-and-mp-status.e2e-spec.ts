@@ -1,3 +1,4 @@
+// R6: Single-responsibility e2e suite for webhook authentication, deduplication, cross-provider scoping, and notice amount verification against PostgreSQL.
 import { createHash, createHmac } from 'crypto'
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
@@ -34,7 +35,19 @@ import {
 const BRAND_ID = 'b1180118-2222-4333-8444-555555555118'
 const MP_SECRET = 'loc118-mp-webhook-secret'
 const DROPI_SECRET = 'loc118-dropi-webhook-secret'
+const CONFIO_WEBHOOK_SECRET = 'loc117-confio-webhook-key'
+const CONFIO_TOKEN = 'loc117-confio-access-token'
 const MARKER_PREFIX = 'loc118-'
+
+function signConfio(
+  data: Record<string, unknown>,
+  properties: string[],
+  timestamp: number,
+): string {
+  const concatenated =
+    properties.map((p) => String(data[p])).join('') + String(timestamp) + CONFIO_WEBHOOK_SECRET
+  return createHash('sha256').update(concatenated).digest('hex').toUpperCase()
+}
 
 function signMp(dataId: string, ts: number): string {
   const manifest = `id:${dataId};request-id:;ts:${ts};`
@@ -119,11 +132,15 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
       MP_WEBHOOK_SECRET: MP_SECRET,
       MP_ACCESS_TOKEN: 'APP_USR-loc118-test-token',
       DROPI_WEBHOOK_SECRET: DROPI_SECRET,
+      CONFIO_WEBHOOK_KEY: CONFIO_WEBHOOK_SECRET,
+      CONFIO_ACCESS_TOKEN: CONFIO_TOKEN,
+      CONFIO_STORE_ID: 'store-loc117',
     }
     a = await startInstance()
     events = a.dataSource.getRepository(WebhookEvent)
     const mpProvider = new MercadoPagoProvider()
     const dropiProvider = new DropiProvider()
+    const confioProvider = new ConfioProvider()
 
     webhook = new WebhookService(
       events,
@@ -143,9 +160,9 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
         { provide: MercadoPagoProvider, useValue: mpProvider },
         { provide: DropiProvider, useValue: dropiProvider },
         { provide: WebhookService, useValue: webhook },
-        // R17: Stripe and Confio controller routes are not exercised in this spec.
+        // R17: Stripe SDK constructEvent is not exercised in this spec.
         { provide: StripeProvider, useValue: {} },
-        { provide: ConfioProvider, useValue: {} },
+        { provide: ConfioProvider, useValue: confioProvider },
       ],
     })
       // R17: Only admin routes use ApiAuthGuard; provider webhook endpoints are public with HMAC.
@@ -386,5 +403,162 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
     const event = await waitEventSettled('mercadopago', `mp:payment.created:${mpPaymentId}:${ts}`)
     expect(event?.status).toBe(WebhookStatus.FAILED)
     expect(await statusOf(a.dataSource, payment.id)).toBe(PaymentStatus.PENDING)
+  })
+
+  it('E8 rejects a Confio signed webhook outside the 24h timestamp window with 401 and deduplicates unsigned field mutations within the window', async () => {
+    // R15: red if verifyConfioWebhookSignature omits the 24h window or buildConfioWebhookEventId reads unsigned updateTime/correlationId.
+    const subName = `stores/s/subscription-plans/p/subscriptions/${MARKER_PREFIX}sub-e8`
+    const nowSec = Math.floor(Date.now() / 1000)
+    const expiredTs = nowSec - 24 * 60 * 60 - 60
+    const expiredData = {
+      name: subName,
+      status: 'PAST_DUE',
+      createTime: '2026-01-01T10:00:00Z',
+      updateTime: '2026-02-14T10:00:00Z',
+    }
+    const expiredProps = ['name', 'status']
+    const expiredBody = {
+      event: 'subscription.subscriptionStatusChanged',
+      data: expiredData,
+      timestamp: expiredTs,
+      signature: {
+        properties: expiredProps,
+        checksum: signConfio(expiredData, expiredProps, expiredTs),
+      },
+    }
+
+    const expiredRes = await request(app.getHttpServer())
+      .post('/webhook/confio')
+      .set('content-type', 'application/json')
+      .set('authorization', `Bearer ${CONFIO_WEBHOOK_SECRET}`)
+      .send(JSON.stringify(expiredBody))
+
+    expect(expiredRes.status).toBe(401)
+
+    const validData1 = {
+      name: subName,
+      status: 'PAST_DUE',
+      createTime: '2026-01-01T10:00:00Z',
+      updateTime: '2026-02-14T10:00:00Z',
+      correlationId: 'corr-1',
+    }
+    const validData2 = {
+      ...validData1,
+      updateTime: '2099-12-31T23:59:59Z',
+      correlationId: 'corr-2',
+    }
+    const checksum = signConfio(validData1, expiredProps, nowSec)
+
+    const firstValid = await request(app.getHttpServer())
+      .post('/webhook/confio')
+      .set('content-type', 'application/json')
+      .set('authorization', `Bearer ${CONFIO_WEBHOOK_SECRET}`)
+      .send(
+        JSON.stringify({
+          event: 'subscription.subscriptionStatusChanged',
+          data: validData1,
+          timestamp: nowSec,
+          signature: { properties: expiredProps, checksum },
+        }),
+      )
+    const secondValid = await request(app.getHttpServer())
+      .post('/webhook/confio')
+      .set('content-type', 'application/json')
+      .set('authorization', `Bearer ${CONFIO_WEBHOOK_SECRET}`)
+      .send(
+        JSON.stringify({
+          event: 'subscription.subscriptionStatusChanged',
+          data: validData2,
+          timestamp: nowSec,
+          signature: { properties: expiredProps, checksum },
+        }),
+      )
+
+    expect(firstValid.status).toBe(200)
+    expect(secondValid.status).toBe(200)
+    expect(secondValid.body.duplicate).toBe(true)
+
+    const expectedEventId = `${subName}:subscription.subscriptionStatusChanged:PAST_DUE:${nowSec}`
+    const storedRows = await events.findBy({ provider: 'confio', providerEventId: expectedEventId })
+    expect(storedRows).toHaveLength(1)
+  })
+
+  it('E9 leaves a payment of another provider pending and uncredited when Confio or Dropi webhook notices reference it, and leaves a notice without confirmed amount pending', async () => {
+    // R15: red if WebhookService/CheckoutService omits provider scoping or completes a notice that omits amount.
+    const wallet = await seedWallet(a.dataSource, BRAND_ID, 0)
+    const paymentRepo = a.dataSource.getRepository(Payment)
+    const stripePayment = await paymentRepo.save(
+      paymentRepo.create({
+        brandId: BRAND_ID,
+        userId: 'user-loc117',
+        walletId: wallet.id,
+        provider: PaymentProvider.STRIPE,
+        providerPaymentId: `${MARKER_PREFIX}cs_stripe_target`,
+        purpose: PaymentPurpose.WALLET_RECHARGE,
+        amount: 10000,
+        currency: 'COP',
+        status: PaymentStatus.PENDING,
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      }),
+    )
+
+    const confioCrossRes = await request(app.getHttpServer())
+      .post('/webhook/confio')
+      .set('content-type', 'application/json')
+      .set('authorization', `Bearer ${CONFIO_TOKEN}`)
+      .send(
+        JSON.stringify({
+          event: 'payment.statusChanged',
+          data: {
+            name: `${MARKER_PREFIX}cs_stripe_target`,
+            status: 'FUNDED',
+            correlationId: stripePayment.id,
+            amountCents: 1000000,
+          },
+          timestamp: Math.floor(Date.now() / 1000),
+        }),
+      )
+    expect(confioCrossRes.status).toBe(200)
+    await waitEventSettled('confio', `${MARKER_PREFIX}cs_stripe_target:FUNDED`)
+    expect(await statusOf(a.dataSource, stripePayment.id)).toBe(PaymentStatus.PENDING)
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(0)
+
+    const confioNoAmountPayment = await paymentRepo.save(
+      paymentRepo.create({
+        brandId: BRAND_ID,
+        userId: 'user-loc117',
+        walletId: wallet.id,
+        provider: PaymentProvider.CONFIO,
+        providerPaymentId: `${MARKER_PREFIX}confio-no-amount`,
+        purpose: PaymentPurpose.WALLET_RECHARGE,
+        amount: 10000,
+        currency: 'COP',
+        status: PaymentStatus.PENDING,
+        metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
+      }),
+    )
+
+    const noAmountRes = await request(app.getHttpServer())
+      .post('/webhook/confio')
+      .set('content-type', 'application/json')
+      .set('authorization', `Bearer ${CONFIO_TOKEN}`)
+      .send(
+        JSON.stringify({
+          event: 'payment.statusChanged',
+          data: {
+            name: `${MARKER_PREFIX}confio-no-amount`,
+            status: 'FUNDED',
+            correlationId: confioNoAmountPayment.id,
+          },
+          timestamp: Math.floor(Date.now() / 1000),
+        }),
+      )
+    expect(noAmountRes.status).toBe(200)
+    await waitEventSettled('confio', `${MARKER_PREFIX}confio-no-amount:FUNDED`)
+
+    const refreshedNoAmount = await paymentRepo.findOneByOrFail({ id: confioNoAmountPayment.id })
+    expect(refreshedNoAmount.status).toBe(PaymentStatus.PENDING)
+    expect(refreshedNoAmount.metadata?.amountMismatch).toBeUndefined()
+    expect(await balanceOf(a.dataSource, wallet.id)).toBe(0)
   })
 })

@@ -1,3 +1,4 @@
+// R6: Single-responsibility unit suite for WebhookController Confio authentication (signed vs one-shot branches).
 import { Test, TestingModule } from '@nestjs/testing'
 import { HttpException, Logger, RawBodyRequest } from '@nestjs/common'
 import { Request } from 'express'
@@ -156,6 +157,8 @@ describe('WebhookController (confio)', () => {
 
   beforeEach(() => {
     for (const clave of CLAVES_DE_ENTORNO) original[clave] = process.env[clave]
+    // R17: Freeze wall-clock time to the signed fixture timestamp so the 24h window check is deterministic.
+    jest.spyOn(Date, 'now').mockReturnValue(TIMESTAMP * 1000)
   })
 
   afterEach(() => {

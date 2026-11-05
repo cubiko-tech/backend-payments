@@ -123,4 +123,36 @@ describe('StripeProvider', () => {
       ).rejects.toThrow('Stripe no configurado')
     })
   })
+
+  describe('getPaymentStatus', () => {
+    it('returns pending when checkout session is complete but payment_status is unpaid or no_payment_required, and completed only when payment_status is paid', async () => {
+      // R15: red if StripeProvider.getPaymentStatus maps session.status === 'complete' to 'completed' without requiring payment_status === 'paid'.
+      process.env.STRIPE_SECRET_KEY = 'sk_test_real_key_123'
+      const provider = new StripeProvider()
+      const retrieve = (provider as any).stripe.checkout.sessions.retrieve as jest.Mock
+
+      retrieve.mockResolvedValueOnce({
+        status: 'complete',
+        payment_status: 'unpaid',
+        created: 1700000000,
+        amount_total: 10000,
+      })
+
+      const unpaidResult = await provider.getPaymentStatus('cs_test_unpaid')
+      expect(unpaidResult.status).toBe('pending')
+      expect(unpaidResult.paidAt).toBeUndefined()
+
+      retrieve.mockResolvedValueOnce({
+        status: 'complete',
+        payment_status: 'paid',
+        created: 1700000000,
+        amount_total: 10000,
+      })
+
+      const paidResult = await provider.getPaymentStatus('cs_test_paid')
+      expect(paidResult.status).toBe('completed')
+      expect(paidResult.paidAt).toEqual(new Date(1700000000 * 1000))
+      expect(paidResult.metadata).toMatchObject({ amountTotal: 10000 })
+    })
+  })
 })

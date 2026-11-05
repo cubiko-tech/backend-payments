@@ -87,15 +87,16 @@ export class StripeProvider implements PaymentProvider {
         throw error
       })
 
-    const statusMap: Record<string, PaymentStatusResult['status']> = {
-      complete: 'completed',
-      expired: 'failed',
-      open: 'pending',
-    }
+    const isPaid = session.status === 'complete' && session.payment_status === 'paid'
+    const status: PaymentStatusResult['status'] = isPaid
+      ? 'completed'
+      : session.status === 'expired'
+        ? 'failed'
+        : 'pending'
 
     return {
-      status: statusMap[session.status] || 'pending',
-      paidAt: session.status === 'complete' ? new Date(session.created * 1000) : undefined,
+      status,
+      paidAt: isPaid ? new Date(session.created * 1000) : undefined,
       metadata: {
         paymentIntent: session.payment_intent,
         customerEmail: session.customer_details?.email,
