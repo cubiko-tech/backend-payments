@@ -88,6 +88,7 @@ describe('A Dropi 404 is no answer about the payment (PostgreSQL, LOC-102)', () 
 
     await webhook.receive('dropi', 'charge.completed', providerEventId, {
       chargeId: payment.providerPaymentId,
+      amount: Number(payment.amount),
     })
 
     const deadline = Date.now() + 5000
