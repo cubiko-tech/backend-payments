@@ -24,6 +24,7 @@ const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
 const COMPLETED_PAYMENT_ID = '22222222-2222-4222-8222-222222222222'
 const REFUNDED_PAYMENT_ID = '33333333-3333-4333-8333-333333333333'
 const PENDING_REFUND_PAYMENT_ID = '44444444-4444-4444-8444-444444444444'
+const UNPAID_PAYMENT_ID = '66666666-6666-4666-8666-666666666666'
 const DOC_ID = '55555555-5555-4555-8555-555555555555'
 const USER_ID = 'user-session-115'
 const SUPERADMIN_ID = 'admin-session-115'
@@ -37,8 +38,9 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   let jwtService: JwtService
   let userToken: string
   let superAdminToken: string
-  let refundWriteRepo: { create: jest.Mock; save: jest.Mock; findOne: jest.Mock }
+  let refundWriteRepo: { create: jest.Mock; save: jest.Mock; findOne: jest.Mock; find: jest.Mock }
   let paymentReadRepo: { findOne: jest.Mock }
+  let activeRefunds: Record<string, Array<Pick<Refund, 'amount' | 'status'>>> = {}
   let subscriptionService: { cancel: jest.Mock; reactivate: jest.Mock }
   let legalDocumentService: { verify: jest.Mock; reject: jest.Mock }
 
@@ -55,8 +57,10 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
       create: jest.fn((data) => ({ ...data })),
       // R17: captures persisted refund payload; real DB write is exercised in the e2e spec.
       save: jest.fn(async (entity) => ({ id: 'ref-created-1', ...entity })),
-      // R17: returns existing pending refund when paymentId matches PENDING_REFUND_PAYMENT_ID.
+      // R17: unused by request(); approve() reads by id.
       findOne: jest.fn(),
+      // R17: returns the active refunds the case seeds per paymentId.
+      find: jest.fn(),
     }
     // R17: supplies payment state and amount for unit branch isolation; real rows are queried in the e2e spec.
     paymentReadRepo = { findOne: jest.fn() }
@@ -152,22 +156,23 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
           status: PaymentStatus.COMPLETED,
         }
       }
-      return null
-    })
-    refundWriteRepo.findOne.mockImplementation(async ({ where }: any) => {
-      if (
-        where?.paymentId === PENDING_REFUND_PAYMENT_ID &&
-        where?.status === RefundStatus.PENDING
-      ) {
+      if (where?.id === UNPAID_PAYMENT_ID) {
         return {
-          id: 'existing-pending-refund',
-          paymentId: PENDING_REFUND_PAYMENT_ID,
+          id: UNPAID_PAYMENT_ID,
           brandId: OWN_BRAND_ID,
           amount: 5000,
-          status: RefundStatus.PENDING,
+          currency: 'COP',
+          status: PaymentStatus.PENDING,
         }
       }
       return null
+    })
+    activeRefunds = {}
+    refundWriteRepo.find.mockImplementation(async ({ where }: any) => {
+      if (where?.paymentId === PENDING_REFUND_PAYMENT_ID) {
+        return [{ id: 'existing-pending-refund', amount: 5000, status: RefundStatus.PENDING }]
+      }
+      return activeRefunds[where?.paymentId] ?? []
     })
   })
 
@@ -219,6 +224,57 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
 
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
     expect(res.body).toMatchObject({ code: 'REFUND_AMOUNT_EXCEEDS_PAYMENT' })
+    expect(refundWriteRepo.save).not.toHaveBeenCalled()
+  })
+
+  const postRefund = (body: Record<string, unknown>) =>
+    request(app.getHttpServer())
+      .post('/refund')
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ currency: 'COP', reason: RefundReason.CUSTOMER_REQUEST, ...body })
+
+  it('rejects a refund on a payment that is not completed with 409 PAYMENT_NOT_COMPLETED', async () => {
+    // R15 (Mutation): guarding only `PaymentStatus.REFUNDED` in refund.service.ts lets a pending payment through.
+    const res = await postRefund({ paymentId: UNPAID_PAYMENT_ID, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'PAYMENT_NOT_COMPLETED' })
+    expect(refundWriteRepo.save).not.toHaveBeenCalled()
+  })
+
+  it('rejects a refund whose currency differs from the payment with 400 REFUND_CURRENCY_MISMATCH', async () => {
+    // R15 (Mutation): removing the currency comparison in refund.service.ts creates a USD refund on a COP payment.
+    const res = await postRefund({ paymentId: COMPLETED_PAYMENT_ID, amount: 10, currency: 'USD' })
+
+    expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+    expect(res.body).toMatchObject({ code: 'REFUND_CURRENCY_MISMATCH' })
+    expect(refundWriteRepo.save).not.toHaveBeenCalled()
+  })
+
+  it('rejects 1000 more on a 5000 payment already refunded in full with 400 REFUND_AMOUNT_EXCEEDS_PAYMENT', async () => {
+    // R15 (Mutation): capping only the requested amount in refund.service.ts returns 201 and saves.
+    // Prepares for executed refunds: nothing reaches `completed` yet, the e2e covers `processing`.
+    activeRefunds[COMPLETED_PAYMENT_ID] = [
+      { amount: '5000.00' as any, status: RefundStatus.COMPLETED },
+    ]
+
+    const res = await postRefund({ paymentId: COMPLETED_PAYMENT_ID, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+    expect(res.body).toMatchObject({ code: 'REFUND_AMOUNT_EXCEEDS_PAYMENT' })
+    expect(refundWriteRepo.save).not.toHaveBeenCalled()
+  })
+
+  it('rejects a refund while another one is processing under the cap with 409 REFUND_ALREADY_PENDING', async () => {
+    // R15 (Mutation): dropping `processing` from the in-flight check in refund.service.ts returns 201.
+    activeRefunds[COMPLETED_PAYMENT_ID] = [
+      { amount: '1000.00' as any, status: RefundStatus.PROCESSING },
+    ]
+
+    const res = await postRefund({ paymentId: COMPLETED_PAYMENT_ID, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'REFUND_ALREADY_PENDING' })
     expect(refundWriteRepo.save).not.toHaveBeenCalled()
   })
 

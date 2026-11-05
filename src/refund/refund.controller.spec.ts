@@ -6,7 +6,7 @@ import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { Refund, RefundReason, RefundStatus } from './entities/refund.entity'
 import { RefundController } from './refund.controller'
@@ -35,6 +35,7 @@ describe('RefundController and RefundService brand payment ownership and operato
     create: jest.Mock
     save: jest.Mock
     findOne: jest.Mock
+    find: jest.Mock
   }
   let refundReadRepo: {
     findAndCount: jest.Mock
@@ -67,6 +68,8 @@ describe('RefundController and RefundService brand payment ownership and operato
         ...entity,
       })),
       findOne: jest.fn(),
+      // R17: no active refunds; the cap and in-flight guards are covered in refund-request-and-authorship.spec.ts.
+      find: jest.fn().mockResolvedValue([]),
     }
     refundReadRepo = {
       findAndCount: jest.fn().mockResolvedValue([[], 0]),
@@ -117,7 +120,14 @@ describe('RefundController and RefundService brand payment ownership and operato
 
     paymentReadRepo.findOne.mockImplementation(async ({ where }: any) => {
       if (where?.id === OWN_PAYMENT_ID) {
-        return { id: OWN_PAYMENT_ID, brandId: OWN_BRAND_ID }
+        // Completed and in COP so the request reaches the brand check this suite measures.
+        return {
+          id: OWN_PAYMENT_ID,
+          brandId: OWN_BRAND_ID,
+          amount: 5000,
+          currency: 'COP',
+          status: PaymentStatus.COMPLETED,
+        }
       }
       if (where?.id === FOREIGN_PAYMENT_ID) {
         return { id: FOREIGN_PAYMENT_ID, brandId: FOREIGN_BRAND_ID }

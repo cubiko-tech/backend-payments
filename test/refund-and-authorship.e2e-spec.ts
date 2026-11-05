@@ -286,6 +286,52 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
     expect(await refundRepo.count({ where: { paymentId: payment.id } })).toBe(0)
   })
 
+  const requestAndApprove = async (paymentId: string, amount: number) => {
+    const created = await postRefund({ paymentId, amount })
+    expect(created.status).toBe(HttpStatus.CREATED)
+    const approved = await request(app.getHttpServer())
+      .post(`/v1/refund/${created.body.data.id}/approve`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({})
+    expect(approved.status).toBe(HttpStatus.CREATED)
+  }
+
+  it('rejects 1000 more on a 5000 payment with 5000 approved with 400 and keeps a single refund row', async () => {
+    // R15 (Mutation): capping only the requested amount in refund.service.ts answers 409, not the 400 cap.
+    const payment = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
+    await requestAndApprove(payment.id, 5000)
+
+    const res = await postRefund({ paymentId: payment.id, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+    expect(res.body).toMatchObject({ code: 'REFUND_AMOUNT_EXCEEDS_PAYMENT' })
+    expect(await refundRepo.count({ where: { paymentId: payment.id } })).toBe(1)
+  })
+
+  it('rejects a refund on a pending payment with 409 PAYMENT_NOT_COMPLETED and writes no row', async () => {
+    // R15 (Mutation): guarding only `PaymentStatus.REFUNDED` in refund.service.ts inserts a pending row.
+    const payment = await seedPayment({ status: PaymentStatus.PENDING, amount: 5000 })
+
+    const res = await postRefund({ paymentId: payment.id, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'PAYMENT_NOT_COMPLETED' })
+    expect(await refundRepo.count({ where: { paymentId: payment.id } })).toBe(0)
+  })
+
+  it('rejects a refund while an approved one is processing under the cap with 409 REFUND_ALREADY_PENDING', async () => {
+    // R15 (Mutation): dropping the `processing` in-flight check in refund.service.ts inserts a second row.
+    const payment = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
+    await requestAndApprove(payment.id, 1000)
+
+    const res = await postRefund({ paymentId: payment.id, amount: 1000 })
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'REFUND_ALREADY_PENDING' })
+    const rows = await refundRepo.find({ where: { paymentId: payment.id } })
+    expect(rows.map((r) => r.status)).toEqual([RefundStatus.PROCESSING])
+  })
+
   it('persists requestedBy from the session on POST /v1/refund both when requestedBy is spoofed and when omitted', async () => {
     // R15 (Mutation): removing `requestedBy: req?.user?.id` in refund.controller.ts stores `admin:falso` or fails.
     const paymentA = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
