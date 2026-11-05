@@ -626,7 +626,7 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   proveedores distintos ya guardaron filas con la misma `providerEventId`.
 - **Qué rompe**: en (a), la segunda notificación se lee como duplicado de la primera; para un mismo
   `chargeId` y `event` el efecto ya es idempotente. En (b), `ADD CONSTRAINT "UQ_webhook_events_provider_id"
-  UNIQUE ("providerEventId")` falla sin borrar filas para no perder historial de eventos.
+UNIQUE ("providerEventId")` falla sin borrar filas para no perder historial de eventos.
 - **Estado**: aceptado en LOC-118 — cuando Dropi incluye `eventId` se usa ese valor; sin `eventId`, el
   hash SHA-256 de `rawBody` es la única señal determinística cubierta por `x-dropi-signature`.
 
@@ -642,4 +642,50 @@ IDEMPOTENT_CHECKOUT_INCOMPLETE` para esa llave, un timeout en `provider.createCh
   `ftp:`) y textos que no son URL; la lista blanca de hosts de almacenamiento queda separada en INBOX
   (aprobado 2026-11-04).
 
+## Un aviso de webhook sin monto confirmado deja el pago en `pending` a la espera del barrido (LOC-117)
 
+- **Dónde**: `src/checkout/checkout.service.ts:2058-2075` (`assertProviderConfirmedAmount`, `isProviderNoticePayload`).
+- **Qué lo dispara**: un aviso de proveedor que omite el monto confirmado (como el ramo one-shot de Confío cuando no
+  trae `amountCents`, o un pago de Mercado Pago con `transactionAmount` nulo).
+- **Qué rompe**: el webhook no completa el pago; queda `pending` hasta que `reconcilePayment` o el barrido
+  `reconcileExternalPayments` (`src/tasks/payment-sweep.ts:26`) consulte `getPaymentStatus` con el monto. Si el barrido
+  no lo encuentra en el proveedor (como en `RIESGOS.md:432-441`), vence a las 24 h como `failed` aunque esté cobrado.
+- **Estado**: abierto — mitigado por `reconcilePayment` y el barrido cada 5 min cuando `getPaymentStatus` devuelve el
+  monto; lo cierra que el aviso one-shot de Confío firme `amountCents` y resolver la búsqueda de Mercado Pago (LOC-89).
+
+## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
+
+- **Dónde**: `src/provider/confio/confio-webhook-signature.ts:5` (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`, `:456`);
+  `src/webhook/webhook.controller.ts:303` (`autenticarRamoFirmado`).
+- **Qué lo dispara**: un aviso firmado de suscripción de Confío (`billingStatusChanged` o `subscriptionStatusChanged`)
+  que llega o se reintenta más de 24 h después del `timestamp` firmado original.
+- **Qué rompe**: el controlador responde 401 `timestamp_out_of_window` en cada reentrega tardía y no consta un barrido
+  de suscripciones de Confío que rescate ese cobro o cambio de estado sin intervención manual.
+- **Estado**: abierto — la ventana de 24 h cubre los reintentos del día; lo cierra confirmar la política de reintentos
+  de Confío o un barrido periódico de suscripciones `confio` contra `getSubscription`.
+
+## Un aviso de webhook que nombra el id de un pago o suscripción de otro proveedor (LOC-117)
+
+- **Dónde**: `src/webhook/webhook.service.ts:176-269`, `:394-445` (`dispatchEvent`, `findPaymentByProviderIds`,
+  `findPaymentByCorrelationId`); `src/webhook/confio-subscription-webhook.service.ts:378-409` (`resolverSuscripcion`);
+  `src/checkout/checkout.service.ts:782-819` (`completeExternalPayment`).
+- **Qué lo dispara**: un aviso de un proveedor (`confio`, `dropi`, `stripe` o `mercadopago`) que lleva en
+  `correlationId`, `providerPaymentId` o `name` el identificador de un pago o suscripción de otro proveedor.
+- **Qué rompe**: antes de LOC-117, la búsqueda sin filtro de proveedor permitía que el aviso de un proveedor completara
+  un pago o alterara una suscripción perteneciente a otro proveedor.
+- **Estado**: cerrado — `WebhookService` y `ConfioSubscriptionWebhookService` filtran por el proveedor del aviso al
+  resolver pagos y suscripciones, `leerPeriodoDelProveedor` prioriza `sub.providerSubscriptionId` de la base sobre
+  `data.name`, y `CheckoutService.completeExternalPayment` exige `expectedProvider` en la lectura y en el reclamo.
+
+## Una sesión de Stripe en estado `complete` pero con `payment_status` distinto de `paid` (LOC-117)
+
+- **Dónde**: `src/webhook/webhook.service.ts:171-180` (`dispatchEvent`);
+  `src/provider/stripe/stripe.provider.ts:90` (`getPaymentStatus`).
+- **Qué lo dispara**: una sesión de Stripe (`checkout.session.completed` o consulta de `getPaymentStatus` en
+  `reconcilePayment` y `reconcileExternalPayments`) con `status: 'complete'` y `payment_status` aún no pagado
+  (`'unpaid'` en medios asíncronos o `'no_payment_required'`).
+- **Qué rompe**: antes de LOC-117, tanto el webhook como `getPaymentStatus` daban el pago por completado sólo con
+  `status === 'complete'`, acreditando wallet o activando plan sin cobro confirmado.
+- **Estado**: cerrado — `WebhookService.dispatchEvent` y `StripeProvider.getPaymentStatus` exigen
+  `payment_status === 'paid'` además de `status === 'complete'`, y el webhook resuelve sólo por `session.id` con
+  `PaymentProvider.STRIPE` (LOC-117).

@@ -1,4 +1,4 @@
-// R6: Keeps the Confio subscription webhook state machine, period resolution, role sync, and transactional persistence together.
+// R6: Keeps the Confio subscription webhook state machine, period resolution, and role sync together.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, Repository, SelectQueryBuilder } from 'typeorm'

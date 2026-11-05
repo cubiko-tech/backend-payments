@@ -510,7 +510,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
   // ------------------------------------------------------------ resolución (1)
   describe('resolución de la suscripción', () => {
     it('resolves by providerSubscriptionId === data.name and provider === confio', async () => {
-      // R15: red if resolverSuscripcion omits provider: SubscriptionProvider.CONFIO when querying by providerSubscriptionId.
+      // R15: red if resolverSuscripcion omits provider: SubscriptionProvider.CONFIO on name lookup.
       conSuscripcion(suscripcion())
 
       await despachar(cambioDeEstado('EXPIRED'))
@@ -537,7 +537,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     })
 
     it('rejects correlationId fallback when the subscription belongs to another provider or another Confio resource name', async () => {
-      // R15: red if resolverSuscripcion allows correlationId fallback onto a non-Confio subscription or a Confio subscription with another providerSubscriptionId.
+      // R15: red if resolverSuscripcion allows correlationId fallback onto another provider or resource.
       const otherProviderSub = suscripcion({
         id: SUB_ID,
         provider: SubscriptionProvider.STRIPE,
@@ -673,7 +673,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     const PAY_UUID = '22222222-2222-4222-8222-222222222222'
 
     it('routes a Confio one-shot payment notice through the legacy status path when the payment belongs to Confio', async () => {
-      // R15: red if dispatchEvent stops routing Confio one-shot notices when ConfioProvider.isCompleted(data.status) is true.
+      // R15: red if dispatchEvent stops routing Confio one-shot notices when isCompleted(data.status).
       paymentReadRepo.findOne.mockImplementation(async ({ where }: any) => {
         if (where?.id === PAY_UUID && where?.provider === PaymentProvider.CONFIO) {
           return {
@@ -699,7 +699,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     })
 
     it('does not call completeExternalPayment when a Confio one-shot notice targets a payment of another provider or mismatched providerPaymentId', async () => {
-      // R15: red if findPaymentByProviderIds or findPaymentByCorrelationId omits the provider === PaymentProvider.CONFIO or providerPaymentId check.
+      // R15: red if findPaymentByProviderIds or findPaymentByCorrelationId omits the provider check.
       paymentReadRepo.findOne.mockImplementation(async ({ where }: any) => {
         if (where?.providerPaymentId === 'stores/s/payments/p') {
           return null
@@ -757,7 +757,7 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     })
 
     it('does not call completeExternalPayment on Stripe checkout.session.completed when payment_status is not paid, and ignores metadata.paymentId', async () => {
-      // R15: red if dispatchEvent omits the payment_status !== 'paid' guard or resolves Stripe sessions via metadata.paymentId.
+      // R15: red if dispatchEvent omits payment_status !== 'paid' or resolves via metadata.paymentId.
       paymentReadRepo.findOne.mockResolvedValue({
         id: PAY_UUID,
         provider: PaymentProvider.STRIPE,

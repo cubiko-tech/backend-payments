@@ -1,4 +1,4 @@
-// R6: Single-responsibility e2e suite for webhook authentication, deduplication, cross-provider scoping, and notice amount verification against PostgreSQL.
+// R6: Single-responsibility e2e suite for webhook auth, deduplication, and provider/amount scoping.
 import { createHash, createHmac } from 'crypto'
 import { INestApplication } from '@nestjs/common'
 import { Test } from '@nestjs/testing'
@@ -406,7 +406,7 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
   })
 
   it('E8 rejects a Confio signed webhook outside the 24h timestamp window with 401 and deduplicates unsigned field mutations within the window', async () => {
-    // R15: red if verifyConfioWebhookSignature omits the 24h window or buildConfioWebhookEventId reads unsigned updateTime/correlationId.
+    // R15: red if verifyConfioWebhookSignature omits the 24h window or eventId reads unsigned fields.
     const subName = `stores/s/subscription-plans/p/subscriptions/${MARKER_PREFIX}sub-e8`
     const nowSec = Math.floor(Date.now() / 1000)
     const expiredTs = nowSec - 24 * 60 * 60 - 60

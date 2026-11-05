@@ -1,4 +1,4 @@
-// R6: Keeps the Confio webhook signature contract, property sets, scalar/object serializers, and bounds together in one pure verifier.
+// R6: Keeps the Confio webhook signature contract, serializers, and bounds together in one pure verifier.
 import { createHash, timingSafeEqual } from 'crypto'
 import { ConfioWebhookPayload } from './confio.types'
 
