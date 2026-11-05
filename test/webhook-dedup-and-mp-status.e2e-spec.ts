@@ -219,7 +219,7 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
   })
 
   it('E2 deduplicates a second Dropi delivery without eventId via UQ_webhook_events_provider_event and returns the dropi winner', async () => {
-    // R15: red if 23505 is not caught (returns error instead of duplicate) or winner lookup omits provider (returns stripe row).
+    // R15: red if 23505 is not caught (error, not duplicate) or the winner lookup omits provider (stripe row).
     const marker = `${MARKER_PREFIX}e2`
     const body = { marker, event: 'charge.failed', chargeId: `${MARKER_PREFIX}ch-e2` }
     const expectedId = `dropi:sha256:${createHash('sha256').update(JSON.stringify(body)).digest('hex')}`
@@ -231,7 +231,7 @@ describe('Dropi and Mercado Pago webhook deduplication and status check (Postgre
     expect(first.status).toBe(200)
     await waitEventSettled('dropi', expectedId)
 
-    // R17: Forces the second delivery past the pre-check SELECT so its INSERT collides with UQ_webhook_events_provider_event (23505).
+    // R17: pushes the second delivery past the pre-check SELECT so its INSERT hits UQ_webhook_events_provider_event.
     jest.spyOn(events, 'findOne').mockResolvedValueOnce(null)
     const second = await deliverDropi(body)
 

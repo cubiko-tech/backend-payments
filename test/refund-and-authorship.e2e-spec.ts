@@ -168,7 +168,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         provideRepo(AuditLog, 'DBRead'),
         // R17: unused by admin wallet endpoints; satisfies AdminController constructor.
         { provide: CreditService, useValue: {} },
-        // R17: external HTTP to backend-platform is out of scope; brand ownership is verified via session claim and stub.
+        // R17: HTTP to backend-platform is out of scope; brand ownership comes from the session claim and stub.
         {
           provide: ClientPlatformService,
           // R17: allows BRAND_A membership without calling external backend-platform HTTP.
@@ -231,7 +231,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
       .send({ currency: 'COP', reason: RefundReason.CUSTOMER_REQUEST, ...body })
 
   it('rejects refunding a refunded payment with 409 PAYMENT_ALREADY_REFUNDED and writes no refund row', async () => {
-    // R15 (Mutation): removing `payment.status === PaymentStatus.REFUNDED` in refund.service.ts lets this insert a pending row.
+    // R15 (Mutation): dropping the `PaymentStatus.REFUNDED` check in refund.service.ts inserts a pending row.
     const payment = await seedPayment({ status: PaymentStatus.REFUNDED })
 
     const res = await postRefund({ paymentId: payment.id, amount: 5000 })
@@ -242,7 +242,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('rejects a second refund on a payment that already has a pending refund with 409 REFUND_ALREADY_PENDING', async () => {
-    // R15 (Mutation): removing the `existingPending` guard in refund.service.ts lets the second request create a second row.
+    // R15 (Mutation): removing the `existingPending` guard in refund.service.ts creates a second row.
     const payment = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
 
     const first = await postRefund({ paymentId: payment.id, amount: 5000 })
@@ -262,7 +262,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('serializes two concurrent refund requests on the same payment so only one pending row is created', async () => {
-    // R15 (Mutation): dropping the pessimistic_write lock on Payment in refund.service.ts lets concurrent requests insert two rows.
+    // R15 (Mutation): dropping the pessimistic_write lock on Payment in refund.service.ts inserts two rows.
     const payment = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
 
     const [resA, resB] = await Promise.all([
@@ -276,7 +276,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('rejects a refund amount exceeding the payment amount with 400 REFUND_AMOUNT_EXCEEDS_PAYMENT and writes no row', async () => {
-    // R15 (Mutation): removing `Number(data.amount) > Number(payment.amount)` in refund.service.ts lets 999999 over 5000 insert a row.
+    // R15 (Mutation): removing `Number(data.amount) > Number(payment.amount)` in refund.service.ts inserts a row.
     const payment = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
 
     const res = await postRefund({ paymentId: payment.id, amount: 999999 })
@@ -287,7 +287,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('persists requestedBy from the session on POST /v1/refund both when requestedBy is spoofed and when omitted', async () => {
-    // R15 (Mutation): removing `requestedBy: req?.user?.id` in refund.controller.ts persists `admin:falso` or fails NOT NULL.
+    // R15 (Mutation): removing `requestedBy: req?.user?.id` in refund.controller.ts stores `admin:falso` or fails.
     const paymentA = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
     const paymentB = await seedPayment({ status: PaymentStatus.COMPLETED, amount: 5000 })
 
@@ -308,7 +308,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('persists triggeredBy from the session in subscription_events on cancel and reactivate when body carries admin:falso', async () => {
-    // R15 (Mutation): restoring `data.triggeredBy` in subscription.controller.ts writes `admin:falso` into subscription_events.
+    // R15 (Mutation): restoring `data.triggeredBy` in the controller writes `admin:falso` into subscription_events.
     const now = new Date()
     const periodEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
     const sub = await subRepo.save(
@@ -355,7 +355,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
   })
 
   it('persists verifiedBy from the session in brand_legal_documents on verify and reject when body carries admin:falso', async () => {
-    // R15 (Mutation): restoring `data.verifiedBy` in billing-profile.controller.ts writes `admin:falso` into brand_legal_documents.
+    // R15 (Mutation): restoring `data.verifiedBy` in the controller writes `admin:falso` into brand_legal_documents.
     const doc = await docRepo.save(
       docRepo.create({
         brandId: BRAND_A,

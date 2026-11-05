@@ -49,7 +49,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
     userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
     superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
-    // R17: unit spec isolates RefundService / controller branching; real PostgreSQL locks run in test/refund-and-authorship.e2e-spec.ts.
+    // R17: unit spec for RefundService/controller branching; real locks: test/refund-and-authorship.e2e-spec.ts.
     refundWriteRepo = {
       // R17: mirrors repository.create field assignment without opening a DB connection in unit tests.
       create: jest.fn((data) => ({ ...data })),
@@ -172,7 +172,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   })
 
   it('rejects refunding an already refunded payment with 409 PAYMENT_ALREADY_REFUNDED and creates no row', async () => {
-    // R15 (Mutation): removing `payment.status === PaymentStatus.REFUNDED` in refund.service.ts lets this return 201 and call save.
+    // R15 (Mutation): dropping the `PaymentStatus.REFUNDED` check in refund.service.ts returns 201 and calls save.
     const res = await request(app.getHttpServer())
       .post('/refund')
       .set('Authorization', `Bearer ${userToken}`)
@@ -189,7 +189,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   })
 
   it('rejects a second refund when another pending refund exists for the same payment with 409 REFUND_ALREADY_PENDING', async () => {
-    // R15 (Mutation): removing the `existingPending` check in refund.service.ts lets the second request create another pending row.
+    // R15 (Mutation): removing the `existingPending` check in refund.service.ts creates a second pending row.
     const res = await request(app.getHttpServer())
       .post('/refund')
       .set('Authorization', `Bearer ${userToken}`)
@@ -206,7 +206,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   })
 
   it('rejects a refund amount greater than the payment amount with 400 REFUND_AMOUNT_EXCEEDS_PAYMENT', async () => {
-    // R15 (Mutation): flipping `Number(data.amount) > Number(payment.amount)` in refund.service.ts lets 999999 over 5000 return 201.
+    // R15 (Mutation): flipping `Number(data.amount) > Number(payment.amount)` in refund.service.ts returns 201.
     const res = await request(app.getHttpServer())
       .post('/refund')
       .set('Authorization', `Bearer ${userToken}`)
@@ -253,7 +253,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   })
 
   it('ignores body.triggeredBy on POST /subscription/cancel and POST /subscription/reactivate and uses session user id', async () => {
-    // R15 (Mutation): restoring `data.triggeredBy` in subscription.controller.ts forwards `admin:falso` to SubscriptionService.
+    // R15 (Mutation): restoring `data.triggeredBy` in subscription.controller.ts forwards `admin:falso`.
     const cancelRes = await request(app.getHttpServer())
       .post('/subscription/cancel')
       .set('Authorization', `Bearer ${userToken}`)
@@ -282,7 +282,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   })
 
   it('ignores body.verifiedBy on admin document verify and reject routes and uses session user id', async () => {
-    // R15 (Mutation): restoring `data.verifiedBy` in billing-profile.controller.ts forwards `admin:falso` to LegalDocumentService.
+    // R15 (Mutation): restoring `data.verifiedBy` in billing-profile.controller.ts forwards `admin:falso`.
     const verifyRes = await request(app.getHttpServer())
       .post(`/billing-profile/admin/documents/${DOC_ID}/verify`)
       .set('Authorization', `Bearer ${superAdminToken}`)
