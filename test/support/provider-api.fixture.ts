@@ -66,8 +66,13 @@ export function realStripeClient(instance: RaceInstance, retrieve: () => Promise
   answerAs(instance, client)
 }
 
-export function stripeSession(amount: number) {
-  return { status: 'complete', created: 1, amount_total: amount * 100 }
+export function stripeSession(amount: number, paymentStatus = 'paid') {
+  return {
+    status: 'complete',
+    payment_status: paymentStatus,
+    created: 1,
+    amount_total: amount * 100,
+  }
 }
 
 function answerAs(instance: RaceInstance, client: unknown) {

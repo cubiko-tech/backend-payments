@@ -7,7 +7,7 @@ import { RefundService } from './refund.service'
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Refund], 'DBWrite'),
+    TypeOrmModule.forFeature([Refund, Payment], 'DBWrite'),
     TypeOrmModule.forFeature([Refund, Payment], 'DBRead'),
   ],
   controllers: [RefundController],

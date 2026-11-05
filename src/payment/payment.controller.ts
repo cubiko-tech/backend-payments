@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { PaymentService } from './payment.service'
+import { ListPaymentsQueryDto } from './dto/list-payments-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
@@ -58,7 +59,7 @@ export class PaymentController {
   @ApiResponse({ status: 200, description: 'Pagos obtenidos correctamente' })
   async getPaymentsByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; status?: string },
+    @Query() filters: ListPaymentsQueryDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(

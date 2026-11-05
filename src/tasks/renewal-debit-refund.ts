@@ -1,4 +1,4 @@
-import { FindOptionsWhere, Raw, Repository } from 'typeorm'
+import { DataSource, FindOptionsWhere, Raw, Repository } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { logger } from '../shared/logger/logger'
@@ -8,6 +8,7 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { WalletService } from '../wallet/wallet.service'
+import { lockAndReread, SubscriptionLockDeps } from './subscription-lock'
 
 /**
  * `metadata.cycleExtension` of a renewal debit. Written with the debit as `pending`: a renewal that
@@ -117,4 +118,52 @@ export async function refundRenewalDebit(
   )
   await markCycleDebit(deps.transactionRepo, { id: debit.id }, CycleExtension.REFUNDED)
   return true
+}
+
+export interface OrphanRenewalSweepDeps extends SubscriptionLockDeps {
+  dataSource: DataSource
+  walletService: Pick<WalletService, 'credit'>
+  auditService: Pick<AuditService, 'log'>
+}
+
+/**
+ * Credits back the renewal debits no pass can extend any more. Each one is decided under the
+ * brand's plan lock, with row and debit reread from the primary, so a pass or a checkout in flight
+ * finishes first. A failure on one debit leaves it pending and does not stop the rest.
+ */
+export async function refundOrphanRenewalDebits(deps: OrphanRenewalSweepDeps): Promise<void> {
+  const transactionRepo = deps.dataSource.getRepository(Transaction)
+  const pending = await transactionRepo.find({ where: PENDING_CYCLE_DEBITS })
+
+  let refunded = 0
+  for (const { id, referenceId } of pending) {
+    try {
+      const sub = await deps.subscriptionRepo.findOne({ where: { id: referenceId } })
+      if (!sub) {
+        logger.log('error', `[CRON] Renewal debit ${id}: subscription ${referenceId} not found`)
+        continue
+      }
+      const release = await lockAndReread(sub, deps)
+      if (!release) continue
+      try {
+        const debit = await transactionRepo.findOne({ where: { id } })
+        if (debit?.metadata?.cycleExtension !== CycleExtension.PENDING) continue
+        if (canStillExtend(debit, sub)) continue
+        const done = await refundRenewalDebit(debit, {
+          walletService: deps.walletService,
+          auditService: deps.auditService,
+          transactionRepo,
+        })
+        if (done) refunded++
+      } finally {
+        await release()
+      }
+    } catch (error) {
+      logger.log('error', `[CRON] Error refunding renewal debit ${id}: ${error.message}`)
+    }
+  }
+
+  if (refunded > 0) {
+    logger.log('warn', `[CRON] refundOrphanRenewalDebits: ${refunded} refunded`)
+  }
 }

@@ -12,6 +12,7 @@ import {
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
 import { readWebhookSecret } from '../../shared/env/webhook-secret'
+import { timingSafeEqualStrings } from '../confio/confio-webhook-signature'
 
 const MP_STATUS: Record<string, PaymentStatusResult['status']> = {
   approved: 'completed',
@@ -32,6 +33,12 @@ export class MercadoPagoApiError extends Error {
   ) {
     super(message)
   }
+}
+
+export interface MercadoPagoNoticePayment {
+  status: string
+  externalReference: string | null
+  transactionAmount: number | null
 }
 
 /**
@@ -168,6 +175,35 @@ export class MercadoPagoProvider implements PaymentProvider {
     }
   }
 
+  /**
+   * Fetches the payment referenced by a webhook notification (`data.id`) directly from Mercado Pago
+   * (`GET /v1/payments/{id}`) so a notice never completes a payment without verifying its live status.
+   * @throws when Mercado Pago fails or returns no `status`.
+   */
+  async getNoticePayment(mpPaymentId: string): Promise<MercadoPagoNoticePayment> {
+    this.ensureConfigured()
+
+    const payment = await this.mpFetch(`/v1/payments/${encodeURIComponent(mpPaymentId)}`)
+    if (typeof payment?.status !== 'string' || payment.status.trim() === '') {
+      throw new Error(`MercadoPago payment ${mpPaymentId} returned no status`)
+    }
+
+    const externalReference =
+      typeof payment.external_reference === 'string' && payment.external_reference.trim() !== ''
+        ? payment.external_reference.trim()
+        : null
+    // Number(null) and Number('') are 0: an absent amount must stay absent, not read as zero.
+    const raw = payment.transaction_amount
+    const rawAmount = raw === null || raw === undefined || raw === '' ? NaN : Number(raw)
+    const transactionAmount = Number.isFinite(rawAmount) ? rawAmount : null
+
+    return {
+      status: payment.status,
+      externalReference,
+      transactionAmount,
+    }
+  }
+
   async refundPayment(providerPaymentId: string, amount?: number): Promise<RefundResult> {
     this.ensureConfigured()
 
@@ -248,25 +284,74 @@ export class MercadoPagoProvider implements PaymentProvider {
     logger.log('warn', 'MercadoPago no soporta eliminación directa de métodos de pago')
   }
 
+  /**
+   * Checks the `x-signature` header (`ts=<seconds or ms>,v1=<hex hmac>`): the HMAC of the manifest, compared in
+   * constant time, and a `ts` within {@link SIGNATURE_WINDOW_MS} of now. A body without `data.id` is rejected.
+   */
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
-    // MercadoPago usa x-signature header con ts y v1
-    // Formato: ts=TIMESTAMP,v1=HASH
     const secret = readWebhookSecret('MP_WEBHOOK_SECRET')
-    if (!secret) return false
+    const signed = readSignedFields(payload, signature)
+    if (!secret || !signed) return false
 
-    try {
-      const parts = signature.split(',')
-      const ts = parts.find((p) => p.startsWith('ts='))?.split('=')[1]
-      const v1 = parts.find((p) => p.startsWith('v1='))?.split('=')[1]
+    if (Math.abs(Date.now() - tsToMs(signed.ts)) > SIGNATURE_WINDOW_MS) return false
 
-      if (!ts || !v1) return false
+    const manifest = `id:${signed.dataId};request-id:;ts:${signed.ts};`
+    const expected = createHmac('sha256', secret).update(manifest).digest('hex')
 
-      const manifest = `id:${JSON.parse(payload.toString()).data?.id};request-id:;ts:${ts};`
-      const hmac = createHmac('sha256', secret).update(manifest).digest('hex')
-
-      return hmac === v1
-    } catch {
-      return false
-    }
+    return timingSafeEqualStrings(signed.v1, expected)
   }
+
+  /**
+   * Deduplication key of a notification whose signature was already validated: built from what is
+   * signed (`data.id`, `ts`) plus its unsigned `action`, so `payment.created` and `payment.updated` never collide.
+   * @throws Error when the signed fields cannot be read.
+   */
+  webhookEventId(payload: Buffer, signature: string): string {
+    const signed = readSignedFields(payload, signature)
+    if (!signed) throw new Error('Mercado Pago notification without signed fields')
+
+    return `mp:${signed.action}:${signed.dataId}:${signed.ts}`
+  }
+}
+
+/** How far `ts` may be from now, on either side. Assumed by LOC-113; Mercado Pago documents none. */
+export const SIGNATURE_WINDOW_MS = 5 * 60 * 1000
+
+interface SignedFields {
+  ts: string
+  v1: string
+  dataId: string
+  action: string
+}
+
+/** Reads the header and the body fields the signature covers; `null` when any of them is missing. */
+function readSignedFields(payload: Buffer, signature: string): SignedFields | null {
+  if (typeof signature !== 'string') return null
+
+  const parts = signature.split(',').map((part) => part.trim())
+  const ts = parts.find((p) => p.startsWith('ts='))?.slice(3)
+  const v1 = parts.find((p) => p.startsWith('v1='))?.slice(3)
+  if (!ts || !/^\d+$/.test(ts) || !v1) return null
+
+  let body: { data?: { id?: unknown }; action?: unknown; type?: unknown } | null
+  try {
+    body = JSON.parse(payload.toString())
+  } catch {
+    return null
+  }
+  const dataId = body?.data?.id
+  const action = body?.action ?? body?.type ?? 'unknown'
+  if (!isPrimitiveField(dataId) || dataId === '' || !isPrimitiveField(action)) return null
+
+  return { ts, v1, dataId: String(dataId), action: String(action) }
+}
+
+/** Only strings and numbers become part of the manifest or the key; `String()` throws on some objects. */
+function isPrimitiveField(value: unknown): value is string | number {
+  return typeof value === 'string' || typeof value === 'number'
+}
+
+/** Mercado Pago shows `ts` both in seconds (10 digits) and in milliseconds (13 digits). */
+function tsToMs(ts: string): number {
+  return ts.length >= 13 ? Number(ts) : Number(ts) * 1000
 }

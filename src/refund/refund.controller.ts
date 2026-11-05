@@ -15,6 +15,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
 import { RequestRefundDto } from './dto/request-refund.dto'
 import { ApproveRefundDto } from './dto/approve-refund.dto'
+import { ListRefundsQueryDto } from './dto/list-refunds-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
@@ -60,7 +61,11 @@ export class RefundController {
       resolveRequestBrandId(req, brandId),
       'POST /refund',
     )
-    return this.refundService.request({ ...data, brandId: validBrandId })
+    return this.refundService.request({
+      ...data,
+      brandId: validBrandId,
+      requestedBy: req?.user?.id,
+    })
   }
 
   @Get()
@@ -68,7 +73,7 @@ export class RefundController {
   @ApiResponse({ status: 200, description: 'Reembolsos obtenidos correctamente' })
   async findByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; status?: string },
+    @Query() filters: ListRefundsQueryDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(

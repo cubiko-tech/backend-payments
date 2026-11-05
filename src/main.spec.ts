@@ -4,6 +4,7 @@ import * as request from 'supertest'
 import { INestApplication } from '@nestjs/common'
 import { NestFactory } from '@nestjs/core'
 import { SwaggerModule } from '@nestjs/swagger'
+import { IsInt } from 'class-validator'
 import { bootstrap } from './main'
 
 jest.mock('cookie-parser', () => jest.fn(() => 'cookie-parser-middleware'))
@@ -162,6 +163,22 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
     await expect(bootstrap()).resolves.toBeUndefined()
     expect(cookieParser).toHaveBeenCalledWith('localdevjwt')
     expect(mockApp.listen).toHaveBeenCalledWith(80)
+  })
+
+  it('installs a global pipe that converts query numbers and tags its 400 with INVALID_REQUEST', async () => {
+    // R15 (Mutation): bootstrap installing a literal ValidationPipe without transform/code turns this red.
+    await bootstrap()
+    const [pipe] = mockApp.useGlobalPipes.mock.calls[0]
+
+    await expect(
+      pipe.transform('5', { type: 'query', metatype: Number, data: 'perPage' }),
+    ).resolves.toBe(5)
+    class Probe {
+      @IsInt() days: number
+    }
+    await expect(
+      pipe.transform({ days: 'abc' }, { type: 'body', metatype: Probe }),
+    ).rejects.toMatchObject({ response: { statusCode: 400, code: 'INVALID_REQUEST' } })
   })
 })
 

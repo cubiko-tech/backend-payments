@@ -779,13 +779,23 @@ export class CheckoutService implements OnModuleInit {
    *
    * @returns true only if this call left the payment `completed`.
    */
-  async completeExternalPayment(paymentId: string, providerData?: any): Promise<boolean> {
+  async completeExternalPayment(
+    paymentId: string,
+    providerData?: Record<string, unknown>,
+    expectedProvider?: PaymentProvider | string,
+  ): Promise<boolean> {
     if (this.inFlightCompletions.has(paymentId)) return false
     this.inFlightCompletions.add(paymentId)
     try {
-      const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
+      const payment = await this.paymentRepo.findOne({
+        where: {
+          id: paymentId,
+          ...(expectedProvider ? { provider: expectedProvider as PaymentProvider } : {}),
+        },
+      })
       if (
         !payment ||
+        (expectedProvider && payment.provider !== expectedProvider) ||
         payment.provider === PaymentProvider.WALLET ||
         payment.status === PaymentStatus.COMPLETED ||
         payment.status === PaymentStatus.REFUNDED ||
@@ -794,12 +804,16 @@ export class CheckoutService implements OnModuleInit {
         return false
       }
 
+      const previousStatus = payment.status
+      const previousMetadata = payment.metadata
+      const isNotice = Boolean(expectedProvider) || this.isProviderNoticePayload(providerData)
       const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
       const claimed = await this.paymentRepo.update(
         // This write replaces `metadata`: from a stale read it would erase the lost flag.
         {
           id: paymentId,
           status: payment.status,
+          ...(expectedProvider ? { provider: expectedProvider as PaymentProvider } : {}),
           ...(providerData && !payment.metadata?.[LOST_TO_NEWER_PURCHASE_FLAG]
             ? {
                 metadata: Raw((column) => `(${column})->>'${LOST_TO_NEWER_PURCHASE_FLAG}' IS NULL`),
@@ -813,7 +827,15 @@ export class CheckoutService implements OnModuleInit {
       )
       if (!claimed.affected) return false
 
-      return await this.finalizeProcessingPayment(payment, paymentId, providerData, metadata)
+      return await this.finalizeProcessingPayment(
+        payment,
+        paymentId,
+        providerData,
+        metadata,
+        isNotice,
+        previousStatus,
+        previousMetadata,
+      )
     } finally {
       this.inFlightCompletions.delete(paymentId)
     }
@@ -824,6 +846,9 @@ export class CheckoutService implements OnModuleInit {
     paymentId: string,
     providerData?: any,
     metadata?: any,
+    isNotice = false,
+    previousStatus: PaymentStatus = PaymentStatus.PENDING,
+    previousMetadata?: Payment['metadata'],
   ): Promise<boolean> {
     payment.status = PaymentStatus.PROCESSING
     if (providerData) {
@@ -831,7 +856,15 @@ export class CheckoutService implements OnModuleInit {
     }
 
     const totalAmount = parseFloat(String(payment.amount))
-    await this.assertProviderConfirmedAmount(payment, totalAmount, providerData)
+    const amountConfirmed = await this.assertProviderConfirmedAmount(
+      payment,
+      totalAmount,
+      providerData,
+      isNotice,
+      previousStatus,
+      previousMetadata,
+    )
+    if (!amountConfirmed) return false
 
     const isPlanPurchase = payment.purpose === PaymentPurpose.PLAN_PURCHASE && !!payment.purposeId
     let extendedUntil: Date | undefined
@@ -1047,17 +1080,22 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Reconciliar un pago consultando el estado REAL en el proveedor.
-   *
-   * Lo usa la página de retorno (al volver del checkout) y el cron de barrido:
-   * si el proveedor confirma el pago, lo completa (idempotente con el webhook).
-   * No depende de que el webhook llegue — robusto en cualquier ambiente.
+   * Reconciles a payment against the provider's live status and completes it when confirmed
+   * (idempotent with the webhook). The return page calls it with the session's brand guard; the
+   * sweep does not call it (it uses `completeExternalPayment`).
+   * @param canAccessBrand brand guard of the caller's session, or `null` from an internal caller
+   *   without a session. `undefined` throws: skipping the guard has to be declared.
+   * @throws RequestException 404 PAYMENT_NOT_FOUND when the payment is missing or the guard denies it.
    */
   async reconcilePayment(
     paymentId: string,
+    canAccessBrand: ((brandId: string) => Promise<boolean>) | null,
   ): Promise<{ status: string; planSlug?: string; refundedToWallet?: boolean }> {
+    if (canAccessBrand === undefined) {
+      throw new Error('reconcilePayment requires a brand guard or an explicit null')
+    }
     const payment = await this.paymentRepo.findOne({ where: { id: paymentId } })
-    if (!payment) {
+    if (!payment || (canAccessBrand && !(await canAccessBrand(payment.brandId)))) {
       throw new RequestException({ code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' }, 404)
     }
 
@@ -1992,27 +2030,52 @@ export class CheckoutService implements OnModuleInit {
     return Math.round(rawAmount * 100) / 100
   }
 
+  private isProviderNoticePayload(providerData?: any): boolean {
+    if (!providerData || typeof providerData !== 'object') return false
+    return typeof providerData.source !== 'string' || providerData.source.length === 0
+  }
+
   private async assertProviderConfirmedAmount(
     payment: Payment,
     expectedAmount: number,
     providerData?: any,
-  ): Promise<void> {
+    isNotice = false,
+    previousStatus: PaymentStatus = PaymentStatus.PENDING,
+    previousMetadata?: Payment['metadata'],
+  ): Promise<boolean> {
     const providerKey = String(payment.provider || '').toLowerCase()
     const spec = this.providerConfirmedAmountSpecs[providerKey]
     if (!spec || !spec.verifiesAmount) {
-      return
+      return true
     }
-    if (!providerData || typeof providerData !== 'object') {
-      return
-    }
-    const rawCandidate = spec.extractConfirmedAmount(providerData)
-    if (rawCandidate === undefined || rawCandidate === null || rawCandidate === '') {
-      return
+    const rawCandidate =
+      (providerData && typeof providerData === 'object'
+        ? spec.extractConfirmedAmount(providerData)
+        : undefined) ??
+      (payment.metadata?.providerData && typeof payment.metadata.providerData === 'object'
+        ? spec.extractConfirmedAmount(payment.metadata.providerData)
+        : undefined)
+    if (
+      rawCandidate === undefined ||
+      rawCandidate === null ||
+      rawCandidate === '' ||
+      !Number.isFinite(Number(rawCandidate))
+    ) {
+      if (!isNotice) {
+        return true
+      }
+      this.log.warn(
+        `Provider ${providerKey} notice for payment ${payment.id} omitted confirmed amount; deferring to reconciliation`,
+      )
+      await this.paymentRepo.update(
+        { id: payment.id, status: PaymentStatus.PROCESSING },
+        { status: previousStatus, metadata: previousMetadata },
+      )
+      payment.status = previousStatus
+      payment.metadata = previousMetadata
+      return false
     }
     const numericConfirmed = Number(rawCandidate)
-    if (!Number.isFinite(numericConfirmed)) {
-      return
-    }
     const expectedInUnit = this.toConfirmedAmountUnit(expectedAmount, spec.unit)
     const confirmedInUnit = this.normalizeConfirmedAmountInUnit(numericConfirmed, spec.unit)
     if (expectedInUnit !== confirmedInUnit) {
@@ -2031,7 +2094,7 @@ export class CheckoutService implements OnModuleInit {
       this.log.error(message)
       winstonLogger.log('error', message, mismatch)
       // What was given stays given: `failed` would leave it in place with nothing to revert it.
-      if (await hasPaymentTakenEffect(payment.id, this.dataSource)) return
+      if (await hasPaymentTakenEffect(payment.id, this.dataSource)) return true
       await this.markPaymentAmountMismatch(payment, providerData, mismatch)
       throw new RequestException(
         {
@@ -2042,6 +2105,7 @@ export class CheckoutService implements OnModuleInit {
         HttpStatus.CONFLICT,
       )
     }
+    return true
   }
 
   /**

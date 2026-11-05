@@ -3,10 +3,11 @@ import helmet from 'helmet'
 
 import { AppModule } from './app.module'
 import { NestFactory } from '@nestjs/core'
-import { ValidationPipe, RequestMethod } from '@nestjs/common'
+import { RequestMethod } from '@nestjs/common'
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger'
 import { isProductionEnv } from './shared/env/is-production'
 import { logger } from './shared/logger/logger'
+import { createGlobalValidationPipe } from './shared/validation/global-validation-pipe'
 
 function requireStartupSecret(name: 'JWT_SECRET' | 'ACCESS_SERVER'): string {
   const value = process.env[name]
@@ -41,7 +42,7 @@ export async function bootstrap() {
   })
 
   app.use(helmet())
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
+  app.useGlobalPipes(createGlobalValidationPipe())
   app.use(cookieParser(jwtSecret))
 
   app.enableCors({

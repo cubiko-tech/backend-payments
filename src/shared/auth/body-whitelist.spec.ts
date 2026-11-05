@@ -8,6 +8,7 @@ import { WalletProvider, WalletStatus } from '../../wallet/entities/wallet.entit
 import { RefundController } from '../../refund/refund.controller'
 import { RefundService } from '../../refund/refund.service'
 import { RefundReason, RefundStatus } from '../../refund/entities/refund.entity'
+import { PaymentStatus } from '../../payment/entities/payment.entity'
 import { PaymentMethodController } from '../../payment-method/payment-method.controller'
 import { PaymentMethodService } from '../../payment-method/payment-method.service'
 import {
@@ -254,9 +255,17 @@ describe('Body DTO whitelist and repository sanitization (LOC-44)', () => {
       const refundRepo = {
         create: jest.fn((d) => d),
         save: jest.fn((d) => Promise.resolve({ id: 'ref-1', ...d })),
+        // R17: no active refunds, so the request reaches create() whose payload this case inspects.
+        find: jest.fn().mockResolvedValue([]),
       }
       const paymentReadRepo = {
-        findOne: jest.fn().mockResolvedValue({ id: VALID_UUID, brandId: OWN_BRAND_ID }),
+        findOne: jest.fn().mockResolvedValue({
+          id: VALID_UUID,
+          brandId: OWN_BRAND_ID,
+          amount: 100,
+          currency: 'USD',
+          status: PaymentStatus.COMPLETED,
+        }),
       }
       const refundService = new RefundService(refundRepo as any, {} as any, paymentReadRepo as any)
       await refundService.request({

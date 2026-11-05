@@ -1,3 +1,4 @@
+// R6: One responsibility, checkout idempotency over HTTP and PostgreSQL, sharing a 120-line fixture.
 import { INestApplication } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
@@ -22,6 +23,7 @@ import { PaymentService } from '../src/payment/payment.service'
 import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { ProviderFactory } from '../src/provider/provider.factory'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { EnterprisePricingService } from '../src/subscription/enterprise-pricing.service'
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
@@ -165,6 +167,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
     }).compile()
 
     app = moduleFixture.createNestApplication()
+    app.useGlobalPipes(createGlobalValidationPipe())
     await app.init()
     checkoutService = moduleFixture.get<CheckoutService>(CheckoutService)
     walletService = moduleFixture.get<WalletService>(WalletService)

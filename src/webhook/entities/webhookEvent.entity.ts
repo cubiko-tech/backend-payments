@@ -9,12 +9,12 @@ export enum WebhookStatus {
 }
 
 @Entity('webhook_events')
-@Index(['providerEventId'], { unique: true })
+@Index('UQ_webhook_events_provider_event', ['provider', 'providerEventId'], { unique: true })
 @Index(['status'])
 export class WebhookEvent extends Content {
   @Column() provider: string
   @Column() eventType: string
-  @Column({ unique: true }) providerEventId: string
+  @Column() providerEventId: string
   @Column({ type: 'jsonb' }) payload: any
   @Column({ type: 'enum', enum: WebhookStatus, default: WebhookStatus.RECEIVED })
   status: WebhookStatus

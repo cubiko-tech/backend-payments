@@ -102,8 +102,8 @@ describe('An external purchase confirmed late against a newer one (PostgreSQL, L
       getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
     })
 
-    const first = await a.checkout.reconcilePayment(external.id)
-    const repeated = await a.checkout.reconcilePayment(external.id)
+    const first = await a.checkout.reconcilePayment(external.id, null)
+    const repeated = await a.checkout.reconcilePayment(external.id, null)
 
     expect(first).toEqual({ status: 'failed', refundedToWallet: true })
     expect(repeated).toEqual({ status: 'failed', refundedToWallet: true })

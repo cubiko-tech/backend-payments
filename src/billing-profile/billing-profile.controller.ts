@@ -5,6 +5,7 @@ import {
   Patch,
   Body,
   Param,
+  ParseUUIDPipe,
   Query,
   Req,
   UseGuards,
@@ -15,6 +16,12 @@ import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
 import { CreateBillingProfileDto } from './dto/create-billing-profile.dto'
 import { UpdateBillingProfileDto } from './dto/update-billing-profile.dto'
+import {
+  ListPendingDocumentsQueryDto,
+  RejectLegalDocumentDto,
+  UploadLegalDocumentDto,
+  VerifyLegalDocumentDto,
+} from './dto/legal-document.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
@@ -127,16 +134,20 @@ export class BillingProfileController {
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar documentos pendientes de verificación (Admin)' })
   @ApiResponse({ status: 200, description: 'Documentos pendientes' })
-  async getPendingDocuments(@Query('limit') limit?: number) {
-    return this.legalDocumentService.findPending(limit || 50)
+  async getPendingDocuments(@Query() query?: ListPendingDocumentsQueryDto) {
+    return this.legalDocumentService.findPending(query?.limit || 50)
   }
 
   @Post('admin/documents/:id/verify')
   @RequireSuperAdmin()
   @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento verificado' })
-  async verifyDocument(@Param('id') id: string, @Body() data: { verifiedBy: string }) {
-    return this.legalDocumentService.verify(id, data.verifiedBy)
+  async verifyDocument(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() _data?: VerifyLegalDocumentDto,
+    @Req() req?: any,
+  ) {
+    return this.legalDocumentService.verify(id, req?.user?.id)
   }
 
   @Post('admin/documents/:id/reject')
@@ -144,16 +155,17 @@ export class BillingProfileController {
   @ApiOperation({ summary: 'Rechazar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento rechazado' })
   async rejectDocument(
-    @Param('id') id: string,
-    @Body() data: { verifiedBy: string; reason: string },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() data: RejectLegalDocumentDto,
+    @Req() req?: any,
   ) {
-    return this.legalDocumentService.reject(id, data.verifiedBy, data.reason)
+    return this.legalDocumentService.reject(id, req?.user?.id, data?.reason)
   }
 
   @Get(':brandId/documents')
   @ApiOperation({ summary: 'Listar documentos legales de una marca' })
   @ApiResponse({ status: 200, description: 'Documentos obtenidos' })
-  async getDocuments(@Param('brandId') brandId: string, @Req() req?: any) {
+  async getDocuments(@Param('brandId', ParseUUIDPipe) brandId: string, @Req() req?: any) {
     const validBrandId = await assertBrandAccess(
       this.platformClient,
       this.logger,
@@ -168,8 +180,8 @@ export class BillingProfileController {
   @ApiOperation({ summary: 'Subir documento legal de una marca' })
   @ApiResponse({ status: 201, description: 'Documento subido' })
   async uploadDocument(
-    @Param('brandId') brandId: string,
-    @Body() data: { country: string; documentType: string; documentUrl: string },
+    @Param('brandId', ParseUUIDPipe) brandId: string,
+    @Body() data: UploadLegalDocumentDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(

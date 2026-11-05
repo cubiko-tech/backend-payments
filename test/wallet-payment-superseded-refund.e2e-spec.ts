@@ -240,7 +240,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
 
     const retryCheckout = await purchasePlan(wallet.id, 'idem-loc96-stuck-1', 'dropi-roax')
     expect(retryCheckout).toEqual({ paymentId: stuck.id, status: 'refunded' })
-    expect(await checkoutService.reconcilePayment(stuck.id)).toEqual({ status: 'refunded' })
+    expect(await checkoutService.reconcilePayment(stuck.id, null)).toEqual({ status: 'refunded' })
 
     const sub = (await subRepo.findOneBy({ brandId: BRAND_ID }))!
     await subRepo.update(sub.id, { status: SubscriptionStatus.EXPIRED, autoRenew: false })
