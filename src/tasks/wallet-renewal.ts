@@ -112,9 +112,9 @@ export async function renewFromWallet(
       debitResult &&
       typeof debitResult === 'object' &&
       'error' in debitResult &&
-      (debitResult as any).error
+      debitResult.error
     ) {
-      throw new Error((debitResult as any).error)
+      throw new Error(String(debitResult.error))
     }
   }
 

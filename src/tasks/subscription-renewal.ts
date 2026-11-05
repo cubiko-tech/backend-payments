@@ -4,7 +4,11 @@ import { freePlanSlug } from '../client/plan-downgrade.util'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
 import { ProviderFactory } from '../provider/provider.factory'
 import { logger } from '../shared/logger/logger'
-import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { endTrialWithoutPayment } from './subscription-expiration'
 import { lockAndReread } from './subscription-lock'
@@ -207,7 +211,7 @@ export async function processDropiBatchCharges(deps: SubscriptionRenewalDeps): P
   const dropiSubscriptions = await deps.subscriptionRepo.find({
     where: {
       status: In([SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE]),
-      provider: 'dropi' as any,
+      provider: SubscriptionProvider.DROPI,
       autoRenew: true,
       nextBillingDate: LessThan(new Date()),
     },
@@ -255,7 +259,7 @@ async function issueExternalCharge(
       brandId: sub.brandId,
       userId: sub.userId,
       purpose: 'plan_purchase',
-      provider: sub.provider as any,
+      provider: sub.provider,
       planSlug: sub.planSlug,
       renewal: true,
     })

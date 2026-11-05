@@ -18,17 +18,22 @@ import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
-import { WebhookEvent } from '../webhook/entities/webhookEvent.entity'
+import { WebhookEvent, WebhookStatus } from '../webhook/entities/webhookEvent.entity'
 import {
   expirePendingCheckouts,
+  PaymentSweepDeps,
   reconcileExternalPayments,
   reconcileWalletBalances,
   reconcileWalletPayments,
   retryMissingCreditNotes,
   settleLostExternalPayments,
 } from './payment-sweep'
-import { confirmarAltasPendientes, franjasDeRepesca } from './pending-signup-confirmation'
-import { refundOrphanRenewalDebits } from './renewal-debit-refund'
+import {
+  confirmarAltasPendientes,
+  franjasDeRepesca,
+  PendingSignupConfirmationDeps,
+} from './pending-signup-confirmation'
+import { OrphanRenewalSweepDeps, refundOrphanRenewalDebits } from './renewal-debit-refund'
 import {
   expireCancelledSubscriptions,
   expireSubscriptions,
@@ -39,119 +44,126 @@ import {
   processSubscriptionRenewals,
   processTrialConversions,
   retryFailedPayments,
+  SubscriptionRenewalDeps,
 } from './subscription-renewal'
 
 export { franjasDeRepesca }
+
+/** Everything the cron modules read from the service; each cron receives the service itself. */
+export type TasksDeps = PaymentSweepDeps &
+  PendingSignupConfirmationDeps &
+  OrphanRenewalSweepDeps &
+  SubscriptionRenewalDeps
 
 /**
  * Scheduled `@Cron` entrypoints of `backend-payments`. Each domain responsibility lives in its own
  * module under `src/tasks/`.
  */
 @Injectable()
-export class TasksService {
-  private readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
-  private readonly MAX_REPESCA = parseInt(process.env.MAX_PENDING_CONFIRMATIONS || '50')
-  private readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
-  private repescaEnCurso = false
-  private readonly CHECKOUT_EXPIRY_HOURS = checkoutExpiryHours()
-  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
-  private readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
-  private readonly subscriptionLocks = new Map<string, Promise<void>>()
+export class TasksService implements TasksDeps {
+  readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
+  readonly MAX_REPESCA = parseInt(process.env.MAX_PENDING_CONFIRMATIONS || '50')
+  readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
+  repescaEnCurso = false
+  readonly CHECKOUT_EXPIRY_HOURS = checkoutExpiryHours()
+  readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
+  readonly subscriptionLocks = new Map<string, Promise<void>>()
 
   constructor(
     @InjectRepository(Wallet, 'DBRead')
-    private walletReadRepo: Repository<Wallet>,
+    readonly walletReadRepo: Repository<Wallet>,
     @InjectRepository(WalletBalanceSnapshot, 'DBWrite')
-    private snapshotRepo: Repository<WalletBalanceSnapshot>,
+    readonly snapshotRepo: Repository<WalletBalanceSnapshot>,
     @InjectRepository(Transaction, 'DBRead')
-    private transactionReadRepo: Repository<Transaction>,
+    readonly transactionReadRepo: Repository<Transaction>,
     @InjectRepository(Payment, 'DBWrite')
-    private paymentRepo: Repository<Payment>,
+    readonly paymentRepo: Repository<Payment>,
     @InjectRepository(Subscription, 'DBWrite')
-    private subscriptionRepo: Repository<Subscription>,
+    readonly subscriptionRepo: Repository<Subscription>,
     @InjectRepository(SubscriptionEvent, 'DBWrite')
-    private subscriptionEventRepo: Repository<SubscriptionEvent>,
+    readonly subscriptionEventRepo: Repository<SubscriptionEvent>,
     @InjectRepository(WebhookEvent, 'DBWrite')
     private webhookEventRepo: Repository<WebhookEvent>,
     @InjectDataSource('DBWrite')
-    private dataSource: DataSource,
-    private walletService: WalletService,
-    private auditService: AuditService,
-    private providerFactory: ProviderFactory,
-    private eventBus: EventBusService,
-    private clientRoles: ClientRolesService,
-    private checkoutService: CheckoutService,
-    private confioWebhook: ConfioSubscriptionWebhookService,
+    readonly dataSource: DataSource,
+    readonly walletService: WalletService,
+    readonly auditService: AuditService,
+    readonly providerFactory: ProviderFactory,
+    readonly eventBus: EventBusService,
+    readonly clientRoles: ClientRolesService,
+    readonly checkoutService: CheckoutService,
+    readonly confioWebhook: ConfioSubscriptionWebhookService,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
   async processTrialConversions() {
-    await processTrialConversions(this as any)
+    await processTrialConversions(this)
   }
 
   @Cron('*/5 * * * *')
   async confirmarAltasPendientes() {
-    await confirmarAltasPendientes(this as any)
+    await confirmarAltasPendientes(this)
   }
 
   @Cron(CronExpression.EVERY_HOUR)
   async processSubscriptionRenewals() {
-    await processSubscriptionRenewals(this as any)
+    await processSubscriptionRenewals(this)
   }
 
   @Cron('0 */6 * * *')
   async retryFailedPayments() {
-    await retryFailedPayments(this as any)
+    await retryFailedPayments(this)
   }
 
   @Cron(CronExpression.EVERY_HOUR)
   async refundOrphanRenewalDebits() {
-    await refundOrphanRenewalDebits(this as any)
+    await refundOrphanRenewalDebits(this)
   }
 
   @Cron('*/5 * * * *')
   async reconcileExternalPayments() {
-    await reconcileExternalPayments(this as any)
+    await reconcileExternalPayments(this)
   }
 
   @Cron('*/5 * * * *')
   async settleLostExternalPayments() {
-    await settleLostExternalPayments(this as any)
+    await settleLostExternalPayments(this)
   }
 
   @Cron('*/5 * * * *')
   async retryMissingCreditNotes() {
-    await retryMissingCreditNotes(this as any)
+    await retryMissingCreditNotes(this)
   }
 
   @Cron('*/5 * * * *')
   async reconcileWalletPayments() {
-    await reconcileWalletPayments(this as any)
+    await reconcileWalletPayments(this)
   }
 
   @Cron('*/30 * * * *')
   async expirePendingCheckouts() {
-    await expirePendingCheckouts(this as any)
+    await expirePendingCheckouts(this)
   }
 
   @Cron(CronExpression.EVERY_HOUR)
   async expireSubscriptions() {
-    await expireSubscriptions(this as any)
+    await expireSubscriptions(this)
   }
 
   @Cron(CronExpression.EVERY_HOUR)
   async expireCancelledSubscriptions() {
-    await expireCancelledSubscriptions(this as any)
+    await expireCancelledSubscriptions(this)
   }
 
   @Cron('0 2 * * *')
   async reconcileWalletBalances() {
-    await reconcileWalletBalances(this as any)
+    await reconcileWalletBalances(this)
   }
 
   @Cron('0 8 * * *')
   async processDropiBatchCharges() {
-    await processDropiBatchCharges(this as any)
+    await processDropiBatchCharges(this)
   }
 
   @Cron('0 3 * * 0')
@@ -160,7 +172,7 @@ export class TasksService {
     cutoff.setDate(cutoff.getDate() - 90)
 
     const result = await this.webhookEventRepo.delete({
-      status: 'processed' as any,
+      status: WebhookStatus.PROCESSED,
       createdAt: LessThan(cutoff),
     })
 
@@ -176,6 +188,6 @@ export class TasksService {
 
   @Cron('0 9 * * *')
   async sendExpirationWarnings() {
-    await sendExpirationWarnings(this as any)
+    await sendExpirationWarnings(this)
   }
 }

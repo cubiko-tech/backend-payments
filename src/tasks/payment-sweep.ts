@@ -29,7 +29,7 @@ import { ProviderFactory } from '../provider/provider.factory'
 import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { logger } from '../shared/logger/logger'
 import { Transaction } from '../transaction/entities/transaction.entity'
-import { Wallet } from '../wallet/entities/wallet.entity'
+import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../wallet/wallet.service'
 
@@ -286,7 +286,7 @@ export async function reconcileWalletBalances(deps: PaymentSweepDeps): Promise<v
   logger.log('info', '[CRON] reconcileWalletBalances: iniciando')
 
   const wallets = await deps.walletReadRepo.find({
-    where: { status: 'active' as any },
+    where: { status: WalletStatus.ACTIVE },
   })
 
   let inconsistent = 0
