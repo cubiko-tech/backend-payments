@@ -487,3 +487,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:145`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
+
+## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
+
+- **Dónde**: `src/webhook/webhook.service.ts:94`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+  (`buildConfioWebhookEventId`)
+- **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
+- **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
+  siendo la clave de idempotencia y no cambia.
+- **Estado**: abierto — lo cierra pasar el id por `escapeLogValue` en esa línea (LOC-162 la dejó como estaba porque
+  su aceptación pide conservarla).

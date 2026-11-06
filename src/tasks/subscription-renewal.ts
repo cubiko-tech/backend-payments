@@ -297,7 +297,8 @@ async function issueExternalCharge(
 
     logger.log(
       'info',
-      `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ${result.checkoutUrl}`,
+      `[CRON] Link de cobro ${sub.provider} emitido para brand ${sub.brandId}: ` +
+        `paymentId=${result.paymentId}`,
     )
   } catch (error) {
     logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)

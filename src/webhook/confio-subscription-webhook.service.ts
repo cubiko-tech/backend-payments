@@ -32,6 +32,7 @@ import {
 } from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
+import { escapeLogValue } from '../shared/logger/log-value'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -322,7 +323,8 @@ export class ConfioSubscriptionWebhookService {
     const sub = await this.resolverSuscripcion(data)
     if (!sub) {
       this.logger.warn(
-        `Confio suscripción no resuelta: name=${data.name} correlationId=${data.correlationId}`,
+        `Confio suscripción no resuelta: name=${escapeLogValue(data.name)} ` +
+          `correlationId=${escapeLogValue(data.correlationId)}`,
       )
       return
     }
@@ -650,7 +652,7 @@ export class ConfioSubscriptionWebhookService {
     const wire: ConfioSubscriptionStatusWire = data?.status || ''
 
     if (CONFIO_ESTADOS_SIN_EFECTO.includes(wire)) {
-      this.logger.log(`Confio estado del alta ignorado: ${wire} (${data?.name})`)
+      this.logger.log(`Confio estado del alta ignorado: ${wire} (${escapeLogValue(data?.name)})`)
       return null
     }
 
@@ -666,7 +668,9 @@ export class ConfioSubscriptionWebhookService {
       ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
       : undefined
     if (!toStatus) {
-      this.logger.warn(`Confio estado no mapeado: ${wire} (${data?.name})`)
+      this.logger.warn(
+        `Confio estado no mapeado: ${escapeLogValue(wire)} (${escapeLogValue(data?.name)})`,
+      )
       return null
     }
 
