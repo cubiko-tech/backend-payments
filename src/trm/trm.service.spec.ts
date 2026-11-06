@@ -96,6 +96,7 @@ describe('TrmService', () => {
     ['a zero rate', [{ ...TRM_ROW, valor: '0' }]],
     ['a missing date', [{ valor: '4000.00' }]],
   ])('rejects with 503 when the source returns %s', async (_label, body) => {
+    // Mutation: drop the rate and date check in fetchRate and every row resolves.
     source.reply = () => ({ status: 200, body })
     await expect(new TrmService(source.url).getUsdCopRate()).rejects.toMatchObject(UNAVAILABLE)
   })

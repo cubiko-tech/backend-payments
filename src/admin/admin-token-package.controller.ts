@@ -32,7 +32,7 @@ export class AdminTokenPackageController {
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateTokenPackageDto,
-    @Req() req: any,
+    @Req() req: { user: { id: string } },
   ) {
     const authorId: string = req.user.id
     const { after } = await this.packages.update(id, body, (manager, change) =>

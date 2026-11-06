@@ -36,7 +36,7 @@ import {
   RequireSuperAdmin,
 } from '../shared/auth/require-permission.decorator'
 import { RequestException } from '../shared/exception/request.exception'
-import { isTokenCurrency } from '../wallet/token-origin'
+import { assertNotTokenCurrency, isTokenCurrency } from '../wallet/token-origin'
 import { WalletService } from '../wallet/wallet.service'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 import { adminIdempotencyKey } from './admin-idempotency-key'
@@ -524,12 +524,7 @@ export class AdminController {
   @ApiResponse({ status: 201, description: 'Wallet creada' })
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
     // The brand token wallet comes only from TokenWalletService: one per brand, balance by origin.
-    if (isTokenCurrency(body.currency)) {
-      throw new RequestException(
-        { code: 'TOKEN_WALLET_RESERVED', message: 'Token wallets come from GET /token-wallet' },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      )
-    }
+    assertNotTokenCurrency(body.currency)
     // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },

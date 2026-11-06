@@ -425,11 +425,12 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
-- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/checkout.service.ts:249`
+- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:80` (`chargeFor`)
 - **Qué lo dispara**: `datos.gov.co` sin responder, con error o con una fila ilegible, y sin una tasa consultada
   en la última hora por esa instancia. El caché es por instancia: N instancias hacen hasta N consultas por hora.
-- **Qué rompe**: todo checkout cuyo precio trae `exchangeRate` responde 503 `EXCHANGE_RATE_UNAVAILABLE` y no
-  guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06). Hoy ningún precio lo trae.
+- **Qué rompe**: el checkout de un paquete de tokens de una marca colombiana responde 503
+  `EXCHANGE_RATE_UNAVAILABLE` y no guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06).
+  Es el único precio que se cobra con la TRM.
 - **Estado**: abierto — aceptado por diseño; lo reabre un respaldo decidido por quien aprueba.
 
 ## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)

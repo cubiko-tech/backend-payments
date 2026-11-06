@@ -36,7 +36,7 @@ export interface TokenMovement {
   replayed: boolean
 }
 
-const fail = (code: string, message: string, status: HttpStatus) =>
+export const fail = (code: string, message: string, status: HttpStatus) =>
   new RequestException({ code, message }, status)
 
 /**

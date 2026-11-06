@@ -153,8 +153,6 @@ interface ResolvedPricing {
   amount: number
   currency: string
   country?: string
-  /** Set when this price is charged with the day's USD→COP TRM; the payment stores the rate. */
-  exchangeRate?: 'USD_COP'
 }
 
 export interface CheckoutResult {
@@ -203,7 +201,7 @@ export class CheckoutService implements OnModuleInit {
     private enterprisePricing: EnterprisePricingService,
     private providerConfig: ProviderConfigService,
     private webhookService: WebhookService,
-    // Optional: only a price with `exchangeRate` needs it, and without it that checkout fails closed.
+    // Optional: only a token package paid in COP needs it, and without it that checkout fails closed.
     @Optional() private trmService?: TrmService,
     // Optional for the same reason: only a token_package checkout needs them, and fails closed without.
     @Optional() private tokenWallets?: TokenWalletService,
@@ -258,14 +256,8 @@ export class CheckoutService implements OnModuleInit {
     // país (no en el precio negociado enterprise ni en el fallback legacy).
     const tokenPackage =
       req.purpose === 'token_package' ? await this.prepareTokenPackage(req) : undefined
-    const { amount, currency, country, exchangeRate } =
-      tokenPackage ?? (await this.resolveAmountAndCurrency(req))
-    // Before the payment row exists: without a rate the checkout is rejected and nothing is saved.
-    const rate = tokenPackage
-      ? tokenPackage.rate
-      : exchangeRate
-        ? await this.quoteUsdCopRate()
-        : undefined
+    const { amount, currency, country } = tokenPackage ?? (await this.resolveAmountAndCurrency(req))
+    const rate = tokenPackage?.rate
 
     // 2. El proveedor se valida contra el MISMO país que decidió el precio. Gatear
     // por el perfil de facturación (`|| 'CO'`) mientras el monto viaja en la moneda

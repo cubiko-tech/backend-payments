@@ -1,12 +1,11 @@
 import { HttpStatus } from '@nestjs/common'
 
 import { Payment } from '../payment/entities/payment.entity'
-import { RequestException } from '../shared/exception/request.exception'
 import { UsdCopRate } from '../trm/trm.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenPackageService, TokenPackageView } from '../wallet/token-package.service'
-import { TokenWalletService } from '../wallet/token-wallet.service'
+import { TokenWalletService, fail } from '../wallet/token-wallet.service'
 
 /** What the payment keeps of the package it bought; completion credits this, never the catalog. */
 export interface TokenPackageSnapshot {
@@ -22,7 +21,6 @@ export interface PreparedTokenPackage {
   currency: 'COP' | 'USD'
   country: string
   rate?: UsdCopRate
-  exchangeRate?: 'USD_COP'
   walletId: string
   snapshot: TokenPackageSnapshot
 }
@@ -36,9 +34,6 @@ export interface TokenPackageDeps {
 
 export const purchasedTokensKey = (paymentId: string) => `payment:${paymentId}:tokens:purchased`
 export const bonusTokensKey = (paymentId: string) => `payment:${paymentId}:tokens:gift`
-
-const fail = (code: string, message: string, status: HttpStatus) =>
-  new RequestException({ code, message }, status)
 
 /**
  * Prices a `token_package` checkout from the catalog and opens the brand token wallet, before
@@ -84,7 +79,7 @@ async function chargeFor(tokenPackage: TokenPackageView, country: string, deps: 
   }
   const rate = await deps.quoteUsdCopRate()
   const amount = Math.round(tokenPackage.priceUsd * rate.rate * 100) / 100
-  return { amount, currency: 'COP' as const, rate, exchangeRate: 'USD_COP' as const }
+  return { amount, currency: 'COP' as const, rate }
 }
 
 function snapshotOf(tokenPackage: TokenPackageView): TokenPackageSnapshot {

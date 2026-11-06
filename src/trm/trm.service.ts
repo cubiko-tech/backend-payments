@@ -71,7 +71,7 @@ export class TrmService {
 /** 503 `EXCHANGE_RATE_UNAVAILABLE`: no rate to charge with, so the payment is not created. */
 export function exchangeRateUnavailable(): RequestException {
   return new RequestException(
-    { code: 'EXCHANGE_RATE_UNAVAILABLE', message: 'No hay TRM disponible para cobrar este pago' },
+    { code: 'EXCHANGE_RATE_UNAVAILABLE', message: 'No TRM is available to charge this payment' },
     HttpStatus.SERVICE_UNAVAILABLE,
   )
 }

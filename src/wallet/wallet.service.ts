@@ -14,7 +14,7 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { AuditLog } from '../audit/entities/auditLog.entity'
 import { MovementAudit } from '../transaction/movement-audit'
-import { isTokenCurrency } from './token-origin'
+import { assertNotTokenCurrency, isTokenCurrency } from './token-origin'
 
 @Injectable()
 export class WalletService {
@@ -76,12 +76,7 @@ export class WalletService {
   async create(data: Partial<Wallet>) {
     try {
       // The brand token wallet is created only by TokenWalletService, one per brand.
-      if (isTokenCurrency(data.currency)) {
-        throw new RequestException(
-          { code: 'TOKEN_WALLET_RESERVED', message: 'Token wallets come from GET /token-wallet' },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      }
+      assertNotTokenCurrency(data.currency)
       // Validar límite de 10 wallets por marca
       const count = await this.walletReadRepository.count({
         where: { brandId: data.brandId },

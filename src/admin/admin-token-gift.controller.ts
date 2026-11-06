@@ -33,7 +33,7 @@ export class AdminTokenGiftController {
   async gift(
     @Param('brandId', ParseUUIDPipe) brandId: string,
     @Body() body: GiftTokensDto,
-    @Req() req: any,
+    @Req() req: { user: { id: string } },
   ) {
     const authorId: string = req.user.id
     const reason = body.reason.trim()
