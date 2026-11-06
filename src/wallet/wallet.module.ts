@@ -7,14 +7,17 @@ import { WalletController } from './wallet.controller'
 import { WalletService } from './wallet.service'
 import { TokenWalletController } from './token-wallet.controller'
 import { TokenWalletService } from './token-wallet.service'
+import { TokenPackage } from './entities/token-package.entity'
+import { TokenPackageController } from './token-package.controller'
+import { TokenPackageService } from './token-package.service'
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction], 'DBWrite'),
+    TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction, TokenPackage], 'DBWrite'),
     TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction], 'DBRead'),
   ],
-  controllers: [WalletController, TokenWalletController],
-  providers: [WalletService, TokenWalletService],
-  exports: [WalletService, TokenWalletService],
+  controllers: [WalletController, TokenWalletController, TokenPackageController],
+  providers: [WalletService, TokenWalletService, TokenPackageService],
+  exports: [WalletService, TokenWalletService, TokenPackageService],
 })
 export class WalletModule {}

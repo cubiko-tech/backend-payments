@@ -11,6 +11,7 @@ import { AuditModule } from '../audit/audit.module'
 import { CreditModule } from '../credit/credit.module'
 import { WalletModule } from '../wallet/wallet.module'
 import { AdminTokenGiftController } from './admin-token-gift.controller'
+import { AdminTokenPackageController } from './admin-token-package.controller'
 
 @Module({
   imports: [
@@ -26,6 +27,6 @@ import { AdminTokenGiftController } from './admin-token-gift.controller'
     CreditModule,
     WalletModule,
   ],
-  controllers: [AdminController, AdminTokenGiftController],
+  controllers: [AdminController, AdminTokenGiftController, AdminTokenPackageController],
 })
 export class AdminModule {}
