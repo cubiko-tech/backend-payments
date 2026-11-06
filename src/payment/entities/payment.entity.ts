@@ -20,6 +20,7 @@ export enum PaymentPurpose {
   PLAN_PURCHASE = 'plan_purchase',
   WALLET_RECHARGE = 'wallet_recharge',
   SERVICE_PAYMENT = 'service_payment',
+  TOKEN_PACKAGE = 'token_package',
 }
 
 @Entity('payments')

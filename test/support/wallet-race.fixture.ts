@@ -30,6 +30,10 @@ import { Transaction, TransactionType } from '../../src/transaction/entities/tra
 import { Wallet, WalletStatus } from '../../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../../src/wallet/wallet.service'
+import { TokenPackage } from '../../src/wallet/entities/token-package.entity'
+import { TokenPackageService } from '../../src/wallet/token-package.service'
+import { TokenWalletService } from '../../src/wallet/token-wallet.service'
+import { TRM_SOURCE_URL, TrmService } from '../../src/trm/trm.service'
 import { ConfioSubscriptionWebhookService } from '../../src/webhook/confio-subscription-webhook.service'
 import { WebhookEvent } from '../../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../../src/webhook/webhook.service'
@@ -51,6 +55,7 @@ const WRITE_ENTITIES = [
   Subscription,
   SubscriptionEvent,
   WebhookEvent,
+  TokenPackage,
 ]
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
 const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
@@ -68,9 +73,13 @@ export interface RaceInstance {
   assignPlan: jest.Mock
 }
 
-/** With `realBilling`, invoices and credit notes are rows and the DIAN answers through its mock. */
+/**
+ * With `realBilling`, invoices and credit notes are rows and the DIAN answers through its mock.
+ * With `trmUrl`, token packages can be bought: the real catalog and token wallet, and the TRM
+ * read from that URL.
+ */
 export async function startInstance(
-  options: { realBilling?: boolean } = {},
+  options: { realBilling?: boolean; trmUrl?: string } = {},
 ): Promise<RaceInstance> {
   const dataSource = new DataSource({
     type: 'postgres',
@@ -122,6 +131,14 @@ export async function startInstance(
             }),
             provideVal(DianService, { isConfigured: () => false, sendInvoice: jest.fn() }),
           ]),
+      ...(options.trmUrl
+        ? [
+            TokenWalletService,
+            TokenPackageService,
+            TrmService,
+            provideVal(TRM_SOURCE_URL, options.trmUrl),
+          ]
+        : []),
       provideVal(SubscriptionService, {}),
       provideVal(TaxService, { getTaxForCountry: jest.fn().mockResolvedValue(DEFAULT_TAX) }),
       provideVal(ProviderFactory, { getProvider: jest.fn() }),

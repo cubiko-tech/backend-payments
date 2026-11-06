@@ -16,6 +16,8 @@ import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { TrmService, UsdCopRate, exchangeRateUnavailable } from '../trm/trm.service'
+import { TokenWalletService } from '../wallet/token-wallet.service'
+import { TokenPackageService } from '../wallet/token-package.service'
 
 import {
   Payment,
@@ -89,6 +91,11 @@ import {
   settleLostExternalPurchase,
 } from './external-payment-close'
 import { issueRefundCreditNote } from './refund-credit-note'
+import {
+  creditTokenPackage,
+  PreparedTokenPackage,
+  prepareTokenPackage,
+} from './token-package-checkout'
 
 /**
  * Servicio orquestador de checkout.
@@ -107,7 +114,7 @@ import { issueRefundCreditNote } from './refund-credit-note'
 export interface CheckoutRequest {
   brandId: string
   userId: string
-  purpose: 'plan_purchase' | 'wallet_recharge' | 'service_payment'
+  purpose: 'plan_purchase' | 'wallet_recharge' | 'service_payment' | 'token_package'
   provider: 'wallet' | 'stripe' | 'mercadopago' | 'dropi' | 'confio'
   // Para plan_purchase
   planSlug?: string
@@ -115,6 +122,8 @@ export interface CheckoutRequest {
   amount?: number
   currency?: string
   walletId?: string
+  // token_package: the catalog row; price and tokens come from it, never from the body
+  packageId?: string
   // URLs de redirect (Stripe/MP/Confio)
   successUrl?: string
   cancelUrl?: string
@@ -196,6 +205,9 @@ export class CheckoutService implements OnModuleInit {
     private webhookService: WebhookService,
     // Optional: only a price with `exchangeRate` needs it, and without it that checkout fails closed.
     @Optional() private trmService?: TrmService,
+    // Optional for the same reason: only a token_package checkout needs them, and fails closed without.
+    @Optional() private tokenWallets?: TokenWalletService,
+    @Optional() private tokenPackages?: TokenPackageService,
   ) {}
 
   /**
@@ -244,9 +256,16 @@ export class CheckoutService implements OnModuleInit {
     // 1. Precio y moneda. En `plan_purchase` los decide el país REGISTRADO de la
     // marca; `country` viene informado SÓLO cuando el precio salió del catálogo por
     // país (no en el precio negociado enterprise ni en el fallback legacy).
-    const { amount, currency, country, exchangeRate } = await this.resolveAmountAndCurrency(req)
+    const tokenPackage =
+      req.purpose === 'token_package' ? await this.prepareTokenPackage(req) : undefined
+    const { amount, currency, country, exchangeRate } =
+      tokenPackage ?? (await this.resolveAmountAndCurrency(req))
     // Before the payment row exists: without a rate the checkout is rejected and nothing is saved.
-    const rate = exchangeRate ? await this.quoteUsdCopRate() : undefined
+    const rate = tokenPackage
+      ? tokenPackage.rate
+      : exchangeRate
+        ? await this.quoteUsdCopRate()
+        : undefined
 
     // 2. El proveedor se valida contra el MISMO país que decidió el precio. Gatear
     // por el perfil de facturación (`|| 'CO'`) mientras el monto viaja en la moneda
@@ -258,7 +277,11 @@ export class CheckoutService implements OnModuleInit {
 
     // 3. Pre-validate wallet ownership, non-TKN currency, and currency match
     // before persisting the payment or debiting across any checkout purpose.
-    if (req.provider === 'wallet' || req.purpose === 'wallet_recharge' || req.walletId) {
+    if (
+      // A token package ignores the body's walletId: its wallet is the brand token wallet.
+      !tokenPackage &&
+      (req.provider === 'wallet' || req.purpose === 'wallet_recharge' || req.walletId)
+    ) {
       await this.assertWalletCurrency(req, currency)
     }
 
@@ -276,9 +299,10 @@ export class CheckoutService implements OnModuleInit {
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
     const isWalletRecharge = req.purpose === 'wallet_recharge'
     const isWalletConsumption = req.provider === 'wallet' && !isWalletRecharge
-    const tax = isWalletRecharge
-      ? await this.resolveRechargeTax(taxCountry)
-      : await this.taxService.getTaxForCountry(taxCountry)
+    const tax =
+      isWalletRecharge || tokenPackage
+        ? await this.resolveRechargeTax(taxCountry)
+        : await this.taxService.getTaxForCountry(taxCountry)
     const directTaxBreakdown = isWalletConsumption
       ? null
       : this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
@@ -291,7 +315,7 @@ export class CheckoutService implements OnModuleInit {
       brandId: req.brandId,
       userId: req.userId,
       ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}),
-      walletId: req.walletId || null,
+      walletId: tokenPackage ? tokenPackage.walletId : req.walletId || null,
       provider: req.provider as PaymentProvider,
       amount: totalAmount,
       currency,
@@ -317,6 +341,7 @@ export class CheckoutService implements OnModuleInit {
             }
           : {}),
         ...(req.idempotencyKey ? { idempotencyFingerprint } : {}),
+        ...(tokenPackage ? { tokenPackage: tokenPackage.snapshot } : {}),
       },
     })
 
@@ -371,6 +396,15 @@ export class CheckoutService implements OnModuleInit {
       currency,
       tax,
     )
+  }
+
+  private prepareTokenPackage(req: CheckoutRequest): Promise<PreparedTokenPackage> {
+    return prepareTokenPackage(req, {
+      tokenPackages: this.tokenPackages,
+      tokenWallets: this.tokenWallets,
+      billingCountry: (brandId) => this.getBillingCountry(brandId),
+      quoteUsdCopRate: () => this.quoteUsdCopRate(),
+    })
   }
 
   private async quoteUsdCopRate(): Promise<UsdCopRate> {
@@ -917,6 +951,9 @@ export class CheckoutService implements OnModuleInit {
     // los pagos anteriores a este cambio, que no lo llevan.
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
     const isWalletRecharge = payment.purpose === PaymentPurpose.WALLET_RECHARGE
+    const isTokenPackage = payment.purpose === PaymentPurpose.TOKEN_PACKAGE
+    // A token package is invoiced as a recharge: strict VAT, included in what was paid.
+    const takesRechargeTax = isWalletRecharge || isTokenPackage
     const hasSavedTaxRate =
       payment.metadata &&
       payment.metadata.taxRate !== undefined &&
@@ -925,13 +962,13 @@ export class CheckoutService implements OnModuleInit {
       Number(payment.metadata.taxRate) >= 0
 
     let tax: { taxName: string; taxRate: number; isInclusive: boolean }
-    if (isWalletRecharge && hasSavedTaxRate) {
+    if (takesRechargeTax && hasSavedTaxRate) {
       tax = this.validateRechargeTaxConfig(country, {
         taxName: String(payment.metadata.taxName || ''),
         taxRate: Number(payment.metadata.taxRate),
         isInclusive: true,
       })
-    } else if (isWalletRecharge) {
+    } else if (takesRechargeTax) {
       tax = await this.resolveRechargeTax(country)
     } else if (hasSavedTaxRate) {
       tax = {
@@ -962,6 +999,9 @@ export class CheckoutService implements OnModuleInit {
       ) {
         throw new Error((creditResult as any).error)
       }
+    }
+    if (isTokenPackage) {
+      await creditTokenPackage(payment, this.tokenWallets)
     }
 
     // Generar factura
@@ -1494,7 +1534,13 @@ export class CheckoutService implements OnModuleInit {
 
     const found = await this.walletService.findById(req.walletId)
     const wallet: Wallet = found && 'data' in found ? found.data : null
-    if (!wallet) return
+    // `findById` throws 404 for an unknown id; no wallet here means its read failed.
+    if (!wallet) {
+      throw new RequestException(
+        { code: 'WALLET_LOOKUP_UNAVAILABLE', message: 'Could not read the wallet' },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      )
+    }
 
     if (wallet.brandId !== req.brandId) {
       throw new RequestException(
@@ -1771,6 +1817,19 @@ export class CheckoutService implements OnModuleInit {
         referenceType: 'subscription',
         referenceId: req.planSlug,
       })
+    } else if (req.purpose === 'token_package') {
+      items.push({
+        description: tokenPackageInvoiceDescription(payment),
+        quantity: 1,
+        unitPrice: subtotal,
+        subtotal,
+        taxRate: tax.taxRate ?? 0,
+        taxAmount,
+        total: invoiceTotal,
+        productType: 'token_package',
+        referenceType: 'payment',
+        referenceId: payment.id,
+      })
     } else if (req.purpose === 'wallet_recharge') {
       items.push({
         description: 'Créditos de uso de la plataforma ROAX',
@@ -1839,10 +1898,13 @@ export class CheckoutService implements OnModuleInit {
       status: InvoiceStatus.PAID,
       issuedAt: new Date(),
       paidAt: new Date(),
-      ...(req.purpose === 'wallet_recharge'
+      ...(req.purpose === 'wallet_recharge' || req.purpose === 'token_package'
         ? {
             metadata: {
-              serviceDescription: 'Créditos de uso de la plataforma ROAX',
+              serviceDescription:
+                req.purpose === 'token_package'
+                  ? tokenPackageInvoiceDescription(payment)
+                  : 'Créditos de uso de la plataforma ROAX',
               taxRate: tax.taxRate ?? 0,
               taxName: tax.taxName || 'N/A',
               buyer: buyerIdentification,
@@ -2195,4 +2257,9 @@ export class CheckoutService implements OnModuleInit {
     })
     return profile?.country || 'CO' // Default Colombia
   }
+}
+
+/** The invoiced line of a token package: only the paid tokens, the bonus is not invoiced. */
+function tokenPackageInvoiceDescription(payment: Payment): string {
+  return `Paquete de ${Number(payment.metadata?.tokenPackage?.purchasedTokens)} tokens ROAX`
 }

@@ -438,3 +438,20 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: todo checkout cuyo precio trae `exchangeRate` responde 503 `EXCHANGE_RATE_UNAVAILABLE` y no
   guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06). Hoy ningún precio lo trae.
 - **Estado**: abierto — aceptado por diseño; lo reabre un respaldo decidido por quien aprueba.
+
+## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)
+
+- **Dónde**: `src/checkout/token-package-checkout.ts:104` (`creditTokenPackage`); `src/wallet/token-wallet.service.ts:86`
+- **Qué lo dispara**: la wallet `TKN` de la marca pasa a `closed` entre el checkout del paquete y la confirmación
+  del proveedor.
+- **Qué rompe**: el pago queda `processing`, cobrado, sin tokens y sin factura; el barrido lo reintenta y vuelve a
+  fallar con `WALLET_CLOSED`.
+- **Estado**: abierto — lo cierra decidir si se reabre la wallet o se devuelve el pago. El checkout ya rechaza una
+  `TKN` cerrada antes de cobrar (`token-package-checkout.ts:75`).
+
+## Reembolsar un paquete de tokens no descuenta los tokens acreditados (LOC-136)
+
+- **Dónde**: `src/checkout/refund-credit-note.ts:147` (`issueRefundCreditNote`)
+- **Qué lo dispara**: un reembolso o una nota crédito sobre un pago `token_package` completado.
+- **Qué rompe**: la marca recupera el dinero y conserva los tokens comprados y el bono.
+- **Estado**: abierto — lo cierra debitar los tokens del pago al reembolsar; fuera del alcance de LOC-136.

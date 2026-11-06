@@ -125,7 +125,7 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
   })
 
   it('CA3 a super admin changes the bonus of the USD 50 package, audited with its author', async () => {
-    // R15: red when update stops saving the changes: the row still reads 6.
+    // R15: red when update stops saving the changes: the package still reads bonus 6.
     const res = await edit({ bonusTokens: 8 }, superAdmin)
 
     expect(res.status).toBe(HttpStatus.OK)
