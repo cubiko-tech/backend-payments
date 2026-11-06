@@ -26,6 +26,7 @@ import {
   stopInstance,
   sweepAfter,
 } from './support/wallet-race.fixture'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const BRAND_ID = 'a7990002-2222-4333-8444-555555555555'
 const BALANCE = 100000
@@ -41,6 +42,8 @@ describe('A failed wallet close against other purchases and sweeps (PostgreSQL, 
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeSweepsToBrand(a.tasks, BRAND_ID)
+    scopeSweepsToBrand(b.tasks, BRAND_ID)
   })
 
   beforeEach(() => cleanBrand(a.dataSource, BRAND_ID))

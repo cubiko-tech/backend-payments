@@ -31,6 +31,7 @@ import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
 import { WebhookEvent } from '../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../src/webhook/webhook.service'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const BRAND_ID = 'f8787878-2222-4333-8444-555555555555'
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
@@ -245,6 +246,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
       walletReconcileLocks: new Map(),
     })
     tasksService = moduleFixture.get(TasksService)
+    scopeSweepsToBrand(tasksService, BRAND_ID)
   })
 
   beforeEach(async () => {

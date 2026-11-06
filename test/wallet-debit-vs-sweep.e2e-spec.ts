@@ -18,6 +18,7 @@ import {
   statusOf,
   stopInstance,
 } from './support/wallet-race.fixture'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const BRAND_ID = 'a7970001-2222-4333-8444-555555555555'
 const BALANCE = 100000
@@ -29,6 +30,8 @@ describe('Wallet debit against the reconciliation sweep (PostgreSQL, two instanc
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeSweepsToBrand(a.tasks, BRAND_ID)
+    scopeSweepsToBrand(b.tasks, BRAND_ID)
   })
 
   beforeEach(() => cleanBrand(a.dataSource, BRAND_ID))
