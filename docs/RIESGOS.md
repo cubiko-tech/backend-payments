@@ -456,3 +456,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: un reembolso o una nota crédito sobre un pago `token_package` completado.
 - **Qué rompe**: la marca recupera el dinero y conserva los tokens comprados y el bono.
 - **Estado**: abierto — lo cierra debitar los tokens del pago al reembolsar; fuera del alcance de LOC-136.
+
+## Un crédito válido sobre un saldo cerca del máximo de `numeric(15,2)` responde 500 (LOC-139)
+
+- **Dónde**: `src/wallet/wallet.service.ts:170` (`credit`); `src/wallet/token-wallet.service.ts:170` (`move`)
+- **Qué lo dispara**: un saldo que ya pasa de 9 billones (1e12 × 9) recibe otro crédito dentro del tope del DTO
+  (`src/admin/dto/money-input.ts`, 1e12).
+- **Qué rompe**: Postgres rechaza la suma con `numeric field overflow`, el movimiento no se aplica y responde 500 en
+  vez de 422.
+- **Estado**: abierto — el tope del borde lo vuelve lejano; lo cierra comprobar la suma contra el máximo de la columna
+  en el servicio.

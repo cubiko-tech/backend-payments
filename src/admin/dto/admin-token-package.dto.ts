@@ -6,12 +6,12 @@ import {
   IsPositive,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator'
 import { MIN_PACKAGE_PRICE_USD } from '../../wallet/token-package.service'
-
-const MONEY = { allowNaN: false, allowInfinity: false, maxDecimalPlaces: 2 }
+import { MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
 
 export class UpdateTokenPackageDto {
   @ApiPropertyOptional({ description: 'Name shown to the buyer' })
@@ -23,20 +23,23 @@ export class UpdateTokenPackageDto {
 
   @ApiPropertyOptional({ description: 'Price in USD, at least 10', example: 25 })
   @IsOptional()
-  @IsNumber(MONEY)
+  @IsNumber(MONEY_INPUT)
   @Min(MIN_PACKAGE_PRICE_USD)
+  @Max(MAX_MONEY_AMOUNT)
   priceUsd?: number
 
   @ApiPropertyOptional({ description: 'Tokens the price pays for, credited as purchased' })
   @IsOptional()
-  @IsNumber(MONEY)
+  @IsNumber(MONEY_INPUT)
   @IsPositive()
+  @Max(MAX_MONEY_AMOUNT)
   purchasedTokens?: number
 
   @ApiPropertyOptional({ description: 'Extra tokens credited as gift; not invoiced' })
   @IsOptional()
-  @IsNumber(MONEY)
+  @IsNumber(MONEY_INPUT)
   @Min(0)
+  @Max(MAX_MONEY_AMOUNT)
   bonusTokens?: number
 
   @ApiPropertyOptional({ description: 'Whether buyers can see and buy it' })

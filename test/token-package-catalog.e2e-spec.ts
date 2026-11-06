@@ -156,4 +156,17 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
     expect(Number((await escala()).priceUsd)).toBe(50)
   })
+
+  it.each(['priceUsd', 'purchasedTokens', 'bonusTokens'])(
+    'LOC-139 refuses %s of 1e20 with 400 and leaves the package as it was',
+    async (field) => {
+      // R15: red when the DTO drops @Max(MAX_MONEY_AMOUNT) on that field: numeric overflow, 500.
+      const res = await edit({ [field]: 1e20 }, superAdmin)
+
+      expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+      const pkg = await escala()
+      expect([pkg.priceUsd, pkg.purchasedTokens, pkg.bonusTokens].map(Number)).toEqual([50, 50, 6])
+      expect(await auditsOf()).toHaveLength(0)
+    },
+  )
 })

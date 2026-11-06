@@ -7,9 +7,11 @@ import {
   IsPositive,
   IsString,
   Length,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator'
+import { MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
 
 export class AdminCreateWalletDto {
   @ApiProperty({ description: 'Brand ID', example: 'brand-123' })
@@ -74,9 +76,10 @@ export class AdjustWalletDto {
   @IsIn(['credit', 'debit'])
   type: 'credit' | 'debit'
 
-  @ApiProperty({ description: 'Adjustment amount', example: 50000 })
-  @IsNumber()
+  @ApiProperty({ description: 'Adjustment amount, two decimals at most', example: 50000 })
+  @IsNumber(MONEY_INPUT)
   @IsPositive()
+  @Max(MAX_MONEY_AMOUNT)
   amount: number
 
   @ApiPropertyOptional({ description: 'Adjustment reason or description' })

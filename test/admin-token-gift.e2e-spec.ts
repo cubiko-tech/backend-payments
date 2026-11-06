@@ -1,3 +1,7 @@
+/**
+ * Admin gifts and keyed adjustments over HTTP against PostgreSQL.
+ * R6: one responsibility, the admin money endpoints behind one app; a split would copy its setup.
+ */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
@@ -198,8 +202,13 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     ['with 0', { amount: 0, reason: 'Bonus', idempotencyKey: 'loc133-r4' }],
     ['with -5', { amount: -5, reason: 'Bonus', idempotencyKey: 'loc133-r5' }],
     ['without key', { amount: 20, reason: 'Bonus' }],
+    ['with 1e20 (over the column)', { amount: 1e20, reason: 'Bonus', idempotencyKey: 'loc139-g1' }],
+    [
+      'with 0.005 (three decimals)',
+      { amount: 0.005, reason: 'Bonus', idempotencyKey: 'loc139-g2' },
+    ],
   ])('CA2 a gift %s answers 400 and moves nothing', async (_label, body) => {
-    // R15: red when the DTO drops that rule (reason, positive amount or key): it answers 201.
+    // R15: red when the DTO drops that rule (reason, amount bounds or key): it answers 201 or 500.
     const res = await gift(body)
 
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
@@ -240,6 +249,20 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     expect(await balanceOf(cop.id)).toBe(150)
     expect(await movementsOf(cop.id)).toHaveLength(1)
     expect((await auditsOf(cop.id)).map((a) => a.action)).toEqual(['wallet_credit'])
+  })
+
+  it.each([
+    ['0.005 (three decimals)', 0.005],
+    ['1e20 (over the column)', 1e20],
+  ])('LOC-139 an adjustment of %s answers 400 and the balance stays', async (_label, amount) => {
+    // R15: red when AdjustWalletDto drops maxDecimalPlaces or @Max: it answers 201 or 500.
+    const cop = await seedWallet('COP', 100)
+
+    const res = await adjust(cop.id, { type: 'credit', amount, idempotencyKey: `loc139-${amount}` })
+
+    expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+    expect(await balanceOf(cop.id)).toBe(100)
+    expect(await movementsOf(cop.id)).toHaveLength(0)
   })
 
   it('E3 a gift key reused with another amount answers 409 and keeps the first gift', async () => {
