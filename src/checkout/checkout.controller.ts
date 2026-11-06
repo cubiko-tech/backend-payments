@@ -71,14 +71,14 @@ export class CheckoutController {
     description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
   })
   async processCheckout(@Body() body: CheckoutRequestDto, @Req() req?: any) {
-    if (req?.user?.id !== 'server') {
+    if (req?.user?.isServer !== true) {
       const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, body?.brandId)
       if (!allowed) {
         throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
       }
     }
     const idempotencyKey = this.extractIdempotencyKey(req)
-    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : body?.userId
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : body?.userId
     // The DTO accepts `renewal` only to discard it here: legacy renewal pricing belongs to the cron.
     return {
       data: await this.checkoutService.processCheckout({
@@ -134,7 +134,7 @@ export class CheckoutController {
   async paymentReturn(@Query() query: CheckoutReturnQueryDto, @Req() req?: any) {
     // ConfioPagos redirige con correlation_id = nuestro paymentId.
     const paymentId = query.paymentId || query.correlation_id
-    const userId = req?.user?.id && req.user.id !== 'server' ? req.user.id : ''
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : ''
     return {
       data: await this.checkoutService.reconcilePayment(paymentId, (brandId) =>
         this.platformClient.canViewBrandCredit(userId, brandId),

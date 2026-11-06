@@ -411,6 +411,17 @@ describe('POST /checkout brand membership gate', () => {
     expect(walletService.debit).not.toHaveBeenCalled()
   })
 
+  it('responds 403 to a session JWT whose id is "server": only the guard marks the server token', async () => {
+    // R15: red when checkout recognizes the server by `id === 'server'` again: it skips membership.
+    mockPlatformResponses([{ userId: 'user-owner-b', roleName: 'superuser' }])
+
+    const response = await postCheckout({ cookies: signUserCookies('server') }, checkoutBody('x'))
+
+    expect(response.status).toBe(403)
+    expect(brandBWallet.balance).toBe(INITIAL_WALLET_BALANCE)
+    expect(walletService.debit).not.toHaveBeenCalled()
+  })
+
   it('responds 403 and keeps Brand B wallet balance intact when the caller is a member without a paying role', async () => {
     mockPlatformResponses([{ userId: 'user-operator-b', roleName: 'operator' }])
 

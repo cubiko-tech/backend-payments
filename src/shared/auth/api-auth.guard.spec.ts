@@ -1,6 +1,10 @@
 import { HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from './api-auth.guard'
-import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
+import {
+  API_PERMISSION_KEY,
+  API_SESSION_ONLY_KEY,
+  API_SUPER_ADMIN_KEY,
+} from './require-permission.decorator'
 
 const b64u = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url')
 const tokenWith = (payload: any) => `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u(payload)}.sig`
@@ -204,5 +208,59 @@ describe('ApiAuthGuard', () => {
     await expect(g.canActivate(makeHandlerCtx())).rejects.toMatchObject({
       status: HttpStatus.FORBIDDEN,
     })
+  })
+
+  it('marks only the ACCESS_SERVER principal as server, never a JWT that claims it (LOC-133)', async () => {
+    // R15: red when the JWT branch copies an `isServer` claim, or the server branch drops the mark.
+    const serverReq: any = { headers: { authorization: 'Bearer srv-secret' }, cookies: {} }
+    const forgedReq: any = { headers: { authorization: 'Bearer forged-jwt' }, cookies: {} }
+    const forged = { id: 'server', isServer: true, isSuperAdmin: true }
+    const g = makeGuard(jest.fn().mockReturnValue(forged))
+    const contextOf = (req: any) => ({ ...ctx(), switchToHttp: () => ({ getRequest: () => req }) })
+
+    await g.canActivate(contextOf(serverReq))
+    await g.canActivate(contextOf(forgedReq))
+
+    expect(serverReq.user.isServer).toBe(true)
+    expect(forgedReq.user.isServer).toBeUndefined()
+  })
+
+  it('refuses the server token with 403 on a class marked @RequireSessionUser (LOC-133)', async () => {
+    // R15: red when the guard reads the session-only mark from the handler alone: server gets in.
+    const classTarget = class GiftStub {}
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if ((key === API_SESSION_ONLY_KEY || key === API_SUPER_ADMIN_KEY) && target === classTarget) {
+        return true
+      }
+      return undefined
+    })
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'admin-1', isSuperAdmin: true }))
+    const withClass = (authorization: string) => ({
+      ...ctx({ authorization }),
+      getClass: () => classTarget,
+    })
+
+    await expect(g.canActivate(withClass('Bearer srv-secret'))).rejects.toMatchObject({
+      status: HttpStatus.FORBIDDEN,
+    })
+    await expect(g.canActivate(withClass('Bearer superadmin-jwt'))).resolves.toBe(true)
+  })
+
+  it('refuses the server token on a session-only handler before @RequirePermission lets it in', async () => {
+    // R15: red when the session-only check runs after the permission branch, which returns early.
+    const handlerTarget = () => undefined
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if (key === API_SESSION_ONLY_KEY && target === handlerTarget) return true
+      if (key === API_PERMISSION_KEY && target === handlerTarget) return 'credit:runs'
+      return undefined
+    })
+    const g = makeGuard(jest.fn())
+    const context = {
+      ...ctx({ authorization: 'Bearer srv-secret' }),
+      getHandler: () => handlerTarget,
+      getClass: () => class Stub {},
+    }
+
+    await expect(g.canActivate(context)).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN })
   })
 })
