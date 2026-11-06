@@ -11,6 +11,8 @@ import { raceConnectionOptions, someoneWaitsOnRowLock } from './support/wallet-r
 dotenvConfig({ path: '.env' })
 
 const BRAND_A = 'a1320000-0000-4000-8000-0000000000e2'
+// Creating and dropping its own database can outlast jest's default 5 s under the parallel suite.
+const MIGRATION_CASE_TIMEOUT_MS = 30_000
 
 interface Instance {
   dataSource: DataSource
@@ -304,34 +306,38 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
     expect(Number((await stored(wallet.id)).giftTokens)).toBe(1)
   })
 
-  it('the migration down drops the origin columns and up brings them back at 0, on its own database', async () => {
-    // R15: red when the case runs on the shared runner: its database is POSTGRES_DB, not its own.
-    // R15: red when down leaves giftTokens behind: the column is still there after it.
-    const migration = new AddTokenWalletOrigins1793949572497()
-    const used = await withDisposableDatabase(a.dataSource, async (runner, name) => {
-      const [{ db }] = await runner.query('SELECT current_database() AS db')
-      expect(db).toBe(name)
-      await runner.query('CREATE TABLE wallets (id uuid PRIMARY KEY DEFAULT gen_random_uuid())')
-      await runner.query(
-        'CREATE TABLE transactions (id uuid PRIMARY KEY DEFAULT gen_random_uuid())',
-      )
-      await migration.up(runner)
-      const [{ id }] = await runner.query('INSERT INTO wallets DEFAULT VALUES RETURNING id')
+  it(
+    'the migration down drops the origin columns and up brings them back at 0, on its own database',
+    async () => {
+      // R15: red when the case runs on the shared runner: its database is POSTGRES_DB, not its own.
+      // R15: red when down leaves giftTokens behind: the column is still there after it.
+      const migration = new AddTokenWalletOrigins1793949572497()
+      const used = await withDisposableDatabase(a.dataSource, async (runner, name) => {
+        const [{ db }] = await runner.query('SELECT current_database() AS db')
+        expect(db).toBe(name)
+        await runner.query('CREATE TABLE wallets (id uuid PRIMARY KEY DEFAULT gen_random_uuid())')
+        await runner.query(
+          'CREATE TABLE transactions (id uuid PRIMARY KEY DEFAULT gen_random_uuid())',
+        )
+        await migration.up(runner)
+        const [{ id }] = await runner.query('INSERT INTO wallets DEFAULT VALUES RETURNING id')
 
-      await migration.down(runner)
-      expect(await hasTokenColumns(runner)).toBe(false)
-      expect(await hasColumn(a.dataSource, 'transactions', 'tokenOrigin')).toBe(true)
-      await migration.up(runner)
+        await migration.down(runner)
+        expect(await hasTokenColumns(runner)).toBe(false)
+        expect(await hasColumn(a.dataSource, 'transactions', 'tokenOrigin')).toBe(true)
+        await migration.up(runner)
 
-      expect(await hasTokenColumns(runner)).toBe(true)
-      const [row] = await runner.query(
-        'SELECT "giftTokens", "purchasedTokens", "dropiTokens" FROM wallets WHERE id = $1',
-        [id],
-      )
-      expect(row).toEqual({ giftTokens: '0.00', purchasedTokens: '0.00', dropiTokens: '0.00' })
-    })
+        expect(await hasTokenColumns(runner)).toBe(true)
+        const [row] = await runner.query(
+          'SELECT "giftTokens", "purchasedTokens", "dropiTokens" FROM wallets WHERE id = $1',
+          [id],
+        )
+        expect(row).toEqual({ giftTokens: '0.00', purchasedTokens: '0.00', dropiTokens: '0.00' })
+      })
 
-    expect(await databaseExists(a.dataSource, used)).toBe(false)
-    expect(await hasTokenColumns(a.dataSource)).toBe(true)
-  })
+      expect(await databaseExists(a.dataSource, used)).toBe(false)
+      expect(await hasTokenColumns(a.dataSource)).toBe(true)
+    },
+    MIGRATION_CASE_TIMEOUT_MS,
+  )
 })
