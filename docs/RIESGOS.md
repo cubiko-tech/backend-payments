@@ -418,3 +418,12 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la marca ve en `GET /wallet` una segunda wallet de tokens que `GET /token-wallet` no usa.
 - **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
   contar si hay filas así por ambiente.
+
+## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
+
+- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/checkout.service.ts:249`
+- **Qué lo dispara**: `datos.gov.co` sin responder, con error o con una fila ilegible, y sin una tasa consultada
+  en la última hora por esa instancia. El caché es por instancia: N instancias hacen hasta N consultas por hora.
+- **Qué rompe**: todo checkout cuyo precio trae `exchangeRate` responde 503 `EXCHANGE_RATE_UNAVAILABLE` y no
+  guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06). Hoy ningún precio lo trae.
+- **Estado**: abierto — aceptado por diseño; lo reabre un respaldo decidido por quien aprueba.

@@ -30,6 +30,7 @@ con separación lectura/escritura (`DBRead` / `DBWrite` en `src/orm/`) y colas/e
 | `src/tasks/` | Tareas programadas (cron) para expiración de suscripciones, reintentos de cobro y snapshots. |
 | `src/tax/` | Cálculo de impuestos aplicables según la configuración activa por país (`tax_config`). |
 | `src/transaction/` | Entidad de movimientos contables (`transactions`, crédito/débito) asociados a cada wallet. |
+| `src/trm/` | Consulta de la TRM USD→COP en `datos.gov.co`, con caché de una hora y 503 sin tasa, para el pago que la usa. |
 | `src/wallet/` | Billeteras por marca y moneda (`/wallet`), recargas, débitos, transferencias y snapshots de saldo. |
 | `src/webhook/` | Recepción y validación de webhooks de pasarelas (`/webhook`) y cola BullMQ de reintentos (`webhook-retry`). |
 

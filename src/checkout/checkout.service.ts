@@ -3,7 +3,7 @@
  * and role-assignment orchestration together because immediate wallet settlements
  * and deferred external webhooks share the same transactional completion state.
  */
-import { HttpStatus, Injectable, Logger, OnModuleInit } from '@nestjs/common'
+import { HttpStatus, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { DataSource, EntityManager, In, Raw, Repository } from 'typeorm'
 
@@ -15,6 +15,7 @@ import { TaxService, isVatCountry } from '../tax/tax.service'
 import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
+import { TrmService, UsdCopRate, exchangeRateUnavailable } from '../trm/trm.service'
 
 import {
   Payment,
@@ -143,6 +144,8 @@ interface ResolvedPricing {
   amount: number
   currency: string
   country?: string
+  /** Set when this price is charged with the day's USD→COP TRM; the payment stores the rate. */
+  exchangeRate?: 'USD_COP'
 }
 
 export interface CheckoutResult {
@@ -191,6 +194,8 @@ export class CheckoutService implements OnModuleInit {
     private enterprisePricing: EnterprisePricingService,
     private providerConfig: ProviderConfigService,
     private webhookService: WebhookService,
+    // Optional: only a price with `exchangeRate` needs it, and without it that checkout fails closed.
+    @Optional() private trmService?: TrmService,
   ) {}
 
   /**
@@ -239,7 +244,9 @@ export class CheckoutService implements OnModuleInit {
     // 1. Precio y moneda. En `plan_purchase` los decide el país REGISTRADO de la
     // marca; `country` viene informado SÓLO cuando el precio salió del catálogo por
     // país (no en el precio negociado enterprise ni en el fallback legacy).
-    const { amount, currency, country } = await this.resolveAmountAndCurrency(req)
+    const { amount, currency, country, exchangeRate } = await this.resolveAmountAndCurrency(req)
+    // Before the payment row exists: without a rate the checkout is rejected and nothing is saved.
+    const rate = exchangeRate ? await this.quoteUsdCopRate() : undefined
 
     // 2. El proveedor se valida contra el MISMO país que decidió el precio. Gatear
     // por el perfil de facturación (`|| 'CO'`) mientras el monto viaja en la moneda
@@ -288,6 +295,7 @@ export class CheckoutService implements OnModuleInit {
       provider: req.provider as PaymentProvider,
       amount: totalAmount,
       currency,
+      ...(rate ? { exchangeRate: rate.rate, exchangeRateDate: rate.date } : {}),
       status: PaymentStatus.PENDING,
       purpose: req.purpose as PaymentPurpose,
       purposeId: req.planSlug || null,
@@ -363,6 +371,11 @@ export class CheckoutService implements OnModuleInit {
       currency,
       tax,
     )
+  }
+
+  private async quoteUsdCopRate(): Promise<UsdCopRate> {
+    if (!this.trmService) throw exchangeRateUnavailable()
+    return this.trmService.getUsdCopRate()
   }
 
   private async assertProviderAvailable(req: CheckoutRequest, country?: string) {
