@@ -112,7 +112,9 @@ describe('Checkout charged with the TRM (real database)', () => {
         { provide: WalletService, ...stub({}) },
         { provide: InvoiceService, ...stub({}) },
         { provide: SubscriptionService, ...stub({}) },
+        // Called on the external path; the rate does not depend on it.
         { provide: AuditService, ...stub({ log: jest.fn() }) },
+        // A fixed 19% tax: the case looks at the rate, not at the tax.
         {
           provide: TaxService,
           ...stub({
@@ -120,6 +122,7 @@ describe('Checkout charged with the TRM (real database)', () => {
           }),
         },
         { provide: DianService, ...stub({}) },
+        // The external provider has a cost; it answers with a checkout and no provider id.
         {
           provide: ProviderFactory,
           ...stub({
@@ -134,10 +137,12 @@ describe('Checkout charged with the TRM (real database)', () => {
         { provide: ClientRolesService, ...stub({}) },
         { provide: ClientPlatformService, ...stub({}) },
         { provide: EnterprisePricingService, ...stub({}) },
+        // Every provider enabled: the gate by country is not what these cases test.
         {
           provide: ProviderConfigService,
           ...stub({ isProviderAvailable: jest.fn().mockResolvedValue(true) }),
         },
+        // Only the late registration of onModuleInit touches the webhook service.
         { provide: WebhookService, ...stub({ setCheckoutService: jest.fn() }) },
       ],
     }).compile()
@@ -195,6 +200,7 @@ describe('Checkout charged with the TRM (real database)', () => {
   })
 
   it('does not query the source for a price without exchangeRate', async () => {
+    // Mutation: quote the rate on every checkout in processCheckout and hits becomes 1.
     const { paymentId } = await service.processCheckout(request())
     const row = await payments.findOneByOrFail({ id: paymentId })
     expect(source.hits).toBe(0)

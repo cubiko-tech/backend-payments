@@ -46,6 +46,7 @@ describe('TrmService', () => {
   })
 
   it('serves the fresh cache while the source is down', async () => {
+    // Mutation: skip the fresh-cache check in getUsdCopRate and the second call rejects.
     const service = new TrmService(source.url)
     await service.getUsdCopRate()
     source.reply = trmDown
@@ -54,7 +55,9 @@ describe('TrmService', () => {
   })
 
   it('queries again once the hour has passed', async () => {
+    // Mutation: drop the expiry from the cache check and hits stays at 1.
     const service = new TrmService(source.url)
+    // Fixed clock: the cache lives one hour and the case cannot wait for it.
     const clock = jest.spyOn(Date, 'now').mockReturnValue(T0)
     await service.getUsdCopRate()
     clock.mockReturnValue(T0 + HOUR_MS)
@@ -65,6 +68,7 @@ describe('TrmService', () => {
   it('rejects with 503 when the cache expired and the source is down', async () => {
     // Mutation: keep serving an expired cache and this resolves with 4000.
     const service = new TrmService(source.url)
+    // Fixed clock: the cache lives one hour and the case cannot wait for it.
     const clock = jest.spyOn(Date, 'now').mockReturnValue(T0)
     await service.getUsdCopRate()
     clock.mockReturnValue(T0 + HOUR_MS)
@@ -79,6 +83,7 @@ describe('TrmService', () => {
   })
 
   it('rejects with 503 when the source host is unreachable', async () => {
+    // Mutation: return a fallback rate of 4000 on a network error and this resolves.
     const service = new TrmService(source.url)
     await source.close()
     source = await startTrmSource()
