@@ -39,6 +39,7 @@ import { RequestException } from '../shared/exception/request.exception'
 import { isTokenCurrency } from '../wallet/token-origin'
 import { WalletService } from '../wallet/wallet.service'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
+import { adminIdempotencyKey } from './admin-idempotency-key'
 import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
 import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
@@ -637,9 +638,8 @@ export class AdminController {
       )
     }
 
-    const previous = await this.transactionWriteRepo.findOne({
-      where: { idempotencyKey: body.idempotencyKey },
-    })
+    const key = adminIdempotencyKey(body.idempotencyKey)
+    const previous = await this.transactionWriteRepo.findOne({ where: { idempotencyKey: key } })
     if (previous) {
       return { data: { wallet, transaction: sameAdjustment(previous, id, body.type, amount) } }
     }
@@ -666,7 +666,6 @@ export class AdminController {
         },
         description: `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
       })
-    const key = body.idempotencyKey
     const result =
       body.type === 'credit'
         ? await this.walletService.credit(id, amount, data, key, undefined, audit)

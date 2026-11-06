@@ -325,7 +325,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       TEST_UUID,
       100,
       expect.objectContaining({ referenceType: 'admin', referenceId: 'user-superadmin' }),
-      'adjust-k2',
+      'admin:adjust-k2',
       undefined,
       expect.any(Function),
     )

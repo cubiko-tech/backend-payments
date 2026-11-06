@@ -5,6 +5,9 @@
  */
 import { config as dotenvConfig } from 'dotenv'
 
+import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
+import { AuditService } from '../src/audit/audit.service'
+import { bonusTokensKey, purchasedTokensKey } from '../src/checkout/token-package-checkout'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import { PaymentStatus } from '../src/payment/entities/payment.entity'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
@@ -168,6 +171,29 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     expect((await tokenWalletOf(instance.dataSource, BRAND))!.balance).toBe('27.00')
     expect(await tokenMoves()).toHaveLength(2)
   })
+
+  it.each([
+    ['purchased', purchasedTokensKey, 20],
+    ['bonus', bonusTokensKey, 2],
+  ])(
+    'LOC-140 a gift keyed as the %s tokens of a package being paid does not take their credit',
+    async (_label, keyOf, amount) => {
+      // R15: red when the gift key loses its admin: prefix: the completion replays or refuses it.
+      const paymentId = await buy()
+      const gifts = new AdminTokenGiftController(
+        instance.moduleRef.get(TokenWalletService),
+        instance.moduleRef.get(AuditService),
+      )
+      const gift = { amount, reason: 'Bonus', idempotencyKey: keyOf(paymentId) }
+      await gifts.gift(BRAND, gift, { user: { id: 'superadmin-loc140' } })
+
+      await instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+
+      const wallet = (await tokenWalletOf(instance.dataSource, BRAND))!
+      expect([wallet.purchasedTokens, wallet.giftTokens].map(Number)).toEqual([25, 2 + amount])
+      expect((await paymentsOf(instance.dataSource, BRAND))[0].status).toBe(PaymentStatus.COMPLETED)
+    },
+  )
 
   it('credits the bonus the package had when it was bought, not a later catalog edit', async () => {
     // R15: red when completion reads the catalog instead of the payment snapshot: gift reads 9.

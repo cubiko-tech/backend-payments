@@ -403,6 +403,19 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     ])
   })
 
+  it('LOC-140 an adjustment keyed like a payment credit does not swallow that credit', async () => {
+    // R15: red when the adjustment key loses its admin: prefix: the credit replays it, 150.
+    const cop = await seedWallet('COP', 100)
+    const internalKey = 'payment:00000000-0000-4000-8000-000000000140:credit'
+
+    const res = await adjust(cop.id, { type: 'credit', amount: 50, idempotencyKey: internalKey })
+    await app.get(WalletService).credit(cop.id, 70, { brandId: BRAND_A }, internalKey)
+
+    expect(res.status).toBe(HttpStatus.CREATED)
+    expect(await balanceOf(cop.id)).toBe(220)
+    expect(await movementsOf(cop.id)).toHaveLength(2)
+  })
+
   it.each([
     ['credit', 150],
     ['debit', 50],

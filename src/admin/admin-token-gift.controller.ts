@@ -5,6 +5,7 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenWalletService } from '../wallet/token-wallet.service'
+import { adminIdempotencyKey } from './admin-idempotency-key'
 import { GiftTokensDto } from './dto/admin-token-gift.dto'
 
 /**
@@ -49,7 +50,7 @@ export class AdminTokenGiftController {
         referenceId: authorId,
         metadata: { authorId, reason },
       },
-      body.idempotencyKey,
+      adminIdempotencyKey(body.idempotencyKey),
       (manager, transaction) =>
         this.auditService.record(manager, {
           userId: authorId,
