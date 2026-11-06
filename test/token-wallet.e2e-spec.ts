@@ -80,6 +80,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('E1 two simultaneous requests from two instances get one wallet with the same id and 0', async () => {
+    // R15: red when getOrCreate reads and then inserts: the second insert fails with 23505.
     const [first, second] = await Promise.all([
       a.tokens.getOrCreate(BRAND_A, 'user-1'),
       b.tokens.getOrCreate(BRAND_A, 'user-2'),
@@ -115,6 +116,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('CA1 with 5 gift and 10 purchased, a debit of 5 leaves gift 0 and purchased 10', async () => {
+    // R15: red when purchased is spent before gift: the wallet ends with gift 5 and purchased 5.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     await creditOf(wallet.id, 5, TokenOrigin.GIFT)
     await creditOf(wallet.id, 10, TokenOrigin.PURCHASED)
@@ -129,6 +131,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('CA1 with 3 Dropi and 2 gift, a debit of 4 outside Dropi is refused and Dropi stays at 3', async () => {
+    // R15: red when Dropi tokens are spendable outside Dropi: the debit of 4 is applied.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     await creditOf(wallet.id, 3, TokenOrigin.DROPI)
     await creditOf(wallet.id, 2, TokenOrigin.GIFT)
@@ -145,6 +148,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('a token credit stores its origin, and the view adds the balance up by origin', async () => {
+    // R15: red when the credit transaction is saved without its tokenOrigin.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
 
     const { transaction } = await creditOf(wallet.id, 4, TokenOrigin.PURCHASED)
@@ -156,6 +160,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('E2 the same credit key sent twice at once credits once', async () => {
+    // R15: red when the movement is saved without its idempotency key: two credits are saved.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
 
     const [first, second] = await Promise.all([
@@ -244,6 +249,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('refuses a debit larger than the wallet balance even when the origins would cover it', async () => {
+    // R15: red when the debit checks only the origins: it applies and the balance goes negative.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     await creditOf(wallet.id, 5, TokenOrigin.GIFT)
     await a.dataSource.query('UPDATE wallets SET balance = 2 WHERE id = $1', [wallet.id])
@@ -255,6 +261,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('a frozen wallet takes token credits and a closed one refuses them', async () => {
+    // R15: red when a token credit skips the closed check: the closed wallet takes the credit.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     const setStatus = (status: WalletStatus) =>
       a.dataSource.getRepository(Wallet).update({ id: wallet.id }, { status })
@@ -270,6 +277,7 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   })
 
   it('the migration down drops the origin columns and up brings them back at 0', async () => {
+    // R15: red when down leaves giftTokens behind: the column is still there after it.
     const migration = new AddTokenWalletOrigins1793949572497()
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     const runner = a.dataSource.createQueryRunner()

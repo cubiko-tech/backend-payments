@@ -16,12 +16,14 @@ describe('planTokenSpend (token debit order, LOC-132)', () => {
   })
 
   it('inside Dropi spends gift, then purchased, then Dropi tokens', () => {
+    // R15: red when inside Dropi the Dropi tokens go first: the plan takes 300 Dropi and 100 gift.
     const taken = planTokenSpend({ gift: 100, purchased: 100, dropi: 300 }, 400, true)
 
     expect(taken).toEqual({ gift: 100, purchased: 100, dropi: 200 })
   })
 
   it('refuses inside Dropi when all origins together do not cover it', () => {
+    // R15: red when a 1-cent shortfall is tolerated: the plan takes all 300 for a debit of 301.
     expect(planTokenSpend({ gift: 100, purchased: 100, dropi: 100 }, 301, true)).toBeNull()
   })
 })

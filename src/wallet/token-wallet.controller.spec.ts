@@ -31,6 +31,7 @@ describe('TokenWalletController (CA1, LOC-132)', () => {
   })
 
   it('returns the token wallet of the brand the caller belongs to', async () => {
+    // R15: red when the wallet is created in the brand's name instead of the caller's user id.
     const { controller, tokenWallets } = build()
 
     const res = await controller.get(BRAND_B, MEMBER_OF_B)
@@ -40,6 +41,7 @@ describe('TokenWalletController (CA1, LOC-132)', () => {
   })
 
   it('lets a super admin read any brand token wallet', async () => {
+    // R15: red when a super admin is not a privileged caller: platform says no and the call is 403.
     const { controller, platformClient } = build()
 
     const res = await controller.get(BRAND_A, { user: { id: 'root', isSuperAdmin: true } })
