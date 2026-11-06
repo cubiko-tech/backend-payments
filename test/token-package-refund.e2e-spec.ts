@@ -207,6 +207,32 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
     expect(await walletState()).toEqual(INTACT)
   })
 
+  it('CA3 refuses to approve a pending partial refund of a package: 422 and nothing moves', async () => {
+    // R15: red when approve skips the full-amount check: processing and the wallet at 0.00.
+    const payment = await boughtPackage()
+    const repo = refundSources[0].getRepository(Refund)
+    // Saved directly, as a partial request accepted before request() refused them.
+    const refund = await repo.save(
+      repo.create({
+        brandId: BRAND,
+        paymentId: payment.id,
+        amount: 10,
+        currency: payment.currency,
+        reason: RefundReason.CUSTOMER_REQUEST,
+        requestedBy: 'user-loc161',
+        status: RefundStatus.PENDING,
+      }),
+    )
+
+    await expect(refunds.approve(refund.id, ADMIN)).rejects.toMatchObject({
+      status: 422,
+      code: 'TOKEN_PACKAGE_PARTIAL_REFUND',
+    })
+    expect(await refundStatuses(payment.id)).toEqual([RefundStatus.PENDING])
+    expect(await walletState()).toEqual(INTACT)
+    expect(await refundDebits(refund.id)).toHaveLength(0)
+  })
+
   it.each([PaymentPurpose.PLAN_PURCHASE, PaymentPurpose.WALLET_RECHARGE])(
     'CA3 a %s refund is approved as before and moves no token wallet',
     async (purpose) => {

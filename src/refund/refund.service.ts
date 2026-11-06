@@ -40,12 +40,7 @@ interface ApproveOps {
   save: (refund: Refund) => Promise<Refund>
 }
 
-/** A package is refunded whole, and only while the brand still holds all of its tokens. */
-async function assertPackageRefundable(
-  payment: Payment,
-  amount: unknown,
-  findWallet: (id: string) => Promise<Wallet | null>,
-) {
+function assertWholePackage(payment: Payment, amount: unknown) {
   if (toCents(amount) !== toCents(payment.amount)) {
     throw new RequestException(
       {
@@ -55,6 +50,15 @@ async function assertPackageRefundable(
       HttpStatus.UNPROCESSABLE_ENTITY,
     )
   }
+}
+
+/** A package is refunded whole, and only while the brand still holds all of its tokens. */
+async function assertPackageRefundable(
+  payment: Payment,
+  amount: unknown,
+  findWallet: (id: string) => Promise<Wallet | null>,
+) {
+  assertWholePackage(payment, amount)
   const tokens = packageTokensOf(payment)
   const wallet = tokens ? await findWallet(payment.walletId) : null
   if (!holdsPackageTokens(wallet, payment, tokens)) throw tokensSpent()
@@ -234,7 +238,11 @@ export class RefundService {
     if (refund.status !== RefundStatus.PENDING) throw refundNotPending()
 
     const payment = await ops.findPayment(refund.paymentId)
-    if (payment && isTokenPackage(payment)) await ops.reclaim(payment)
+    if (payment && isTokenPackage(payment)) {
+      // Pending rows may predate the request-time check, so approval checks the amount again.
+      assertWholePackage(payment, refund.amount)
+      await ops.reclaim(payment)
+    }
 
     refund.status = RefundStatus.PROCESSING
     refund.approvedBy = approvedBy
