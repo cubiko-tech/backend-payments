@@ -2,6 +2,7 @@ import { ExecutionContext, INestApplication } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
+import { EntityManager } from 'typeorm'
 import { AuditService } from '../audit/audit.service'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { BureauService } from '../credit/bureau/bureau.service'
@@ -18,6 +19,7 @@ import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionController } from '../subscription/subscription.controller'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
+import { MovementAudit } from '../transaction/movement-audit'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../wallet/wallet.service'
@@ -40,12 +42,13 @@ describe('AdminController, SubscriptionController & CreditController input valid
     status: WalletStatus.ACTIVE,
   }
   const walletService = {
-    credit: jest.fn(async (walletId: string, amount: number) => ({
-      data: {
-        wallet: adjustedWallet,
-        transaction: { id: VALID_UUID, walletId, type: TransactionType.CREDIT, amount },
-      },
-    })),
+    credit: jest.fn(async (walletId: string, amount: number, ...rest: unknown[]) => {
+      const transaction = { id: VALID_UUID, walletId, type: TransactionType.CREDIT, amount }
+      // Runs the audit inside the credit, as WalletService.credit does before it commits.
+      const audit = rest[3] as MovementAudit | undefined
+      await audit?.({} as EntityManager, transaction as Transaction)
+      return { data: { wallet: adjustedWallet, transaction } }
+    }),
   }
   const walletWriteRepo = {
     findOne: jest.fn(),
@@ -64,7 +67,10 @@ describe('AdminController, SubscriptionController & CreditController input valid
     save: jest.fn(async (p) => ({ id: VALID_UUID, ...p })),
   }
   const transactionWriteRepo = { findOne: jest.fn().mockResolvedValue(null) }
-  const auditService = { log: jest.fn().mockResolvedValue(undefined) }
+  const auditService = {
+    log: jest.fn().mockResolvedValue(undefined),
+    record: jest.fn().mockResolvedValue(undefined),
+  }
   const subscriptionService = {
     startTrial: jest.fn().mockResolvedValue({ data: { id: VALID_UUID } }),
     cancel: jest.fn().mockResolvedValue({ data: { id: VALID_UUID } }),
@@ -218,13 +224,14 @@ describe('AdminController, SubscriptionController & CreditController input valid
       })
 
     expect(adjustRes.status).toBe(201)
-    expect(auditService.log).toHaveBeenLastCalledWith(
-      USER_UUID,
-      'wallet_credit',
-      'wallet',
-      VALID_UUID,
-      expect.any(Object),
-      expect.any(String),
+    expect(auditService.record).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        userId: USER_UUID,
+        action: 'wallet_credit',
+        entityType: 'wallet',
+        entityId: VALID_UUID,
+      }),
     )
   })
 
