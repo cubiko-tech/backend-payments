@@ -441,7 +441,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)
 
-- **Dónde**: `src/checkout/token-package-checkout.ts:104` (`creditTokenPackage`); `src/wallet/token-wallet.service.ts:86`
+- **Dónde**: `src/checkout/token-package-checkout.ts:104` (`creditTokenPackage`);
+  `src/wallet/token-wallet.service.ts:86`
 - **Qué lo dispara**: la wallet `TKN` de la marca pasa a `closed` entre el checkout del paquete y la confirmación
   del proveedor.
 - **Qué rompe**: el pago queda `processing`, cobrado, sin tokens y sin factura; el barrido lo reintenta y vuelve a

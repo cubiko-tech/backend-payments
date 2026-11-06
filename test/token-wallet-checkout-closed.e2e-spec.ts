@@ -92,7 +92,7 @@ describe('Checkout against a token wallet or a missing wallet (PostgreSQL, LOC-1
   })
 
   it('CA5 a recharge to a walletId that does not exist answers 404 and saves no payment', async () => {
-    // Regression only: WalletService.findById answers this 404 before and after LOC-136.
+    // R15: red when WalletService.findById stops throwing 404 for an unknown id: it answers 503.
     await expect(
       checkout({ walletId: '00000000-0000-4000-8000-0000000000aa' }),
     ).rejects.toMatchObject({
