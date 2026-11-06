@@ -497,3 +497,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   siendo la clave de idempotencia y no cambia.
 - **Estado**: abierto — lo cierra pasar el id por `escapeLogValue` en esa línea (LOC-162 la dejó como estaba porque
   su aceptación pide conservarla).
+
+## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
+
+- **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:743-756` (`planearCambioDeEstado`) y
+  `:455-460` (`planearCobro`)
+- **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
+  `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
+- **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
+  recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
+  Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
+- **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).

@@ -426,13 +426,6 @@ export class ConfioSubscriptionWebhookService {
       // («exitoso o fallido», tabla de eventos del contrato): hoy no hay estado
       // intermedio. Si Confío agrega uno, este predicado lo leería como impago.
       //
-      // ⚠️ DINERO: escribir `past_due` arma un cron VIEJO. `retryFailedPayments`
-      // (`tasks.service.ts:216-250`, cada 6h) toma `PAST_DUE + autoRenew` y para
-      // `provider === 'confio'` emite un link de pago REAL con aviso al usuario;
-      // `expireSubscriptions` después la vence por `retryCount`. Con la recurrencia
-      // delegada eso cobraría por un segundo riel. Hoy es LATENTE (ninguna
-      // suscripción confío tiene resource name) y retirarlo es de
-      // `alta-crea-suscripcion-en-confiopagos`: no se toca un camino que gasta plata.
       // Un cobro fallido sobre una fila YA dada de baja no tiene efecto: mover a
       // `past_due` la convertiría en un moroso vivo, que es peor que no hacer
       // nada —la fila deja de ser una baja y pasa a ser una deuda—, y el acceso
@@ -443,6 +436,17 @@ export class ConfioSubscriptionWebhookService {
         this.logger.log(
           `Confio cobro no exitoso sobre una suscripción ya dada de baja (${sub.id}): ` +
             `sin efecto, status=${data?.status}`,
+        )
+
+        return null
+      }
+
+      // `past_due` makes `retryFailedPayments` issue and notify a new payment link, so a signup
+      // that was never activated would get a second link for its first period.
+      if (sub.status === SubscriptionStatus.PENDING) {
+        this.logger.log(
+          `Confio failed charge on a still pending subscription (${sub.id}): ` +
+            `no effect, status=${data?.status}`,
         )
 
         return null
