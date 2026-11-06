@@ -1,3 +1,4 @@
+<!-- R12: revisado 2026-11-06 — un solo dominio (riesgos abiertos del servicio), una entrada por título -->
 # Riesgos de backend-payments
 
 Una entrada por riesgo, corta (R33). El archivo nace con el primer riesgo y se borra la entrada
@@ -396,3 +397,24 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
 - **Estado**: abierto — lo cierra confirmar los reintentos de Confío o barrer las `confio` con `getSubscription`.
+
+## El saldo de una wallet `TKN` sin origen no se gasta (LOC-132)
+
+- **Dónde**: `src/wallet/token-wallet.service.ts:117` (`planTokenSpend`), `:279` (`unassigned`);
+  `src/admin/admin.controller.ts:518` (`createWallet`), `:592` (`adjustWallet`)
+- **Qué lo dispara**: una wallet `TKN` con saldo anterior a la migración `1793949572497`, o movida por
+  `POST /admin/wallets` o `adjust`, que no conocen los orígenes.
+- **Qué rompe**: ese saldo aparece en `unassigned` y el débito de tokens no lo toma, porque decide por los
+  orígenes; si admin baja el total por debajo de los orígenes, el débito rechaza por `balance`.
+- **Estado**: abierto — lo cierra que quien aprueba diga a qué origen va el saldo previo, y que admin
+  acredite y ajuste tokens por `TokenWalletService`.
+
+## Una marca puede tener otra wallet `TKN` además de la `internal/TKN` (LOC-132)
+
+- **Dónde**: `src/admin/admin.controller.ts:518` (`createWallet`); `src/wallet/entities/wallet.entity.ts:18`
+  (`@Index`, único por marca, provider y moneda)
+- **Qué lo dispara**: un alta por admin con otro `provider` o con `currency` en minúsculas, o filas así
+  anteriores a LOC-132 (`POST /wallet` ya las rechaza).
+- **Qué rompe**: la marca ve en `GET /wallet` una segunda wallet de tokens que `GET /token-wallet` no usa.
+- **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
+  contar si hay filas así por ambiente.

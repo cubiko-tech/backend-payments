@@ -13,6 +13,7 @@ import { HttpStatus } from '@nestjs/common'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { AuditLog } from '../audit/entities/auditLog.entity'
+import { isTokenCurrency } from './token-origin'
 
 @Injectable()
 export class WalletService {
@@ -73,6 +74,13 @@ export class WalletService {
    */
   async create(data: Partial<Wallet>) {
     try {
+      // The brand token wallet is created only by TokenWalletService, one per brand.
+      if (isTokenCurrency(data.currency)) {
+        throw new RequestException(
+          { code: 'TOKEN_WALLET_RESERVED', message: 'Token wallets come from GET /token-wallet' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
       // Validar límite de 10 wallets por marca
       const count = await this.walletReadRepository.count({
         where: { brandId: data.brandId },
@@ -701,6 +709,13 @@ export class WalletService {
       if (fromWallet.currency !== toWallet.currency) {
         throw new RequestException(
           { code: 'DIFFERENT_CURRENCY', message: 'Las wallets deben tener la misma moneda' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+      // A transfer moves `balance` only; token origins would no longer add up to it.
+      if (isTokenCurrency(fromWallet.currency) || isTokenCurrency(toWallet.currency)) {
+        throw new RequestException(
+          { code: 'WALLET_CURRENCY_MISMATCH', message: 'Token wallets cannot be transferred' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }

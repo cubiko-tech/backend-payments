@@ -13,6 +13,7 @@ import { PaymentMethodController } from '../../payment-method/payment-method.con
 import { RefundController } from '../../refund/refund.controller'
 import { SubscriptionController } from '../../subscription/subscription.controller'
 import { WalletController } from '../../wallet/wallet.controller'
+import { TokenWalletController } from '../../wallet/token-wallet.controller'
 import { WebhookController } from '../../webhook/webhook.controller'
 
 /**
@@ -53,6 +54,7 @@ const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = 
   ['payment-method', PaymentMethodController],
   ['refund', RefundController],
   ['wallet', WalletController],
+  ['token-wallet', TokenWalletController],
   // Los dos que ya estaban cerrados: siguen acá para que nadie los reabra.
   ['checkout', CheckoutController],
   ['subscription', SubscriptionController],

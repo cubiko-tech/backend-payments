@@ -31,6 +31,7 @@ export class Transaction extends Content {
   @Column({ nullable: true }) referenceType: string
   @Column({ nullable: true }) referenceId: string
   @Column({ nullable: true, unique: true }) idempotencyKey: string
+  @Column({ type: 'varchar', length: 20, nullable: true }) tokenOrigin: string | null
   @Column({ type: 'jsonb', nullable: true }) metadata: any
 
   @ManyToOne(() => Wallet, { onDelete: 'CASCADE' })

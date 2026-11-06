@@ -5,14 +5,16 @@ import { WalletBalanceSnapshot } from './entities/walletBalanceSnapshot.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { WalletController } from './wallet.controller'
 import { WalletService } from './wallet.service'
+import { TokenWalletController } from './token-wallet.controller'
+import { TokenWalletService } from './token-wallet.service'
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction], 'DBWrite'),
     TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction], 'DBRead'),
   ],
-  controllers: [WalletController],
-  providers: [WalletService],
-  exports: [WalletService],
+  controllers: [WalletController, TokenWalletController],
+  providers: [WalletService, TokenWalletService],
+  exports: [WalletService, TokenWalletService],
 })
 export class WalletModule {}
