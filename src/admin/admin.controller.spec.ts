@@ -19,9 +19,10 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
-import { Transaction } from '../transaction/entities/transaction.entity'
+import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
 
 const mockQueryBuilder = () => ({
@@ -74,6 +75,7 @@ describe('AdminController — extendSubscription', () => {
       mockRepo() as any, // transactionWriteRepo
       auditService as any,
       {} as any, // creditService
+      {} as any, // walletService
     )
   })
 
@@ -144,6 +146,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
   let creditService: { listActivationRequests: jest.Mock; updateActivationRequest: jest.Mock }
   let metricsService: Record<string, jest.Mock>
   let rolesService: { checkPermission: jest.Mock }
+  let walletService: { credit: jest.Mock; debit: jest.Mock }
 
   beforeAll(async () => {
     prevJwtSecret = process.env.JWT_SECRET
@@ -161,14 +164,8 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     paymentWriteRepo = mockRepo()
     walletReadRepo = mockRepo()
     walletWriteRepo = mockRepo()
-    // R17: These specs check routes and audit; test/wallet-adjust-race measures the transaction.
-    ;(walletWriteRepo as any).manager = {
-      transaction: (work: (manager: any) => Promise<unknown>) =>
-        work({
-          findOne: (_entity: unknown, options: unknown) => walletWriteRepo.findOne(options),
-          save: (_entity: unknown, row: unknown) => Promise.resolve(row),
-        }),
-    }
+    // R17: These specs check routes and audit; test/wallet-adjust-race measures the ledger write.
+    walletService = { credit: jest.fn(), debit: jest.fn() }
     snapshotReadRepo = mockRepo()
     providerReadRepo = mockRepo()
     providerWriteRepo = mockRepo()
@@ -219,6 +216,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         { provide: AuditService, useValue: auditService },
         { provide: CreditService, useValue: creditService },
         { provide: MetricsService, useValue: metricsService },
+        { provide: WalletService, useValue: walletService },
       ],
     }).compile()
 
@@ -266,6 +264,12 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     }))
     walletWriteRepo.save.mockImplementation((d: any) => Promise.resolve({ id: TEST_UUID, ...d }))
     transactionWriteRepo.save.mockImplementation((d: any) => Promise.resolve({ id: 'tx-1', ...d }))
+    walletService.credit.mockImplementation(async (walletId: string, amount: number) => ({
+      data: {
+        wallet: { id: walletId },
+        transaction: { id: 'tx-1', walletId, type: TransactionType.CREDIT, amount },
+      },
+    }))
     providerReadRepo.findOne.mockResolvedValue(null)
     providerWriteRepo.findOne.mockImplementation(async () => ({
       id: TEST_UUID,
@@ -294,11 +298,43 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     const validBodyRes = await request(app.getHttpServer())
       .post(`/admin/wallets/${TEST_UUID}/adjust`)
       .set('Authorization', `Bearer ${userToken}`)
-      .send({ type: 'credit', amount: 500 })
+      .send({ type: 'credit', amount: 500, idempotencyKey: 'adjust-403' })
 
     expect(validBodyRes.status).toBe(403)
     expect(walletWriteRepo.findOne).not.toHaveBeenCalled()
-    expect(walletWriteRepo.save).not.toHaveBeenCalled()
+    expect(walletService.credit).not.toHaveBeenCalled()
+  })
+
+  it('adjusts for a super admin session and refuses the server token with 403 (LOC-133)', async () => {
+    // R15: red when the adjustment loses @RequireSessionUser: the server token gets 201.
+    const body = { type: 'credit', amount: 100, idempotencyKey: 'adjust-k2', adminUserId: 'otro' }
+
+    const serverRes = await request(app.getHttpServer())
+      .post(`/admin/wallets/${TEST_UUID}/adjust`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send(body)
+    expect(serverRes.status).toBe(403)
+    expect(walletService.credit).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .post(`/admin/wallets/${TEST_UUID}/adjust`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send(body)
+    expect(superAdminRes.status).toBe(201)
+    expect(walletService.credit).toHaveBeenCalledWith(
+      TEST_UUID,
+      100,
+      expect.objectContaining({ referenceType: 'admin', referenceId: 'user-superadmin' }),
+      'adjust-k2',
+    )
+    expect(auditService.log).toHaveBeenCalledWith(
+      'user-superadmin',
+      'wallet_credit',
+      'wallet',
+      TEST_UUID,
+      expect.any(Object),
+      expect.any(String),
+    )
   })
 
   it.each([
@@ -321,12 +357,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       { brandId: 'brand-1', provider: 'internal', currency: 'COP' },
     ],
     ['wallets toggle-freeze', 'post', `/admin/wallets/${TEST_UUID}/toggle-freeze`, {}],
-    [
-      'wallets adjust',
-      'post',
-      `/admin/wallets/${TEST_UUID}/adjust`,
-      { type: 'credit', amount: 100 },
-    ],
     ['wallets summary', 'get', '/admin/wallets/summary', undefined],
     ['wallets inconsistent', 'get', '/admin/wallets/inconsistent', undefined],
     ['audit-log', 'get', '/admin/audit-log', undefined],
@@ -500,16 +530,9 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       'wallet_frozen',
       'wallet',
     ],
-    [
-      'wallets/:id/adjust',
-      `/admin/wallets/${TEST_UUID}/adjust`,
-      { type: 'credit', amount: 100, adminUserId: 'otro' },
-      'wallet_credit',
-      'wallet',
-    ],
   ] as const)(
     'records session actor and ignores body.adminUserId on POST %s (LOC-50)',
-    async (routeName, path, body, expectedAction, expectedEntityType) => {
+    async (_routeName, path, body, expectedAction, expectedEntityType) => {
       const auditEntries: Array<Record<string, any>> = []
       auditService.log.mockImplementation(
         async (userId, action, entityType, entityId, changes, description) => {
@@ -538,11 +561,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         expect.any(Object),
         expect.any(String),
       )
-      if (routeName === 'wallets/:id/adjust') {
-        expect(transactionWriteRepo.create).toHaveBeenCalledWith(
-          expect.objectContaining({ referenceId: 'user-superadmin' }),
-        )
-      }
 
       const superAdminAuditRes = await request(app.getHttpServer())
         .get('/admin/audit-log')
@@ -558,7 +576,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       )
 
       auditService.log.mockClear()
-      transactionWriteRepo.create.mockClear()
 
       const serverRes = await request(app.getHttpServer())
         .post(path)
@@ -575,11 +592,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         expect.any(Object),
         expect.any(String),
       )
-      if (routeName === 'wallets/:id/adjust') {
-        expect(transactionWriteRepo.create).toHaveBeenCalledWith(
-          expect.objectContaining({ referenceId: 'server' }),
-        )
-      }
 
       const serverAuditRes = await request(app.getHttpServer())
         .get('/admin/audit-log')

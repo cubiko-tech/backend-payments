@@ -9,6 +9,8 @@ import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { AuditModule } from '../audit/audit.module'
 import { CreditModule } from '../credit/credit.module'
+import { WalletModule } from '../wallet/wallet.module'
+import { AdminTokenGiftController } from './admin-token-gift.controller'
 
 @Module({
   imports: [
@@ -22,7 +24,8 @@ import { CreditModule } from '../credit/credit.module'
     ),
     AuditModule,
     CreditModule,
+    WalletModule,
   ],
-  controllers: [AdminController],
+  controllers: [AdminController, AdminTokenGiftController],
 })
 export class AdminModule {}

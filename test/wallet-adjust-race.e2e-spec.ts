@@ -1,4 +1,6 @@
-import { EntityManager } from 'typeorm'
+import { randomUUID } from 'crypto'
+import { HttpException } from '@nestjs/common'
+import { EntityManager, FindOneOptions } from 'typeorm'
 
 import { AdminController } from '../src/admin/admin.controller'
 import { AuditService } from '../src/audit/audit.service'
@@ -24,6 +26,17 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
   let b: RaceInstance
   let admin: AdminController
 
+  const adjust = (walletId: string, type: 'credit' | 'debit', amount: number) =>
+    admin.adjustWallet(walletId, { type, amount, idempotencyKey: `adjust-${randomUUID()}` })
+  const failureOf = (pending: Promise<unknown>) =>
+    pending.then(
+      () => ({ status: 0, code: 'none' }),
+      (error: HttpException & { code?: string }) => ({
+        status: error.getStatus(),
+        code: error.code,
+      }),
+    )
+
   const creditFromB = (walletId: string) =>
     b.wallet.credit(walletId, MOVE, { brandId: BRAND_ID, category: 'refund' })
   const debitFromB = (walletId: string, amount: number) =>
@@ -34,18 +47,23 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     a.dataSource.getRepository(Wallet).update({ id: walletId }, { status })
 
   /**
-   * Starts `action` right after the adjustment reads the wallet row, and lets the adjustment go on
-   * once `action` finished or is blocked on the row lock, the only two outcomes it can have.
+   * Starts `action` right after the adjustment reads the wallet row it writes (the first read that
+   * asks for the row lock), and lets the adjustment go on once `action` finished or is blocked on
+   * the row lock, the only two outcomes it can have.
    */
   function landAfterAdjustRead(action: () => Promise<unknown>) {
     const read = EntityManager.prototype.findOne
     let landed: Promise<unknown> = Promise.resolve()
+    let paused = false
     // R17: Only a forced pause lands a movement between the read and the write, whatever the write.
-    jest.spyOn(EntityManager.prototype, 'findOne').mockImplementationOnce(async function (
+    jest.spyOn(EntityManager.prototype, 'findOne').mockImplementation(async function (
       this: EntityManager,
       ...args: Parameters<EntityManager['findOne']>
     ) {
       const row = await read.apply(this, args)
+      const options = args[1] as FindOneOptions | undefined
+      if (paused || !options?.lock) return row
+      paused = true
       landed = action()
       await Promise.race([landed, someoneWaitsOnRowLock(a.dataSource)])
       return row
@@ -88,6 +106,7 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
       a.dataSource.getRepository(Transaction),
       a.moduleRef.get(AuditService),
       unused,
+      a.wallet,
     )
   })
 
@@ -106,10 +125,9 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     const wallet = await seedWallet(a.dataSource, BRAND_ID, START)
     const landed = landAfterAdjustRead(() => creditFromB(wallet.id))
 
-    const result = await admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })
+    await adjust(wallet.id, 'credit', ADJUST)
     await landed()
 
-    expect(result.error).toBeUndefined()
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START + ADJUST + MOVE)
     const adjustment = (await movementsOf(wallet.id)).find((m) => m.referenceType === 'admin')!
     expect(Number(adjustment.amount)).toBe(ADJUST)
@@ -123,7 +141,7 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     const wallet = await seedWallet(a.dataSource, BRAND_ID, ADJUST)
     const landed = landAfterAdjustRead(() => creditFromB(wallet.id))
 
-    await admin.adjustWallet(wallet.id, { type: 'debit', amount: ADJUST })
+    await adjust(wallet.id, 'debit', ADJUST)
     await landed()
 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(MOVE)
@@ -135,7 +153,7 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     const wallet = await seedWallet(a.dataSource, BRAND_ID, MOVE)
     const landed = landAfterAdjustRead(() => debitFromB(wallet.id, MOVE))
 
-    await admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })
+    await adjust(wallet.id, 'credit', ADJUST)
     await landed()
 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(ADJUST)
@@ -145,11 +163,9 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
   it('A4 two concurrent adjustments both add up', async () => {
     // R15: red when the adjustment reads without the lock: one of the two is lost.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, START)
-    const landed = landAfterAdjustRead(() =>
-      admin.adjustWallet(wallet.id, { type: 'credit', amount: MOVE }),
-    )
+    const landed = landAfterAdjustRead(() => adjust(wallet.id, 'credit', MOVE))
 
-    await admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })
+    await adjust(wallet.id, 'credit', ADJUST)
     await landed()
 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START + ADJUST + MOVE)
@@ -162,7 +178,7 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     await holdingRow(
       wallet.id,
       `UPDATE wallets SET balance = balance + ${MOVE} WHERE id = $1`,
-      () => admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST }),
+      () => adjust(wallet.id, 'credit', ADJUST),
     )
 
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START + ADJUST + MOVE)
@@ -175,10 +191,10 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     const result = await holdingRow(
       wallet.id,
       `UPDATE wallets SET status = 'closed' WHERE id = $1`,
-      () => admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST }),
+      () => failureOf(adjust(wallet.id, 'credit', ADJUST)),
     )
 
-    expect(result).toEqual({ error: 'Wallet cerrada' })
+    expect(result).toEqual({ status: 422, code: 'WALLET_CLOSED' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(0)
     expect(await movementsOf(wallet.id)).toHaveLength(0)
   })
@@ -190,15 +206,15 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
     const result = await holdingRow(
       wallet.id,
       `UPDATE wallets SET status = 'frozen' WHERE id = $1`,
-      () => admin.adjustWallet(wallet.id, { type: 'debit', amount: START }),
+      () => failureOf(adjust(wallet.id, 'debit', START)),
     )
 
-    expect(result).toEqual({ error: 'Wallet congelada — no se permiten débitos' })
+    expect(result).toEqual({ status: 422, code: 'WALLET_FROZEN' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START)
     expect(await movementsOf(wallet.id)).toHaveLength(0)
   })
 
-  it('A8 a failed balance write leaves neither the balance nor the transaction', async () => {
+  it('A8 a failed balance write leaves neither balance, transaction nor audit, and answers 500', async () => {
     // R15: red when the two writes run outside one transaction: the transaction row stays.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, START)
     const save = EntityManager.prototype.save
@@ -211,46 +227,48 @@ describe('Adjusting a wallet while its balance moves (PostgreSQL, LOC-110)', () 
       return (save as (...all: unknown[]) => Promise<unknown>).apply(this, args)
     } as EntityManager['save'])
 
-    await expect(admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })).rejects.toThrow(
-      'write failed',
-    )
+    const result = await failureOf(adjust(wallet.id, 'credit', ADJUST))
 
     jest.restoreAllMocks()
+    expect(result).toEqual({ status: 500, code: 'WALLET_ADJUST_FAILED' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START)
     expect(await movementsOf(wallet.id)).toHaveLength(0)
+    const audits = await a.dataSource.query('SELECT id FROM audit_log WHERE "entityId" = $1', [
+      wallet.id,
+    ])
+    expect(audits).toHaveLength(0)
   })
 
-  it('A9 a closed wallet answers as before and does not move', async () => {
+  it('A9 a closed wallet answers 422 WALLET_CLOSED and does not move', async () => {
     // R15: red when the closed check goes away: the closed wallet takes the money.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, 0)
     await setStatus(wallet.id, WalletStatus.CLOSED)
 
-    const result = await admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })
+    const result = await failureOf(adjust(wallet.id, 'credit', ADJUST))
 
-    expect(result).toEqual({ error: 'Wallet cerrada' })
+    expect(result).toEqual({ status: 422, code: 'WALLET_CLOSED' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(0)
   })
 
-  it('A10 a debit on a frozen wallet answers as before and a credit still enters', async () => {
+  it('A10 a debit on a frozen wallet answers 422 WALLET_FROZEN and a credit still enters', async () => {
     // R15: red when the frozen check goes away: the debit goes through.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, START)
     await setStatus(wallet.id, WalletStatus.FROZEN)
 
-    const debit = await admin.adjustWallet(wallet.id, { type: 'debit', amount: START })
-    const credit = await admin.adjustWallet(wallet.id, { type: 'credit', amount: ADJUST })
+    const debit = await failureOf(adjust(wallet.id, 'debit', START))
+    await adjust(wallet.id, 'credit', ADJUST)
 
-    expect(debit).toEqual({ error: 'Wallet congelada — no se permiten débitos' })
-    expect(credit.error).toBeUndefined()
+    expect(debit).toEqual({ status: 422, code: 'WALLET_FROZEN' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START + ADJUST)
   })
 
-  it('A11 a debit over the balance answers as before, naming the balance', async () => {
+  it('A11 a debit over the balance answers 422 INSUFFICIENT_BALANCE', async () => {
     // R15: red when the funds check goes away: the balance goes negative.
     const wallet = await seedWallet(a.dataSource, BRAND_ID, START)
 
-    const result = await admin.adjustWallet(wallet.id, { type: 'debit', amount: ADJUST })
+    const result = await failureOf(adjust(wallet.id, 'debit', ADJUST))
 
-    expect(result).toEqual({ error: `Fondos insuficientes. Balance actual: ${START}` })
+    expect(result).toEqual({ status: 422, code: 'INSUFFICIENT_BALANCE' })
     expect(await balanceOf(a.dataSource, wallet.id)).toBe(START)
   })
 })

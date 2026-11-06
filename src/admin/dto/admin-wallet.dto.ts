@@ -90,4 +90,10 @@ export class AdjustWalletDto {
   @IsString()
   @MaxLength(100)
   category?: string
+
+  @ApiProperty({ description: 'Repeating it returns the first adjustment instead of a second one' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
+  idempotencyKey: string
 }

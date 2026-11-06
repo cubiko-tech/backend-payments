@@ -17,9 +17,10 @@ import { EnterprisePricingService } from '../subscription/enterprise-pricing.ser
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionController } from '../subscription/subscription.controller'
 import { SubscriptionService } from '../subscription/subscription.service'
-import { Transaction } from '../transaction/entities/transaction.entity'
+import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
 
 const VALID_UUID = '11111111-1111-4111-8111-111111111111'
@@ -31,15 +32,20 @@ describe('AdminController, SubscriptionController & CreditController input valid
 
   // R17: Repo and service doubles isolate HTTP pipe validation from DB and external services.
   const walletReadRepo = { findOne: jest.fn() }
-  const txManager = {
-    findOne: jest.fn().mockResolvedValue({
-      id: VALID_UUID,
-      brandId: BRAND_UUID,
-      currency: 'COP',
-      balance: 100,
-      status: WalletStatus.ACTIVE,
-    }),
-    save: jest.fn(async (_e: any, obj: any) => obj),
+  const adjustedWallet = {
+    id: VALID_UUID,
+    brandId: BRAND_UUID,
+    currency: 'COP',
+    balance: 100,
+    status: WalletStatus.ACTIVE,
+  }
+  const walletService = {
+    credit: jest.fn(async (walletId: string, amount: number) => ({
+      data: {
+        wallet: adjustedWallet,
+        transaction: { id: VALID_UUID, walletId, type: TransactionType.CREDIT, amount },
+      },
+    })),
   }
   const walletWriteRepo = {
     findOne: jest.fn(),
@@ -50,7 +56,6 @@ describe('AdminController, SubscriptionController & CreditController input valid
       }
       return { id: VALID_UUID, ...w }
     }),
-    manager: { transaction: jest.fn(async (cb: any) => cb(txManager)) },
   }
   const providerReadRepo = { findOne: jest.fn() }
   const providerWriteRepo = {
@@ -58,7 +63,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
     create: jest.fn((x) => x),
     save: jest.fn(async (p) => ({ id: VALID_UUID, ...p })),
   }
-  const transactionWriteRepo = { create: jest.fn((x) => ({ id: VALID_UUID, ...x })) }
+  const transactionWriteRepo = { findOne: jest.fn().mockResolvedValue(null) }
   const auditService = { log: jest.fn().mockResolvedValue(undefined) }
   const subscriptionService = {
     startTrial: jest.fn().mockResolvedValue({ data: { id: VALID_UUID } }),
@@ -114,6 +119,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
         { provide: SubscriptionService, useValue: subscriptionService },
         { provide: EnterprisePricingService, useValue: enterprisePricingService },
         { provide: ClientPlatformService, useValue: platformClient },
+        { provide: WalletService, useValue: walletService },
       ],
     })
       .overrideGuard(ApiAuthGuard)
@@ -132,6 +138,8 @@ describe('AdminController, SubscriptionController & CreditController input valid
   beforeEach(() => {
     jest.clearAllMocks()
     walletReadRepo.findOne.mockResolvedValue(null)
+    walletWriteRepo.findOne.mockResolvedValue(adjustedWallet)
+    transactionWriteRepo.findOne.mockResolvedValue(null)
     providerReadRepo.findOne.mockResolvedValue(null)
   })
 
@@ -154,11 +162,11 @@ describe('AdminController, SubscriptionController & CreditController input valid
     // R15 (Mutation): Remove AdjustWalletDto or id field -> bad amount passes or admin call fails.
     const badRes = await request(app.getHttpServer())
       .post(`/admin/wallets/${VALID_UUID}/adjust`)
-      .send({ id: VALID_UUID, type: 'credit', amount: -50 })
+      .send({ id: VALID_UUID, type: 'credit', amount: -50, idempotencyKey: 'k-bad' })
 
     expect(badRes.status).toBe(400)
     expect(badRes.body.code).toBe('INVALID_REQUEST')
-    expect(walletWriteRepo.manager.transaction).not.toHaveBeenCalled()
+    expect(walletService.credit).not.toHaveBeenCalled()
 
     const okRes = await request(app.getHttpServer())
       .post(`/admin/wallets/${VALID_UUID}/adjust`)
@@ -168,10 +176,11 @@ describe('AdminController, SubscriptionController & CreditController input valid
         amount: 50,
         description: 'Manual top-up',
         category: 'admin_adjustment',
+        idempotencyKey: 'k-ok',
       })
 
     expect(okRes.status).toBe(201)
-    expect(walletWriteRepo.manager.transaction).toHaveBeenCalledTimes(1)
+    expect(walletService.credit).toHaveBeenCalledTimes(1)
   })
 
   it('accepts POST /admin/wallets and /adjust with adminUserId and audits session actor', async () => {
@@ -205,6 +214,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
         description: 'Manual top-up',
         category: 'admin_adjustment',
         adminUserId: 'system',
+        idempotencyKey: 'k-actor',
       })
 
     expect(adjustRes.status).toBe(201)

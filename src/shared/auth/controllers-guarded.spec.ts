@@ -1,6 +1,7 @@
 import { GUARDS_METADATA } from '@nestjs/common/constants'
 
 import { AdminController } from '../../admin/admin.controller'
+import { AdminTokenGiftController } from '../../admin/admin-token-gift.controller'
 import { ApiAuthGuard } from './api-auth.guard'
 import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
@@ -46,6 +47,7 @@ import { WebhookController } from '../../webhook/webhook.controller'
  */
 const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = [
   ['admin', AdminController],
+  ['admin/token-wallets', AdminTokenGiftController],
   ['billing-profile', BillingProfileController],
   ['dian', DianController],
   ['invoice', InvoiceController],
@@ -113,6 +115,7 @@ describe('webhook: el guard va por handler, no en la clase', () => {
 describe('admin and metrics controllers require superadmin operator', () => {
   it.each([
     ['admin', AdminController],
+    ['admin/token-wallets', AdminTokenGiftController],
     ['metrics', MetricsController],
   ])('%s declares @RequireSuperAdmin at class level', (_name, controller) => {
     expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, controller)).toBe(true)

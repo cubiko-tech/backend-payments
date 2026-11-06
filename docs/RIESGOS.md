@@ -400,24 +400,35 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El saldo de una wallet `TKN` sin origen no se gasta (LOC-132)
 
-- **Dónde**: `src/wallet/token-wallet.service.ts:117` (`planTokenSpend`), `:279` (`unassigned`);
-  `src/admin/admin.controller.ts:518` (`createWallet`), `:592` (`adjustWallet`)
-- **Qué lo dispara**: una wallet `TKN` con saldo anterior a la migración `1793949572497`, o movida por
-  `POST /admin/wallets` o `adjust`, que no conocen los orígenes.
+- **Dónde**: `src/wallet/token-wallet.service.ts:117` (`planTokenSpend`), `:279` (`unassigned`)
+- **Qué lo dispara**: una wallet `TKN` con saldo anterior a la migración `1793949572497`. Admin ya no la
+  crea ni la ajusta (LOC-133: 422), y el regalo entra por `TokenWalletService` con su origen.
 - **Qué rompe**: ese saldo aparece en `unassigned` y el débito de tokens no lo toma, porque decide por los
   orígenes; si admin baja el total por debajo de los orígenes, el débito rechaza por `balance`.
-- **Estado**: abierto — lo cierra que quien aprueba diga a qué origen va el saldo previo, y que admin
-  acredite y ajuste tokens por `TokenWalletService`.
+- **Estado**: abierto — lo cierra que quien aprueba diga a qué origen va el saldo previo.
 
 ## Una marca puede tener otra wallet `TKN` además de la `internal/TKN` (LOC-132)
 
-- **Dónde**: `src/admin/admin.controller.ts:518` (`createWallet`); `src/wallet/entities/wallet.entity.ts:18`
-  (`@Index`, único por marca, provider y moneda)
-- **Qué lo dispara**: un alta por admin con otro `provider` o con `currency` en minúsculas, o filas así
-  anteriores a LOC-132 (`POST /wallet` ya las rechaza).
+- **Dónde**: `src/wallet/entities/wallet.entity.ts:18` (`@Index`, único por marca, provider y moneda)
+- **Qué lo dispara**: filas `TKN` con otro `provider` o en minúsculas anteriores a LOC-132 y LOC-133
+  (`POST /wallet` y `POST /admin/wallets` ya las rechazan).
 - **Qué rompe**: la marca ve en `GET /wallet` una segunda wallet de tokens que `GET /token-wallet` no usa.
 - **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
   contar si hay filas así por ambiente.
+
+## Dos ajustes de admin simultáneos con la misma llave y el mismo cuerpo auditan dos veces (LOC-133)
+
+- **Dónde**: `src/admin/admin.controller.ts:664` (`sameAdjustment` tras `credit`/`debit`), `:666` (audit)
+- **Qué lo dispara**: dos `POST /admin/wallets/:id/adjust` iguales que pasan juntos la consulta de la llave.
+- **Qué rompe**: el saldo se mueve una sola vez, pero `audit_log` muestra dos `wallet_credit`/`wallet_debit`.
+- **Estado**: abierto — lo cierra que `credit`/`debit` digan si el movimiento fue un replay.
+
+## Un regalo de tokens a un `brandId` que no es una marca crea su wallet `TKN` (LOC-133)
+
+- **Dónde**: `src/admin/admin-token-gift.controller.ts:36` (`getOrCreate`)
+- **Qué lo dispara**: un super admin que manda un UUID válido que no corresponde a ninguna marca.
+- **Qué rompe**: queda una wallet `TKN` con regalo que nadie ve; los tokens no llegan a la marca buscada.
+- **Estado**: abierto — lo cierra preguntarle a platform si la marca existe antes de acreditar.
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
