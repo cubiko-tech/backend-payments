@@ -141,7 +141,8 @@ export class ApiAuthGuard implements CanActivate {
       if (!id) return null
       return {
         id,
-        isSuperAdmin: body.data.role === 'superadmin' || !!body.data.isSuperAdmin,
+        // Auth echoes the payload the client signed, so no claim of it may grant super admin.
+        isSuperAdmin: false,
         brand: body.data.brand ?? this.decodeClaims(token)?.brand ?? null,
       }
     } catch {

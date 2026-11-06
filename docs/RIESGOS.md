@@ -460,3 +460,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   vez de 422.
 - **Estado**: abierto — el tope del borde lo vuelve lejano; lo cierra comprobar la suma contra el máximo de la columna
   en el servicio.
+
+## Quien tiene el `clientSecret` de un client firma el `id` y la `brand` de cualquier usuario (LOC-143)
+
+- **Dónde**: `src/shared/auth/api-auth.guard.ts:140`, `:146` (`validateViaAuth`: `id` y `brand` salen de la respuesta
+  de backend-auth, que según LOC-143 devuelve el payload firmado tal cual)
+- **Qué lo dispara**: un token de auto-login firmado con el `clientSecret` (el client `dropi` lo usa Dropi) con el
+  `id` de otro usuario o una `brand` ajena.
+- **Qué rompe**: `@RequirePermission` consulta `checkPermission(id)` y la marca `canViewBrandCredit(id)` con ese
+  `id`, así que se actúa como ese usuario. Que backend-roles le conceda permisos de admin a ese id es hipótesis
+  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:145`).
+- **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
+  aparte, en ese repo).

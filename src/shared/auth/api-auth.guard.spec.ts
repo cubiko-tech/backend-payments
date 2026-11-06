@@ -81,21 +81,56 @@ describe('ApiAuthGuard', () => {
     await expect(g.canActivate(ctx({ authorization: `Bearer ${t}` }))).rejects.toBeDefined()
   })
 
-  it('rol superadmin del auth bypassa RBAC en endpoint admin', async () => {
-    reflector.get.mockReturnValue('credit:runs') // endpoint admin
-    const g = makeGuard(
+  const autoLoginAs = (data: Record<string, unknown>) => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ code: 'tokenValidate', data: { user: 'a1', ...data } }),
+    })
+    return `Bearer ${tokenWith({ client: 'dropi', user: 'a1', ...data })}`
+  }
+  const rejectLocal = () =>
+    makeGuard(
       jest.fn(() => {
         throw new Error('invalid signature')
       }),
     )
-    fetchMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({ code: 'tokenValidate', data: { user: 'a1', role: 'superadmin' } }),
-    })
-    const t = tokenWith({ client: 'dropi' })
-    expect(await g.canActivate(ctx({ authorization: `Bearer ${t}` }))).toBe(true)
-    expect(roles.checkPermission).not.toHaveBeenCalled()
-  })
+
+  it.each([
+    ['role superadmin', { role: 'superadmin' }],
+    ['isSuperAdmin true', { isSuperAdmin: true }],
+  ])(
+    'an auto-login token with %s goes through RBAC and gets 403 without the permission (LOC-143)',
+    async (_l, data) => {
+      // R15: red when validateViaAuth reads that claim from the auth answer again: RBAC is skipped.
+      reflector.get.mockReturnValue('credit:runs')
+      roles.checkPermission.mockResolvedValue(false)
+
+      await expect(
+        rejectLocal().canActivate(ctx({ authorization: autoLoginAs(data) })),
+      ).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN })
+      expect(roles.checkPermission).toHaveBeenCalledWith('a1', 'credit:runs')
+    },
+  )
+
+  it.each([
+    ['role superadmin', { role: 'superadmin' }],
+    ['isSuperAdmin true', { isSuperAdmin: true }],
+  ])(
+    'an auto-login token with %s gets 403 on a @RequireSuperAdmin class (LOC-143)',
+    async (_l, data) => {
+      // R15: red when validateViaAuth reads that claim from the auth answer again: it resolves true.
+      const classTarget = class AdminStub {}
+      reflector.get.mockImplementation((key: string, target: unknown) =>
+        key === API_SUPER_ADMIN_KEY && target === classTarget ? true : undefined,
+      )
+      const context = { ...ctx({ authorization: autoLoginAs(data) }), getClass: () => classTarget }
+
+      await expect(rejectLocal().canActivate(context)).rejects.toMatchObject({
+        status: HttpStatus.FORBIDDEN,
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    },
+  )
 
   it('rejects Bearer CHANGEME with 401 when ACCESS_SERVER is CHANGEME', async () => {
     process.env.ACCESS_SERVER = 'CHANGEME'
