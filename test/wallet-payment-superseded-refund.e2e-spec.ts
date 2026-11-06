@@ -32,6 +32,7 @@ import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
 import { WebhookEvent } from '../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../src/webhook/webhook.service'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const BRAND_ID = 'f8969696-2222-4333-8444-555555555555'
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
@@ -207,6 +208,7 @@ describe('Superseded wallet payment refund reconciliation e2e (PostgreSQL, LOC-9
       walletReconcileLocks: new Map(),
     })
     tasksService = moduleFixture.get(TasksService)
+    scopeSweepsToBrand(tasksService, BRAND_ID)
   })
 
   beforeEach(async () => {

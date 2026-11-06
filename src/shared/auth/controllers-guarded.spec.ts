@@ -1,6 +1,8 @@
 import { GUARDS_METADATA } from '@nestjs/common/constants'
 
 import { AdminController } from '../../admin/admin.controller'
+import { AdminTokenGiftController } from '../../admin/admin-token-gift.controller'
+import { AdminTokenPackageController } from '../../admin/admin-token-package.controller'
 import { ApiAuthGuard } from './api-auth.guard'
 import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
@@ -13,6 +15,8 @@ import { PaymentMethodController } from '../../payment-method/payment-method.con
 import { RefundController } from '../../refund/refund.controller'
 import { SubscriptionController } from '../../subscription/subscription.controller'
 import { WalletController } from '../../wallet/wallet.controller'
+import { TokenWalletController } from '../../wallet/token-wallet.controller'
+import { TokenPackageController } from '../../wallet/token-package.controller'
 import { WebhookController } from '../../webhook/webhook.controller'
 
 /**
@@ -45,6 +49,8 @@ import { WebhookController } from '../../webhook/webhook.controller'
  */
 const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = [
   ['admin', AdminController],
+  ['admin/token-wallets', AdminTokenGiftController],
+  ['admin/token-packages', AdminTokenPackageController],
   ['billing-profile', BillingProfileController],
   ['dian', DianController],
   ['invoice', InvoiceController],
@@ -53,6 +59,8 @@ const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = 
   ['payment-method', PaymentMethodController],
   ['refund', RefundController],
   ['wallet', WalletController],
+  ['token-wallet', TokenWalletController],
+  ['token-packages', TokenPackageController],
   // Los dos que ya estaban cerrados: siguen acá para que nadie los reabra.
   ['checkout', CheckoutController],
   ['subscription', SubscriptionController],
@@ -111,6 +119,8 @@ describe('webhook: el guard va por handler, no en la clase', () => {
 describe('admin and metrics controllers require superadmin operator', () => {
   it.each([
     ['admin', AdminController],
+    ['admin/token-wallets', AdminTokenGiftController],
+    ['admin/token-packages', AdminTokenPackageController],
     ['metrics', MetricsController],
   ])('%s declares @RequireSuperAdmin at class level', (_name, controller) => {
     expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, controller)).toBe(true)

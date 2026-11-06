@@ -51,6 +51,7 @@ import { SubscriptionService } from '../src/subscription/subscription.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
+import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
 
 const [BRAND_A, USER_A, SUPERADMIN_ID] = [
@@ -164,6 +165,8 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         provideRepo(ProviderConfig, 'DBWrite'),
         provideRepo(ProviderConfig, 'DBRead'),
         provideRepo(Transaction, 'DBWrite'),
+        provideRepo(Transaction, 'DBRead'),
+        WalletService,
         provideRepo(AuditLog, 'DBWrite'),
         provideRepo(AuditLog, 'DBRead'),
         // R17: unused by admin wallet endpoints; satisfies AdminController constructor.
@@ -459,6 +462,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         description: 'Initial credit',
         category: 'admin_adjustment',
         adminUserId: 'system',
+        idempotencyKey: `loc115-adjust-${walletId}`,
       })
     expect(adjustRes.status).toBe(HttpStatus.CREATED)
 

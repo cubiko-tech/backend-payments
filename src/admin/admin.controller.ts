@@ -11,6 +11,7 @@ import {
   UseGuards,
   ParseUUIDPipe,
   BadRequestException,
+  HttpStatus,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
@@ -20,11 +21,8 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
-import {
-  Transaction,
-  TransactionType,
-  TransactionStatus,
-} from '../transaction/entities/transaction.entity'
+import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
+import { MovementAudit } from '../transaction/movement-audit'
 import { AuditService } from '../audit/audit.service'
 import { CreditService } from '../credit/credit.service'
 import {
@@ -32,8 +30,16 @@ import {
   CreditActivationRequestStatus,
 } from '../credit/credit.types'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequirePermission, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import {
+  RequirePermission,
+  RequireSessionUser,
+  RequireSuperAdmin,
+} from '../shared/auth/require-permission.decorator'
+import { RequestException } from '../shared/exception/request.exception'
+import { assertNotTokenCurrency, isTokenCurrency } from '../wallet/token-origin'
+import { WalletService } from '../wallet/wallet.service'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
+import { adminIdempotencyKey } from './admin-idempotency-key'
 import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
 import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
@@ -75,6 +81,7 @@ export class AdminController {
     private readonly transactionWriteRepo: Repository<Transaction>,
     private readonly auditService: AuditService,
     private readonly creditService: CreditService,
+    private readonly walletService: WalletService,
   ) {}
 
   // ============================================
@@ -516,6 +523,8 @@ export class AdminController {
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
+    // The brand token wallet comes only from TokenWalletService: one per brand, balance by origin.
+    assertNotTokenCurrency(body.currency)
     // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
@@ -587,75 +596,85 @@ export class AdminController {
   }
 
   @Post('wallets/:id/adjust')
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Acreditar o debitar fondos de una wallet (Admin)' })
-  @ApiResponse({ status: 200, description: 'Ajuste realizado' })
+  @ApiResponse({ status: 201, description: 'Ajuste realizado, o el primero bajo esta llave' })
+  @ApiResponse({ status: 400, description: 'Falta la llave, o el monto o el tipo no son válidos' })
+  @ApiResponse({ status: 403, description: 'No es una sesión de super admin (token de servidor)' })
+  @ApiResponse({ status: 404, description: 'WALLET_NOT_FOUND' })
+  @ApiResponse({
+    status: 409,
+    description: 'IDEMPOTENCY_KEY_CONFLICT: la llave es de otro movimiento',
+  })
+  @ApiResponse({
+    status: 422,
+    description:
+      'WALLET_CURRENCY_MISMATCH (TKN), WALLET_CLOSED, WALLET_FROZEN, INSUFFICIENT_BALANCE',
+  })
   async adjustWallet(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: AdjustWalletDto,
     @Req() req?: any,
   ) {
     const actor = req?.user?.id || 'admin'
-    // The row lock serializes this with every other movement, so the balance read stays current.
-    const outcome = await this.walletWriteRepo.manager.transaction(async (manager) => {
-      const wallet = await manager.findOne(Wallet, {
-        where: { id },
-        lock: { mode: 'pessimistic_write' },
+    const amount = Number(body.amount)
+    // Write connection: the replica may not have a wallet created a moment ago.
+    const wallet = await this.walletWriteRepo.findOne({ where: { id } })
+    if (!wallet) {
+      throw new RequestException(
+        { code: 'WALLET_NOT_FOUND', message: 'Wallet not found' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+    if (isTokenCurrency(wallet.currency)) {
+      throw new RequestException(
+        { code: 'WALLET_CURRENCY_MISMATCH', message: 'Token wallets are not adjusted here' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
+    }
+
+    const key = adminIdempotencyKey(body.idempotencyKey)
+    const previous = await this.transactionWriteRepo.findOne({ where: { idempotencyKey: key } })
+    if (previous) {
+      return { data: { wallet, transaction: sameAdjustment(previous, id, body.type, amount) } }
+    }
+
+    const data = {
+      brandId: wallet.brandId,
+      category: body.category || 'admin_adjustment',
+      description: body.description || `Ajuste manual (${body.type})`,
+      referenceType: 'admin',
+      referenceId: actor,
+    }
+    const audit: MovementAudit = (manager, transaction) =>
+      this.auditService.record(manager, {
+        userId: actor,
+        action: body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
+        entityType: 'wallet',
+        entityId: id,
+        changes: {
+          amount,
+          balanceBefore: Number(transaction.balanceBefore),
+          balanceAfter: Number(transaction.balanceAfter),
+          category: body.category,
+          transactionId: transaction.id,
+        },
+        description: `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
       })
-      if (!wallet) return { error: 'Wallet no encontrada' }
-      if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada' }
-      if (wallet.status === WalletStatus.FROZEN && body.type === 'debit') {
-        return { error: 'Wallet congelada — no se permiten débitos' }
-      }
+    const result =
+      body.type === 'credit'
+        ? await this.walletService.credit(id, amount, data, key, undefined, audit)
+        : await this.walletService.debit(id, amount, data, undefined, key, audit)
+    if ('error' in result) {
+      throw new RequestException(
+        { code: 'WALLET_ADJUST_FAILED', message: String(result.error) },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      )
+    }
+    // A concurrent request under the same key comes back as its movement, not as an error.
+    sameAdjustment(result.data.transaction, id, body.type, amount)
 
-      const amount = Math.abs(Number(body.amount))
-      if (!amount || amount <= 0) return { error: 'Monto inválido' }
-
-      const balanceBefore = Number(wallet.balance)
-      const balanceAfter = body.type === 'credit' ? balanceBefore + amount : balanceBefore - amount
-
-      if (body.type === 'debit' && balanceAfter < 0) {
-        return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
-      }
-
-      const transaction = this.transactionWriteRepo.create({
-        walletId: id,
-        brandId: wallet.brandId,
-        type: body.type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT,
-        amount,
-        balanceBefore,
-        balanceAfter,
-        status: TransactionStatus.COMPLETED,
-        category: body.category || 'admin_adjustment',
-        description: body.description || `Ajuste manual (${body.type})`,
-        referenceType: 'admin',
-        referenceId: actor,
-      })
-      await manager.save(Transaction, transaction)
-
-      wallet.balance = balanceAfter as any
-      await manager.save(Wallet, wallet)
-
-      return { wallet, transaction, amount, balanceBefore, balanceAfter }
-    })
-    if ('error' in outcome) return { error: outcome.error }
-    const { wallet, transaction, amount, balanceBefore, balanceAfter } = outcome
-
-    await this.auditService.log(
-      actor,
-      body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
-      'wallet',
-      id,
-      {
-        amount,
-        balanceBefore,
-        balanceAfter,
-        category: body.category,
-        transactionId: transaction.id,
-      },
-      `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
-    )
-
-    return { data: { wallet, transaction } }
+    return { data: result.data }
   }
 
   @Get('wallets/summary')
@@ -784,4 +803,25 @@ export class AdminController {
     await this.providerWriteRepo.save(config)
     return { data: config }
   }
+}
+
+/** The movement recorded under the key when it is this adjustment; a 409 when it is another one. */
+function sameAdjustment(
+  movement: Transaction,
+  walletId: string,
+  type: 'credit' | 'debit',
+  amount: number,
+): Transaction {
+  const expectedType = type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT
+  const same =
+    movement.walletId === walletId &&
+    movement.type === expectedType &&
+    Math.round(Number(movement.amount) * 100) === Math.round(amount * 100)
+  if (!same) {
+    throw new RequestException(
+      { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'Key already used by another movement' },
+      HttpStatus.CONFLICT,
+    )
+  }
+  return movement
 }

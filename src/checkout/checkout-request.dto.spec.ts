@@ -153,4 +153,22 @@ describe('POST /checkout body validation', () => {
       expect.objectContaining({ renewal: undefined, idempotencyKey: 'from-header' }),
     )
   })
+
+  it('CA3 refuses a token package body that carries its own tokens, before the service', async () => {
+    // R15 (Mutation): accepting purchasedTokens in the DTO answers 201 and reaches the service.
+    const packageBody = {
+      brandId: BRAND_ID,
+      purpose: 'token_package',
+      provider: 'dropi',
+      packageId: '3c1d5e7f-3333-4c2a-9f1a-66a0985a10e6',
+    }
+    const accepted = await post(packageBody)
+    processCheckout.mockClear()
+    const res = await post({ ...packageBody, purchasedTokens: 999, bonusTokens: 99 })
+
+    expect(accepted.status).toBe(201)
+    expect(res.status).toBe(400)
+    expect(res.body.code).toBe('INVALID_REQUEST')
+    expect(processCheckout).not.toHaveBeenCalled()
+  })
 })

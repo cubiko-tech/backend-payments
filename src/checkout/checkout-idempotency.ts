@@ -145,6 +145,8 @@ export function buildIdempotencyFingerprint(req: CheckoutRequest): string {
         }
       : null,
     renewal: Boolean(req.renewal),
+    // Only when present: payments stored before token packages keep their fingerprint.
+    ...(req.packageId ? { packageId: req.packageId } : {}),
   })
 }
 

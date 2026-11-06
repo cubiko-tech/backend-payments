@@ -68,6 +68,7 @@ describe('Freezing a wallet while its balance moves (PostgreSQL, LOC-107)', () =
       unused,
       a.moduleRef.get(AuditService),
       unused,
+      unused,
     )
   })
 

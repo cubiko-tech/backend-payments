@@ -11,6 +11,7 @@ import {
 import { Wallet, WalletProvider } from '../wallet/entities/wallet.entity'
 import { WalletService } from '../wallet/wallet.service'
 import type { CheckoutRequest } from './checkout.service'
+import { bonusTokensKey, purchasedTokensKey } from './token-package-checkout'
 import {
   hasNewerDebitedPurchase,
   lockBrandPlan,
@@ -182,7 +183,12 @@ export async function hasPaymentTakenEffect(paymentId: string, dataSource: DataS
        OR EXISTS (SELECT 1 FROM invoices WHERE "paymentId" = $1::uuid)`,
     [
       paymentId,
-      [`payment:${paymentId}:credit`, getWalletRefundIdempotencyKey(paymentId)],
+      [
+        `payment:${paymentId}:credit`,
+        purchasedTokensKey(paymentId),
+        bonusTokensKey(paymentId),
+        getWalletRefundIdempotencyKey(paymentId),
+      ],
       PLAN_APPLYING_EVENTS,
     ],
   )

@@ -20,6 +20,7 @@ export enum PaymentPurpose {
   PLAN_PURCHASE = 'plan_purchase',
   WALLET_RECHARGE = 'wallet_recharge',
   SERVICE_PAYMENT = 'service_payment',
+  TOKEN_PACKAGE = 'token_package',
 }
 
 @Entity('payments')
@@ -35,6 +36,9 @@ export class Payment extends Content {
   @Column({ nullable: true }) providerPaymentId: string
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ length: 3 }) currency: string
+  // USD→COP TRM this payment was priced with, and the day it is valid from; null when unused.
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true }) exchangeRate: number
+  @Column({ type: 'date', nullable: true }) exchangeRateDate: string
   @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
   status: PaymentStatus
   @Column({ type: 'enum', enum: PaymentPurpose }) purpose: PaymentPurpose

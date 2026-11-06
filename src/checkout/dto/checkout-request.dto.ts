@@ -22,6 +22,7 @@ const PURPOSES: CheckoutRequest['purpose'][] = [
   'plan_purchase',
   'wallet_recharge',
   'service_payment',
+  'token_package',
 ]
 const PROVIDERS: CheckoutRequest['provider'][] = [
   'wallet',
@@ -92,6 +93,10 @@ export class CheckoutRequestDto {
   @IsOptional()
   @IsUUID()
   walletId?: string
+
+  @IsOptional()
+  @IsUUID()
+  packageId?: string
 
   @IsOptional()
   @IsString()

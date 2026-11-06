@@ -19,6 +19,7 @@ import {
   statusOf,
   stopInstance,
 } from './support/wallet-race.fixture'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const BRAND_ID = 'a7970002-2222-4333-8444-555555555555'
 const BALANCE = 100000
@@ -31,6 +32,8 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeSweepsToBrand(a.tasks, BRAND_ID)
+    scopeSweepsToBrand(b.tasks, BRAND_ID)
   })
 
   beforeEach(() => cleanBrand(a.dataSource, BRAND_ID))
@@ -67,7 +70,7 @@ describe('Failed wallet payment with a recorded debit (PostgreSQL, two instances
     return payment
   }
 
-  /** Old enough for any sweep: specs running at once share this database and sweep all brands. */
+  /** Old enough for the sweep, which reads only this spec's brand (`scopeSweepsToBrand`). */
   const failOldWithDebit = async (walletId: string, key: string) => {
     const payment = await failWithDebit(walletId, key)
     await backdate(a.dataSource, payment.id)

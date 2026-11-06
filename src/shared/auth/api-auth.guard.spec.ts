@@ -1,6 +1,10 @@
 import { HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from './api-auth.guard'
-import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
+import {
+  API_PERMISSION_KEY,
+  API_SESSION_ONLY_KEY,
+  API_SUPER_ADMIN_KEY,
+} from './require-permission.decorator'
 
 const b64u = (o: any) => Buffer.from(JSON.stringify(o)).toString('base64url')
 const tokenWith = (payload: any) => `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u(payload)}.sig`
@@ -77,21 +81,56 @@ describe('ApiAuthGuard', () => {
     await expect(g.canActivate(ctx({ authorization: `Bearer ${t}` }))).rejects.toBeDefined()
   })
 
-  it('rol superadmin del auth bypassa RBAC en endpoint admin', async () => {
-    reflector.get.mockReturnValue('credit:runs') // endpoint admin
-    const g = makeGuard(
+  const autoLoginAs = (data: Record<string, unknown>) => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ code: 'tokenValidate', data: { user: 'a1', ...data } }),
+    })
+    return `Bearer ${tokenWith({ client: 'dropi', user: 'a1', ...data })}`
+  }
+  const rejectLocal = () =>
+    makeGuard(
       jest.fn(() => {
         throw new Error('invalid signature')
       }),
     )
-    fetchMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({ code: 'tokenValidate', data: { user: 'a1', role: 'superadmin' } }),
-    })
-    const t = tokenWith({ client: 'dropi' })
-    expect(await g.canActivate(ctx({ authorization: `Bearer ${t}` }))).toBe(true)
-    expect(roles.checkPermission).not.toHaveBeenCalled()
-  })
+
+  it.each([
+    ['role superadmin', { role: 'superadmin' }],
+    ['isSuperAdmin true', { isSuperAdmin: true }],
+  ])(
+    'an auto-login token with %s goes through RBAC and gets 403 without the permission (LOC-143)',
+    async (_l, data) => {
+      // R15: red when validateViaAuth reads that claim from the auth answer again: RBAC is skipped.
+      reflector.get.mockReturnValue('credit:runs')
+      roles.checkPermission.mockResolvedValue(false)
+
+      await expect(
+        rejectLocal().canActivate(ctx({ authorization: autoLoginAs(data) })),
+      ).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN })
+      expect(roles.checkPermission).toHaveBeenCalledWith('a1', 'credit:runs')
+    },
+  )
+
+  it.each([
+    ['role superadmin', { role: 'superadmin' }],
+    ['isSuperAdmin true', { isSuperAdmin: true }],
+  ])(
+    'an auto-login token with %s gets 403 on a @RequireSuperAdmin class (LOC-143)',
+    async (_l, data) => {
+      // R15: red when validateViaAuth reads that claim from the auth answer again: it resolves true.
+      const classTarget = class AdminStub {}
+      reflector.get.mockImplementation((key: string, target: unknown) =>
+        key === API_SUPER_ADMIN_KEY && target === classTarget ? true : undefined,
+      )
+      const context = { ...ctx({ authorization: autoLoginAs(data) }), getClass: () => classTarget }
+
+      await expect(rejectLocal().canActivate(context)).rejects.toMatchObject({
+        status: HttpStatus.FORBIDDEN,
+      })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    },
+  )
 
   it('rejects Bearer CHANGEME with 401 when ACCESS_SERVER is CHANGEME', async () => {
     process.env.ACCESS_SERVER = 'CHANGEME'
@@ -204,5 +243,59 @@ describe('ApiAuthGuard', () => {
     await expect(g.canActivate(makeHandlerCtx())).rejects.toMatchObject({
       status: HttpStatus.FORBIDDEN,
     })
+  })
+
+  it('marks only the ACCESS_SERVER principal as server, never a JWT that claims it (LOC-133)', async () => {
+    // R15: red when the JWT branch copies an `isServer` claim, or the server branch drops the mark.
+    const serverReq: any = { headers: { authorization: 'Bearer srv-secret' }, cookies: {} }
+    const forgedReq: any = { headers: { authorization: 'Bearer forged-jwt' }, cookies: {} }
+    const forged = { id: 'server', isServer: true, isSuperAdmin: true }
+    const g = makeGuard(jest.fn().mockReturnValue(forged))
+    const contextOf = (req: any) => ({ ...ctx(), switchToHttp: () => ({ getRequest: () => req }) })
+
+    await g.canActivate(contextOf(serverReq))
+    await g.canActivate(contextOf(forgedReq))
+
+    expect(serverReq.user.isServer).toBe(true)
+    expect(forgedReq.user.isServer).toBeUndefined()
+  })
+
+  it('refuses the server token with 403 on a class marked @RequireSessionUser (LOC-133)', async () => {
+    // R15: red when the guard reads the session-only mark from the handler alone: server gets in.
+    const classTarget = class GiftStub {}
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if ((key === API_SESSION_ONLY_KEY || key === API_SUPER_ADMIN_KEY) && target === classTarget) {
+        return true
+      }
+      return undefined
+    })
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'admin-1', isSuperAdmin: true }))
+    const withClass = (authorization: string) => ({
+      ...ctx({ authorization }),
+      getClass: () => classTarget,
+    })
+
+    await expect(g.canActivate(withClass('Bearer srv-secret'))).rejects.toMatchObject({
+      status: HttpStatus.FORBIDDEN,
+    })
+    await expect(g.canActivate(withClass('Bearer superadmin-jwt'))).resolves.toBe(true)
+  })
+
+  it('refuses the server token on a session-only handler before @RequirePermission lets it in', async () => {
+    // R15: red when the session-only check runs after the permission branch, which returns early.
+    const handlerTarget = () => undefined
+    reflector.get.mockImplementation((key: string, target: unknown) => {
+      if (key === API_SESSION_ONLY_KEY && target === handlerTarget) return true
+      if (key === API_PERMISSION_KEY && target === handlerTarget) return 'credit:runs'
+      return undefined
+    })
+    const g = makeGuard(jest.fn())
+    const context = {
+      ...ctx({ authorization: 'Bearer srv-secret' }),
+      getHandler: () => handlerTarget,
+      getClass: () => class Stub {},
+    }
+
+    await expect(g.canActivate(context)).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN })
   })
 })

@@ -1,3 +1,4 @@
+// R6: one responsibility, the checkout retry window; its cases share one instance and setup.
 import { HttpStatus } from '@nestjs/common'
 import { DataSource } from 'typeorm'
 import { buildIdempotencyFingerprint } from '../src/checkout/checkout-idempotency'
@@ -24,6 +25,7 @@ import {
   startInstance,
   stopInstance,
 } from './support/wallet-race.fixture'
+import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
 
 const { Payment, PaymentProvider, PaymentPurpose, PaymentStatus } = paymentEntities
 type Payment = paymentEntities.Payment
@@ -128,6 +130,7 @@ describe('Checkout retry window (PostgreSQL)', () => {
 
   beforeAll(async () => {
     instance = await startInstance()
+    scopeSweepsToBrand(instance.tasks, BRAND_ID)
     dataSource = instance.dataSource
     // R17: A real provider is external; the cases assert whether it gets called and force its failure.
     createCheckout = jest.fn()

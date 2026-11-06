@@ -13,6 +13,8 @@ import { HttpStatus } from '@nestjs/common'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { AuditLog } from '../audit/entities/auditLog.entity'
+import { MovementAudit } from '../transaction/movement-audit'
+import { assertNotTokenCurrency, isTokenCurrency } from './token-origin'
 
 @Injectable()
 export class WalletService {
@@ -73,6 +75,8 @@ export class WalletService {
    */
   async create(data: Partial<Wallet>) {
     try {
+      // The brand token wallet is created only by TokenWalletService, one per brand.
+      assertNotTokenCurrency(data.currency)
       // Validar límite de 10 wallets por marca
       const count = await this.walletReadRepository.count({
         where: { brandId: data.brandId },
@@ -102,6 +106,8 @@ export class WalletService {
    * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
    * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
    * failed or duplicate credit leaves the wallet closed.
+   *
+   * `audit` commits with the credit; a credit that comes back as an earlier one does not run it.
    */
   async credit(
     walletId: string,
@@ -109,7 +115,14 @@ export class WalletService {
     data: Partial<Transaction> | string = {},
     idempotencyKey?: string,
     reopenClosed?: { userId: string; reason: string },
+    audit?: MovementAudit,
   ) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
     const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
@@ -171,6 +184,7 @@ export class WalletService {
         ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 
@@ -215,6 +229,7 @@ export class WalletService {
    * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
    * @param idempotencyKey Optional key looked up by key alone to return a repeated
    * movement as recorded.
+   * @param audit Commits with the debit; a repeated movement does not run it.
    */
   async debit(
     walletId: string,
@@ -222,6 +237,7 @@ export class WalletService {
     data: Partial<Transaction> & { brandId: string },
     expectedCurrency?: string,
     idempotencyKey?: string,
+    audit?: MovementAudit,
   ) {
     if (typeof walletId !== 'string' || !walletId.trim()) {
       throw new RequestException(
@@ -359,6 +375,7 @@ export class WalletService {
         ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 
@@ -607,6 +624,7 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
+    assertNotTokenCurrency(wallet.currency)
     const hasBalance = () =>
       new RequestException(
         {
@@ -701,6 +719,13 @@ export class WalletService {
       if (fromWallet.currency !== toWallet.currency) {
         throw new RequestException(
           { code: 'DIFFERENT_CURRENCY', message: 'Las wallets deben tener la misma moneda' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+      // A transfer moves `balance` only; token origins would no longer add up to it.
+      if (isTokenCurrency(fromWallet.currency) || isTokenCurrency(toWallet.currency)) {
+        throw new RequestException(
+          { code: 'WALLET_CURRENCY_MISMATCH', message: 'Token wallets cannot be transferred' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }

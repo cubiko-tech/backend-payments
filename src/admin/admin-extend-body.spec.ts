@@ -17,6 +17,7 @@ import { Subscription, SubscriptionStatus } from '../subscription/entities/subsc
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { Wallet } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
 
 const SUB_ID = '11111111-1111-4111-8111-111111111111'
@@ -63,6 +64,7 @@ describe('AdminController body and query conversion through the global pipe', ()
         { provide: getRepositoryToken(Transaction, 'DBWrite'), useValue: repo() },
         { provide: AuditService, useValue: auditService },
         { provide: CreditService, useValue: {} },
+        { provide: WalletService, useValue: {} },
       ],
     })
       // R17: operator authorization is covered by admin.controller.spec; here it only has to pass.
