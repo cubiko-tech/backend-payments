@@ -10,6 +10,9 @@ import { AddTransactionIdempotencyKey1792728404940 } from '../migrations/1792728
 
 dotenvConfig({ path: '.env' })
 
+// CREATE and DROP DATABASE slow down with machine load; jest's default 5 s is not enough for them.
+const DISPOSABLE_DB_TIMEOUT_MS = 30_000
+
 describe('WalletService idempotent movements (e2e)', () => {
   let moduleRef: TestingModule
   let dataSource: DataSource
@@ -245,7 +248,7 @@ describe('WalletService idempotent movements (e2e)', () => {
     }
   }
 
-  it('reverts and reapplies the idempotencyKey migration cleanly', async () => {
+  const revertsAndReappliesTheMigration = async () => {
     // Fails on targetDb/sharedColumnsWhileDown if queryRunner uses dataSource instead of the disposable DB.
     const migration = new AddTransactionIdempotencyKey1792728404940()
 
@@ -274,5 +277,11 @@ describe('WalletService idempotent movements (e2e)', () => {
       )
       expect(afterUp).toHaveLength(1)
     })
-  })
+  }
+
+  it(
+    'reverts and reapplies the idempotencyKey migration cleanly',
+    revertsAndReappliesTheMigration,
+    DISPOSABLE_DB_TIMEOUT_MS,
+  )
 })
