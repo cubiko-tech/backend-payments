@@ -472,6 +472,35 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     expect(await balanceOf(tkn.id)).toBe(10)
   })
 
+  it('CA5 closing the TKN wallet answers 422, it stays active and a later gift credits', async () => {
+    // R15: red when close stops refusing TKN: it answers 201 and the gift gets 422 WALLET_CLOSED.
+    const tkn = await seedWallet('TKN', 0)
+
+    const res = await http()
+      .post(`/wallet/${tkn.id}/close`)
+      .set('Authorization', `Bearer ${superAdmin}`)
+    const later = await gift({ amount: 20, reason: 'Bonus', idempotencyKey: 'loc144-g1' })
+
+    expect(res.status).toBe(HttpStatus.UNPROCESSABLE_ENTITY)
+    expect(res.body.code).toBe('TOKEN_WALLET_RESERVED')
+    expect(later.status).toBe(HttpStatus.CREATED)
+    const row = await dataSource.getRepository(Wallet).findOneByOrFail({ id: tkn.id })
+    expect([row.status, Number(row.balance)]).toEqual([WalletStatus.ACTIVE, 20])
+  })
+
+  it('closing a COP wallet with balance 0 still closes it', async () => {
+    // R15: red when the TKN guard catches every currency: the COP close answers 422.
+    const cop = await seedWallet('COP', 0)
+
+    const res = await http()
+      .post(`/wallet/${cop.id}/close`)
+      .set('Authorization', `Bearer ${superAdmin}`)
+
+    expect(res.status).toBe(HttpStatus.CREATED)
+    const row = await dataSource.getRepository(Wallet).findOneByOrFail({ id: cop.id })
+    expect(row.status).toBe(WalletStatus.CLOSED)
+  })
+
   it('CA5 an admin TKN wallet with balance 10 answers 422 and is not created', async () => {
     // R15: red when createWallet stops refusing TKN: it answers 201 with a second token wallet.
     const res = await http()

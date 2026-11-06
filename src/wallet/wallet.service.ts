@@ -624,6 +624,7 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
+    assertNotTokenCurrency(wallet.currency)
     const hasBalance = () =>
       new RequestException(
         {
