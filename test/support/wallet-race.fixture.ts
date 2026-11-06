@@ -305,6 +305,17 @@ export function someoneWaitsOnRowLock(dataSource: DataSource, timeoutMs = 3000) 
   )
 }
 
+/** Like `someoneWaitsOnRowLock`, true once at least `count` sessions of this suite are blocked. */
+export function sessionsWaitOnRowLock(dataSource: DataSource, count: number, timeoutMs = 3000) {
+  return suiteSessionMatches(
+    dataSource,
+    `SELECT 1 FROM pg_stat_activity
+     WHERE wait_event_type = 'Lock' AND datname = current_database() AND application_name = $1
+     HAVING count(*) >= ${Math.trunc(count)}`,
+    timeoutMs,
+  )
+}
+
 /** Like `someoneWaitsOnRowLock`, for a session of this suite blocked on an advisory lock. */
 export function someoneWaitsOnAdvisoryLock(dataSource: DataSource, timeoutMs = 3000) {
   return suiteSessionMatches(

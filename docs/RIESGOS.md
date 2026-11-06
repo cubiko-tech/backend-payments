@@ -446,10 +446,25 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Reembolsar un paquete de tokens no descuenta los tokens acreditados (LOC-136)
 
-- **Dónde**: `src/checkout/refund-credit-note.ts:147` (`issueRefundCreditNote`)
-- **Qué lo dispara**: un reembolso o una nota crédito sobre un pago `token_package` completado.
-- **Qué rompe**: la marca recupera el dinero y conserva los tokens comprados y el bono.
-- **Estado**: abierto — lo cierra debitar los tokens del pago al reembolsar; fuera del alcance de LOC-136.
+- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`) y `:170` (pedir);
+  `src/wallet/token-package-reclaim.ts:68` (`reclaimPackageTokens`)
+- **Qué lo dispara**: `POST /refund` y su aprobación sobre un pago `token_package` completado. La nota crédito no es
+  este camino: `issueRefundCreditNote` sólo corre para una compra de plan (`checkout.service.ts:1086`,
+  `payment-sweep.ts:154`).
+- **Qué rompe**: la marca recuperaría el dinero y conservaría los tokens comprados y el bono.
+- **Estado**: mitigado por LOC-161 — aprobar debita los comprados y el bono del paquete en la misma transacción, y
+  pedir o aprobar un paquete cuyos tokens ya no están, o por menos de lo pagado, responde 422 sin mover nada.
+
+## Aprobar el reembolso de un paquete quita los tokens antes de que la plata vuelva (LOC-161)
+
+- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`); `src/provider/provider.interface.ts:84`
+  (`refundPayment`, sin llamador)
+- **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:184-186` sólo lo loguea).
+- **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
+  `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
+- **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
+  reembolsos.
 
 ## Un crédito válido sobre un saldo cerca del máximo de `numeric(15,2)` responde 500 (LOC-139)
 
