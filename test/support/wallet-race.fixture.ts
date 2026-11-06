@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { DataSource } from 'typeorm'
@@ -62,6 +63,26 @@ const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
 
 export const PLAN_PRICE = 19900
 
+// Jest evaluates this module once per test file, so the name tells this suite's sessions apart.
+const SUITE_APPLICATION_NAME = `roax-e2e-${process.pid}-${randomUUID().slice(0, 8)}`
+
+/**
+ * PostgreSQL options of a race instance. Every connection carries this suite's application name,
+ * which is what the wait helpers below count.
+ */
+export function raceConnectionOptions() {
+  return {
+    type: 'postgres' as const,
+    host: process.env.POSTGRES_HOST || '127.0.0.1',
+    port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
+    username: process.env.POSTGRES_USER || 'postgres',
+    password: process.env.POSTGRES_PASSWORD || 'postgres',
+    database: process.env.POSTGRES_DB,
+    applicationName: SUITE_APPLICATION_NAME,
+    synchronize: false,
+  }
+}
+
 /** One service instance: its own connection pool and Nest module, sharing only PostgreSQL. */
 export interface RaceInstance {
   dataSource: DataSource
@@ -81,16 +102,7 @@ export interface RaceInstance {
 export async function startInstance(
   options: { realBilling?: boolean; trmUrl?: string } = {},
 ): Promise<RaceInstance> {
-  const dataSource = new DataSource({
-    type: 'postgres',
-    host: process.env.POSTGRES_HOST || '127.0.0.1',
-    port: parseInt(process.env.POSTGRES_PORT || '5432', 10),
-    username: process.env.POSTGRES_USER || 'postgres',
-    password: process.env.POSTGRES_PASSWORD || 'postgres',
-    database: process.env.POSTGRES_DB,
-    entities: WRITE_ENTITIES,
-    synchronize: false,
-  })
+  const dataSource = new DataSource({ ...raceConnectionOptions(), entities: WRITE_ENTITIES })
   await dataSource.initialize()
 
   const provideRepo = (entity: any, conn: string) => ({
@@ -268,30 +280,40 @@ export function parkFirstCall(target: any, method: string, gate: Gate): jest.Spy
   })
 }
 
-/** True once some session is blocked on a row lock; false if none blocks in time. */
-export async function someoneWaitsOnRowLock(dataSource: DataSource, timeoutMs = 3000) {
+/** Polls `sql` (with the suite's application name as $1) until it returns a row or time runs out. */
+async function suiteSessionMatches(dataSource: DataSource, sql: string, timeoutMs: number) {
+  const name = (dataSource.options as { applicationName?: string }).applicationName
+  if (!name) throw new Error('The wait helpers need a connection from raceConnectionOptions()')
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const rows = await dataSource.query(
-      `SELECT 1 FROM pg_stat_activity
-       WHERE wait_event_type = 'Lock' AND datname = current_database()`,
-    )
-    if (rows.length > 0) return true
+    if ((await dataSource.query(sql, [name])).length > 0) return true
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   return false
 }
 
-/** True once some session is blocked on an advisory lock; false if none blocks in time. */
-export async function someoneWaitsOnAdvisoryLock(dataSource: DataSource, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const rows = await dataSource.query(
-      `SELECT 1 FROM pg_locks l JOIN pg_database d ON d.oid = l.database
-       WHERE l.locktype = 'advisory' AND NOT l.granted AND d.datname = current_database()`,
-    )
-    if (rows.length > 0) return true
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  return false
+/**
+ * True once a session of this suite (any instance built from `raceConnectionOptions()`) is blocked
+ * on a row lock; false if none blocks in time. Waits of other suites on the same database do not count.
+ */
+export function someoneWaitsOnRowLock(dataSource: DataSource, timeoutMs = 3000) {
+  return suiteSessionMatches(
+    dataSource,
+    `SELECT 1 FROM pg_stat_activity
+     WHERE wait_event_type = 'Lock' AND datname = current_database() AND application_name = $1`,
+    timeoutMs,
+  )
+}
+
+/** Like `someoneWaitsOnRowLock`, for a session of this suite blocked on an advisory lock. */
+export function someoneWaitsOnAdvisoryLock(dataSource: DataSource, timeoutMs = 3000) {
+  return suiteSessionMatches(
+    dataSource,
+    `SELECT 1 FROM pg_locks l
+     JOIN pg_database d ON d.oid = l.database
+     JOIN pg_stat_activity a ON a.pid = l.pid
+     WHERE l.locktype = 'advisory' AND NOT l.granted AND d.datname = current_database()
+       AND a.application_name = $1`,
+    timeoutMs,
+  )
 }

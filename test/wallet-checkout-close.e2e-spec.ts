@@ -213,13 +213,14 @@ describe('Closing a wallet checkout against other purchases and the sweep (Postg
     const wallet = await seedWallet(a.dataSource, BRAND_ID, BALANCE)
     const older = await buyAndParkInsideClose(wallet.id, 'loc97-e7b-a', 'dropi-roax')
     const newer = buy(b, wallet.id, 'loc97-e7b-b', 'growth')
-    await someoneWaitsOnAdvisoryLock(a.dataSource)
+    const newerWaited = await someoneWaitsOnAdvisoryLock(a.dataSource)
 
     older.gate.release()
     await Promise.allSettled([older.purchase, newer])
     await sweepOldPayment(older.payment.id)
 
     const newerPayment = await findPaymentByKey(a.dataSource, 'loc97-e7b-b')
+    expect(newerWaited).toBe(true)
     expect(await statusOf(a.dataSource, older.payment.id)).toBe(PaymentStatus.REFUNDED)
     expect(await movements(a.dataSource, older.payment.id, TransactionType.CREDIT)).toHaveLength(1)
     expect(await statusOf(a.dataSource, newerPayment.id)).toBe(PaymentStatus.COMPLETED)
