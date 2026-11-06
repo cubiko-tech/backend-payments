@@ -71,6 +71,7 @@ describe('Confio webhook log lines escape provider values', () => {
 
   beforeEach(() => {
     process.env.CONFIO_WEBHOOK_KEY = WEBHOOK_KEY
+    // Spies on the real Nest logger capture each line; muted so the run output stays readable.
     warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation()
     log = jest.spyOn(Logger.prototype, 'log').mockImplementation()
     jest.spyOn(Logger.prototype, 'error').mockImplementation()
@@ -115,6 +116,7 @@ describe('Confio webhook log lines escape provider values', () => {
   })
 
   it('keeps the bearer rejection line as it was', async () => {
+    // Red if the rejection escapes its own fixed fields: `data=no aplica` turns into `data%3Dno aplica`.
     const { controller } = realWebhookChain()
     const signed = { event: 'subscription.billingStatusChanged', data: {}, timestamp: 1 }
 
@@ -128,6 +130,7 @@ describe('Confio webhook log lines escape provider values', () => {
   })
 
   it('keeps the accepted webhook line as it was', async () => {
+    // Red if `webhook.service.ts` drops the event id from the accepted line.
     const { controller } = realWebhookChain()
     const oneShot = {
       event: 'payment.statusChanged',

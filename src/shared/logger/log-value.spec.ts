@@ -17,12 +17,14 @@ describe('escapeLogValue', () => {
   })
 
   it('cuts values longer than 120 characters and marks the cut', () => {
+    // Red if the length cap goes: all 200 characters come back.
     const escaped = escapeLogValue('a'.repeat(200))
 
     expect(escaped).toBe(`${'a'.repeat(120)}…`)
   })
 
   it('stringifies values that are not strings', () => {
+    // Red if `String()` goes: `undefined` reaches `.replace` and throws.
     expect(escapeLogValue(undefined)).toBe('undefined')
     expect(escapeLogValue(42)).toBe('42')
   })
