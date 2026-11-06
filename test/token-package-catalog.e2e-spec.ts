@@ -169,4 +169,17 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
       expect(await auditsOf()).toHaveLength(0)
     },
   )
+
+  it.each(['priceUsd', 'purchasedTokens', 'bonusTokens'])(
+    'LOC-139 refuses %s of 1e-7 with 400 and leaves the package as it was',
+    async (field) => {
+      // R15: red when that field uses maxDecimalPlaces again: it throws on 1e-7 and answers 500.
+      const res = await edit({ [field]: 1e-7 }, superAdmin)
+
+      expect(res.status).toBe(HttpStatus.BAD_REQUEST)
+      const pkg = await escala()
+      expect([pkg.priceUsd, pkg.purchasedTokens, pkg.bonusTokens].map(Number)).toEqual([50, 50, 6])
+      expect(await auditsOf()).toHaveLength(0)
+    },
+  )
 })

@@ -207,6 +207,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
       'with 0.005 (three decimals)',
       { amount: 0.005, reason: 'Bonus', idempotencyKey: 'loc139-g2' },
     ],
+    ['with 1e-7 (exponent form)', { amount: 1e-7, reason: 'Bonus', idempotencyKey: 'loc139-g3' }],
   ])('CA2 a gift %s answers 400 and moves nothing', async (_label, body) => {
     // R15: red when the DTO drops that rule (reason, amount bounds or key): it answers 201 or 500.
     const res = await gift(body)
@@ -253,9 +254,10 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
 
   it.each([
     ['0.005 (three decimals)', 0.005],
+    ['1e-7 (exponent form)', 1e-7],
     ['1e20 (over the column)', 1e20],
   ])('LOC-139 an adjustment of %s answers 400 and the balance stays', async (_label, amount) => {
-    // R15: red when AdjustWalletDto drops maxDecimalPlaces or @Max: it answers 201 or 500.
+    // R15: red when AdjustWalletDto drops @HasAtMostTwoDecimals or @Max: it answers 201 or 500.
     const cop = await seedWallet('COP', 100)
 
     const res = await adjust(cop.id, { type: 'credit', amount, idempotencyKey: `loc139-${amount}` })

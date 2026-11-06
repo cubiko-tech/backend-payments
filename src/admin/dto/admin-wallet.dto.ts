@@ -11,7 +11,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator'
-import { MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
+import { HasAtMostTwoDecimals, MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
 
 export class AdminCreateWalletDto {
   @ApiProperty({ description: 'Brand ID', example: 'brand-123' })
@@ -78,6 +78,7 @@ export class AdjustWalletDto {
 
   @ApiProperty({ description: 'Adjustment amount, two decimals at most', example: 50000 })
   @IsNumber(MONEY_INPUT)
+  @HasAtMostTwoDecimals()
   @IsPositive()
   @Max(MAX_MONEY_AMOUNT)
   amount: number

@@ -8,11 +8,12 @@ import {
   Max,
   MaxLength,
 } from 'class-validator'
-import { MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
+import { HasAtMostTwoDecimals, MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
 
 export class GiftTokensDto {
   @ApiProperty({ description: 'Tokens to give, two decimals at most', example: 20 })
   @IsNumber(MONEY_INPUT)
+  @HasAtMostTwoDecimals()
   @IsPositive()
   @Max(MAX_MONEY_AMOUNT)
   amount: number
