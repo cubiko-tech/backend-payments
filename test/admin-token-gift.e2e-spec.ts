@@ -339,7 +339,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     expect(await balanceOf(tkn.id)).toBe(0)
   })
 
-  it('E8 a gift whose audit fails keeps the movement with its author; the retry replays, no audit', async () => {
+  it('E8 a gift whose audit fails keeps the movement with its author; its retry replays unaudited', async () => {
     // R15: red when the gift audits a replay: the retry writes a token_gift row.
     // R17: the audit table does not fail on demand; this is the failure after the commit.
     jest.spyOn(AuditService.prototype, 'log').mockRejectedValueOnce(new Error('audit down'))
