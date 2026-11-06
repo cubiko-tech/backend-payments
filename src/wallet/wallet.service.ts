@@ -13,6 +13,7 @@ import { HttpStatus } from '@nestjs/common'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { AuditLog } from '../audit/entities/auditLog.entity'
+import { MovementAudit } from '../transaction/movement-audit'
 import { isTokenCurrency } from './token-origin'
 
 @Injectable()
@@ -110,6 +111,8 @@ export class WalletService {
    * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
    * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
    * failed or duplicate credit leaves the wallet closed.
+   *
+   * `audit` commits with the credit; a credit that comes back as an earlier one does not run it.
    */
   async credit(
     walletId: string,
@@ -117,6 +120,7 @@ export class WalletService {
     data: Partial<Transaction> | string = {},
     idempotencyKey?: string,
     reopenClosed?: { userId: string; reason: string },
+    audit?: MovementAudit,
   ) {
     if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
       throw new RequestException(
@@ -185,6 +189,7 @@ export class WalletService {
         ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 
@@ -229,6 +234,7 @@ export class WalletService {
    * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
    * @param idempotencyKey Optional key looked up by key alone to return a repeated
    * movement as recorded.
+   * @param audit Commits with the debit; a repeated movement does not run it.
    */
   async debit(
     walletId: string,
@@ -236,6 +242,7 @@ export class WalletService {
     data: Partial<Transaction> & { brandId: string },
     expectedCurrency?: string,
     idempotencyKey?: string,
+    audit?: MovementAudit,
   ) {
     if (typeof walletId !== 'string' || !walletId.trim()) {
       throw new RequestException(
@@ -373,6 +380,7 @@ export class WalletService {
         ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 

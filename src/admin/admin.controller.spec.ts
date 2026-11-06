@@ -326,15 +326,11 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       100,
       expect.objectContaining({ referenceType: 'admin', referenceId: 'user-superadmin' }),
       'adjust-k2',
+      undefined,
+      expect.any(Function),
     )
-    expect(auditService.log).toHaveBeenCalledWith(
-      'user-superadmin',
-      'wallet_credit',
-      'wallet',
-      TEST_UUID,
-      expect.any(Object),
-      expect.any(String),
-    )
+    // The audit commits inside credit; nothing is logged after it.
+    expect(auditService.log).not.toHaveBeenCalled()
   })
 
   it.each([

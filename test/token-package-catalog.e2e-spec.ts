@@ -20,6 +20,7 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenPackageController } from '../src/wallet/token-package.controller'
 import { TokenPackageService } from '../src/wallet/token-package.service'
+import { failNextAuditWrite } from './support/audit-failure.fixture'
 
 dotenvConfig({ path: '.env' })
 
@@ -93,6 +94,7 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
   })
 
   beforeEach(restoreSeed)
+  afterEach(() => jest.restoreAllMocks())
 
   afterAll(async () => {
     await restoreSeed()
@@ -135,6 +137,23 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
     expect(rest).toHaveLength(0)
     expect(audit).toMatchObject({ action: 'token_package_updated', userId: SUPERADMIN_ID })
     expect(audit.changes).toMatchObject({ before: { bonusTokens: 6 }, after: { bonusTokens: 8 } })
+  })
+
+  it('LOC-140 an edit whose audit write fails leaves the package as it was; its retry audits once', async () => {
+    // R15: red when the edit audits outside its transaction: the bonus reads 8 with no audit row.
+    failNextAuditWrite()
+
+    const failed = await edit({ bonusTokens: 8 }, superAdmin)
+
+    expect(Number((await escala()).bonusTokens)).toBe(6)
+    expect(await auditsOf()).toHaveLength(0)
+    expect(failed.status).toBe(HttpStatus.INTERNAL_SERVER_ERROR)
+
+    const retried = await edit({ bonusTokens: 8 }, superAdmin)
+
+    expect(retried.status).toBe(HttpStatus.OK)
+    expect(Number((await escala()).bonusTokens)).toBe(8)
+    expect((await auditsOf()).map((a) => a.action)).toEqual(['token_package_updated'])
   })
 
   it.each([

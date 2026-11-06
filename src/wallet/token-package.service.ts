@@ -1,6 +1,6 @@
 import { HttpStatus, Injectable } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { EntityManager, Repository } from 'typeorm'
 import { RequestException } from '../shared/exception/request.exception'
 import { TokenPackage } from './entities/token-package.entity'
 
@@ -19,6 +19,11 @@ export interface TokenPackageView {
   purchasedTokens: number
   bonusTokens: number
   active: boolean
+}
+
+export interface TokenPackageChange {
+  before: TokenPackageView
+  after: TokenPackageView
 }
 
 /** The token package catalog: buyers read the active packages, a super admin edits them. */
@@ -43,17 +48,26 @@ export class TokenPackageService {
 
   /**
    * Applies `changes` and returns the package before and after; 404 when the id is unknown. The
-   * caller validates the values; the table's CHECK constraints refuse what slips through.
+   * caller validates the values; the table's CHECK constraints refuse what slips through. `audit`
+   * runs in the same transaction: when it throws, the package stays as it was.
    */
   async update(
     id: string,
     changes: TokenPackageChanges,
-  ): Promise<{ before: TokenPackageView; after: TokenPackageView }> {
-    const row = await this.packages.findOne({ where: { id } })
-    if (!row) throw packageNotFound()
-    const before = toPackageView(row)
-    Object.assign(row, changes)
-    return { before, after: toPackageView(await this.packages.save(row)) }
+    audit?: (manager: EntityManager, change: TokenPackageChange) => Promise<unknown>,
+  ): Promise<TokenPackageChange> {
+    return this.packages.manager.transaction(async (manager) => {
+      const row = await manager.findOne(TokenPackage, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      })
+      if (!row) throw packageNotFound()
+      const before = toPackageView(row)
+      Object.assign(row, changes)
+      const change = { before, after: toPackageView(await manager.save(TokenPackage, row)) }
+      if (audit) await audit(manager, change)
+      return change
+    })
   }
 }
 

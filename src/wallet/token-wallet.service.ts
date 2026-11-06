@@ -11,6 +11,7 @@ import { RequestException } from '../shared/exception/request.exception'
 import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
 import { TOKEN_CURRENCY, TokenOrigin, isTokenCurrency } from './token-origin'
 import { TokenBuckets, fromCents, planTokenSpend, toCents } from './token-spend'
+import { MovementAudit } from '../transaction/movement-audit'
 
 const BUCKET_COLUMN: Record<TokenOrigin, 'giftTokens' | 'purchasedTokens' | 'dropiTokens'> = {
   [TokenOrigin.GIFT]: 'giftTokens',
@@ -69,20 +70,24 @@ export class TokenWalletService {
     return toView(wallet!)
   }
 
-  /** Credits `amount` tokens from `origin`. Frozen wallets take credits; closed ones do not. */
+  /**
+   * Credits `amount` tokens from `origin`. Frozen wallets take credits; closed ones do not. `audit`
+   * commits with the credit; a replay does not run it again.
+   */
   async creditTokens(
     walletId: string,
     amount: number,
     origin: TokenOrigin,
     data: Partial<Transaction> & { brandId: string },
     idempotencyKey?: string,
+    audit?: MovementAudit,
   ): Promise<TokenMovement> {
     const cents = assertAmount(amount)
     if (!Object.values(TokenOrigin).includes(origin)) {
       throw fail('INVALID_TOKEN_ORIGIN', 'Unknown token origin', HttpStatus.BAD_REQUEST)
     }
     const expected = { walletId, type: TransactionType.CREDIT, cents, origin }
-    return this.move(walletId, data, idempotencyKey, expected, (wallet) => {
+    return this.move(walletId, data, idempotencyKey, expected, audit, (wallet) => {
       if (wallet.status === WalletStatus.CLOSED) {
         throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
       }
@@ -106,7 +111,7 @@ export class TokenWalletService {
     const cents = assertAmount(amount)
     const expected = { walletId, type: TransactionType.DEBIT, cents, origin: null }
     const txData = { ...data, brandId: context.brandId }
-    return this.move(walletId, txData, idempotencyKey, expected, (wallet) => {
+    return this.move(walletId, txData, idempotencyKey, expected, undefined, (wallet) => {
       if (wallet.status !== WalletStatus.ACTIVE) {
         throw fail(
           'WALLET_NOT_ACTIVE',
@@ -136,6 +141,7 @@ export class TokenWalletService {
     data: Partial<Transaction> & { brandId: string },
     idempotencyKey: string | undefined,
     expected: ExpectedMovement,
+    audit: MovementAudit | undefined,
     apply: (wallet: Wallet) => AppliedMovement,
   ): Promise<TokenMovement> {
     const key = idempotencyKey ?? data.idempotencyKey
@@ -185,6 +191,7 @@ export class TokenWalletService {
           idempotencyKey: key,
         }),
       )
+      if (audit) await audit(queryRunner.manager, transaction)
       await queryRunner.commitTransaction()
       this.logger.log(`Token ${applied.type} of ${expected.cents / 100} on wallet ${walletId}`)
       return { wallet: toView(wallet), transaction, replayed: false }

@@ -22,6 +22,7 @@ import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
+import { MovementAudit } from '../transaction/movement-audit'
 import { AuditService } from '../audit/audit.service'
 import { CreditService } from '../credit/credit.service'
 import {
@@ -650,10 +651,26 @@ export class AdminController {
       referenceType: 'admin',
       referenceId: actor,
     }
+    const audit: MovementAudit = (manager, transaction) =>
+      this.auditService.record(manager, {
+        userId: actor,
+        action: body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
+        entityType: 'wallet',
+        entityId: id,
+        changes: {
+          amount,
+          balanceBefore: Number(transaction.balanceBefore),
+          balanceAfter: Number(transaction.balanceAfter),
+          category: body.category,
+          transactionId: transaction.id,
+        },
+        description: `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
+      })
+    const key = body.idempotencyKey
     const result =
       body.type === 'credit'
-        ? await this.walletService.credit(id, amount, data, body.idempotencyKey)
-        : await this.walletService.debit(id, amount, data, undefined, body.idempotencyKey)
+        ? await this.walletService.credit(id, amount, data, key, undefined, audit)
+        : await this.walletService.debit(id, amount, data, undefined, key, audit)
     if ('error' in result) {
       throw new RequestException(
         { code: 'WALLET_ADJUST_FAILED', message: String(result.error) },
@@ -661,22 +678,7 @@ export class AdminController {
       )
     }
     // A concurrent request under the same key comes back as its movement, not as an error.
-    const transaction = sameAdjustment(result.data.transaction, id, body.type, amount)
-
-    await this.auditService.log(
-      actor,
-      body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
-      'wallet',
-      id,
-      {
-        amount,
-        balanceBefore: Number(transaction.balanceBefore),
-        balanceAfter: Number(transaction.balanceAfter),
-        category: body.category,
-        transactionId: transaction.id,
-      },
-      `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
-    )
+    sameAdjustment(result.data.transaction, id, body.type, amount)
 
     return { data: result.data }
   }

@@ -7,7 +7,10 @@ import { TokenOrigin } from '../wallet/token-origin'
 import { TokenWalletService } from '../wallet/token-wallet.service'
 import { GiftTokensDto } from './dto/admin-token-gift.dto'
 
-/** Gift tokens a super admin gives a brand: origin `gift`, with reason and author, no invoice. */
+/**
+ * Gift tokens a super admin gives a brand: origin `gift`, with reason and author, no invoice. The
+ * `token_gift` audit row commits with the credit, so a gift is never left unaudited.
+ */
 @ApiTags('Admin')
 @Controller('admin/token-wallets')
 @UseGuards(ApiAuthGuard)
@@ -47,17 +50,16 @@ export class AdminTokenGiftController {
         metadata: { authorId, reason },
       },
       body.idempotencyKey,
+      (manager, transaction) =>
+        this.auditService.record(manager, {
+          userId: authorId,
+          action: 'token_gift',
+          entityType: 'wallet',
+          entityId: wallet.id,
+          changes: { brandId, amount: body.amount, reason, transactionId: transaction.id },
+          description: `Gift of ${body.amount} tokens: ${reason}`,
+        }),
     )
-    if (!movement.replayed) {
-      await this.auditService.log(
-        authorId,
-        'token_gift',
-        'wallet',
-        wallet.id,
-        { brandId, amount: body.amount, reason, transactionId: movement.transaction.id },
-        `Gift of ${body.amount} tokens: ${reason}`,
-      )
-    }
     return { data: movement }
   }
 }

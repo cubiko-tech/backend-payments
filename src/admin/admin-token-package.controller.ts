@@ -35,14 +35,15 @@ export class AdminTokenPackageController {
     @Req() req: any,
   ) {
     const authorId: string = req.user.id
-    const { before, after } = await this.packages.update(id, body)
-    await this.auditService.log(
-      authorId,
-      'token_package_updated',
-      'token_package',
-      id,
-      { before, after },
-      `Token package ${after.slug} updated`,
+    const { after } = await this.packages.update(id, body, (manager, change) =>
+      this.auditService.record(manager, {
+        userId: authorId,
+        action: 'token_package_updated',
+        entityType: 'token_package',
+        entityId: id,
+        changes: { ...change },
+        description: `Token package ${change.after.slug} updated`,
+      }),
     )
     return { data: after }
   }

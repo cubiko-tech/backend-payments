@@ -33,6 +33,7 @@ import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnaps
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
+import { failNextAuditWrite } from './support/audit-failure.fixture'
 
 dotenvConfig({ path: '.env' })
 
@@ -364,25 +365,75 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     expect(await balanceOf(tkn.id)).toBe(0)
   })
 
-  it('E8 a gift whose audit fails keeps the movement with its author; its retry replays unaudited', async () => {
-    // R15: red when the gift audits a replay: the retry writes a token_gift row.
-    // R17: the audit table does not fail on demand; this is the failure after the commit.
-    jest.spyOn(AuditService.prototype, 'log').mockRejectedValueOnce(new Error('audit down'))
-    const body = { amount: 20, reason: 'Bonus', idempotencyKey: 'loc133-k8' }
+  it('LOC-140 a gift whose audit write fails once: its retry adds 20 once with one audit row', async () => {
+    // R15: red when the gift audits after the commit and only off a replay: no audit row at all.
+    failNextAuditWrite()
+    const body = { amount: 20, reason: 'Bonus', idempotencyKey: 'loc140-k1' }
 
     const failed = await gift(body)
     const retried = await gift(body)
 
+    const wallet = (await tokenWallet())!
+    expect((await auditsOf(wallet.id)).map((a) => [a.action, a.userId])).toEqual([
+      ['token_gift', SUPERADMIN_ID],
+    ])
+    expect(Number(wallet.balance)).toBe(20)
+    expect(await movementsOf(wallet.id)).toHaveLength(1)
     expect([failed.status, retried.status]).toEqual([
       HttpStatus.INTERNAL_SERVER_ERROR,
       HttpStatus.CREATED,
     ])
-    const wallet = (await tokenWallet())!
-    expect(Number(wallet.balance)).toBe(20)
-    const [movement] = await movementsOf(wallet.id)
-    expect(movement).toMatchObject({ referenceId: SUPERADMIN_ID, description: 'Bonus' })
-    expect(await auditsOf(wallet.id)).toHaveLength(0)
   })
+
+  it('LOC-140 an adjustment whose audit write fails once: its retry adds 50 once with one audit row', async () => {
+    // R15: red when the adjustment audits after the commit: the retry finds the key, no audit row.
+    const cop = await seedWallet('COP', 100)
+    failNextAuditWrite()
+    const body = { type: 'credit', amount: 50, idempotencyKey: 'loc140-k4' }
+
+    const failed = await adjust(cop.id, body)
+    const retried = await adjust(cop.id, body)
+
+    expect((await auditsOf(cop.id)).map((a) => a.action)).toEqual(['wallet_credit'])
+    expect(await balanceOf(cop.id)).toBe(150)
+    expect(await movementsOf(cop.id)).toHaveLength(1)
+    expect([failed.status, retried.status]).toEqual([
+      HttpStatus.INTERNAL_SERVER_ERROR,
+      HttpStatus.CREATED,
+    ])
+  })
+
+  it.each([
+    ['credit', 150],
+    ['debit', 50],
+  ] as const)(
+    'LOC-140 two equal %s adjustments at once move once and leave one audit row',
+    async (type, balance) => {
+      // R15: red when the adjustment audits after the commit: each request writes its own row.
+      const cop = await seedWallet('COP', 100)
+      const original = WalletService.prototype[type] as (...args: unknown[]) => Promise<unknown>
+      let release: () => void = () => undefined
+      const bothPastTheLookup = new Promise<void>((resolve) => (release = resolve))
+      let arrived = 0
+      // R17: only holding both past the key lookup makes them reach the wallet lock together.
+      jest.spyOn(WalletService.prototype, type).mockImplementation(async function (
+        this: WalletService,
+        ...args: unknown[]
+      ) {
+        if (++arrived === 2) release()
+        await bothPastTheLookup
+        return original.apply(this, args)
+      } as never)
+      const body = { type, amount: 50, idempotencyKey: `loc140-k5-${type}` }
+
+      const results = await Promise.all([adjust(cop.id, body), adjust(cop.id, body)])
+
+      expect(await auditsOf(cop.id)).toHaveLength(1)
+      expect(await movementsOf(cop.id)).toHaveLength(1)
+      expect(await balanceOf(cop.id)).toBe(balance)
+      expect(results.map((r) => r.status)).toEqual([HttpStatus.CREATED, HttpStatus.CREATED])
+    },
+  )
 
   it('CA5 an adjustment on a TKN wallet answers 422 and moves nothing', async () => {
     // R15: red when adjustWallet stops refusing TKN: the adjustment answers 201.

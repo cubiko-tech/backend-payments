@@ -416,13 +416,6 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
   contar si hay filas así por ambiente.
 
-## Dos ajustes de admin simultáneos con la misma llave y el mismo cuerpo auditan dos veces (LOC-133)
-
-- **Dónde**: `src/admin/admin.controller.ts:664` (`sameAdjustment` tras `credit`/`debit`), `:666` (audit)
-- **Qué lo dispara**: dos `POST /admin/wallets/:id/adjust` iguales que pasan juntos la consulta de la llave.
-- **Qué rompe**: el saldo se mueve una sola vez, pero `audit_log` muestra dos `wallet_credit`/`wallet_debit`.
-- **Estado**: abierto — lo cierra que `credit`/`debit` digan si el movimiento fue un replay.
-
 ## Un regalo de tokens a un `brandId` que no es una marca crea su wallet `TKN` (LOC-133)
 
 - **Dónde**: `src/admin/admin-token-gift.controller.ts:36` (`getOrCreate`)
