@@ -210,7 +210,7 @@ describe('A failed Confio charge on a pending signup (PostgreSQL, LOC-163)', () 
 
   const paymentsOfBrand = () => a.dataSource.getRepository(Payment).countBy({ brandId: BRAND_ID })
 
-  it('E1: a failed charge on a pending signup changes nothing and the retry cron sends no link', async () => {
+  it('E1: a failed charge on a pending signup changes nothing and the retry cron sends nothing', async () => {
     // R15: red if planearCobro ignores pending again: the row goes past_due and the cron issues a payment.
     const sub = await seed({ status: SubscriptionStatus.PENDING })
 
@@ -240,7 +240,7 @@ describe('A failed Confio charge on a pending signup (PostgreSQL, LOC-163)', () 
     expect(roles.removePlanFromBrand).toHaveBeenCalledWith(BRAND_ID, PLAN_SLUG)
   })
 
-  it('E3: a failed charge on a cancelled active subscription has no effect', async () => {
+  it('E3: a failed charge on a cancelled active subscription is ignored', async () => {
     // R15: red if the cancellation guard goes: the cancelled row turns into a live past_due debt.
     const sub = await seed({ status: SubscriptionStatus.ACTIVE, cancelledAt: new Date() })
 
