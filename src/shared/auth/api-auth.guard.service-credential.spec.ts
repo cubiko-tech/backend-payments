@@ -14,12 +14,15 @@ import { ServiceCredentialService } from './service-credential.service'
 const ADS_KEY = 'psk.roax-ads.secret'
 
 describe('ApiAuthGuard with a service credential (LOC-173)', () => {
+  // R17: each case sets the route marks it needs; a real Reflector would need decorated handlers.
   const reflector = { get: jest.fn() }
+  // R17: the service identity must be refused before roles is asked; the double records the call.
   const roles = { checkPermission: jest.fn() }
   // R17: the lookup is ServiceCredentialService's; the e2e runs it against PostgreSQL.
   const credentials = { authenticate: jest.fn() }
   const fetchMock = jest.fn()
 
+  // R17: verify stands for JwtService.verify, so a case can make a session token valid or not.
   const guard = (verify = jest.fn(), withCredentials = true) =>
     new ApiAuthGuard(
       reflector as unknown as Reflector,
@@ -85,6 +88,7 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
     // R15: red when a missing service lets the key resolve to an identity: it answers 403.
     const { context } = onRoute(`Bearer ${ADS_KEY}`, {})
 
+    // R17: the key never reaches JwtService here; verify only fills the constructor.
     await expect(guard(jest.fn(), false).canActivate(context)).rejects.toMatchObject({
       status: HttpStatus.UNAUTHORIZED,
     })

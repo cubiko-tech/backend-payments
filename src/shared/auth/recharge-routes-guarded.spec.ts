@@ -81,10 +81,12 @@ describe('recharge routes require the ROAX Ads service credential', () => {
   })
 
   it('accepts a recharge controller that requires ROAX Ads on the class', () => {
+    // R15: red when the check reads the mark from handlers only: the guarded route is flagged.
     expect(rechargeRoutesWithoutAdsCredential([GuardedRecharge])).toEqual([])
   })
 
   it('no controller of src/ exposes a recharge route without the ROAX Ads credential', () => {
+    // R15: red when controllersOf stops walking subfolders: it finds no controller at all.
     const controllers = controllersOf(join(__dirname, '..', '..'))
 
     expect(controllers.length).toBeGreaterThan(10)

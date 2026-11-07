@@ -253,6 +253,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
   })
 
   it('a key with a valid shape for an unknown client gets 401', async () => {
+    // R15: red when authenticate stops refusing a missing row: it answers 500.
     await issuedKey()
 
     const res = await createRecharge(`psk.ghost-client.${'A'.repeat(43)}`)
@@ -289,7 +290,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
     expect(await audits()).toHaveLength(1)
   })
 
-  it('E3 a rotation whose audit write fails keeps the previous key and leaves no audit', async () => {
+  it('E3 a rotation whose audit write fails keeps the previous key and its single audit row', async () => {
     // R15: red when the hash commits before the audit is written: the previous key gets 401.
     const previous = await issuedKey()
     failNextAuditWrite()
@@ -301,7 +302,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
     expect((await audits()).map((a) => a.action)).toEqual(['service_credential_created'])
   })
 
-  it('E3 an issue whose audit write fails leaves no credential, and its retry issues one', async () => {
+  it('E3 an issue whose audit write fails stores nothing, and its retry issues one', async () => {
     // R15: red when the row commits before the audit: the retry answers 409.
     failNextAuditWrite()
 
@@ -359,6 +360,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
   })
 
   it('a client in the path out of the pattern answers 400', async () => {
+    // R15: red when ServiceClientDto drops @Matches: the rotation looks the client up, 404.
     const res = await rotate('A'.repeat(51))
 
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
