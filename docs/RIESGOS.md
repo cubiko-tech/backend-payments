@@ -268,7 +268,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/subscription/subscription.controller.ts:320`, `:335` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
-  `src/shared/auth/api-auth.guard.ts:104`, `:154` (`payload.brand`, `decodeClaims`, que se usa en `:146`)
+  `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
   `brand`, con esa marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura no mira membresía ni rol, mientras otra marca nombrada exige `superuser`,
@@ -452,13 +452,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Quien tiene el `clientSecret` de un client firma el `id` y la `brand` de cualquier usuario (LOC-143)
 
-- **Dónde**: `src/shared/auth/api-auth.guard.ts:141`, `:146` (`validateViaAuth`: `id` y `brand` salen de la respuesta
+- **Dónde**: `src/shared/auth/api-auth.guard.ts:159`, `:165` (`validateViaAuth`: `id` y `brand` salen de la respuesta
   de backend-auth, que según LOC-143 devuelve el payload firmado tal cual)
 - **Qué lo dispara**: un token de auto-login firmado con el `clientSecret` (el client `dropi` lo usa Dropi) con el
   `id` de otro usuario o una `brand` ajena.
 - **Qué rompe**: `@RequirePermission` consulta `checkPermission(id)` y la marca `canViewBrandCredit(id)` con ese
   `id`, así que se actúa como ese usuario. Que backend-roles le conceda permisos de admin a ese id es hipótesis
-  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:145`).
+  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:164`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
 
