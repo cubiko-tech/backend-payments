@@ -487,9 +487,21 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
 
 - **Dónde**: `src/shared/auth/service-credential.service.ts:41` (`authenticate`);
-  `src/shared/auth/api-auth.guard.ts:111`
+  `src/shared/auth/api-auth.guard.ts:126`
 - **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
 - **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
-  informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`.
+  informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`. Crear una recarga pide además el token de
+  un miembro de la marca (`src/recharge/dropi-recharge.controller.ts:46`): la key sola no alcanza.
 - **Estado**: mitigado por la rotación y la desactivación de `admin/service-credentials`, que valen desde su
   commit. Abierto: la key no vence sola.
+
+## Una recarga desde Dropi que nadie informa queda `pending` para siempre (LOC-174)
+
+- **Dónde**: `src/tasks/payment-sweep.ts:242` (el vencimiento la excluye);
+  `src/payment/payment.service.ts:104` (el usuario no la cancela)
+- **Qué lo dispara**: ROAX Ads crea la recarga y nunca informa su resultado (se cae entre el cobro en Dropi y el
+  aviso, o el aviso falla siempre).
+- **Qué rompe**: la recarga no vence ni se cancela: queda `pending`, sin tokens, y si Dropi la cobró la marca
+  pagó sin recibir. Sólo el resultado la cierra (LOC-175).
+- **Estado**: abierto — lo cierra la señal de LOC-181 (la edad de la `pending` más vieja) y la conciliación del
+  release que conecta el cobro (076 C3).

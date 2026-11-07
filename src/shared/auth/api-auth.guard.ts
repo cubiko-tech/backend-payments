@@ -7,10 +7,12 @@ import { Request } from 'express'
 import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
 import {
+  API_ON_BEHALF_OF_KEY,
   API_PERMISSION_KEY,
   API_SERVICE_CLIENT_KEY,
   API_SESSION_ONLY_KEY,
   API_SUPER_ADMIN_KEY,
+  ON_BEHALF_OF_HEADER,
 } from './require-permission.decorator'
 import { SERVICE_KEY_PREFIX, ServiceCredentialService } from './service-credential.service'
 
@@ -53,7 +55,9 @@ export class ApiAuthGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request & { user?: GuardUser }>()
+    const req = context
+      .switchToHttp()
+      .getRequest<Request & { user?: GuardUser; onBehalfOf?: GuardUser }>()
     const user = await this.resolveUser(req)
     if (!user) {
       throw new RequestException(
@@ -73,6 +77,17 @@ export class ApiAuthGuard implements CanActivate {
     const serviceClient = readMeta<string>(API_SERVICE_CLIENT_KEY)
     if ((serviceClient || user.serviceClient) && user.serviceClient !== serviceClient) {
       throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
+
+    if (readMeta<boolean>(API_ON_BEHALF_OF_KEY)) {
+      const person = await this.resolveOnBehalfOf(req)
+      if (!person) {
+        throw new RequestException(
+          { error: 'unauthorized', code: 'unauthorized' },
+          HttpStatus.UNAUTHORIZED,
+        )
+      }
+      req.onBehalfOf = person
     }
 
     if (readMeta<boolean>(API_SESSION_ONLY_KEY) && user.isServer) {
@@ -115,6 +130,19 @@ export class ApiAuthGuard implements CanActivate {
         : null
     }
 
+    return this.resolvePersonToken(token)
+  }
+
+  /**
+   * The person of `X-User-Authorization`; null when absent or invalid. Read only as a person's
+   * JWT, so the server token and service keys there resolve to nobody.
+   */
+  private async resolveOnBehalfOf(req: Request): Promise<GuardUser | null> {
+    const token = this.bearerOf(req.headers[ON_BEHALF_OF_HEADER])
+    return token ? this.resolvePersonToken(token) : null
+  }
+
+  private async resolvePersonToken(token: string): Promise<GuardUser | null> {
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
     if (this.JWT_SECRET) {
       try {
@@ -179,8 +207,11 @@ export class ApiAuthGuard implements CanActivate {
   }
 
   private extractBearer(req: Request): string {
-    const auth = req.headers.authorization || ''
-    const parts = auth.split(' ')
+    return this.bearerOf(req.headers.authorization)
+  }
+
+  private bearerOf(header: string | string[] | undefined): string {
+    const parts = (typeof header === 'string' ? header : '').split(' ')
     return parts.length > 1 && parts[0].toLowerCase() === 'bearer' ? parts[1] : ''
   }
 

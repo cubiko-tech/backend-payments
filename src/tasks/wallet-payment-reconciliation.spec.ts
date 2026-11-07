@@ -63,7 +63,10 @@ describe('Wallet payment reconciliation and expiration safety (LOC-87)', () => {
         Array.from(payments.values()).filter((p) => {
           const allowed = where?.status ? [where.status._value ?? where.status].flat() : null
           return (
-            (!where?.provider || p.provider === where.provider) &&
+            (!where?.provider ||
+              (where.provider._type === 'not'
+                ? p.provider !== where.provider._value
+                : p.provider === where.provider)) &&
             (!allowed || allowed.includes(p.status)) &&
             beforeDate(p.createdAt, where?.createdAt?._value)
           )

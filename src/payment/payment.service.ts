@@ -1,7 +1,7 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
-import { Payment, PaymentStatus } from './entities/payment.entity'
+import { Repository, DataSource, Not } from 'typeorm'
+import { Payment, PaymentProvider, PaymentStatus } from './entities/payment.entity'
 import { PaymentAttempt } from './entities/paymentAttempt.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { RequestException } from '../shared/exception/request.exception'
@@ -100,7 +100,8 @@ export class PaymentService {
         ? null
         : await runner.manager.update(
             Payment,
-            { id, status: PaymentStatus.PENDING },
+            // A recharge from Dropi may be charging at Dropi right now: only its result closes it.
+            { id, status: PaymentStatus.PENDING, provider: Not(PaymentProvider.DROPI_WALLET) },
             { status: PaymentStatus.FAILED, failureReason },
           )
       if (!cancelled?.affected) {
