@@ -26,11 +26,11 @@ describe('ConfioProvider checkout log line', () => {
     // Red if the line logs `resp.url` again: the link shows up in the captured log.
     const logSpy = jest.spyOn(logger, 'log')
     // The fake ConfioPagos (R17): the real API is external and has a cost.
-    ;(global as any).fetch = jest.fn().mockResolvedValue({
+    global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 201,
       text: async () => JSON.stringify({ name: 'payments/abc123', url: PAYMENT_LINK }),
-    })
+    }) as unknown as typeof fetch
 
     const result = await new ConfioProvider().createCheckout({
       amount: 99000,

@@ -16,9 +16,11 @@ const BUYER_BODY = JSON.stringify({ buyer: { email: 'a@b.co', document: '123' } 
 
 /** The fake ConfioPagos: every call answers `status` with `body`. */
 function confioAnswers(status: number, body: string): void {
-  ;(global as any).fetch = jest
-    .fn()
-    .mockResolvedValue({ ok: status < 400, status, text: async () => body })
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: status < 400,
+    status,
+    text: async () => body,
+  }) as unknown as typeof fetch
 }
 
 /**

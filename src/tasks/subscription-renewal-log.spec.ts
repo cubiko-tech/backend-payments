@@ -1,22 +1,26 @@
 import { logger } from '../shared/logger/logger'
-import { SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
 import { processTrialConversions, SubscriptionRenewalDeps } from './subscription-renewal'
 
 const PAYMENT_LINK = 'https://pay.example/abc'
 
 /** An expired Confio trial with no initial link yet: the cron issues the external charge. */
-function expiredConfioTrial(): any {
+function expiredConfioTrial(): Subscription {
   return {
     id: 'sub-confio-1',
     brandId: 'brand-1',
     userId: 'user-1',
-    provider: 'confio',
+    provider: SubscriptionProvider.CONFIO,
     planSlug: 'pro',
     status: SubscriptionStatus.TRIAL,
     autoRenew: true,
     nextBillingDate: new Date('2026-01-01T00:00:00Z'),
     retryCount: 0,
-  }
+  } as Subscription
 }
 
 /**
@@ -24,17 +28,17 @@ function expiredConfioTrial(): any {
  * reads the log line; `processCheckout` is the fake checkout that returns the payment link.
  * `dataSource` has no `createQueryRunner`, so the plan lock stays in-process.
  */
-function renewalDeps(sub: any) {
+function renewalDeps(sub: Subscription) {
   const publishNotification = jest.fn().mockResolvedValue(undefined)
   const deps = {
     subscriptionRepo: {
       find: jest.fn().mockResolvedValue([sub]),
       findOne: jest.fn().mockResolvedValue(null),
-      save: jest.fn().mockImplementation(async (row: any) => row),
+      save: jest.fn().mockImplementation(async (row: unknown) => row),
     },
     subscriptionEventRepo: {
-      create: jest.fn().mockImplementation((row: any) => row),
-      save: jest.fn().mockImplementation(async (row: any) => row),
+      create: jest.fn().mockImplementation((row: unknown) => row),
+      save: jest.fn().mockImplementation(async (row: unknown) => row),
     },
     eventBus: { publishNotification },
     checkoutService: {
