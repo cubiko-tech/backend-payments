@@ -1,15 +1,18 @@
+import { randomUUID } from 'crypto'
 import { config as dotenvConfig } from 'dotenv'
-import { DataSource } from 'typeorm'
+import { DataSource, QueryRunner } from 'typeorm'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { TokenOrigin } from '../src/wallet/token-origin'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
-import { someoneWaitsOnRowLock } from './support/wallet-race.fixture'
+import { raceConnectionOptions, someoneWaitsOnRowLock } from './support/wallet-race.fixture'
 
 dotenvConfig({ path: '.env' })
 
 const BRAND_A = 'a1320000-0000-4000-8000-0000000000e2'
+// Creating and dropping its own database can outlast jest's default 5 s under the parallel suite.
+const MIGRATION_CASE_TIMEOUT_MS = 30_000
 
 interface Instance {
   dataSource: DataSource
@@ -18,16 +21,7 @@ interface Instance {
 
 /** One service instance: its own connection pool, sharing only PostgreSQL. */
 async function startInstance(): Promise<Instance> {
-  const dataSource = new DataSource({
-    type: 'postgres',
-    host: process.env.POSTGRES_HOST,
-    port: Number(process.env.POSTGRES_PORT),
-    username: process.env.POSTGRES_USER,
-    password: process.env.POSTGRES_PASSWORD,
-    database: process.env.POSTGRES_DB,
-    entities: [Wallet, Transaction],
-    synchronize: false,
-  })
+  const dataSource = new DataSource({ ...raceConnectionOptions(), entities: [Wallet, Transaction] })
   await dataSource.initialize()
   return {
     dataSource,
@@ -35,11 +29,47 @@ async function startInstance(): Promise<Instance> {
   }
 }
 
-async function hasTokenColumns(dataSource: DataSource): Promise<boolean> {
-  const rows = await dataSource.query(
-    `SELECT 1 FROM information_schema.columns WHERE table_name = 'wallets' AND column_name = 'giftTokens'`,
+async function hasColumn(db: DataSource | QueryRunner, table: string, column: string) {
+  const rows = await db.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+    [table, column],
   )
   return rows.length > 0
+}
+
+const hasTokenColumns = (db: DataSource | QueryRunner) => hasColumn(db, 'wallets', 'giftTokens')
+
+async function databaseExists(dataSource: DataSource, name: string) {
+  return (await dataSource.query('SELECT 1 FROM pg_database WHERE datname = $1', [name])).length > 0
+}
+
+/**
+ * Runs `run` on a runner of a database created for it and dropped afterwards, so a migration
+ * going down never takes columns away from the suites sharing POSTGRES_DB.
+ */
+async function withDisposableDatabase(
+  admin: DataSource,
+  run: (runner: QueryRunner, name: string) => Promise<void>,
+): Promise<string> {
+  const name = `payments_qa_payments_mig_${randomUUID().replace(/-/g, '')}`
+  await admin.query(`CREATE DATABASE "${name}"`)
+  const disposable = new DataSource({ ...raceConnectionOptions(), database: name })
+  try {
+    await disposable.initialize()
+    const runner = disposable.createQueryRunner()
+    try {
+      await run(runner, name)
+    } finally {
+      await runner.release()
+    }
+  } finally {
+    try {
+      if (disposable.isInitialized) await disposable.destroy()
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS "${name}"`)
+    }
+  }
+  return name
 }
 
 describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
@@ -276,24 +306,38 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
     expect(Number((await stored(wallet.id)).giftTokens)).toBe(1)
   })
 
-  it('the migration down drops the origin columns and up brings them back at 0', async () => {
-    // R15: red when down leaves giftTokens behind: the column is still there after it.
-    const migration = new AddTokenWalletOrigins1793949572497()
-    const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
-    const runner = a.dataSource.createQueryRunner()
-    try {
-      await migration.down(runner)
-      expect(await hasTokenColumns(a.dataSource)).toBe(false)
-      await migration.up(runner)
-    } finally {
-      await runner.release()
-    }
+  it(
+    'the migration down drops the origin columns and up brings them back at 0, on its own database',
+    async () => {
+      // R15: red when the case runs on the shared runner: its database is POSTGRES_DB, not its own.
+      // R15: red when down leaves giftTokens behind: the column is still there after it.
+      const migration = new AddTokenWalletOrigins1793949572497()
+      const used = await withDisposableDatabase(a.dataSource, async (runner, name) => {
+        const [{ db }] = await runner.query('SELECT current_database() AS db')
+        expect(db).toBe(name)
+        await runner.query('CREATE TABLE wallets (id uuid PRIMARY KEY DEFAULT gen_random_uuid())')
+        await runner.query(
+          'CREATE TABLE transactions (id uuid PRIMARY KEY DEFAULT gen_random_uuid())',
+        )
+        await migration.up(runner)
+        const [{ id }] = await runner.query('INSERT INTO wallets DEFAULT VALUES RETURNING id')
 
-    expect(await hasTokenColumns(a.dataSource)).toBe(true)
-    const [row] = await a.dataSource.query(
-      'SELECT "giftTokens", "purchasedTokens", "dropiTokens" FROM wallets WHERE id = $1',
-      [wallet.id],
-    )
-    expect(row).toEqual({ giftTokens: '0.00', purchasedTokens: '0.00', dropiTokens: '0.00' })
-  })
+        await migration.down(runner)
+        expect(await hasTokenColumns(runner)).toBe(false)
+        expect(await hasColumn(a.dataSource, 'transactions', 'tokenOrigin')).toBe(true)
+        await migration.up(runner)
+
+        expect(await hasTokenColumns(runner)).toBe(true)
+        const [row] = await runner.query(
+          'SELECT "giftTokens", "purchasedTokens", "dropiTokens" FROM wallets WHERE id = $1',
+          [id],
+        )
+        expect(row).toEqual({ giftTokens: '0.00', purchasedTokens: '0.00', dropiTokens: '0.00' })
+      })
+
+      expect(await databaseExists(a.dataSource, used)).toBe(false)
+      expect(await hasTokenColumns(a.dataSource)).toBe(true)
+    },
+    MIGRATION_CASE_TIMEOUT_MS,
+  )
 })

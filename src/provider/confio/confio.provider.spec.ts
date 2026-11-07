@@ -28,13 +28,11 @@ describe('ConfioProvider', () => {
   })
 
   /**
-   * ConfioPagos devuelve texto plano en algunos errores. Antes el `JSON.parse`
-   * iba ANTES del chequeo de `response.ok`, así que el fallo salía como
-   * `Unexpected token 'S'…` y se llevaba puesto el status y el motivo: los logs
-   * quedaban sin nada que diagnosticar. Medido contra dev el 2026-09-04.
+   * Some ConfioPagos errors are plain text: the message keeps the status instead
+   * of a parse error, and never the body, which callers log and can carry buyer data.
    */
   describe('respuesta que no es JSON', () => {
-    it('conserva el status y el cuerpo crudo en el error', async () => {
+    it('keeps the status and drops the raw body from the error', async () => {
       ;(global as any).fetch = jest.fn().mockResolvedValue({
         ok: false,
         status: 422,
@@ -54,9 +52,9 @@ describe('ConfioProvider', () => {
         })
         .catch((e) => e)
 
-      // Las dos mitades que el parseo a ciegas destruía.
+      // Red if the body goes back into the message: the text shows up.
       expect(err.message).toContain('422')
-      expect(err.message).toContain('Subscription plan is not available')
+      expect(err.message).not.toContain('Subscription plan is not available')
       // Y no el error de parseo, que es lo que se veía antes.
       expect(err.message).not.toContain('Unexpected token')
     })

@@ -37,6 +37,7 @@ import {
 } from '../provider/confio/confio-webhook-signature'
 import { readConfioWebhookKey } from '../provider/confio/confio-webhook-env'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
+import { escapeLogValue } from '../shared/logger/log-value'
 
 /**
  * Webhook Controller — el ÚNICO controller del servicio sin guard de clase, y
@@ -57,22 +58,6 @@ import { ConfioWebhookPayload } from '../provider/confio/confio.types'
  */
 const SIN_CAMPOS_DE_FIRMA = 'signature.properties=no aplica data=no aplica'
 
-/** Tope de caracteres de cada eco del emisor dentro de una línea de log. */
-const ECO_DE_LOG_MAX = 120
-
-/**
- * Normaliza un valor QUE VIENE DEL EMISOR antes de loguearlo: sin esto un
- * `event` con saltos de línea o secuencias ANSI forja líneas de log, y una lista
- * de `properties` larguísima infla cada rechazo. Espeja a `echoForDetail` de
- * `confio-webhook-signature.ts`, que no se exporta.
- */
-function ecoDeLog(value: unknown): string {
-  const raw = typeof value === 'string' ? value : String(value)
-  const clean = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
-
-  return clean.length > ECO_DE_LOG_MAX ? `${clean.slice(0, ECO_DE_LOG_MAX)}…` : clean
-}
-
 /**
  * Campos del payload que acompañan a un rechazo POSTERIOR a la verificación de
  * firma: el conjunto declarado por el emisor y las claves de `data`. Nunca el
@@ -80,9 +65,10 @@ function ecoDeLog(value: unknown): string {
  */
 function camposDeFirma(payload: ConfioWebhookPayload): string {
   const properties = payload?.signature?.properties
-  const declared = Array.isArray(properties) ? ecoDeLog(properties.join(',')) : 'ausente'
+  const declared = Array.isArray(properties) ? escapeLogValue(properties.join(',')) : 'ausente'
   const data = payload?.data
-  const keys = data && typeof data === 'object' ? ecoDeLog(Object.keys(data).join(',')) : 'ausente'
+  const keys =
+    data && typeof data === 'object' ? escapeLogValue(Object.keys(data).join(',')) : 'ausente'
 
   return `signature.properties=[${declared}] data=[${keys}]`
 }
@@ -222,7 +208,7 @@ export class WebhookController {
       this.autenticarRamoOneShot(rawBody, bearer)
 
       this.logger.warn(
-        `Webhook ConfioPagos ignorado: evento fuera del contrato "${ecoDeLog(payload.event)}"`,
+        `Webhook ConfioPagos ignorado: evento fuera del contrato "${escapeLogValue(payload.event)}"`,
       )
 
       return { ignored: true }
@@ -329,7 +315,7 @@ export class WebhookController {
   /** Rechazo de webhook de ConfioPagos: UNA línea de log y un 401. */
   private rechazarWebhookConfio(reason: string, campos: string, detail: string): HttpException {
     this.logger.warn(
-      `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${ecoDeLog(detail)}"`,
+      `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${escapeLogValue(detail)}"`,
     )
 
     return new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)

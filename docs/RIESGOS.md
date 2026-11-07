@@ -446,10 +446,25 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Reembolsar un paquete de tokens no descuenta los tokens acreditados (LOC-136)
 
-- **Dónde**: `src/checkout/refund-credit-note.ts:147` (`issueRefundCreditNote`)
-- **Qué lo dispara**: un reembolso o una nota crédito sobre un pago `token_package` completado.
-- **Qué rompe**: la marca recupera el dinero y conserva los tokens comprados y el bono.
-- **Estado**: abierto — lo cierra debitar los tokens del pago al reembolsar; fuera del alcance de LOC-136.
+- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`) y `:170` (pedir);
+  `src/wallet/token-package-reclaim.ts:68` (`reclaimPackageTokens`)
+- **Qué lo dispara**: `POST /refund` y su aprobación sobre un pago `token_package` completado. La nota crédito no es
+  este camino: `issueRefundCreditNote` sólo corre para una compra de plan (`checkout.service.ts:1086`,
+  `payment-sweep.ts:154`).
+- **Qué rompe**: la marca recuperaría el dinero y conservaría los tokens comprados y el bono.
+- **Estado**: mitigado por LOC-161 — aprobar debita los comprados y el bono del paquete en la misma transacción, y
+  pedir o aprobar un paquete cuyos tokens ya no están, o por menos de lo pagado, responde 422 sin mover nada.
+
+## Aprobar el reembolso de un paquete quita los tokens antes de que la plata vuelva (LOC-161)
+
+- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`); `src/provider/provider.interface.ts:84`
+  (`refundPayment`, sin llamador)
+- **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:184-186` sólo lo loguea).
+- **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
+  `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
+- **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
+  reembolsos.
 
 ## Un crédito válido sobre un saldo cerca del máximo de `numeric(15,2)` responde 500 (LOC-139)
 
@@ -472,3 +487,25 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:145`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
+
+## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
+
+- **Dónde**: `src/webhook/webhook.service.ts:94`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+  (`buildConfioWebhookEventId`)
+- **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
+- **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
+  siendo la clave de idempotencia y no cambia.
+- **Estado**: abierto — lo cierra pasar el id por `escapeLogValue` en esa línea (LOC-162 la dejó como estaba porque
+  su aceptación pide conservarla).
+
+## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
+
+- **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:743-756` (`planearCambioDeEstado`) y
+  `:455-460` (`planearCobro`)
+- **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
+  `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
+- **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
+  recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
+  Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
+- **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).
