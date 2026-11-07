@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto'
 import { config as dotenvConfig } from 'dotenv'
 import { DataSource, QueryRunner } from 'typeorm'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
@@ -6,6 +5,7 @@ import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { TokenOrigin } from '../src/wallet/token-origin'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
+import { databaseExists, withDisposableDatabase } from './support/disposable-database.fixture'
 import { raceConnectionOptions, someoneWaitsOnRowLock } from './support/wallet-race.fixture'
 
 dotenvConfig({ path: '.env' })
@@ -38,39 +38,6 @@ async function hasColumn(db: DataSource | QueryRunner, table: string, column: st
 }
 
 const hasTokenColumns = (db: DataSource | QueryRunner) => hasColumn(db, 'wallets', 'giftTokens')
-
-async function databaseExists(dataSource: DataSource, name: string) {
-  return (await dataSource.query('SELECT 1 FROM pg_database WHERE datname = $1', [name])).length > 0
-}
-
-/**
- * Runs `run` on a runner of a database created for it and dropped afterwards, so a migration
- * going down never takes columns away from the suites sharing POSTGRES_DB.
- */
-async function withDisposableDatabase(
-  admin: DataSource,
-  run: (runner: QueryRunner, name: string) => Promise<void>,
-): Promise<string> {
-  const name = `payments_qa_payments_mig_${randomUUID().replace(/-/g, '')}`
-  await admin.query(`CREATE DATABASE "${name}"`)
-  const disposable = new DataSource({ ...raceConnectionOptions(), database: name })
-  try {
-    await disposable.initialize()
-    const runner = disposable.createQueryRunner()
-    try {
-      await run(runner, name)
-    } finally {
-      await runner.release()
-    }
-  } finally {
-    try {
-      if (disposable.isInitialized) await disposable.destroy()
-    } finally {
-      await admin.query(`DROP DATABASE IF EXISTS "${name}"`)
-    }
-  }
-  return name
-}
 
 describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
   let a: Instance
