@@ -102,7 +102,9 @@ describe('ApiAuthGuard', () => {
     'an auto-login token with %s goes through RBAC and gets 403 without the permission (LOC-143)',
     async (_l, data) => {
       // R15: red when validateViaAuth reads that claim from the auth answer again: RBAC is skipped.
-      reflector.get.mockReturnValue('credit:runs')
+      reflector.get.mockImplementation((key: string) =>
+        key === API_PERMISSION_KEY ? 'credit:runs' : undefined,
+      )
       roles.checkPermission.mockResolvedValue(false)
 
       await expect(

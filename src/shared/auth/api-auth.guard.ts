@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, HttpStatus, Injectable } from '@nestjs/common'
+import { CanActivate, ExecutionContext, HttpStatus, Injectable, Optional } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
 import { timingSafeEqual } from 'crypto'
@@ -8,9 +8,11 @@ import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
 import {
   API_PERMISSION_KEY,
+  API_SERVICE_CLIENT_KEY,
   API_SESSION_ONLY_KEY,
   API_SUPER_ADMIN_KEY,
 } from './require-permission.decorator'
+import { SERVICE_KEY_PREFIX, ServiceCredentialService } from './service-credential.service'
 
 interface GuardUser {
   id: string
@@ -18,6 +20,8 @@ interface GuardUser {
   brand?: string | null
   /** Set only when the request carried `ACCESS_SERVER`; no token claim can set it. */
   isServer?: boolean
+  /** Set only when the request carried a valid service credential: the client it belongs to. */
+  serviceClient?: string
 }
 
 function readAuthSecret(value: string | undefined): string | null {
@@ -44,6 +48,8 @@ export class ApiAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
     private readonly roles: ClientRolesService,
+    // Optional so test modules that provide the guard alone still compile; without it a key gets 401.
+    @Optional() private readonly serviceCredentials?: ServiceCredentialService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -62,6 +68,12 @@ export class ApiAuthGuard implements CanActivate {
     const readMeta = <T>(key: string): T | undefined =>
       this.reflector.get<T>(key, handler) ??
       (controllerClass ? this.reflector.get<T>(key, controllerClass) : undefined)
+
+    // Before every other check: the permission branch below returns early.
+    const serviceClient = readMeta<string>(API_SERVICE_CLIENT_KEY)
+    if ((serviceClient || user.serviceClient) && user.serviceClient !== serviceClient) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
 
     if (readMeta<boolean>(API_SESSION_ONLY_KEY) && user.isServer) {
       throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
@@ -94,6 +106,13 @@ export class ApiAuthGuard implements CanActivate {
 
     if (this.isServerToken(token)) {
       return { id: 'server', isSuperAdmin: true, brand: null, isServer: true }
+    }
+
+    if (token.startsWith(SERVICE_KEY_PREFIX)) {
+      const client = await this.serviceCredentials?.authenticate(token)
+      return client
+        ? { id: `service:${client}`, isSuperAdmin: false, brand: null, serviceClient: client }
+        : null
     }
 
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).

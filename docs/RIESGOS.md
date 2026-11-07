@@ -483,3 +483,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
   Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
 - **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).
+
+## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
+
+- **Dónde**: `src/shared/auth/service-credential.service.ts:41` (`authenticate`);
+  `src/shared/auth/api-auth.guard.ts:111`
+- **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
+- **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
+  informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`.
+- **Estado**: mitigado por la rotación y la desactivación de `admin/service-credentials`, que valen desde su
+  commit. Abierto: la key no vence sola.

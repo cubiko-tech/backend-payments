@@ -3,6 +3,7 @@ import { GUARDS_METADATA } from '@nestjs/common/constants'
 import { AdminController } from '../../admin/admin.controller'
 import { AdminTokenGiftController } from '../../admin/admin-token-gift.controller'
 import { AdminTokenPackageController } from '../../admin/admin-token-package.controller'
+import { AdminServiceCredentialController } from '../../admin/admin-service-credential.controller'
 import { ApiAuthGuard } from './api-auth.guard'
 import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
@@ -51,6 +52,7 @@ const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = 
   ['admin', AdminController],
   ['admin/token-wallets', AdminTokenGiftController],
   ['admin/token-packages', AdminTokenPackageController],
+  ['admin/service-credentials', AdminServiceCredentialController],
   ['billing-profile', BillingProfileController],
   ['dian', DianController],
   ['invoice', InvoiceController],

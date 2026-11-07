@@ -18,3 +18,14 @@ export const API_SESSION_ONLY_KEY = 'require_session_user'
  * needs a person's session, whose id is the author it records.
  */
 export const RequireSessionUser = () => SetMetadata(API_SESSION_ONLY_KEY, true)
+
+export const API_SERVICE_CLIENT_KEY = 'require_service_client'
+
+/** The client name of ROAX Ads' service credential, the only one that recharges from Dropi. */
+export const ROAX_ADS_CLIENT = 'roax-ads'
+
+/**
+ * Lets in only the service credential of `client`, on a handler or a whole controller: the server
+ * token, users and super admins get 403. A service credential gets 403 on any route without it.
+ */
+export const RequireServiceClient = (client: string) => SetMetadata(API_SERVICE_CLIENT_KEY, client)
