@@ -58,6 +58,8 @@ import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { logger as winstonLogger } from '../shared/logger/logger'
+import { escapeLogValue } from '../shared/logger/log-value'
+import { ConfioApiError } from '../provider/confio/confio-api-error'
 import {
   buildIdempotencyFingerprint,
   createRetryExpiredException,
@@ -801,6 +803,7 @@ export class CheckoutService implements OnModuleInit {
 
       return result
     } catch (error) {
+      this.logExternalCheckoutRejection(payment.id, req.provider, error)
       payment.status = PaymentStatus.FAILED
       payment.failureReason = error.message
       await this.paymentRepo.save(payment)
@@ -810,6 +813,15 @@ export class CheckoutService implements OnModuleInit {
         message: `Error con ${req.provider}: ${error.message}`,
       })
     }
+  }
+
+  /** One diagnostic line per rejected checkout: never the body, the payment link or buyer data. */
+  private logExternalCheckoutRejection(paymentId: string, provider: string, error: unknown) {
+    const confio = error instanceof ConfioApiError ? error : undefined
+    this.log.warn(
+      `External checkout rejected: payment=${paymentId} provider=${escapeLogValue(provider)} ` +
+        `status=${confio?.status ?? 'n/a'} code=${escapeLogValue(confio?.providerCode ?? 'n/a')}`,
+    )
   }
 
   /**

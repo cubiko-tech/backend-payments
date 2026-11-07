@@ -1,7 +1,17 @@
 import { Logger, RawBodyRequest } from '@nestjs/common'
+import { Queue } from 'bullmq'
 import { Request } from 'express'
+import { DataSource, Repository } from 'typeorm'
 
 import { ClientRolesService } from '../client/client-roles.service'
+import { Payment } from '../payment/entities/payment.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
+import { WebhookEvent } from './entities/webhookEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { buildConfioWebhookEventId } from '../provider/confio/confio-webhook'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
@@ -22,31 +32,41 @@ function linesOf(spy: jest.SpyInstance): string[] {
   return spy.mock.calls.map((call) => String(call[0]))
 }
 
+function noMarkerQueryBuilder() {
+  const qb = {
+    where: () => qb,
+    andWhere: () => qb,
+    getOne: async () => null,
+  }
+  return qb
+}
+
 /**
- * Doubles (R17): the repositories are in-memory stand-ins that never find a row, the retry queue
+ * Doubles (R17): the repositories are in-memory stand-ins that find only `found`, the retry queue
  * is never reached, and `ConfioProvider` only compares the one-shot bearer with the access token,
  * which is all the controller delegates to it. Controller, webhook service and Confio subscription
  * service are the real ones, so each line comes from the code that writes it in production.
  */
-function realWebhookChain() {
-  const subscriptionRepo = { findOne: jest.fn().mockResolvedValue(null) }
+function realWebhookChain(found: Subscription | null = null) {
+  const subscriptionRepo = { findOne: jest.fn().mockResolvedValue(found) }
+  const subscriptionEventRepo = { createQueryBuilder: noMarkerQueryBuilder }
   const confioSubscriptions = new ConfioSubscriptionWebhookService(
-    subscriptionRepo as any,
-    {} as any,
-    {} as any,
+    subscriptionRepo as unknown as Repository<Subscription>,
+    subscriptionEventRepo as unknown as Repository<SubscriptionEvent>,
+    {} as DataSource,
     {} as ConfioProvider,
     {} as ClientRolesService,
   )
   const writeRepo = {
     findOne: jest.fn().mockResolvedValue(null),
-    create: jest.fn((row: any) => ({ id: 'we-1', ...row })),
-    save: jest.fn(async (row: any) => row),
+    create: jest.fn((row: object) => ({ id: 'we-1', ...row })),
+    save: jest.fn(async (row: object) => row),
   }
   const webhookService = new WebhookService(
-    writeRepo as any,
-    { findOne: jest.fn() } as any,
-    { findOne: jest.fn().mockResolvedValue(null) } as any,
-    { add: jest.fn() } as any,
+    writeRepo as unknown as Repository<WebhookEvent>,
+    { findOne: jest.fn() } as unknown as Repository<WebhookEvent>,
+    { findOne: jest.fn().mockResolvedValue(null) } as unknown as Repository<Payment>,
+    { add: jest.fn() } as unknown as Queue,
     confioSubscriptions,
     {} as MercadoPagoProvider,
   )
@@ -107,7 +127,7 @@ describe('Confio webhook log lines escape provider values', () => {
       data: { name: 'stores/s"\nforged=1', correlationId: 'c"=1', status: 'ACTIVE' },
     }
 
-    await confioSubscriptions.handle({ payload } as any)
+    await confioSubscriptions.handle({ payload } as unknown as WebhookEvent)
 
     const unresolved = linesOf(warn).filter((line) => line.includes('suscripción no resuelta'))
     expect(unresolved).toEqual([
@@ -144,5 +164,28 @@ describe('Confio webhook log lines escape provider values', () => {
 
     const id = buildConfioWebhookEventId(oneShot as never)
     expect(linesOf(log)).toContain(`Webhook recibido: confio/payment.statusChanged (${id})`)
+  })
+
+  it('logs a failed charge on a pending subscription in one line when its status has a newline', async () => {
+    // Red if `data.status` goes back raw into the pending line: the newline splits it in two.
+    const pending = {
+      id: 'sub-pending-1',
+      provider: SubscriptionProvider.CONFIO,
+      providerSubscriptionId: 'stores/01TESTSTORE/subscriptions/01SUB',
+      status: SubscriptionStatus.PENDING,
+    } as Subscription
+    const { confioSubscriptions } = realWebhookChain(pending)
+    const payload = {
+      event: 'subscription.billingStatusChanged',
+      data: { name: pending.providerSubscriptionId, status: 'FAILED\nforged=1' },
+    }
+
+    await confioSubscriptions.handle({ payload, providerEventId: 'ev-1' } as WebhookEvent)
+
+    const pendingLines = linesOf(log).filter((line) => line.includes('still pending subscription'))
+    expect(pendingLines).toEqual([
+      'Confio failed charge on a still pending subscription (sub-pending-1): ' +
+        'no effect, status=FAILED forged%3D1',
+    ])
   })
 })

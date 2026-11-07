@@ -13,6 +13,7 @@ import {
 } from '../provider.interface'
 import { isProductionEnv } from '../../shared/env/is-production'
 import { logger } from '../../shared/logger/logger'
+import { ConfioApiError } from './confio-api-error'
 import { ConfioSubscriptionInputError } from './confio-subscription-error'
 import { assertConfioBuyer } from './confio-buyer'
 import {
@@ -138,11 +139,15 @@ export class ConfioProvider implements PaymentProvider {
       body = text ? JSON.parse(text) : {}
     } catch {
       // Some ConfioPagos errors are plain text: report their status, not a SyntaxError.
-      throw new Error(`ConfioPagos respondió ${response.status} con un cuerpo que no es JSON`)
+      throw new ConfioApiError(
+        `ConfioPagos respondió ${response.status} con un cuerpo que no es JSON`,
+        response.status,
+      )
     }
 
     if (!response.ok) {
-      throw new Error(`ConfioPagos error ${response.status}`)
+      const code = body?.code == null ? undefined : String(body.code)
+      throw new ConfioApiError(`ConfioPagos error ${response.status}`, response.status, code)
     }
     return body
   }

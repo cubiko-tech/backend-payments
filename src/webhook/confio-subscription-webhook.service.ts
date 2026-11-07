@@ -435,7 +435,7 @@ export class ConfioSubscriptionWebhookService {
       if (yaDadaDeBaja(sub)) {
         this.logger.log(
           `Confio cobro no exitoso sobre una suscripción ya dada de baja (${sub.id}): ` +
-            `sin efecto, status=${data?.status}`,
+            `sin efecto, status=${escapeLogValue(data?.status)}`,
         )
 
         return null
@@ -446,13 +446,15 @@ export class ConfioSubscriptionWebhookService {
       if (sub.status === SubscriptionStatus.PENDING) {
         this.logger.log(
           `Confio failed charge on a still pending subscription (${sub.id}): ` +
-            `no effect, status=${data?.status}`,
+            `no effect, status=${escapeLogValue(data?.status)}`,
         )
 
         return null
       }
 
-      this.logger.warn(`Confio cobro no exitoso para ${sub.id}: status=${data?.status}`)
+      this.logger.warn(
+        `Confio cobro no exitoso para ${sub.id}: status=${escapeLogValue(data?.status)}`,
+      )
       return {
         eventType: SubscriptionEventType.PAYMENT_FAILED,
         toStatus: SubscriptionStatus.PAST_DUE,
@@ -656,7 +658,9 @@ export class ConfioSubscriptionWebhookService {
     const wire: ConfioSubscriptionStatusWire = data?.status || ''
 
     if (CONFIO_ESTADOS_SIN_EFECTO.includes(wire)) {
-      this.logger.log(`Confio estado del alta ignorado: ${wire} (${escapeLogValue(data?.name)})`)
+      this.logger.log(
+        `Confio estado del alta ignorado: ${escapeLogValue(wire)} (${escapeLogValue(data?.name)})`,
+      )
       return null
     }
 
