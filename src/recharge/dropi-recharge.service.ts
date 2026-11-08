@@ -19,7 +19,7 @@ import { TaxService } from '../tax/tax.service'
 import { TrmService } from '../trm/trm.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenWalletService, fail } from '../wallet/token-wallet.service'
-import { rechargePesos, storedRate } from './dropi-recharge-pricing'
+import { exactTokens, rechargePesos, storedRate } from './dropi-recharge-pricing'
 import { DropiRechargeSignal } from './dropi-recharge-signal'
 import { TOKEN_PRICE_USD } from './token-price'
 
@@ -71,15 +71,17 @@ export class DropiRechargeService {
   /**
    * Prices `tokens` at the day's TRM plus the country's VAT and saves the recharge `pending`. A
    * retry with the same `requestId` and tokens gets the same recharge; with other tokens, 409.
+   * Tokens are fixed, priced and compared at two decimals: noise below the hundredth is dropped.
    * Rejects with no payment saved: a non-CO brand (422), no TRM (503), no readable VAT (422) and a
    * closed token wallet (422). The token wallet itself may be left created.
    */
   async create(
     brandId: string,
     userId: string,
-    tokens: number,
+    requestedTokens: number,
     requestId: string,
   ): Promise<CreatedDropiRecharge> {
+    const tokens = exactTokens(requestedTokens)
     const idempotencyKey = dropiRechargeKey(requestId)
     const existing = await this.payments.findOne({ where: { brandId, idempotencyKey } })
     if (existing) return { created: false, recharge: sameRequestOrConflict(existing, tokens) }

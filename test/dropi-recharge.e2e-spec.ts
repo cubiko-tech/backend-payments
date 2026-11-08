@@ -127,6 +127,31 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     expect(one.body.data.amount).toBe(4_761)
   })
 
+  it('charges 375 tokens at TRM 4,113.60 as 1,835,694 pesos, not one more', async () => {
+    // R15: red when the price goes back to a float product: it gets 1,835,695.
+    trm.reply = () => ({ status: 200, body: [{ ...TRM_ROW, valor: '4113.60' }] })
+
+    const res = await postRecharge(recharge, body({ tokens: 375 }), member)
+
+    expect(res.status).toBe(HttpStatus.CREATED)
+    expect(res.body.data.amount).toBe(1_835_694)
+    const [row] = await rechargesOf(a.dataSource, RECHARGE_BRAND)
+    expect(Number(row.amount)).toBe(1_835_694)
+  })
+
+  it('fixes 10.000000001 tokens as 10 and gives a retry with 10 the same recharge', async () => {
+    // R15: red when create keeps the raw tokens: it stores 10.000000001 and the retry gets 409.
+    const first = await postRecharge(recharge, body({ tokens: 10.000000001 }), member)
+    const retry = await postRecharge(recharge, body({ tokens: 10 }), member)
+
+    expect([first.status, retry.status]).toEqual([HttpStatus.CREATED, HttpStatus.OK])
+    expect(first.body.data).toMatchObject({ tokens: 10, amount: 47_600 })
+    expect(retry.body.data.id).toBe(first.body.data.id)
+    const rows = await rechargesOf(a.dataSource, RECHARGE_BRAND)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].metadata.dropiRecharge.tokens).toBe(10)
+  })
+
   it('refuses with 403 a user who is not a member of the brand and saves nothing', async () => {
     // R15: red when the controller stops asking platform: the outsider gets 201.
     const outsider = recharge.jwt.sign({ id: 'outsider-loc174', isSuperAdmin: false, brand: null })
