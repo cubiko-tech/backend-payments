@@ -505,3 +505,29 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   pagó sin recibir. Sólo el resultado la cierra (LOC-175).
 - **Estado**: abierto — lo cierra la señal de LOC-181 (la edad de la `pending` más vieja) y la conciliación del
   release que conecta el cobro (076 C3).
+
+## Una recarga cobrada en Dropi con la wallet `TKN` cerrada queda `pending` sin tokens (LOC-175)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:75` (`creditTokens` rechaza la wallet cerrada)
+- **Qué lo dispara**: la wallet de tokens de la marca se cierra entre la creación de la recarga y el aviso
+  `charged`.
+- **Qué rompe**: el aviso recibe 422 `WALLET_CLOSED` y la recarga sigue `pending`: Dropi ya descontó el saldo y la
+  marca no recibe los tokens. Nada la devuelve en Dropi.
+- **Estado**: abierto — lo cierra una decisión de producto (devolver el saldo en Dropi o reabrir la wallet).
+
+## El reintento del admin reabre una recarga que Dropi informó fallida (LOC-175)
+
+- **Dónde**: `src/admin/admin.controller.ts:368-378` (`retryPayment` pasa cualquier pago fallido a pendiente)
+- **Qué lo dispara**: un admin reintenta una recarga `dropi_wallet` cerrada `failed`, y después llega un aviso
+  `charged`.
+- **Qué rompe**: la recarga reabierta acepta el `charged` y acredita sus tokens, aunque Dropi la había informado
+  fallida.
+- **Estado**: abierto — lo cierra LOC-176, que reescribe ese reintento: excluir `dropi_wallet` de él.
+
+## Reembolsar una recarga desde Dropi deja sus tokens en la wallet (LOC-175)
+
+- **Dónde**: `src/refund/refund.service.ts:134` (acepta cualquier pago completado) y
+  `src/refund/refund.service.ts:241-245` (sólo recupera los tokens de un paquete)
+- **Qué lo dispara**: se pide y se aprueba el reembolso de una recarga `dropi_wallet` ya `completed`.
+- **Qué rompe**: el reembolso se registra y los tokens del origen `dropi` quedan en la wallet de la marca.
+- **Estado**: abierto — el alcance (rechazar ese reembolso o recuperar los tokens) lo decide quien aprueba.

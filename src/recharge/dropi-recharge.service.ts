@@ -154,7 +154,7 @@ function sameRequestOrConflict(existing: Payment, tokens: number): DropiRecharge
   return toView(existing)
 }
 
-function toView(payment: Payment): DropiRechargeView {
+export function toView(payment: Payment): DropiRechargeView {
   const terms: DropiRechargeTerms = payment.metadata.dropiRecharge
   return {
     id: payment.id,

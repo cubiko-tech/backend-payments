@@ -7,16 +7,21 @@ import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
 import { DataSource } from 'typeorm'
 
+import { AuditService } from '../../src/audit/audit.service'
+import { AuditLog } from '../../src/audit/entities/auditLog.entity'
 import { BillingProfile } from '../../src/billing-profile/entities/billingProfile.entity'
 import { ClientPlatformService } from '../../src/client/client-platform.service'
 import { ClientRolesService } from '../../src/client/client-roles.service'
 import { Payment } from '../../src/payment/entities/payment.entity'
+import { DropiRechargeResultController } from '../../src/recharge/dropi-recharge-result.controller'
+import { DropiRechargeResultService } from '../../src/recharge/dropi-recharge-result.service'
 import { DropiRechargeController } from '../../src/recharge/dropi-recharge.controller'
 import { DropiRechargeService } from '../../src/recharge/dropi-recharge.service'
 import { ApiAuthGuard } from '../../src/shared/auth/api-auth.guard'
 import { ServiceCredentialService } from '../../src/shared/auth/service-credential.service'
 import { createGlobalValidationPipe } from '../../src/shared/validation/global-validation-pipe'
 import { TaxService } from '../../src/tax/tax.service'
+import { Transaction } from '../../src/transaction/entities/transaction.entity'
 import { TRM_SOURCE_URL, TrmService } from '../../src/trm/trm.service'
 import { Wallet } from '../../src/wallet/entities/wallet.entity'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
@@ -60,9 +65,13 @@ export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, b
     useValue: dataSource.getRepository(entity as never),
   })
   const moduleRef = await Test.createTestingModule({
-    controllers: [DropiRechargeController],
+    controllers: [DropiRechargeController, DropiRechargeResultController],
     providers: [
       DropiRechargeService,
+      DropiRechargeResultService,
+      AuditService,
+      repo(AuditLog, 'DBWrite'),
+      repo(AuditLog, 'DBRead'),
       TokenWalletService,
       TrmService,
       Reflector,
@@ -100,8 +109,28 @@ export function postRecharge(recharge: RechargeApp, body: object, userToken: str
   return call.send(body)
 }
 
+/** `POST /recharge/dropi/:id/result` with the ROAX Ads key only, as the result arrives. */
+export function postResult(recharge: RechargeApp, id: string, body: object) {
+  return request(recharge.app.getHttpServer())
+    .post(`/recharge/dropi/${id}/result`)
+    .set('Authorization', `Bearer ${ADS_KEY}`)
+    .send(body)
+}
+
 export function rechargesOf(dataSource: DataSource, brandId: string) {
   return dataSource.getRepository(Payment).find({ where: { brandId } })
+}
+
+export function tokenWalletOf(dataSource: DataSource, brandId: string) {
+  return dataSource.getRepository(Wallet).findOneByOrFail({ brandId, currency: 'TKN' })
+}
+
+export function creditsOf(dataSource: DataSource, paymentId: string) {
+  return dataSource.getRepository(Transaction).findBy({ referenceId: paymentId })
+}
+
+export function auditOf(dataSource: DataSource, paymentId: string) {
+  return dataSource.getRepository(AuditLog).findBy({ entityType: 'payment', entityId: paymentId })
 }
 
 export async function cleanBillingProfile(dataSource: DataSource, brandId: string) {
