@@ -45,7 +45,15 @@ export class Payment extends Content {
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ length: 3 }) currency: string
   // USD→COP TRM this payment was priced with, and the day it is valid from; null when unused.
-  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true }) exchangeRate: number
+  // pg returns a decimal as text: the transformer keeps the declared number type true.
+  @Column({
+    type: 'decimal',
+    precision: 12,
+    scale: 2,
+    nullable: true,
+    transformer: { to: (value) => value, from: (value) => (value == null ? value : Number(value)) },
+  })
+  exchangeRate: number
   @Column({ type: 'date', nullable: true }) exchangeRateDate: string
   @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
   status: PaymentStatus

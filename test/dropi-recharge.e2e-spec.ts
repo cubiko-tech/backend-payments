@@ -24,7 +24,16 @@ import {
   rechargesOf,
   startRechargeApp,
 } from './support/dropi-recharge.fixture'
-import { startTrmSource, TRM_ROW, trmDown, trmOk, TrmSource } from './support/trm-source.fixture'
+import {
+  startTrmSource,
+  TRM_DAY,
+  TRM_ROW,
+  trmDayPlus,
+  trmDown,
+  trmOk,
+  trmRow,
+  TrmSource,
+} from './support/trm-source.fixture'
 import {
   cleanBrand,
   RaceInstance,
@@ -192,6 +201,43 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
   it('answers 503 with no TRM and saves nothing', async () => {
     // R15: red when a fallback rate prices the recharge: it gets 201.
     trm.reply = trmDown
+
+    const res = await postRecharge(recharge, body(), member)
+
+    expect(res.status).toBe(HttpStatus.SERVICE_UNAVAILABLE)
+    expect(res.body.code).toBe('EXCHANGE_RATE_UNAVAILABLE')
+    expect(await rechargesOf(a.dataSource, RECHARGE_BRAND)).toHaveLength(0)
+  })
+
+  it("prices with today's TRM when the source's first row is in force from tomorrow", async () => {
+    // R15: red when the TRM takes the first row again: the recharge is priced at 4,500.
+    trm.reply = () => ({
+      status: 200,
+      body: [trmRow('4500.00', trmDayPlus(1), trmDayPlus(2)), TRM_ROW],
+    })
+
+    const res = await postRecharge(recharge, body(), member)
+
+    expect(res.status).toBe(HttpStatus.CREATED)
+    expect(res.body.data).toMatchObject({ exchangeRate: 4000, exchangeRateDate: TRM_DAY })
+    const [row] = await rechargesOf(a.dataSource, RECHARGE_BRAND)
+    expect([Number(row.exchangeRate), row.exchangeRateDate]).toEqual([4000, TRM_DAY])
+  })
+
+  it('answers 503 and saves nothing when the only row is in force from tomorrow', async () => {
+    // R15: red when the TRM takes the first row again: tomorrow's rate prices it, 201.
+    trm.reply = () => ({ status: 200, body: [trmRow('4500.00', trmDayPlus(1), trmDayPlus(2))] })
+
+    const res = await postRecharge(recharge, body(), member)
+
+    expect(res.status).toBe(HttpStatus.SERVICE_UNAVAILABLE)
+    expect(res.body.code).toBe('EXCHANGE_RATE_UNAVAILABLE')
+    expect(await rechargesOf(a.dataSource, RECHARGE_BRAND)).toHaveLength(0)
+  })
+
+  it('answers 503 and saves nothing when the source sends a rate of 1e10', async () => {
+    // R15: red when the credible range goes: the save overflows decimal(12,2) and the call gets 500.
+    trm.reply = () => ({ status: 200, body: [{ ...TRM_ROW, valor: '1e10' }] })
 
     const res = await postRecharge(recharge, body(), member)
 
