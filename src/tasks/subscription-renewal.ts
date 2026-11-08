@@ -303,9 +303,14 @@ async function issueExternalCharge(
   } catch (error) {
     logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
     sub.status = SubscriptionStatus.PAST_DUE
-    if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
+    // No TRM is a gap on our side, not a failed charge: it must not use up a retry.
+    if (isRetry && !isMissingExchangeRate(error)) sub.retryCount = (sub.retryCount || 0) + 1
     await deps.subscriptionRepo.save(sub)
   }
+}
+
+function isMissingExchangeRate(error: unknown): boolean {
+  return (error as { code?: string })?.code === 'EXCHANGE_RATE_UNAVAILABLE'
 }
 
 function logMissingWallet(sub: Subscription): void {
