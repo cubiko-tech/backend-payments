@@ -39,6 +39,17 @@ describe('DropiRechargeSignal', () => {
     })
   })
 
+  it('a recharge born after the app clock is recorded with age 0, never negative', () => {
+    // R15: red when secondsSince drops its floor at 0: the age is sent as -30.
+    const ahead = new Date(NOW.getTime() + 30_000)
+    signal.changed(rechargeOf(PaymentStatus.PENDING, { createdAt: ahead }), NOW)
+
+    expect(agent.recordCustomEvent).toHaveBeenCalledWith(
+      'DropiRecharge',
+      expect.objectContaining({ ageSeconds: 0 }),
+    )
+  })
+
   it('the backlog is recorded as its own event', () => {
     // R15: red when backlog reuses the recharge event type: the alert query would not find it.
     signal.backlog(2, 2400)

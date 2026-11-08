@@ -162,12 +162,12 @@ describe('A recharge from Dropi leaves a New Relic signal (PostgreSQL, LOC-181)'
   })
 
   describe('the minute sweep', () => {
-    const now = new Date()
     const backlog = () => recharge.apm.events.filter((e) => e.type === 'DropiRechargeBacklog')
 
     /**
-     * Runs the sweep in a transaction rolled back afterwards, with every other pending recharge
-     * failed inside it, so rows left in the shared database by others never count.
+     * Runs one tick in a transaction rolled back afterwards, with every other pending recharge
+     * failed inside it, so rows left in the shared database by others never count. Ages are set
+     * with the database `now()`, fixed for the whole transaction, so the reading is exact.
      */
     async function sweepAlone(pending: { id: string; minutes: number }[]) {
       const runner = a.dataSource.createQueryRunner()
@@ -179,16 +179,47 @@ describe('A recharge from Dropi leaves a New Relic signal (PostgreSQL, LOC-181)'
           [pending.map(({ id }) => id)],
         )
         for (const { id, minutes } of pending) {
-          const createdAt = new Date(now.getTime() - minutes * 60_000)
-          await runner.query('UPDATE payments SET "createdAt" = $2 WHERE id = $1', [id, createdAt])
+          await runner.query(
+            `UPDATE payments SET "createdAt" = now() - make_interval(mins => $2) WHERE id = $1`,
+            [id, minutes],
+          )
         }
         const signal = recharge.moduleRef.get(DropiRechargeSignal)
-        await new DropiRechargeBacklogTask(runner.manager.getRepository(Payment), signal).run(now)
+        await new DropiRechargeBacklogTask(runner.manager.getRepository(Payment), signal).tick()
       } finally {
         await runner.rollbackTransaction()
         await runner.release()
       }
     }
+
+    it('with the app clock 10 minutes behind, a 40-minute recharge is 2,400 seconds old', async () => {
+      // R15: red when the age goes back to the app clock: it reports 1,800 seconds.
+      const pending = (await create()).body.data
+      jest.useFakeTimers({
+        now: Date.now() - 10 * 60_000,
+        doNotFake: [
+          'hrtime',
+          'nextTick',
+          'performance',
+          'queueMicrotask',
+          'setImmediate',
+          'clearImmediate',
+          'setInterval',
+          'clearInterval',
+          'setTimeout',
+          'clearTimeout',
+        ],
+      })
+      try {
+        await sweepAlone([{ id: pending.id, minutes: 40 }])
+      } finally {
+        jest.useRealTimers()
+      }
+
+      expect(backlog().map((event) => event.attributes)).toEqual([
+        { pending: 1, oldestPendingSeconds: 2400 },
+      ])
+    })
 
     it('two pending recharges of 5 and 40 minutes count 2 and 2,400 seconds', async () => {
       // R15: red when the sweep takes the newest instead of the oldest: it reports 300 seconds.

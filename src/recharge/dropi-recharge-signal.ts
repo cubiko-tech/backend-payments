@@ -13,8 +13,9 @@ const STATUS_OF: Partial<Record<PaymentStatus, string>> = {
   [PaymentStatus.FAILED]: 'failed',
 }
 
-export const secondsSince = (from: Date, now: Date) =>
-  Math.floor((now.getTime() - new Date(from).getTime()) / 1000)
+// Never negative: createdAt comes from the database clock, which may run ahead of the app's.
+const secondsSince = (from: Date, now: Date) =>
+  Math.max(0, Math.floor((now.getTime() - new Date(from).getTime()) / 1000))
 
 /**
  * What a recharge from Dropi tells New Relic: one `DropiRecharge` event per state change and one

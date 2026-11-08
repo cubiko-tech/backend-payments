@@ -9,7 +9,7 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payment/entities/payment.entity'
-import { DropiRechargeSignal, secondsSince } from '../recharge/dropi-recharge-signal'
+import { DropiRechargeSignal } from '../recharge/dropi-recharge-signal'
 
 /**
  * Every minute, how many recharges from Dropi are still pending and the age of the oldest one, in
@@ -27,19 +27,19 @@ export class DropiRechargeBacklogTask {
   // Not `run` itself: the cron library calls the handler with its own first argument.
   @Cron(CronExpression.EVERY_MINUTE)
   tick(): Promise<void> {
-    return this.run(new Date())
+    return this.run()
   }
 
-  async run(now: Date): Promise<void> {
+  async run(): Promise<void> {
+    // The age is measured by the database clock, the one that set createdAt, not the app's.
     const row = await this.payments
       .createQueryBuilder('payment')
       .select('COUNT(*)', 'pending')
-      .addSelect('MIN(payment.createdAt)', 'oldest')
+      .addSelect('FLOOR(EXTRACT(EPOCH FROM now() - MIN(payment.createdAt)))', 'oldest')
       .where('payment.provider = :provider', { provider: PaymentProvider.DROPI_WALLET })
       .andWhere('payment.purpose = :purpose', { purpose: PaymentPurpose.TOKEN_RECHARGE })
       .andWhere('payment.status = :status', { status: PaymentStatus.PENDING })
-      .getRawOne<{ pending: string; oldest: Date | null }>()
-    const oldest = row?.oldest ? secondsSince(row.oldest, now) : 0
-    this.signal.backlog(Number(row?.pending ?? 0), oldest)
+      .getRawOne<{ pending: string; oldest: string | null }>()
+    this.signal.backlog(Number(row?.pending ?? 0), Number(row?.oldest ?? 0))
   }
 }
