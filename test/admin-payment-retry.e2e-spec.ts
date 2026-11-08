@@ -91,7 +91,7 @@ describe('Admin retry of a failed payment (PostgreSQL, LOC-176)', () => {
     a = await startInstance()
     b = await startInstance()
     payments = a.dataSource.getRepository(Payment)
-    const unused = null as any
+    const unused = null as never
     admin = new AdminController(
       unused,
       unused,
@@ -220,7 +220,7 @@ describe('Admin retry of a failed payment (PostgreSQL, LOC-176)', () => {
     const payment = await seedFailed({
       provider: PaymentProvider.DROPI_WALLET,
       purpose: PaymentPurpose.TOKEN_RECHARGE,
-      walletId: null as any,
+      walletId: undefined,
     })
 
     await expectConflict(admin.retryPayment(payment.id), 'PAYMENT_NOT_RETRYABLE')
