@@ -12,7 +12,7 @@ import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
 import { TOKEN_CURRENCY, TokenOrigin, isTokenCurrency } from './token-origin'
 import { TokenBuckets, fromCents, planTokenRefund, planTokenSpend, toCents } from './token-spend'
 import { MovementAudit } from '../transaction/movement-audit'
-import { applyLimits, isLimitHit, MovementLimits } from './movement-limits'
+import { applyLimits, connectWithin, isLimitHit, MovementLimits } from './movement-limits'
 
 const BUCKET_COLUMN: Record<TokenOrigin, 'giftTokens' | 'purchasedTokens' | 'dropiTokens'> = {
   [TokenOrigin.GIFT]: 'giftTokens',
@@ -39,6 +39,10 @@ export interface TokenMovement {
 
 export const fail = (code: string, message: string, status: HttpStatus) =>
   new RequestException({ code, message }, status)
+
+/** A movement that ran out of its limits: nothing was applied; retry with the same key. */
+export const walletBusy = () =>
+  fail('WALLET_BUSY', 'Wallet is busy, retry with the same key', HttpStatus.SERVICE_UNAVAILABLE)
 
 /**
  * The brand token wallet (`internal`/`TKN`) and its balance per origin. Every movement locks the
@@ -231,7 +235,13 @@ export class TokenWalletService {
   ): Promise<TokenMovement> {
     const key = idempotencyKey ?? data.idempotencyKey
     const queryRunner = this.dataSource.createQueryRunner()
-    await queryRunner.connect()
+    if (limits) {
+      await connectWithin(queryRunner, limits.connectTimeoutMs).catch((error) => {
+        throw isLimitHit(error) ? walletBusy() : error
+      })
+    } else {
+      await queryRunner.connect()
+    }
     await queryRunner.startTransaction()
     try {
       if (limits) await applyLimits(queryRunner, limits)
@@ -283,18 +293,20 @@ export class TokenWalletService {
       this.logger.log(`Token ${applied.type} of ${expected.cents / 100} on wallet ${walletId}`)
       return { wallet: toView(wallet), transaction, replayed: false }
     } catch (error) {
-      if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
+      const limitHit = limits !== undefined && isLimitHit(error)
+      if (queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction()
+        } catch (rollbackError) {
+          // transaction_timeout ends the session: the server already rolled back.
+          if (!limitHit) throw rollbackError
+        }
+      }
       if (key && isUniqueConstraintViolation(error)) {
         // Awaited here: `finally` releases the query runner this lookup uses.
         return await this.replayAfterConflict(queryRunner, walletId, key, expected)
       }
-      if (limits && isLimitHit(error)) {
-        throw fail(
-          'WALLET_BUSY',
-          'Wallet is busy, retry with the same key',
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
-      }
+      if (limitHit) throw walletBusy()
       throw error
     } finally {
       await queryRunner.release()

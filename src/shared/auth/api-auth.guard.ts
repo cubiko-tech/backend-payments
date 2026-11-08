@@ -178,6 +178,7 @@ export class ApiAuthGuard implements CanActivate {
     const client = this.decodeClaims(token)?.client
     if (!client) return null
 
+    const signal = AbortSignal.timeout(timeoutMs ?? 10000)
     let res: globalThis.Response
     try {
       res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
@@ -187,16 +188,27 @@ export class ApiAuthGuard implements CanActivate {
           'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ client }),
-        signal: AbortSignal.timeout(timeoutMs ?? 10000),
+        signal,
       })
     } catch {
       if (timeoutMs) throw authUnavailable()
       return null
     }
-    if (timeoutMs && res.status >= 500) throw authUnavailable()
+    if (timeoutMs && res.status >= 500) {
+      // Drop the unread body so the connection does not wait on it.
+      await res.body?.cancel().catch(() => undefined)
+      throw authUnavailable()
+    }
+    if (!res.ok) return null
+    let body: any
     try {
-      if (!res.ok) return null
-      const body: any = await res.json()
+      body = await res.json()
+    } catch {
+      // The signal still runs while the body is read: auth sent headers and stalled.
+      if (timeoutMs && signal.aborted) throw authUnavailable()
+      return null
+    }
+    try {
       if (body?.code !== 'tokenValidate' || !body?.data) return null
       const id = body.data.user || body.data.id
       if (!id) return null

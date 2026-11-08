@@ -186,6 +186,42 @@ export async function holdWalletRow(dataSource: DataSource, walletId: string) {
   }
 }
 
+interface PoolView {
+  options: { max: number }
+  totalCount: number
+  idleCount: number
+}
+
+const poolOf = (dataSource: DataSource) =>
+  (dataSource.driver as unknown as { master: PoolView }).master
+
+/** Connections of `dataSource`'s pool that are checked out right now. */
+export function checkedOut(dataSource: DataSource): number {
+  const pool = poolOf(dataSource)
+  return pool.totalCount - pool.idleCount
+}
+
+/**
+ * Checks out every free connection of `dataSource`'s pool, so the next one waits, until the returned
+ * call gives them back; it gives them back once however many times it is called.
+ */
+export async function holdPool(dataSource: DataSource) {
+  const free = poolOf(dataSource).options.max - checkedOut(dataSource)
+  const held = await Promise.all(
+    Array.from({ length: free }, async () => {
+      const queryRunner = dataSource.createQueryRunner()
+      await queryRunner.connect()
+      return queryRunner
+    }),
+  )
+  let released = false
+  return async () => {
+    if (released) return
+    released = true
+    await Promise.all(held.map((queryRunner) => queryRunner.release()))
+  }
+}
+
 export function movementsOf(dataSource: DataSource, walletId: string) {
   return dataSource
     .getRepository(Transaction)

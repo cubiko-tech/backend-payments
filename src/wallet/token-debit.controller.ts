@@ -14,15 +14,16 @@ import {
 import { RequestException } from '../shared/exception/request.exception'
 import { DebitTokensDto } from './dto/debit-tokens.dto'
 import { RefundDebitDto } from './dto/refund-debit.dto'
-import { MovementLimits } from './movement-limits'
-import { TokenMovement, TokenWalletService, fail } from './token-wallet.service'
+import { isLimitHit, MovementLimits, withinMs } from './movement-limits'
+import { TokenMovement, TokenWalletService, fail, walletBusy } from './token-wallet.service'
 
 /**
- * Budget of a debit, under the 5 s ROAX Ads waits for Pagos: auth and platform get 1.5 s each, the
- * wallet row and each statement 500 ms.
+ * Budget of a debit, 4.5 s in all under the 5 s ROAX Ads waits for Pagos: auth 1 s, platform 1 s,
+ * the wallet lookup 0.5 s, a pool connection 0.5 s and the whole transaction 1.5 s.
  */
-const UPSTREAM_TIMEOUT_MS = 1500
-const DEBIT_LIMITS: MovementLimits = { lockTimeoutMs: 500, statementTimeoutMs: 500 }
+const UPSTREAM_TIMEOUT_MS = 1000
+const WALLET_LOOKUP_TIMEOUT_MS = 500
+const DEBIT_LIMITS: MovementLimits = { connectTimeoutMs: 500, transactionTimeoutMs: 1500 }
 
 export const DEBIT_REFERENCE = 'token_debit'
 
@@ -74,7 +75,10 @@ export class TokenDebitController {
       this.logger.warn(`Forbidden token debit: user=${userId} brandId=${brandId}`)
       throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
-    const walletId = await this.tokenWallets.findTokenWalletId(brandId)
+    const lookup = this.tokenWallets.findTokenWalletId(brandId)
+    const walletId = await withinMs(lookup, WALLET_LOOKUP_TIMEOUT_MS).catch((error) => {
+      throw isLimitHit(error) ? walletBusy() : error
+    })
     if (!walletId) {
       throw fail('INSUFFICIENT_BALANCE', 'Insufficient tokens', HttpStatus.UNPROCESSABLE_ENTITY)
     }

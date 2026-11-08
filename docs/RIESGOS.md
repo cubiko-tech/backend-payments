@@ -558,12 +558,17 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un débito de ROAX Ads que commitea después de que ROAX Ads se rindió queda sin reintegrar (LOC-187)
 
-- **Dónde**: `src/wallet/token-debit.controller.ts:24-25` (el presupuesto) y `:116`,
-  `src/wallet/token-wallet.service.ts:172` (el 404 `DEBIT_NOT_FOUND` del reintegro)
-- **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por algo que no es auth, platform, el lock de la
-  fila ni una sentencia (cada uno tiene su tope); ROAX Ads lo da por fallido y pide el reintegro antes de que commitee.
+- **Dónde**: `src/wallet/token-debit.controller.ts:24-26` (el presupuesto) y `:120`,
+  `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
+- **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
+  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
+  antes del `SET LOCAL` (`token-wallet.service.ts:245-247`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
+  lo da por fallido y pide el reintegro antes de ver el débito.
 - **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
   generación. Ningún barrido de Pagos lo repara.
-- **Estado**: mitigado por los topes (1,5 s auth, 1,5 s platform, 500 ms lock y sentencia) y por el contrato del 404:
-  «todavía no hay débito con esa llave, reintentá con la misma». Abierto — lo cierra LOC-191 reintentando el
-  reintegro con la misma llave ante un 404.
+- **Estado**: mitigado por un presupuesto de 4,5 s: auth 1 s, platform 1 s, la búsqueda de la wallet 0,5 s, la conexión
+  del pool 0,5 s y la transacción entera 1,5 s (`transaction_timeout`, que PostgreSQL aplica en el servidor y
+  revierte aunque el proceso ya no espere); y por el contrato del 404: «todavía no hay débito con esa llave, reintentá
+  con la misma». Abierto — lo cierra LOC-191 reintentando el reintegro con la misma llave ante un 404.
+  `transaction_timeout` existe desde PostgreSQL 17: la base local es 18.1 (medido); en una base anterior el `SET LOCAL`
+  falla y todo débito responde 500. La versión de dev, staging y producción no se miró.
