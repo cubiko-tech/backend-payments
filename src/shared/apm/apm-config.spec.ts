@@ -27,9 +27,9 @@ describe('New Relic agent configuration', () => {
     mockNewRelicLoads.mockClear()
   })
 
-  it('start:prod preloads the agent', () => {
-    // R15: red when start:prod goes back to plain node: the agent never loads in production.
-    expect(scripts()['start:prod']).toMatch(/^node -r newrelic /)
+  it.each(['start:prod', 'start:stag'])('%s preloads the agent', (script) => {
+    // R15: red when either script goes back to plain node: that environment never reports.
+    expect(scripts()[script]).toMatch(/^node -r newrelic /)
   })
 
   it('pins neither the app name nor the licence in any npm script', () => {

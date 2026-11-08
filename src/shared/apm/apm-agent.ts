@@ -10,8 +10,9 @@ export const APM_AGENT = Symbol('APM_AGENT')
 const silentAgent: ApmAgent = { recordCustomEvent: () => undefined }
 
 /**
- * The agent `node -r newrelic` preloads when `NEW_RELIC_LICENSE_KEY` is set; without it, one that
- * records nothing, so the service starts and the package is never loaded.
+ * The agent `start:prod` and `start:stag` preload with `node -r newrelic` when
+ * `NEW_RELIC_LICENSE_KEY` is set. Without it, one that records nothing: the preloaded agent does
+ * not connect, the service still starts, and this code never requires the package.
  */
 export function loadApmAgent(env: NodeJS.ProcessEnv = process.env): ApmAgent {
   if (!env.NEW_RELIC_LICENSE_KEY) return silentAgent
