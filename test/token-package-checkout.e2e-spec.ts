@@ -7,17 +7,23 @@ import { config as dotenvConfig } from 'dotenv'
 
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
+import { buildIdempotencyFingerprint } from '../src/checkout/checkout-idempotency'
 import { bonusTokensKey, purchasedTokensKey } from '../src/checkout/token-package-checkout'
 import { InvoiceService } from '../src/invoice/invoice.service'
-import { PaymentStatus } from '../src/payment/entities/payment.entity'
+import {
+  Payment,
+  PaymentProvider,
+  PaymentPurpose,
+  PaymentStatus,
+} from '../src/payment/entities/payment.entity'
 import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import {
   cleanPackageBrand,
-  dropiNotice,
-  fakeDropi,
+  confioNotice,
+  fakeExternalProvider,
   packageCheckout,
   packageId,
   paymentsOf,
@@ -72,7 +78,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     await cleanPackageBrand(instance.dataSource, BRAND)
     await restoreCatalog()
     source.reply = trmOk
-    fakeDropi(instance)
+    fakeExternalProvider(instance)
   })
 
   afterEach(() => jest.restoreAllMocks())
@@ -87,7 +93,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
   it('CA3 the USD 25 package charges COP at its TRM, invoices VAT included and credits 25 + 2', async () => {
     // R15: red when completion credits the paid amount instead of the package tokens: 100002.
     const paymentId = await buy()
-    const done = await instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+    const done = await instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE))
 
     expect(done).toBe(true)
     const payment = (await paymentsOf(instance.dataSource, BRAND))[0]
@@ -129,7 +135,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     const payment = (await paymentsOf(instance.dataSource, BRAND))[0]
     expect([payment.amount, payment.currency]).toEqual(['100000.00', 'COP'])
     expect(payment.walletId).not.toBe(foreign)
-    await instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+    await instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE))
     expect((await tokenWalletOf(instance.dataSource, BRAND))!.balance).toBe('27.00')
   })
 
@@ -139,11 +145,11 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     const gate = createGate()
     parkFirstCall(instance.moduleRef.get(TokenWalletService), 'creditTokens', gate)
 
-    const first = instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+    const first = instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE))
     await gate.reached
     const second = await instance.checkout.completeExternalPayment(
       paymentId,
-      dropiNotice(COP_PRICE),
+      confioNotice(COP_PRICE),
     )
     gate.release()
 
@@ -159,7 +165,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       .spyOn(instance.moduleRef.get(InvoiceService), 'create')
       .mockRejectedValueOnce(new Error('invoice store down'))
     await expect(
-      instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE)),
+      instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE)),
     ).rejects.toThrow('invoice store down')
     expect((await paymentsOf(instance.dataSource, BRAND))[0].status).toBe(PaymentStatus.PROCESSING)
 
@@ -188,7 +194,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       const gift = { amount, reason: 'Bonus', idempotencyKey: keyOf(paymentId) }
       await gifts.gift(BRAND, gift, { user: { id: 'superadmin-loc140' } })
 
-      await instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+      await instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE))
 
       const wallet = (await tokenWalletOf(instance.dataSource, BRAND))!
       expect([wallet.purchasedTokens, wallet.giftTokens].map(Number)).toEqual([25, 2 + amount])
@@ -202,7 +208,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     await instance.dataSource
       .getRepository(TokenPackage)
       .update({ slug: TESTEO_SEMANAL.slug }, { bonusTokens: 9 })
-    await instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE))
+    await instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE))
 
     expect((await tokenWalletOf(instance.dataSource, BRAND))!.giftTokens).toBe('2.00')
   })
@@ -214,10 +220,10 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       .spyOn(instance.moduleRef.get(InvoiceService), 'create')
       .mockRejectedValueOnce(new Error('invoice store down'))
     await expect(
-      instance.checkout.completeExternalPayment(paymentId, dropiNotice(COP_PRICE)),
+      instance.checkout.completeExternalPayment(paymentId, confioNotice(COP_PRICE)),
     ).rejects.toThrow()
 
-    await instance.checkout.completeExternalPayment(paymentId, dropiNotice(1))
+    await instance.checkout.completeExternalPayment(paymentId, confioNotice(1))
 
     const payment = (await paymentsOf(instance.dataSource, BRAND))[0]
     expect(payment.status).toBe(PaymentStatus.COMPLETED)
@@ -241,7 +247,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     const down = await startTrmSource(trmDown)
     const cold = await startInstance({ realBilling: true, trmUrl: down.url })
     try {
-      fakeDropi(cold)
+      fakeExternalProvider(cold)
       await expect(cold.checkout.processCheckout(packageCheckout(BRAND, id))).rejects.toMatchObject(
         { status: 503, code: 'EXCHANGE_RATE_UNAVAILABLE' },
       )
@@ -260,7 +266,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     const down = await startTrmSource(trmDown)
     const cold = await startInstance({ realBilling: true, trmUrl: down.url })
     try {
-      fakeDropi(cold)
+      fakeExternalProvider(cold)
       jest
         .spyOn(cold.moduleRef.get(ProviderConfigService), 'isProviderAvailable')
         .mockResolvedValue(false)
@@ -274,6 +280,49 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       await stopInstance(cold)
       await down.close()
     }
+  })
+
+  it('CA5 refuses a dropi package with 400 PROVIDER_NOT_AVAILABLE, saving no payment', async () => {
+    // R15: red when assertProviderAvailable drops its dropi package guard: the payment is saved.
+    const createCheckout = fakeExternalProvider(instance)
+    const config = instance.moduleRef.get(ProviderConfigService)
+    expect(await config.isProviderAvailable('CO', 'dropi')).toBe(true)
+
+    await expect(buy({ provider: 'dropi' })).rejects.toMatchObject({
+      status: 400,
+      code: 'PROVIDER_NOT_AVAILABLE',
+    })
+    expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
+    expect(await tokenWalletOf(instance.dataSource, BRAND)).toBeNull()
+    expect(createCheckout).not.toHaveBeenCalled()
+  })
+
+  it('CA5 refuses to retry a failed dropi package with 400, leaving the payment failed', async () => {
+    // R15: red when assertProviderAvailable drops its dropi package guard: the row turns pending.
+    const createCheckout = fakeExternalProvider(instance)
+    const req = packageCheckout(BRAND, id, { provider: 'dropi', idempotencyKey: 'loc207-retry' })
+    const payments = instance.dataSource.getRepository(Payment)
+    const failed = await payments.save(
+      payments.create({
+        brandId: BRAND,
+        userId: req.userId,
+        idempotencyKey: req.idempotencyKey,
+        provider: PaymentProvider.DROPI,
+        amount: COP_PRICE,
+        currency: 'COP',
+        status: PaymentStatus.FAILED,
+        purpose: PaymentPurpose.TOKEN_PACKAGE,
+        metadata: { country: 'CO', idempotencyFingerprint: buildIdempotencyFingerprint(req) },
+      }),
+    )
+
+    await expect(instance.checkout.processCheckout(req)).rejects.toMatchObject({
+      status: 400,
+      code: 'PROVIDER_NOT_AVAILABLE',
+    })
+    const rows = await paymentsOf(instance.dataSource, BRAND)
+    expect(rows.map((row) => [row.id, row.status])).toEqual([[failed.id, PaymentStatus.FAILED]])
+    expect(createCheckout).not.toHaveBeenCalled()
   })
 
   it('refuses with 422 WALLET_CLOSED and saves no payment when the brand token wallet is closed', async () => {

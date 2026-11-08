@@ -22,8 +22,8 @@ import { refundTokensKey } from '../src/wallet/token-package-reclaim'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import {
   cleanPackageBrand,
-  dropiNotice,
-  fakeDropi,
+  confioNotice,
+  fakeExternalProvider,
   packageCheckout,
   packageId,
   tokenWalletOf,
@@ -67,7 +67,7 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
 
   const boughtPackage = async () => {
     const checkout = await instance.checkout.processCheckout(packageCheckout(BRAND, id))
-    await instance.checkout.completeExternalPayment(checkout.paymentId, dropiNotice(COP_PRICE))
+    await instance.checkout.completeExternalPayment(checkout.paymentId, confioNotice(COP_PRICE))
     return instance.dataSource.getRepository(Payment).findOneByOrFail({ id: checkout.paymentId })
   }
   const ask = (payment: Payment, amount = Number(payment.amount)) =>
@@ -109,7 +109,7 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
     await cleanRefunds()
     await cleanPackageBrand(instance.dataSource, BRAND)
     source.reply = trmOk
-    fakeDropi(instance)
+    fakeExternalProvider(instance)
   })
 
   afterEach(() => jest.restoreAllMocks())

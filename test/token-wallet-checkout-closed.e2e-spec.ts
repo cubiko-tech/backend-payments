@@ -8,7 +8,11 @@ import { config as dotenvConfig } from 'dotenv'
 import { CheckoutRequest } from '../src/checkout/checkout.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
-import { cleanPackageBrand, fakeDropi, paymentsOf } from './support/token-package.fixture'
+import {
+  cleanPackageBrand,
+  fakeExternalProvider,
+  paymentsOf,
+} from './support/token-package.fixture'
 import { RaceInstance, startInstance, stopInstance } from './support/wallet-race.fixture'
 
 dotenvConfig({ path: '.env' })
@@ -53,7 +57,7 @@ describe('Checkout against a token wallet or a missing wallet (PostgreSQL, LOC-1
         status: WalletStatus.ACTIVE,
       }),
     )
-    fakeDropi(instance)
+    fakeExternalProvider(instance)
   })
 
   afterEach(() => jest.restoreAllMocks())

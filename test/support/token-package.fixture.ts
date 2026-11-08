@@ -18,11 +18,11 @@ export const TESTEO_SEMANAL = {
 export const packageId = async (dataSource: DataSource, slug = TESTEO_SEMANAL.slug) =>
   (await dataSource.getRepository(TokenPackage).findOneByOrFail({ slug })).id
 
-/** A Dropi checkout: the provider has a cost, so its client answers with a link and no network. */
-export function fakeDropi(instance: RaceInstance) {
+/** An external checkout: the provider has a cost, so its client answers with a link and no network. */
+export function fakeExternalProvider(instance: RaceInstance) {
   const createCheckout = jest.fn(async () => ({
-    providerPaymentId: `dropi-${Date.now()}`,
-    checkoutUrl: 'https://pay.example/dropi',
+    providerPaymentId: `external-${Date.now()}`,
+    checkoutUrl: 'https://pay.example/external',
   }))
   // R17: the external provider charges money; the cases only need its link and its notice.
   ;(instance.moduleRef.get(ProviderFactory).getProvider as jest.Mock).mockReturnValue({
@@ -39,13 +39,16 @@ export const packageCheckout = (
   brandId,
   userId: 'user-loc136',
   purpose: 'token_package',
-  provider: 'dropi',
+  provider: 'confio',
   packageId: id,
   ...overrides,
 })
 
-/** Dropi's notice: confirms the charged amount in major units. */
-export const dropiNotice = (amount: number) => ({ amount, source: 'webhook' })
+/** Confio's notice: confirms the charged amount in cents. */
+export const confioNotice = (amount: number) => ({
+  amountCents: Math.round(amount * 100),
+  source: 'webhook',
+})
 
 export const tokenWalletOf = (dataSource: DataSource, brandId: string) =>
   dataSource.getRepository(Wallet).findOneBy({ brandId, currency: 'TKN' })
