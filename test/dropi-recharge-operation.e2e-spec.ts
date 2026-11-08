@@ -55,6 +55,7 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
     expect(created.status).toBe(HttpStatus.CREATED)
     return a.dataSource.getRepository(Payment).findOneByOrFail({ id: created.body.data.id })
   }
+  // Sent now: a supertest request only starts when something awaits it.
   const charge = (payment: Payment) =>
     postResult(apps[payment.brandId], payment.id, {
       brandId: payment.brandId,
@@ -64,6 +65,28 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
     }).then((res) => res)
   const stored = (payment: Payment) =>
     a.dataSource.getRepository(Payment).findOneByOrFail({ id: payment.id })
+  const expectCharged = async (payment: Payment) => {
+    const row = await stored(payment)
+    expect([row.status, row.providerPaymentId]).toEqual([PaymentStatus.COMPLETED, OPERATION])
+    expect(await creditsOf(a.dataSource, payment.id)).toHaveLength(1)
+    expect(await auditOf(a.dataSource, payment.id)).toHaveLength(1)
+  }
+  const expectRefused = async (
+    answer: { status: number; body: { code?: string } },
+    payment: Payment,
+  ) => {
+    expect([answer.status, answer.body.code]).toEqual([
+      HttpStatus.CONFLICT,
+      'DROPI_OPERATION_ALREADY_USED',
+    ])
+    const row = await stored(payment)
+    expect([row.status, row.providerPaymentId]).toEqual([PaymentStatus.PENDING, null])
+    expect(await creditsOf(a.dataSource, payment.id)).toHaveLength(0)
+    expect(await auditOf(a.dataSource, payment.id)).toHaveLength(0)
+  }
+  /** The answers of two calls at once, winner first: which one wins is up to PostgreSQL. */
+  const byOutcome = <T extends { status: number }>(pairs: [Payment, T][]) =>
+    [...pairs].sort(([, x], [, y]) => x.status - y.status)
   const dropiTokens = async (brandId: string) =>
     Number((await tokenWalletOf(a.dataSource, brandId)).dropiTokens)
   const holdWallets = async (...walletIds: string[]) => {
@@ -114,19 +137,19 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
     process.env = { ...envSnapshot }
   })
 
-  it('CA2: the operation that charged one recharge answers 409 on another, which stays pending', async () => {
+  it('CA2: the operation that charged one recharge answers 409 on another, also on its retry', async () => {
     // R15: red when the 23505 of the index is not told apart: the second gets IDEMPOTENCY_KEY_CONFLICT.
     const first = await open(BRAND)
     const second = await open(BRAND)
 
     const answers = [await charge(first), await charge(second)]
+    const retry = await charge(second)
 
-    expect(answers.map((res) => res.status)).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
-    expect(answers[1].body.code).toBe('DROPI_OPERATION_ALREADY_USED')
-    expect((await stored(second)).status).toBe(PaymentStatus.PENDING)
-    expect((await stored(second)).providerPaymentId).toBeNull()
-    expect(await creditsOf(a.dataSource, second.id)).toHaveLength(0)
-    expect(await auditOf(a.dataSource, second.id)).toHaveLength(0)
+    expect(answers[0].status).toBe(HttpStatus.OK)
+    await expectCharged(first)
+    await expectRefused(answers[1], second)
+    // The 409 rolled the credit back: the retry finds no movement under its key and is refused again.
+    await expectRefused(retry, second)
     expect(await dropiTokens(BRAND)).toBe(10)
   })
 
@@ -139,10 +162,16 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
     expect(await sessionsWaitOnRowLock(a.dataSource, 2)).toBe(true)
     await releaseWallets()
 
-    const statuses = (await Promise.all(calls)).map((res) => res.status).sort()
+    const answers = await Promise.all(calls)
 
     expect(await dropiTokens(BRAND)).toBe(10)
-    expect(statuses).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
+    const [[winner, won], [loser, lost]] = byOutcome([
+      [first, answers[0]],
+      [second, answers[1]],
+    ])
+    expect(won.status).toBe(HttpStatus.OK)
+    await expectCharged(winner)
+    await expectRefused(lost, loser)
   })
 
   it('CA2: recharges of two brands charged at once with one operation credit 10 tokens in all', async () => {
@@ -154,9 +183,15 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
     expect(await sessionsWaitOnRowLock(a.dataSource, 2)).toBe(true)
     await releaseWallets()
 
-    const statuses = (await Promise.all(calls)).map((res) => res.status).sort()
+    const answers = await Promise.all(calls)
 
     expect((await dropiTokens(BRAND)) + (await dropiTokens(OTHER_BRAND))).toBe(10)
-    expect(statuses).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
+    const [[winner, won], [loser, lost]] = byOutcome([
+      [first, answers[0]],
+      [second, answers[1]],
+    ])
+    expect(won.status).toBe(HttpStatus.OK)
+    await expectCharged(winner)
+    await expectRefused(lost, loser)
   })
 })
