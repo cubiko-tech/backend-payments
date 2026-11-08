@@ -20,6 +20,7 @@ import { TrmService } from '../trm/trm.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenWalletService, fail } from '../wallet/token-wallet.service'
 import { rechargePesos, storedRate } from './dropi-recharge-pricing'
+import { DropiRechargeSignal } from './dropi-recharge-signal'
 import { TOKEN_PRICE_USD } from './token-price'
 
 /** What a recharge from Dropi fixes when it is created; LOC-175 credits these tokens, no others. */
@@ -64,6 +65,7 @@ export class DropiRechargeService {
     private readonly trm: TrmService,
     private readonly taxService: TaxService,
     private readonly tokenWallets: TokenWalletService,
+    private readonly signal: DropiRechargeSignal,
   ) {}
 
   /**
@@ -128,7 +130,9 @@ export class DropiRechargeService {
       },
     })
     try {
-      return { created: true, recharge: toView(await this.payments.save(payment)) }
+      const saved = await this.payments.save(payment)
+      this.signal.changed(saved)
+      return { created: true, recharge: toView(saved) }
     } catch (error) {
       if (!isUniqueConstraintViolation(error)) throw error
       // Another call with the same requestId inserted first.

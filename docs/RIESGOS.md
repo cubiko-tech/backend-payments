@@ -503,12 +503,22 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   aviso, o el aviso falla siempre).
 - **Qué rompe**: la recarga no vence ni se cancela: queda `pending`, sin tokens, y si Dropi la cobró la marca
   pagó sin recibir. Sólo el resultado la cierra (LOC-175).
-- **Estado**: abierto — lo cierra la señal de LOC-181 (la edad de la `pending` más vieja) y la conciliación del
+- **Estado**: abierto — LOC-181 la hace visible (`src/tasks/dropi-recharge-backlog.ts`: la edad de la `pending`
+  más vieja cada minuto), y avisa cuando quien aprueba crea la alerta en New Relic; la cierra la conciliación del
   release que conecta el cobro (076 C3).
+
+## Un cierre de recarga desde Dropi puede no dejar su evento en New Relic (LOC-181)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:156` (el evento va después del commit) y
+  `src/recharge/dropi-recharge-signal.ts:47` (un error del agente se loguea y se descarta)
+- **Qué lo dispara**: el proceso cae entre el commit del cierre y el evento, o el agente falla al registrarlo.
+- **Qué rompe**: el SLO cuenta un cierre menos; el dinero y la auditoría no cambian, y como la recarga ya no está
+  `pending` el barrido tampoco la ve.
+- **Estado**: abierto — aceptado: la señal no puede frenar ni deshacer un cierre ya comprometido.
 
 ## Una recarga cobrada en Dropi con la wallet `TKN` cerrada queda `pending` sin tokens (LOC-175)
 
-- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:75` (`creditTokens` rechaza la wallet cerrada)
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:77` (`creditTokens` rechaza la wallet cerrada)
 - **Qué lo dispara**: la wallet de tokens de la marca se cierra entre la creación de la recarga y el aviso
   `charged`.
 - **Qué rompe**: el aviso recibe 422 `WALLET_CLOSED` y la recarga sigue `pending`: Dropi ya descontó el saldo y la

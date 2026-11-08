@@ -15,8 +15,10 @@ import { ClientRolesService } from '../../src/client/client-roles.service'
 import { Payment } from '../../src/payment/entities/payment.entity'
 import { DropiRechargeResultController } from '../../src/recharge/dropi-recharge-result.controller'
 import { DropiRechargeResultService } from '../../src/recharge/dropi-recharge-result.service'
+import { DropiRechargeSignal } from '../../src/recharge/dropi-recharge-signal'
 import { DropiRechargeController } from '../../src/recharge/dropi-recharge.controller'
 import { DropiRechargeService } from '../../src/recharge/dropi-recharge.service'
+import { APM_AGENT, ApmAgent, ApmAttributes } from '../../src/shared/apm/apm-agent'
 import { ApiAuthGuard } from '../../src/shared/auth/api-auth.guard'
 import { ServiceCredentialService } from '../../src/shared/auth/service-credential.service'
 import { createGlobalValidationPipe } from '../../src/shared/validation/global-validation-pipe'
@@ -39,6 +41,18 @@ export interface RechargeApp {
   jwt: JwtService
   tax: { getTaxForCountry: jest.Mock }
   platform: { canViewBrandCredit: jest.Mock }
+  apm: ApmDouble
+}
+
+/** What the New Relic double was handed, in order. */
+export interface ApmDouble extends ApmAgent {
+  events: { type: string; attributes: ApmAttributes }[]
+}
+
+// R17: New Relic is an external service with a cost; the double keeps what the agent would send.
+export function apmDouble(): ApmDouble {
+  const events: ApmDouble['events'] = []
+  return { events, recordCustomEvent: (type, attributes) => events.push({ type, attributes }) }
 }
 
 /**
@@ -60,6 +74,7 @@ export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, b
   const credentials = {
     authenticate: jest.fn(async (key: string) => (key === ADS_KEY ? 'roax-ads' : null)),
   }
+  const apm = apmDouble()
   const repo = (entity: unknown, connection: string) => ({
     provide: getRepositoryToken(entity as never, connection),
     useValue: dataSource.getRepository(entity as never),
@@ -69,6 +84,8 @@ export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, b
     providers: [
       DropiRechargeService,
       DropiRechargeResultService,
+      DropiRechargeSignal,
+      { provide: APM_AGENT, useValue: apm },
       AuditService,
       repo(AuditLog, 'DBWrite'),
       repo(AuditLog, 'DBRead'),
@@ -92,7 +109,7 @@ export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, b
   const app = moduleRef.createNestApplication()
   app.useGlobalPipes(createGlobalValidationPipe())
   await app.init()
-  return { app, moduleRef, jwt, tax, platform } as RechargeApp
+  return { app, moduleRef, jwt, tax, platform, apm } as RechargeApp
 }
 
 /** Drops the TRM cached by an earlier case: the cache lasts an hour and each case sets its rate. */

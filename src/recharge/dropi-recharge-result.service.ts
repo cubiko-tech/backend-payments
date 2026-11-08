@@ -14,6 +14,7 @@ import { TokenOrigin } from '../wallet/token-origin'
 import { toCents } from '../wallet/token-spend'
 import { TokenWalletService, fail } from '../wallet/token-wallet.service'
 import { DropiChargeResult, decideRechargeResult } from './dropi-recharge-result'
+import { DropiRechargeSignal } from './dropi-recharge-signal'
 import { DropiRechargeTerms, DropiRechargeView, toView } from './dropi-recharge.service'
 import { ReportDropiRechargeResultDto } from './dto/report-dropi-recharge-result.dto'
 
@@ -37,6 +38,7 @@ export class DropiRechargeResultService {
     private readonly dataSource: DataSource,
     private readonly tokenWallets: TokenWalletService,
     private readonly auditService: AuditService,
+    private readonly signal: DropiRechargeSignal,
   ) {}
 
   async report(id: string, body: ReportDropiRechargeResultDto): Promise<DropiRechargeView> {
@@ -108,7 +110,7 @@ export class DropiRechargeResultService {
         },
       )
       // A replay did not run the close above: what the recharge holds now decides the answer.
-      return movement.replayed ? this.decideAgain(payment.id, body) : this.viewOf(payment.id)
+      return movement.replayed ? this.decideAgain(payment.id, body) : this.closedView(payment.id)
     } catch (error) {
       if (error instanceof ClosedMeanwhile) return this.decideAgain(payment.id, body)
       throw error
@@ -136,7 +138,7 @@ export class DropiRechargeResultService {
       })
       return true
     })
-    return closed ? this.viewOf(payment.id) : this.decideAgain(payment.id, body)
+    return closed ? this.closedView(payment.id) : this.decideAgain(payment.id, body)
   }
 
   /** Answers a report that another call overtook, from the recharge as that call left it. */
@@ -148,8 +150,11 @@ export class DropiRechargeResultService {
     throw new Error(`Recharge ${id} is still pending after another call closed it`)
   }
 
-  private async viewOf(id: string) {
-    return toView(await this.payments.findOneOrFail({ where: { id } }))
+  /** The view of a recharge this call just closed, which is the only close that signals. */
+  private async closedView(id: string) {
+    const payment = await this.payments.findOneOrFail({ where: { id } })
+    this.signal.changed(payment)
+    return toView(payment)
   }
 }
 
