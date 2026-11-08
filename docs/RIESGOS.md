@@ -491,7 +491,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
 - **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
   informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`. Crear una recarga pide además el token de
-  un miembro de la marca (`src/recharge/dropi-recharge.controller.ts:46`): la key sola no alcanza.
+  un miembro de la marca (`src/recharge/dropi-recharge.controller.ts:46`), pero informarla no
+  (`src/recharge/dropi-recharge-result.controller.ts:24-29`): con la key y una cuenta propia miembro de una
+  marca, se crea la recarga y se informa `charged` con una operación inventada, y la marca recibe los tokens sin
+  que Dropi haya cobrado nada.
 - **Estado**: mitigado por la rotación y la desactivación de `admin/service-credentials`, que valen desde su
   commit. Abierto: la key no vence sola.
 
@@ -525,13 +528,16 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   marca no recibe los tokens. Nada la devuelve en Dropi.
 - **Estado**: abierto — lo cierra una decisión de producto (devolver el saldo en Dropi o reabrir la wallet).
 
-## Reembolsar una recarga desde Dropi deja sus tokens en la wallet (LOC-175)
+## Una recarga desde Dropi informada `failed` y cobrada después no tiene corrección (LOC-175)
 
-- **Dónde**: `src/refund/refund.service.ts:134` (acepta cualquier pago completado) y
-  `src/refund/refund.service.ts:241-245` (sólo recupera los tokens de un paquete)
-- **Qué lo dispara**: se pide y se aprueba el reembolso de una recarga `dropi_wallet` ya `completed`.
-- **Qué rompe**: el reembolso se registra y los tokens del origen `dropi` quedan en la wallet de la marca.
-- **Estado**: abierto — el alcance (rechazar ese reembolso o recuperar los tokens) lo decide quien aprueba.
+- **Dónde**: `src/recharge/dropi-recharge-result.ts:31-35` (un `charged` sobre una `failed` es `conflict`) y
+  `src/admin/admin.controller.ts:382-387` (el reintento de admin la rechaza con 409)
+- **Qué lo dispara**: ROAX Ads informa `failed` y Dropi termina descontando el saldo (un cobro que se confirma
+  tarde, o un `failed` informado por error).
+- **Qué rompe**: la recarga queda `failed` sin tokens y el saldo de Dropi ya salió: la marca pagó sin recibir, y
+  ni el aviso `charged` ni el reintento de admin la reabren.
+- **Estado**: abierto — lo cierra la conciliación contra Dropi del release que conecta el cobro (076 C3), o una
+  corrección manual que decida quien aprueba.
 
 ## La migración de LOC-182 no sube si un ambiente ya tiene dos recargas con la misma operación
 

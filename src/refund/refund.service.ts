@@ -1,7 +1,7 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { In, Repository } from 'typeorm'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { Refund, RefundStatus } from './entities/refund.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
@@ -31,6 +31,18 @@ const refundNotPending = () =>
     { code: 'REFUND_NOT_PENDING', message: 'Solo se pueden aprobar reembolsos pendientes' },
     HttpStatus.UNPROCESSABLE_ENTITY,
   )
+
+// Nothing gives the Dropi balance back, so refunding a recharge paid with it would keep its tokens.
+function assertNotDropiRecharge(payment: Payment) {
+  if (payment.provider !== PaymentProvider.DROPI_WALLET) return
+  throw new RequestException(
+    {
+      code: 'PAYMENT_NOT_REFUNDABLE',
+      message: 'A recharge paid with the Dropi balance is not refunded',
+    },
+    HttpStatus.CONFLICT,
+  )
+}
 
 /** Where `approvePending` reads and writes: the approving transaction, or plain repositories. */
 interface ApproveOps {
@@ -140,6 +152,7 @@ export class RefundService {
         HttpStatus.CONFLICT,
       )
     }
+    assertNotDropiRecharge(payment)
     if (String(data.currency ?? '').toUpperCase() !== String(payment.currency).toUpperCase()) {
       throw new RequestException(
         {
@@ -238,6 +251,8 @@ export class RefundService {
     if (refund.status !== RefundStatus.PENDING) throw refundNotPending()
 
     const payment = await ops.findPayment(refund.paymentId)
+    // A pending row may predate the request-time refusal.
+    if (payment) assertNotDropiRecharge(payment)
     if (payment && isTokenPackage(payment)) {
       // Pending rows may predate the request-time check, so approval checks the amount again.
       assertWholePackage(payment, refund.amount)
