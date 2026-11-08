@@ -1,7 +1,10 @@
 import { Global, Module } from '@nestjs/common'
 import { JwtModule } from '@nestjs/jwt'
+import { TypeOrmModule } from '@nestjs/typeorm'
 
 import { ApiAuthGuard } from './api-auth.guard'
+import { ServiceCredential } from './entities/service-credential.entity'
+import { ServiceCredentialService } from './service-credential.service'
 
 /**
  * Autenticación de la API: el guard y el `JwtService` que necesita.
@@ -25,8 +28,11 @@ import { ApiAuthGuard } from './api-auth.guard'
  */
 @Global()
 @Module({
-  imports: [JwtModule.register({ secret: process.env.JWT_SECRET })],
-  providers: [ApiAuthGuard],
-  exports: [ApiAuthGuard, JwtModule],
+  imports: [
+    JwtModule.register({ secret: process.env.JWT_SECRET }),
+    TypeOrmModule.forFeature([ServiceCredential], 'DBWrite'),
+  ],
+  providers: [ApiAuthGuard, ServiceCredentialService],
+  exports: [ApiAuthGuard, JwtModule, ServiceCredentialService],
 })
 export class AuthModule {}

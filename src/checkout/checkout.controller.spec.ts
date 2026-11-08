@@ -20,6 +20,7 @@ import { PaymentAttempt } from '../payment/entities/paymentAttempt.entity'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
@@ -257,6 +258,7 @@ describe('POST /checkout brand membership gate', () => {
       controllers: [CheckoutController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         JwtService,
         ClientPlatformService,
         CheckoutService,

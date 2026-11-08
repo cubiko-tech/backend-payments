@@ -18,3 +18,26 @@ export const API_SESSION_ONLY_KEY = 'require_session_user'
  * needs a person's session, whose id is the author it records.
  */
 export const RequireSessionUser = () => SetMetadata(API_SESSION_ONLY_KEY, true)
+
+export const API_SERVICE_CLIENT_KEY = 'require_service_client'
+
+/** The client name of ROAX Ads' service credential, the only one that recharges from Dropi. */
+export const ROAX_ADS_CLIENT = 'roax-ads'
+
+/**
+ * Lets in only the service credential of `client`, on a handler or a whole controller: the server
+ * token, users and super admins get 403. A service credential gets 403 on any route without it.
+ */
+export const RequireServiceClient = (client: string) => SetMetadata(API_SERVICE_CLIENT_KEY, client)
+
+export const API_ON_BEHALF_OF_KEY = 'require_on_behalf_of_user'
+
+/** Header that carries the token of the person a service calls for, as `Bearer <token>`. */
+export const ON_BEHALF_OF_HEADER = 'x-user-authorization'
+
+/**
+ * Next to `@RequireServiceClient`, also requires the token of the person the service calls for in
+ * `X-User-Authorization`, resolved as any user's session; 401 without it. The guard leaves that
+ * person in `req.onBehalfOf`. The server token and service credentials are never accepted there.
+ */
+export const RequireOnBehalfOfUser = () => SetMetadata(API_ON_BEHALF_OF_KEY, true)

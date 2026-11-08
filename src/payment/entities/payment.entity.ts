@@ -7,6 +7,8 @@ export enum PaymentProvider {
   DROPI = 'dropi',
   WALLET = 'wallet',
   CONFIO = 'confio',
+  // Paid with the Dropi balance; calls no provider and only its reported result closes it.
+  DROPI_WALLET = 'dropi_wallet',
 }
 export enum PaymentStatus {
   PENDING = 'pending',
@@ -21,11 +23,17 @@ export enum PaymentPurpose {
   WALLET_RECHARGE = 'wallet_recharge',
   SERVICE_PAYMENT = 'service_payment',
   TOKEN_PACKAGE = 'token_package',
+  TOKEN_RECHARGE = 'token_recharge',
 }
 
 @Entity('payments')
 @Index(['brandId', 'status', 'createdAt'])
 @Index(['providerPaymentId'])
+// One Dropi operation closes one recharge; only recharges carry `metadata.dropiRecharge`.
+@Index('UQ_payments_dropi_operation', ['providerPaymentId'], {
+  unique: true,
+  where: `"providerPaymentId" IS NOT NULL AND "metadata" -> 'dropiRecharge' IS NOT NULL`,
+})
 @Index(['brandId', 'idempotencyKey'], { unique: true })
 export class Payment extends Content {
   @Column() brandId: string

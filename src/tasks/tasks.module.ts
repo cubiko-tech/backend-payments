@@ -14,6 +14,8 @@ import { AuditModule } from '../audit/audit.module'
 import { PaymentModule } from '../payment/payment.module'
 import { CheckoutModule } from '../checkout/checkout.module'
 import { WebhookModule } from '../webhook/webhook.module'
+import { RechargeModule } from '../recharge/recharge.module'
+import { DropiRechargeBacklogTask } from './dropi-recharge-backlog'
 
 @Module({
   imports: [
@@ -41,7 +43,8 @@ import { WebhookModule } from '../webhook/webhook.module'
     // La repesca de altas sin confirmar reusa `ConfioSubscriptionWebhookService`: la
     // regla de qué se otorga vive allá y no se duplica acá.
     WebhookModule,
+    RechargeModule,
   ],
-  providers: [TasksService],
+  providers: [TasksService, DropiRechargeBacklogTask],
 })
 export class TasksModule {}

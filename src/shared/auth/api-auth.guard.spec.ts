@@ -1,4 +1,5 @@
 import { HttpStatus } from '@nestjs/common'
+import { unknownServiceKeys } from '../../../test/support/service-credential.double'
 import { ApiAuthGuard } from './api-auth.guard'
 import {
   API_PERMISSION_KEY,
@@ -22,7 +23,8 @@ describe('ApiAuthGuard', () => {
   const roles = { checkPermission: jest.fn() } as any
   let fetchMock: jest.Mock
 
-  const makeGuard = (verify: jest.Mock) => new ApiAuthGuard(reflector, { verify } as any, roles)
+  const makeGuard = (verify: jest.Mock) =>
+    new ApiAuthGuard(reflector, { verify } as any, roles, unknownServiceKeys.useValue as never)
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -102,7 +104,9 @@ describe('ApiAuthGuard', () => {
     'an auto-login token with %s goes through RBAC and gets 403 without the permission (LOC-143)',
     async (_l, data) => {
       // R15: red when validateViaAuth reads that claim from the auth answer again: RBAC is skipped.
-      reflector.get.mockReturnValue('credit:runs')
+      reflector.get.mockImplementation((key: string) =>
+        key === API_PERMISSION_KEY ? 'credit:runs' : undefined,
+      )
       roles.checkPermission.mockResolvedValue(false)
 
       await expect(

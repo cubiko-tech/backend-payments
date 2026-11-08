@@ -53,6 +53,7 @@ import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
+import { unknownServiceKeys } from './support/service-credential.double'
 
 const [BRAND_A, USER_A, SUPERADMIN_ID] = [
   'a1150001-1111-4111-8111-111111111111',
@@ -147,6 +148,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         AuditService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         provideRepo(Refund, 'DBWrite'),
@@ -320,6 +322,45 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
     expect(res.status).toBe(HttpStatus.CONFLICT)
     expect(res.body).toMatchObject({ code: 'PAYMENT_NOT_COMPLETED' })
     expect(await refundRepo.count({ where: { paymentId: payment.id } })).toBe(0)
+  })
+
+  const seedDropiRecharge = () =>
+    seedPayment({ provider: PaymentProvider.DROPI_WALLET, purpose: PaymentPurpose.TOKEN_RECHARGE })
+
+  it('rejects refunding a charged Dropi recharge with 409 PAYMENT_NOT_REFUNDABLE and writes no row', async () => {
+    // R15: red when the dropi_wallet refusal goes from createPendingRefund: it answers 201.
+    const payment = await seedDropiRecharge()
+
+    const res = await postRefund({ paymentId: payment.id, amount: 5000 })
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'PAYMENT_NOT_REFUNDABLE' })
+    expect(await refundRepo.count({ where: { paymentId: payment.id } })).toBe(0)
+  })
+
+  it('refuses approving a pending refund of a Dropi recharge with 409 and keeps it pending', async () => {
+    // R15: red when the refusal goes from approvePending: the refund ends up processing.
+    const payment = await seedDropiRecharge()
+    const pending = await refundRepo.save(
+      refundRepo.create({
+        brandId: BRAND_A,
+        paymentId: payment.id,
+        amount: 5000,
+        currency: 'COP',
+        reason: RefundReason.CUSTOMER_REQUEST,
+        requestedBy: USER_A,
+        status: RefundStatus.PENDING,
+      }),
+    )
+
+    const res = await request(app.getHttpServer())
+      .post(`/v1/refund/${pending.id}/approve`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({})
+
+    expect(res.status).toBe(HttpStatus.CONFLICT)
+    expect(res.body).toMatchObject({ code: 'PAYMENT_NOT_REFUNDABLE' })
+    expect((await refundRepo.findOneByOrFail({ id: pending.id })).status).toBe(RefundStatus.PENDING)
   })
 
   it('rejects a refund while an approved one is processing under the cap with 409 REFUND_ALREADY_PENDING', async () => {

@@ -29,6 +29,7 @@ import { PaymentAttempt } from '../src/payment/entities/paymentAttempt.entity'
 import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { ProviderFactory } from '../src/provider/provider.factory'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { unknownServiceKeys } from './support/service-credential.double'
 import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { EnterprisePricingService } from '../src/subscription/enterprise-pricing.service'
 import { Subscription } from '../src/subscription/entities/subscription.entity'
@@ -134,6 +135,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
       controllers: [CheckoutController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         JwtService,
         ClientPlatformService,
         CheckoutService,

@@ -5,6 +5,7 @@ import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import * as request from 'supertest'
 
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { CheckoutController } from '../checkout/checkout.controller'
 import { CheckoutService } from '../checkout/checkout.service'
 import { ClientPlatformService } from '../client/client-platform.service'
@@ -37,6 +38,7 @@ describe('PaymentController — POST /payment/checkout removal (LOC-93)', () => 
       controllers: [PaymentController, CheckoutController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         JwtService,
         {
           provide: PaymentService,

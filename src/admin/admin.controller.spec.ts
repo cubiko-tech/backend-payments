@@ -18,12 +18,19 @@ import { MetricsService } from '../metrics/metrics.service'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
+
+// R17: These specs check the retry route and its audit; test/admin-payment-retry measures the claim.
+jest.mock('../checkout/wallet-payment-close', () => ({
+  ...jest.requireActual('../checkout/wallet-payment-close'),
+  claimFailedPaymentForRetry: jest.fn().mockResolvedValue({ affected: 1 }),
+}))
 
 const mockQueryBuilder = () => ({
   andWhere: jest.fn().mockReturnThis(),
@@ -161,7 +168,8 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     subscriptionReadRepo = mockRepo()
     subscriptionWriteRepo = mockRepo()
     paymentReadRepo = mockRepo()
-    paymentWriteRepo = mockRepo()
+    // The retry hands this connection to the claim, mocked above.
+    paymentWriteRepo = Object.assign(mockRepo(), { manager: { connection: {} } })
     walletReadRepo = mockRepo()
     walletWriteRepo = mockRepo()
     // R17: These specs check routes and audit; test/wallet-adjust-race measures the ledger write.
@@ -197,6 +205,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       controllers: [AdminController, MetricsController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         Reflector,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: rolesService },

@@ -21,6 +21,7 @@ import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenPackageController } from '../src/wallet/token-package.controller'
 import { TokenPackageService } from '../src/wallet/token-package.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
+import { unknownServiceKeys } from './support/service-credential.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -78,6 +79,7 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
         AuditService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getRepositoryToken(TokenPackage, 'DBWrite'), useValue: packages() },
         ...['DBWrite', 'DBRead'].map((conn) => ({

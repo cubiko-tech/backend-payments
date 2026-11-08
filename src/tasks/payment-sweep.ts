@@ -238,6 +238,8 @@ export async function expirePendingCheckouts(deps: PaymentSweepDeps): Promise<vo
 
   const expiredPending = await deps.paymentRepo.find({
     where: {
+      // A recharge from Dropi never expires: only the result ROAX Ads reports closes it.
+      provider: Not(PaymentProvider.DROPI_WALLET),
       status: PaymentStatus.PENDING,
       createdAt: LessThan(expiryTime),
     },

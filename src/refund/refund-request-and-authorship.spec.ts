@@ -12,6 +12,7 @@ import { ClientPlatformService } from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { createGlobalValidationPipe } from '../shared/validation/global-validation-pipe'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
 import { SubscriptionController } from '../subscription/subscription.controller'
@@ -89,6 +90,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
         RefundService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         // R17: real JwtService instance configured with test secret.
         { provide: JwtService, useValue: jwtService },
         // R17: permission check stub; routes under test use session brand or @RequireSuperAdmin.

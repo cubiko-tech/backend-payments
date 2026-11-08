@@ -11,6 +11,7 @@ import { EnterprisePricingService } from './enterprise-pricing.service'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { RequestException } from '../shared/exception/request.exception'
 
 const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory'], ['confirm']] as const
@@ -271,6 +272,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
       controllers: [SubscriptionController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         Reflector,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },

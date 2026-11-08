@@ -51,9 +51,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Tres bordes del reintento con `Idempotency-Key` siguen sin salida (LOC-86)
 
-- **Dónde**: `src/checkout/checkout-idempotency.ts:197`, `:39` (`resolvePaymentStateOutcome`,
-  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:398`, `:718`
-  (`retryFailedIdempotentPayment`, `createCheckout`); `src/provider/dropi/dropi.provider.ts:76`
+- **Dónde**: `src/checkout/checkout-idempotency.ts:199`, `:39` (`resolvePaymentStateOutcome`,
+  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:439`, `:759`
+  (`retryFailedIdempotentPayment`, la llamada `provider.createCheckout` en `processExternalPayment`, con la
+  entrada pública `processCheckout` en `:226`); `src/provider/dropi/dropi.provider.ts:79`
 - **Qué lo dispara**: un reintento con la misma llave sobre (a) un `completed` sin
   `metadata.checkoutResult` (falló después del cierre o lo completó un webhook); (b) un externo `failed`
   sin `providerPaymentId`; (c) una fila que la ruta retirada `POST /payment/checkout` (`c77a594`, LOC-93)
@@ -66,10 +67,11 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La conciliación de pagos `wallet` deja casos sin quien los recupere (LOC-87, LOC-96)
 
-- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:613`
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:351` (`callRolesApi`); `src/checkout/checkout.service.ts:2144`
-  (`assignPlanInRoles`); `src/checkout/wallet-payment-close.ts:88` (`yieldOverlappedOlderPurchase`)
+  `src/client/client-roles.service.ts:351` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
+  (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
+  (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
   al asignar el plan; (c) el proceso muere entre el cierre y `assignPlanInRoles`; (d) un `failed` con
   débito pasa 30 días sin acreditarse; (e) dos compras de planes distintos se solapan y la vieja cierra
@@ -95,7 +97,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una compra externa perdedora no se puede acreditar: tope de wallets (LOC-101, LOC-104)
 
-- **Dónde**: `src/checkout/external-payment-close.ts:221` (`resolveRefundWallet`)
+- **Dónde**: `src/checkout/external-payment-close.ts:227` (`resolveRefundWallet`)
 - **Qué lo dispara**: la compra perdió contra una más nueva, la marca no tiene wallet `internal` en esa
   moneda y ya tiene 10 wallets.
 - **Qué rompe**: la plata cobrada no vuelve: la compra queda `processing` con `lostToNewerPurchase`, sin
@@ -106,32 +108,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una compra desplazada se devuelve entera con hasta 15 minutos de uso (LOC-101, LOC-103)
 
 - **Dónde**: `src/checkout/wallet-payment-close.ts:21` (`PLAN_YIELD_WINDOW_MS`);
-  `src/checkout/external-payment-close.ts:79` (`displacedWithinWindow`)
+  `src/checkout/external-payment-close.ts:80` (`displacedWithinWindow`)
 - **Qué lo dispara**: otra compra cambia el plan dentro de los 15 minutos de que ésta aplicó el suyo.
 - **Qué rompe**: la marca recibe el total aunque usó el plan hasta 15 minutos; pasado el tope, nada.
 - **Estado**: mitigado por el tope de 15 minutos, confirmado por quien aprueba el 2026-11-02.
 
-## Una compra externa devuelta a la wallet conserva su factura (LOC-101)
-
-- **Dónde**: `src/checkout/checkout.service.ts:844` (`finalizeProcessingPayment`);
-  `src/checkout/wallet-payment-close.ts:88` (`yieldOverlappedOlderPurchase`)
-- **Qué lo dispara**: la compra ya facturó cuando pierde: cedió después de `completed`, o una más nueva
-  cerró durante las llamadas de factura.
-- **Qué rompe**: queda una factura, quizá ya en la DIAN, por una compra cuya plata volvió a la wallet; este
-  camino no emite nota crédito. La que pierde antes de facturar no genera factura.
-- **Estado**: abierto — lo cierra que quien aprueba decida si la devolución exige nota crédito.
-
-## La página de retorno dice «no pudo completarse» de una compra devuelta a la wallet (LOC-101)
-
-- **Dónde**: `src/checkout/checkout.service.ts:1063` (`confirmedPaymentAnswer`, `refundedToWallet`)
-- **Qué lo dispara**: quien compró vuelve del proveedor con una compra que perdió contra una más nueva.
-- **Qué rompe**: responde `failed` con `refundedToWallet: true`, que el front aún no lee: no se avisa que
-  la plata está en la wallet. No se pierde plata.
-- **Estado**: abierto — lo cierra que `frontend-platform` lea `refundedToWallet`.
-
 ## Un barrido que pierde su candado termina en error aunque su trabajo haya quedado hecho (LOC-100)
 
-- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:88`, `:655` (`acquireWalletReconcileLock`, `releaseLock`)
+- **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:88`, `:656` (`acquireWalletReconcileLock`, `releaseLock`,
+  con el `release` sin catch en `:104-130`)
 - **Qué lo dispara**: la conexión del candado del pago muere mientras el barrido trabaja.
 - **Qué rompe**: la pasada lanza `Query runner already released`, que tapa su resultado. No toca la plata:
   `claimGiveUp` y el reclamo por estado del cierre siguen siendo exclusivos.
@@ -139,7 +124,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
 
-- **Dónde**: `src/checkout/wallet-payment-close.ts:56` (`lockBrandPlan`);
+- **Dónde**: `src/checkout/wallet-payment-close.ts:59` (`lockBrandPlan`);
   `src/tasks/subscription-lock.ts:18`, `:41` (`lockAndReread`, `acquireSubscriptionLock`)
 - **Qué lo dispara**: bajo el candado se llama a roles, al proveedor y a ConfioPagos. Basta un checkout o
   un webhook de la marca mientras un cron procesa su fila; para agotar el pool, tantos cierres esperando
@@ -220,7 +205,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
 
-- **Dónde**: `src/provider/confio/confio.provider.ts:130`; `src/provider/stripe/stripe.provider.ts:86`
+- **Dónde**: `src/provider/confio/confio.provider.ts:132`; `src/provider/stripe/stripe.provider.ts:86`
   (`ProviderPaymentNotFoundError`)
 - **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado: el 404 se lee como «el
   pago no existe».
@@ -230,7 +215,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:49` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
-  (`providerLetsExpire`); `src/admin/admin.controller.ts:290` (`paymentsPending`)
+  (`providerLetsExpire`); `src/admin/admin.controller.ts:301` (`paymentsPending`, con la ruta en `:298`)
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id` por una ruta que no existe o por un cobro que no
   existe: no se distinguen. Se midió contra el core-back local; la API real no se conoce.
 - **Qué rompe**: un `pending` abandonado no vence, sin tope, hasta que el usuario lo cancela: una llamada y
@@ -240,7 +225,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Lo que el barrido no rescata o completa sin mirar (LOC-89)
 
 - **Dónde**: `src/tasks/payment-sweep.ts:234`, `:114` (`expirePendingCheckouts`,
-  `settleLostExternalPayments`); `src/checkout/checkout.service.ts:2038` (`assertProviderConfirmedAmount`)
+  `settleLostExternalPayments`); `src/checkout/checkout.service.ts:2117` (`assertProviderConfirmedAmount`)
 - **Qué lo dispara**: (a) se paga justo después de que la expiración leyó `pending` y el webhook se pierde;
   (b) un `pending` sin `providerPaymentId`, por una caída antes de guardarlo; (c) un `processing` con plan
   que el proveedor reembolsó; (d) un monto distinto cuando el pago ya dio plan, crédito o factura; (e) otra
@@ -252,7 +237,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un proveedor que no confirma el monto deja el pago esperando o lo completa sin verificarlo (LOC-117, LOC-127)
 
-- **Dónde**: `src/checkout/checkout.service.ts:2038`, `:2033` (`assertProviderConfirmedAmount`,
+- **Dónde**: `src/checkout/checkout.service.ts:2117`, `:2112` (`assertProviderConfirmedAmount`,
   `isProviderNoticePayload`); `src/provider/mercadopago/mercadopago.provider.ts:173` (`transactionAmount`)
 - **Qué lo dispara**: (a) un aviso sin monto confirmado (el one-shot de Confío sin `amountCents`, Mercado
   Pago con `transaction_amount` nulo); (b) después, el retorno o el barrido tampoco traen monto.
@@ -264,8 +249,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El precio viejo todavía se puede pagar pasadas las 24 h (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:718`, `:410` (`createCheckout`, `firstAttemptAt`);
-  `src/checkout/checkout-idempotency.ts:235` (`checkoutResult`)
+- **Dónde**: `src/checkout/checkout.service.ts:759`, `:451` (`createCheckout`, `firstAttemptAt`);
+  `src/checkout/checkout-idempotency.ts:238` (`checkoutResult`)
 - **Qué lo dispara**: (a) un reintento aceptado en plazo abre una sesión cuya vida pone el proveedor; (b) un
   `pending` que el barrido no vence sigue repitiendo su `checkoutUrl` con la misma llave.
 - **Qué rompe**: la compra se completa al monto guardado después de las 24 h. El tope es hipótesis: depende
@@ -274,7 +259,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un pago con débito se cierra pasadas las 24 h si se reintenta (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:383` (`assertRetryAllowed`)
+- **Dónde**: `src/checkout/checkout.service.ts:424` (`assertRetryAllowed`)
 - **Qué lo dispara**: un `failed` de wallet con débito sin acreditar que se reintenta antes del barrido.
 - **Qué rompe**: la compra cierra al precio ya cobrado, sin segundo débito, en vez de responder vencido.
 - **Estado**: mitigado por la exención: pedirle un pedido nuevo a quien ya pagó lo haría pagar dos veces.
@@ -283,7 +268,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/subscription/subscription.controller.ts:320`, `:335` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
-  `src/shared/auth/api-auth.guard.ts:93`, `:142` (`payload.brand`, `decodeClaims`)
+  `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
   `brand`, con esa marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura no mira membresía ni rol, mientras otra marca nombrada exige `superuser`,
@@ -349,7 +334,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El retorno del checkout distingue con 503 si el `paymentId` existe cuando cae `platform` (LOC-116)
 
-- **Dónde**: `src/checkout/checkout.service.ts:1090` (`reconcilePayment`);
+- **Dónde**: `src/checkout/checkout.service.ts:1147` (`reconcilePayment`);
   `src/checkout/checkout.controller.ts:134` (`paymentReturn`)
 - **Qué lo dispara**: (a) `GET /v1/checkout/return` mientras `backend-platform` no responde; (b) un 400 o
   404 que llega al BFF de `frontend-platform` (otro repositorio, no se abrió en LOC-131).
@@ -361,7 +346,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## La devolución a la wallet no mira los reembolsos en curso del mismo pago (LOC-127)
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336` (`refundSupersededWalletPayment`);
-  `src/refund/refund.service.ts:65` (`createPendingRefund`)
+  `src/refund/refund.service.ts:114` (`createPendingRefund`)
 - **Qué lo dispara**: un `POST /v1/refund` sobre un `completed` que queda `pending` o `processing`, y
   después la conciliación devuelve ese pago a la wallet.
 - **Qué rompe**: dos devoluciones posibles del mismo pago; `approve` hoy sólo marca `processing`, así que
@@ -392,7 +377,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:6`, `:456`
-  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:284` (`autenticarRamoFirmado`)
+  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:270` (`autenticarRamoFirmado`)
 - **Qué lo dispara**: un aviso firmado de suscripción que llega o se reintenta a más de 24 h de su `timestamp`.
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
@@ -400,7 +385,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El saldo de una wallet `TKN` sin origen no se gasta (LOC-132)
 
-- **Dónde**: `src/wallet/token-wallet.service.ts:117` (`planTokenSpend`), `:279` (`unassigned`)
+- **Dónde**: `src/wallet/token-wallet.service.ts:122` (`planTokenSpend`), `:286` (`unassigned`)
 - **Qué lo dispara**: una wallet `TKN` con saldo anterior a la migración `1793949572497`. Admin ya no la
   crea ni la ajusta (LOC-133: 422), y el regalo entra por `TokenWalletService` con su origen.
 - **Qué rompe**: ese saldo aparece en `unassigned` y el débito de tokens no lo toma, porque decide por los
@@ -418,14 +403,14 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un regalo de tokens a un `brandId` que no es una marca crea su wallet `TKN` (LOC-133)
 
-- **Dónde**: `src/admin/admin-token-gift.controller.ts:36` (`getOrCreate`)
+- **Dónde**: `src/admin/admin-token-gift.controller.ts:40` (`getOrCreate`)
 - **Qué lo dispara**: un super admin que manda un UUID válido que no corresponde a ninguna marca.
 - **Qué rompe**: queda una wallet `TKN` con regalo que nadie ve; los tokens no llegan a la marca buscada.
 - **Estado**: abierto — lo cierra preguntarle a platform si la marca existe antes de acreditar.
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
-- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:80` (`chargeFor`)
+- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:76` (`chargeFor`)
 - **Qué lo dispara**: `datos.gov.co` sin responder, con error o con una fila ilegible, y sin una tasa consultada
   en la última hora por esa instancia. El caché es por instancia: N instancias hacen hasta N consultas por hora.
 - **Qué rompe**: el checkout de un paquete de tokens de una marca colombiana responde 503
@@ -435,29 +420,18 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)
 
-- **Dónde**: `src/checkout/token-package-checkout.ts:104` (`creditTokenPackage`);
-  `src/wallet/token-wallet.service.ts:86`
+- **Dónde**: `src/checkout/token-package-checkout.ts:99` (`creditTokenPackage`);
+  `src/wallet/token-wallet.service.ts:90-92`
 - **Qué lo dispara**: la wallet `TKN` de la marca pasa a `closed` entre el checkout del paquete y la confirmación
   del proveedor.
 - **Qué rompe**: el pago queda `processing`, cobrado, sin tokens y sin factura; el barrido lo reintenta y vuelve a
   fallar con `WALLET_CLOSED`.
 - **Estado**: abierto — lo cierra decidir si se reabre la wallet o se devuelve el pago. El checkout ya rechaza una
-  `TKN` cerrada antes de cobrar (`token-package-checkout.ts:75`).
-
-## Reembolsar un paquete de tokens no descuenta los tokens acreditados (LOC-136)
-
-- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`) y `:170` (pedir);
-  `src/wallet/token-package-reclaim.ts:68` (`reclaimPackageTokens`)
-- **Qué lo dispara**: `POST /refund` y su aprobación sobre un pago `token_package` completado. La nota crédito no es
-  este camino: `issueRefundCreditNote` sólo corre para una compra de plan (`checkout.service.ts:1086`,
-  `payment-sweep.ts:154`).
-- **Qué rompe**: la marca recuperaría el dinero y conservaría los tokens comprados y el bono.
-- **Estado**: mitigado por LOC-161 — aprobar debita los comprados y el bono del paquete en la misma transacción, y
-  pedir o aprobar un paquete cuyos tokens ya no están, o por menos de lo pagado, responde 422 sin mover nada.
+  `TKN` cerrada antes de cobrar (`token-package-checkout.ts:70-71`).
 
 ## Aprobar el reembolso de un paquete quita los tokens antes de que la plata vuelva (LOC-161)
 
-- **Dónde**: `src/refund/refund.service.ts:237` (`approvePending`); `src/provider/provider.interface.ts:84`
+- **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
   reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:184-186` sólo lo loguea).
@@ -468,7 +442,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un crédito válido sobre un saldo cerca del máximo de `numeric(15,2)` responde 500 (LOC-139)
 
-- **Dónde**: `src/wallet/wallet.service.ts:170` (`credit`); `src/wallet/token-wallet.service.ts:170` (`move`)
+- **Dónde**: `src/wallet/wallet.service.ts:169` (`credit`); `src/wallet/token-wallet.service.ts:176` (`move`)
 - **Qué lo dispara**: un saldo que ya pasa de 9 billones (1e12 × 9) recibe otro crédito dentro del tope del DTO
   (`src/admin/dto/money-input.ts`, 1e12).
 - **Qué rompe**: Postgres rechaza la suma con `numeric field overflow`, el movimiento no se aplica y responde 500 en
@@ -478,13 +452,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Quien tiene el `clientSecret` de un client firma el `id` y la `brand` de cualquier usuario (LOC-143)
 
-- **Dónde**: `src/shared/auth/api-auth.guard.ts:140`, `:146` (`validateViaAuth`: `id` y `brand` salen de la respuesta
+- **Dónde**: `src/shared/auth/api-auth.guard.ts:159`, `:165` (`validateViaAuth`: `id` y `brand` salen de la respuesta
   de backend-auth, que según LOC-143 devuelve el payload firmado tal cual)
 - **Qué lo dispara**: un token de auto-login firmado con el `clientSecret` (el client `dropi` lo usa Dropi) con el
   `id` de otro usuario o una `brand` ajena.
 - **Qué rompe**: `@RequirePermission` consulta `checkPermission(id)` y la marca `canViewBrandCredit(id)` con ese
   `id`, así que se actúa como ese usuario. Que backend-roles le conceda permisos de admin a ese id es hipótesis
-  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:145`).
+  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:164`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
 
@@ -502,10 +476,82 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
   entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:743-756` (`planearCambioDeEstado`) y
-  `:455-460` (`planearCobro`)
+  `:455-462` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
   recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
   Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
 - **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).
+
+## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
+
+- **Dónde**: `src/shared/auth/service-credential.service.ts:41` (`authenticate`);
+  `src/shared/auth/api-auth.guard.ts:126`
+- **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
+- **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
+  informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`. Crear una recarga pide además el token de
+  un miembro de la marca (`src/recharge/dropi-recharge.controller.ts:46`), pero informarla no
+  (`src/recharge/dropi-recharge-result.controller.ts:24-29`): con la key y una cuenta propia miembro de una
+  marca, se crea la recarga y se informa `charged` con una operación inventada, y la marca recibe los tokens sin
+  que Dropi haya cobrado nada.
+- **Estado**: mitigado por la rotación y la desactivación de `admin/service-credentials`, que valen desde su
+  commit. Abierto: la key no vence sola.
+
+## Una recarga desde Dropi que nadie informa queda `pending` para siempre (LOC-174)
+
+- **Dónde**: `src/tasks/payment-sweep.ts:242` (el vencimiento la excluye);
+  `src/payment/payment.service.ts:104` (el usuario no la cancela)
+- **Qué lo dispara**: ROAX Ads crea la recarga y nunca informa su resultado (se cae entre el cobro en Dropi y el
+  aviso, o el aviso falla siempre).
+- **Qué rompe**: la recarga no vence ni se cancela: queda `pending`, sin tokens, y si Dropi la cobró la marca
+  pagó sin recibir. Sólo el resultado la cierra (LOC-175).
+- **Estado**: abierto — LOC-181 la hace visible (`src/tasks/dropi-recharge-backlog.ts`: la edad de la `pending`
+  más vieja cada minuto), y avisa cuando quien aprueba crea la alerta en New Relic; la cierra la conciliación del
+  release que conecta el cobro (076 C3).
+
+## Un cierre de recarga desde Dropi puede no dejar su evento en New Relic (LOC-181)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:156` (el evento va después del commit) y
+  `src/recharge/dropi-recharge-signal.ts:47` (un error del agente se loguea y se descarta)
+- **Qué lo dispara**: el proceso cae entre el commit del cierre y el evento, o el agente falla al registrarlo.
+- **Qué rompe**: el SLO cuenta un cierre menos; el dinero y la auditoría no cambian, y como la recarga ya no está
+  `pending` el barrido tampoco la ve.
+- **Estado**: abierto — aceptado: la señal no puede frenar ni deshacer un cierre ya comprometido.
+
+## Una recarga cobrada en Dropi con la wallet `TKN` cerrada queda `pending` sin tokens (LOC-175)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:77` (`creditTokens` rechaza la wallet cerrada)
+- **Qué lo dispara**: la wallet de tokens de la marca se cierra entre la creación de la recarga y el aviso
+  `charged`.
+- **Qué rompe**: el aviso recibe 422 `WALLET_CLOSED` y la recarga sigue `pending`: Dropi ya descontó el saldo y la
+  marca no recibe los tokens. Nada la devuelve en Dropi.
+- **Estado**: abierto — lo cierra una decisión de producto (devolver el saldo en Dropi o reabrir la wallet).
+
+## Una recarga desde Dropi informada `failed` y cobrada después no tiene corrección (LOC-175)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.ts:31-35` (un `charged` sobre una `failed` es `conflict`) y
+  `src/admin/admin.controller.ts:382-387` (el reintento de admin la rechaza con 409)
+- **Qué lo dispara**: ROAX Ads informa `failed` y Dropi termina descontando el saldo (un cobro que se confirma
+  tarde, o un `failed` informado por error).
+- **Qué rompe**: la recarga queda `failed` sin tokens y el saldo de Dropi ya salió: la marca pagó sin recibir, y
+  ni el aviso `charged` ni el reintento de admin la reabren.
+- **Estado**: abierto — lo cierra la conciliación contra Dropi del release que conecta el cobro (076 C3), o una
+  corrección manual que decida quien aprueba.
+
+## La migración de LOC-182 no sube si un ambiente ya tiene dos recargas con la misma operación
+
+- **Dónde**: `src/payment/entities/payment.entity.ts:33` (`UQ_payments_dropi_operation`, que crea la migración
+  1794106072424-AddDropiOperationUnique)
+- **Qué lo dispara**: antes del despliegue, el defecto de `d2f764d` cerró dos recargas con un mismo
+  `dropiOperationId` en ese ambiente.
+- **Qué rompe**: el `up` falla y con él todas las migraciones pendientes del release, que corren en una transacción.
+- **Estado**: abierto — a propósito: las filas son dinero acreditado de más; se miran y se resuelven a mano antes
+  de desplegar, no las corrige la migración.
+
+## Una operación de Dropi que pertenece a otra marca acredita en la primera que la informa (LOC-182)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:104` (el índice es global, no por marca)
+- **Qué lo dispara**: ROAX Ads informa la operación de una marca sobre la recarga de otra.
+- **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
+- **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).

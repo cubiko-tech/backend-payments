@@ -34,6 +34,9 @@ export async function rollbackQuietly(runner: QueryRunner) {
 /** The checkout lost its payment to the sweep, a cancellation or a newer purchase. */
 export class WalletCheckoutLostError extends RequestException {}
 
+/** A failed payment still holds its debit, which only the sweep may settle by crediting it back. */
+export class PaymentDebitedError extends RequestException {}
+
 export type WalletCloseResult =
   | { outcome: 'completed'; paidAt: Date; subscription?: Subscription; extended: boolean }
   | { outcome: 'superseded' }
@@ -113,12 +116,14 @@ export async function yieldOverlappedOlderPurchase(payment: Payment, manager: En
  * A payment with a debit keeps its `createdAt`: the purchase happened then, and a newer
  * one still wins over it at the close. One without a debit is a new purchase from
  * `retriedAt`. Returns the claim result and the `createdAt` the payment ended up with.
+ * With `refuseDebited`, a payment with a debit throws `PaymentDebitedError` and is left as is.
  */
 export async function claimFailedPaymentForRetry(
   paymentId: string,
   values: Partial<Payment>,
   retriedAt: Date,
   dataSource: DataSource,
+  options: { refuseDebited?: boolean } = {},
 ): Promise<{ affected?: number | null; createdAt?: Date }> {
   const runner = dataSource.createQueryRunner()
   await runner.connect()
@@ -143,6 +148,12 @@ export async function claimFailedPaymentForRetry(
       'SELECT 1 FROM transactions WHERE "idempotencyKey" = $1 LIMIT 1',
       [`payment:${paymentId}:debit`],
     )
+    if (options.refuseDebited && debits.length > 0) {
+      throw new PaymentDebitedError(
+        { code: 'PAYMENT_DEBITED', message: `Payment ${paymentId} holds a debit` },
+        HttpStatus.CONFLICT,
+      )
+    }
     const createdAt = debits.length > 0 ? undefined : retriedAt
     const claimed = await runner.manager
       .getRepository(Payment)

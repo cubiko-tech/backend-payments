@@ -10,6 +10,7 @@ import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { RequestException } from '../shared/exception/request.exception'
 import { WebhookController } from '../webhook/webhook.controller'
 import { WebhookService } from '../webhook/webhook.service'
@@ -126,6 +127,7 @@ describe('BillingProfileController and WebhookController admin operator authoriz
       controllers: [BillingProfileController, WebhookController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         Reflector,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: rolesService },

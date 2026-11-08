@@ -11,7 +11,9 @@ import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
 import { AuditService } from '../audit/audit.service'
-import { TaxService, isVatCountry } from '../tax/tax.service'
+import { TaxService } from '../tax/tax.service'
+import { resolveRechargeTax, validateRechargeTax } from '../tax/recharge-tax'
+import { breakDownTaxInclusiveAmount } from '../tax/tax-inclusive-breakdown'
 import { DianService } from '../dian/dian.service'
 import { ProviderFactory } from '../provider/provider.factory'
 import { EventBusService } from '../event-bus/event-bus.service'
@@ -295,11 +297,11 @@ export class CheckoutService implements OnModuleInit {
     const isWalletConsumption = req.provider === 'wallet' && !isWalletRecharge
     const tax =
       isWalletRecharge || tokenPackage
-        ? await this.resolveRechargeTax(taxCountry)
+        ? await resolveRechargeTax(this.taxService, taxCountry, this.log)
         : await this.taxService.getTaxForCountry(taxCountry)
     const directTaxBreakdown = isWalletConsumption
       ? null
-      : this.breakDownTaxInclusiveAmount(amount, tax.taxRate)
+      : breakDownTaxInclusiveAmount(amount, tax.taxRate)
     const subtotalAmount = directTaxBreakdown ? directTaxBreakdown.subtotal : amount
     const taxAmount = directTaxBreakdown ? directTaxBreakdown.taxAmount : 0
     const totalAmount = directTaxBreakdown ? directTaxBreakdown.totalAmount : amount
@@ -967,13 +969,17 @@ export class CheckoutService implements OnModuleInit {
 
     let tax: { taxName: string; taxRate: number; isInclusive: boolean }
     if (takesRechargeTax && hasSavedTaxRate) {
-      tax = this.validateRechargeTaxConfig(country, {
-        taxName: String(payment.metadata.taxName || ''),
-        taxRate: Number(payment.metadata.taxRate),
-        isInclusive: true,
-      })
+      tax = validateRechargeTax(
+        country,
+        {
+          taxName: String(payment.metadata.taxName || ''),
+          taxRate: Number(payment.metadata.taxRate),
+          isInclusive: true,
+        },
+        this.log,
+      )
     } else if (takesRechargeTax) {
-      tax = await this.resolveRechargeTax(country)
+      tax = await resolveRechargeTax(this.taxService, country, this.log)
     } else if (hasSavedTaxRate) {
       tax = {
         taxName: String(payment.metadata.taxName || 'N/A'),
@@ -984,7 +990,7 @@ export class CheckoutService implements OnModuleInit {
       tax = await this.taxService.getTaxForCountry(country)
     }
 
-    const { subtotal, taxAmount } = this.breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
+    const { subtotal, taxAmount } = breakDownTaxInclusiveAmount(totalAmount, tax.taxRate)
 
     if (isWalletRecharge && payment.walletId) {
       const creditResult = await this.walletService.credit(payment.walletId, totalAmount, {
@@ -1926,95 +1932,6 @@ export class CheckoutService implements OnModuleInit {
     }
 
     return result.data
-  }
-
-  private async resolveRechargeTax(
-    taxCountry: string,
-  ): Promise<{ taxName: string; taxRate: number; isInclusive: boolean }> {
-    const normalizedCountry = String(taxCountry || '')
-      .trim()
-      .toUpperCase()
-    let tax: { taxName: string; taxRate: number; isInclusive: boolean } | null = null
-    try {
-      tax = await this.taxService.getTaxForCountry(taxCountry)
-    } catch (error) {
-      this.log.error(
-        `Unable to read tax rate for country ${normalizedCountry || taxCountry}: ${error.message}`,
-      )
-      throw new RequestException(
-        {
-          code: 'TAX_RATE_UNAVAILABLE',
-          message: `Unable to read tax rate for country ${normalizedCountry || taxCountry}`,
-        },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      )
-    }
-
-    return this.validateRechargeTaxConfig(taxCountry, tax)
-  }
-
-  private validateRechargeTaxConfig(
-    taxCountry: string,
-    tax: { taxName: string; taxRate: number; isInclusive: boolean } | null | undefined,
-  ): { taxName: string; taxRate: number; isInclusive: boolean } {
-    const normalizedCountry = String(taxCountry || '')
-      .trim()
-      .toUpperCase()
-    const parsedRate =
-      tax && tax.taxRate !== null && tax.taxRate !== undefined ? Number(tax.taxRate) : NaN
-    const normalizedTaxName = String(tax?.taxName || '').trim()
-    const requiresVat = isVatCountry(normalizedCountry) || normalizedTaxName.toUpperCase() === 'IVA'
-    const isUnreadable =
-      !tax ||
-      !Number.isFinite(parsedRate) ||
-      parsedRate < 0 ||
-      (requiresVat && (normalizedTaxName === 'N/A' || parsedRate <= 0))
-
-    if (isUnreadable) {
-      this.log.error(
-        `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
-      )
-      throw new RequestException(
-        {
-          code: 'TAX_RATE_UNAVAILABLE',
-          message: `Unable to read a valid tax rate for country ${normalizedCountry || taxCountry}`,
-        },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      )
-    }
-
-    return {
-      taxName: normalizedTaxName || 'N/A',
-      taxRate: parsedRate,
-      isInclusive: true,
-    }
-  }
-
-  /**
-   * Shared tax breakdown rule for `processCheckout` and `completeExternalPayment`:
-   * all published prices are final tax-inclusive amounts and ignore `tax_config.isInclusive`,
-   * extracting `subtotal = round(total / (1 + rate))` and `taxAmount = round(total - subtotal)`.
-   */
-  private breakDownTaxInclusiveAmount(
-    totalAmount: number,
-    taxRate: number,
-  ): { subtotal: number; taxAmount: number; totalAmount: number } {
-    const normalizedTotal = Math.round(Number(totalAmount) * 100) / 100
-    const normalizedRate = Number(taxRate)
-    if (!Number.isFinite(normalizedRate) || normalizedRate <= 0) {
-      return {
-        subtotal: normalizedTotal,
-        taxAmount: 0,
-        totalAmount: normalizedTotal,
-      }
-    }
-    const subtotal = Math.round((normalizedTotal / (1 + normalizedRate)) * 100) / 100
-    const taxAmount = Math.round((normalizedTotal - subtotal) * 100) / 100
-    return {
-      subtotal,
-      taxAmount,
-      totalAmount: normalizedTotal,
-    }
   }
 
   private readonly providerConfirmedAmountSpecs: Record<

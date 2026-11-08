@@ -24,6 +24,7 @@ con separación lectura/escritura (`DBRead` / `DBWrite` en `src/orm/`) y colas/e
 | `src/payment/` | Creación y consulta de pagos e intentos de cobro (`/payment`). |
 | `src/payment-method/` | CRUD de métodos de pago guardados por marca (`/payment-method`). |
 | `src/provider/` | Registro y adaptadores de pasarelas (`ProviderFactory`): Stripe (`src/provider/stripe/`), MercadoPago (`src/provider/mercadopago/`), Dropi (`src/provider/dropi/`) y Confío (`src/provider/confio/`). |
+| `src/recharge/` | Recarga de tokens pagada con el saldo Dropi (`/recharge/dropi`): la pide ROAX Ads con su credencial y el token del usuario, nace `pending` con la TRM, los pesos con IVA y los tokens fijados, y no vence sola. |
 | `src/refund/` | Solicitud, listado y procesamiento de reembolsos (`/refund`). |
 | `src/shared/` | Guard de autenticación y permisos (`src/shared/auth/`), middleware (`src/shared/middleware/`), logger (`src/shared/logger/`), excepciones (`src/shared/exception/`), entidad base (`src/shared/entities/`) y entorno (`src/shared/env/`). |
 | `src/subscription/` | Ciclo de vida de suscripciones (`/subscription`), trials y cancelaciones de Confío, precios enterprise e historial de eventos. |
