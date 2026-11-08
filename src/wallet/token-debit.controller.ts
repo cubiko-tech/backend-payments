@@ -14,8 +14,8 @@ import {
 import { RequestException } from '../shared/exception/request.exception'
 import { DebitTokensDto } from './dto/debit-tokens.dto'
 import { RefundDebitDto } from './dto/refund-debit.dto'
-import { isLimitHit, MovementLimits, withinMs } from './movement-limits'
-import { TokenMovement, TokenWalletService, fail, walletBusy } from './token-wallet.service'
+import { isLimitHit, MovementLimits, walletBusy, withinMs } from './movement-limits'
+import { TokenMovement, TokenWalletService, fail } from './token-wallet.service'
 
 /**
  * Budget of a debit, 4.5 s in all under the 5 s ROAX Ads waits for Pagos: auth 1 s, platform 1 s,

@@ -1,3 +1,5 @@
+// R6: one responsibility, the token wallet's movement guard (`move`) and the movements that go
+// through it; splitting them apart would expose `move` to callers that skip its lock and key.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, QueryRunner, Repository } from 'typeorm'
@@ -10,9 +12,22 @@ import {
 import { RequestException } from '../shared/exception/request.exception'
 import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
 import { TOKEN_CURRENCY, TokenOrigin, isTokenCurrency } from './token-origin'
-import { TokenBuckets, fromCents, planTokenRefund, planTokenSpend, toCents } from './token-spend'
+import {
+  TokenBuckets,
+  fromCents,
+  owedByDebit,
+  planTokenRefund,
+  planTokenSpend,
+  toCents,
+} from './token-spend'
 import { MovementAudit } from '../transaction/movement-audit'
-import { applyLimits, connectWithin, isLimitHit, MovementLimits } from './movement-limits'
+import {
+  applyLimits,
+  connectWithin,
+  isLimitHit,
+  MovementLimits,
+  walletBusy,
+} from './movement-limits'
 
 const BUCKET_COLUMN: Record<TokenOrigin, 'giftTokens' | 'purchasedTokens' | 'dropiTokens'> = {
   [TokenOrigin.GIFT]: 'giftTokens',
@@ -39,10 +54,6 @@ export interface TokenMovement {
 
 export const fail = (code: string, message: string, status: HttpStatus) =>
   new RequestException({ code, message }, status)
-
-/** A movement that ran out of its limits: nothing was applied; retry with the same key. */
-export const walletBusy = () =>
-  fail('WALLET_BUSY', 'Wallet is busy, retry with the same key', HttpStatus.SERVICE_UNAVAILABLE)
 
 /**
  * The brand token wallet (`internal`/`TKN`) and its balance per origin. Every movement locks the
@@ -181,13 +192,10 @@ export class TokenWalletService {
         const earlier = await manager.find(Transaction, {
           where: { referenceType: DEBIT_REFUND_REFERENCE, referenceId: debit.id },
         })
-        const owed = splitOf(debit)
-        for (const refund of earlier) {
-          const back = splitOf(refund)
-          owed.gift -= back.gift
-          owed.purchased -= back.purchased
-          owed.dropi -= back.dropi
-        }
+        const owed = owedByDebit(
+          debit.metadata?.tokenSplit,
+          earlier.map((refund) => refund.metadata?.tokenSplit),
+        )
         const split = planTokenRefund(owed, cents)
         if (!split) {
           throw fail(
@@ -345,15 +353,6 @@ interface AppliedMovement {
 
 /** `referenceType` of a refund; its `referenceId` is the refunded debit. */
 export const DEBIT_REFUND_REFERENCE = 'token_debit_refund'
-
-function splitOf(movement: Transaction): TokenBuckets {
-  const split = movement.metadata?.tokenSplit ?? {}
-  return {
-    gift: toCents(split.gift ?? 0),
-    purchased: toCents(split.purchased ?? 0),
-    dropi: toCents(split.dropi ?? 0),
-  }
-}
 
 /**
  * The movement already recorded under `key` when it is this same movement, `null` when the key is

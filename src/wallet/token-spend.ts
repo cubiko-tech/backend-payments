@@ -42,5 +42,35 @@ export function planTokenRefund(remaining: TokenBuckets, amount: number): TokenB
   return left > 0 ? null : given
 }
 
+/** A split as `metadata.tokenSplit` stores it, in tokens. */
+export interface StoredSplit {
+  gift?: unknown
+  purchased?: unknown
+  dropi?: unknown
+}
+
+/** In cents, what `debit` took from each origin minus what `refunds` already gave back to it. */
+export function owedByDebit(
+  debit: StoredSplit | undefined,
+  refunds: (StoredSplit | undefined)[],
+): TokenBuckets {
+  const owed = splitInCents(debit)
+  for (const refund of refunds) {
+    const back = splitInCents(refund)
+    owed.gift -= back.gift
+    owed.purchased -= back.purchased
+    owed.dropi -= back.dropi
+  }
+  return owed
+}
+
+function splitInCents(split: StoredSplit = {}): TokenBuckets {
+  return {
+    gift: toCents(split.gift ?? 0),
+    purchased: toCents(split.purchased ?? 0),
+    dropi: toCents(split.dropi ?? 0),
+  }
+}
+
 export const toCents = (value: unknown) => Math.round(Number(value) * 100)
 export const fromCents = (cents: number) => cents / 100

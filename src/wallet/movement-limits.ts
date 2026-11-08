@@ -1,4 +1,14 @@
+import { HttpStatus } from '@nestjs/common'
 import { QueryRunner } from 'typeorm'
+
+import { RequestException } from '../shared/exception/request.exception'
+
+/** A movement that ran out of its limits: nothing was applied; retry with the same key. */
+export const walletBusy = () =>
+  new RequestException(
+    { code: 'WALLET_BUSY', message: 'Wallet is busy, retry with the same key' },
+    HttpStatus.SERVICE_UNAVAILABLE,
+  )
 
 /**
  * Caps of a movement, in ms: how long it waits for a pool connection, and how long its whole
