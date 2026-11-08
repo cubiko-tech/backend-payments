@@ -3,9 +3,9 @@ import * as path from 'path'
 
 import { loadApmAgent } from './apm-agent'
 
+// R17: loading the real agent starts it, and it reports to New Relic, an external paid service.
 const mockNewRelicLoads = jest.fn()
 const mockNewRelicAgent = { recordCustomEvent: jest.fn() }
-// R17: loading the real agent starts it, and it reports to New Relic, an external paid service.
 jest.mock('newrelic', () => {
   mockNewRelicLoads()
   return mockNewRelicAgent
