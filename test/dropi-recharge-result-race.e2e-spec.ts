@@ -148,7 +148,7 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
   })
 
   it('two charged reports at once leave a single close event, from the call that closed it', async () => {
-    // R15: red when the overtaken charged call also signals its close: two charged events.
+    // R15: red when the replayed charged call also signals its close: two charged events.
     await holdWallet()
     const calls = [send(result('charged', 'op-1')), send(result('charged', 'op-2'))]
     expect(await sessionsWaitOnRowLock(a.dataSource, 2)).toBe(true)
@@ -161,7 +161,7 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
   })
 
   it('a charged report overtaken by a failed one leaves only the failed close event', async () => {
-    // R15: red when the charged call closed meanwhile signals anyway: a charged event appears.
+    // R15: red when the charged call closed meanwhile signals anyway: two failed events.
     await holdWallet()
     const late = send(result('charged', 'op-1'))
     expect(await someoneWaitsOnRowLock(a.dataSource)).toBe(true)
@@ -175,7 +175,7 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
   })
 
   it('a failed report overtaken by a charged one gets 409 and leaves only the charged event', async () => {
-    // R15: red when the failed call that found it closed signals anyway: a failed event appears.
+    // R15: red when the failed call that found it closed signals anyway: two charged events.
     await holdPayment()
     const charged = send(result('charged', 'op-1'))
     expect(await someoneWaitsOnRowLock(a.dataSource)).toBe(true)
