@@ -10,6 +10,7 @@ import { AuditService } from '../src/audit/audit.service'
 import { bonusTokensKey, purchasedTokensKey } from '../src/checkout/token-package-checkout'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import { PaymentStatus } from '../src/payment/entities/payment.entity'
+import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
@@ -95,7 +96,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       currency: 'COP',
       amount: '100000.00',
     })
-    expect(payment.exchangeRate).toBe('4000.00')
+    expect(Number(payment.exchangeRate)).toBe(4000)
     expect(payment.metadata.tokenPackage).toMatchObject({
       priceUsd: 25,
       purchasedTokens: 25,
@@ -245,6 +246,28 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
         { status: 503, code: 'EXCHANGE_RATE_UNAVAILABLE' },
       )
       expect(down.hits).toBe(1)
+      expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
+      expect(await tokenWalletOf(instance.dataSource, BRAND)).toBeNull()
+    } finally {
+      await stopInstance(cold)
+      await down.close()
+    }
+  })
+
+  it('refuses a provider not enabled for the country before quoting, with the TRM source down', async () => {
+    // R15: red when processCheckout quotes before the provider check: it gets 503, not the provider.
+    // Its own instance: the shared one has the rate cached and would never ask the source.
+    const down = await startTrmSource(trmDown)
+    const cold = await startInstance({ realBilling: true, trmUrl: down.url })
+    try {
+      fakeDropi(cold)
+      jest
+        .spyOn(cold.moduleRef.get(ProviderConfigService), 'isProviderAvailable')
+        .mockResolvedValue(false)
+      await expect(cold.checkout.processCheckout(packageCheckout(BRAND, id))).rejects.toMatchObject(
+        { status: 400, code: 'PROVIDER_NOT_AVAILABLE' },
+      )
+      expect(down.hits).toBe(0)
       expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
       expect(await tokenWalletOf(instance.dataSource, BRAND)).toBeNull()
     } finally {

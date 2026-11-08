@@ -29,6 +29,8 @@ export interface TokenPackageDeps {
   tokenPackages?: TokenPackageService
   tokenWallets?: TokenWalletService
   billingCountry: (brandId: string) => Promise<string>
+  /** Rejects when the request's provider is not enabled for `country`. */
+  assertProviderAvailable: (country: string) => Promise<void>
   quoteUsdCopRate: () => Promise<UsdCopRate>
 }
 
@@ -39,7 +41,8 @@ export const bonusTokensKey = (paymentId: string) => `payment:${paymentId}:token
  * Prices a `token_package` checkout from the catalog and opens the brand token wallet, before
  * the payment exists. A Colombian billing country pays in COP at the day's TRM; any other pays
  * the USD price. Rejects, with nothing saved: `provider: 'wallet'` (422), an unknown or
- * inactive package (404), no TRM (503) and a closed token wallet (422).
+ * inactive package (404), a provider not enabled for the country (400, checked before the TRM),
+ * no TRM (503) and a closed token wallet (422).
  */
 export async function prepareTokenPackage(
   req: { brandId: string; userId: string; provider: string; packageId?: string },
@@ -64,6 +67,7 @@ export async function prepareTokenPackage(
   }
   const tokenPackage = await deps.tokenPackages.findActive(req.packageId)
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
+  await deps.assertProviderAvailable(country)
   const pricing = await chargeFor(tokenPackage, country, deps)
 
   const wallet = await deps.tokenWallets.getOrCreate(req.brandId, req.userId)

@@ -267,7 +267,8 @@ export class CheckoutService implements OnModuleInit {
     // por el perfil de facturación (`|| 'CO'`) mientras el monto viaja en la moneda
     // del país de la marca dejaba pasar un cobro en USD a un proveedor habilitado
     // sólo para CO y nunca validado para esa moneda.
-    if (req.provider !== 'wallet') {
+    if (req.provider !== 'wallet' && !tokenPackage) {
+      // Not for a token package: prepareTokenPackage checked it before quoting the TRM.
       await this.assertProviderAvailable(req, country)
     }
 
@@ -399,6 +400,7 @@ export class CheckoutService implements OnModuleInit {
       tokenPackages: this.tokenPackages,
       tokenWallets: this.tokenWallets,
       billingCountry: (brandId) => this.getBillingCountry(brandId),
+      assertProviderAvailable: (country) => this.assertProviderAvailable(req, country),
       quoteUsdCopRate: () => this.quoteUsdCopRate(),
     })
   }
