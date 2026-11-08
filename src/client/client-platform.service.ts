@@ -76,8 +76,11 @@ export class ClientPlatformService {
     this.countryCache.clear()
   }
 
-  /** Filters by `brand.id` because `?user=` is ignored under the server token. */
-  async canViewBrandCredit(userId: string, brandId: string): Promise<boolean> {
+  /**
+   * Filters by `brand.id` because `?user=` is ignored under the server token. Platform gets
+   * `timeoutMs` to answer; past it, 503.
+   */
+  async canViewBrandCredit(userId: string, brandId: string, timeoutMs = 10000): Promise<boolean> {
     const normalizedBrandId = typeof brandId === 'string' ? brandId.trim() : ''
     if (!userId || !normalizedBrandId) {
       return false
@@ -96,7 +99,7 @@ export class ClientPlatformService {
       const url = `${this.platformUrl}/v1/brand/rol/user?brand.id=${encodeURIComponent(normalizedBrandId)}`
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.accessServer}` },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(timeoutMs),
       })
       if (!response.ok) {
         this.logger.warn(`backend-platform brand/rol/user responded ${response.status}`)

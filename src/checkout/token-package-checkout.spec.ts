@@ -22,12 +22,14 @@ describe('token package checkout', () => {
     creditTokens: jest.fn().mockResolvedValue({}),
   }
   const quoteUsdCopRate = jest.fn().mockResolvedValue({ rate: 4000, date: '2026-11-06' })
+  const assertProviderAvailable = jest.fn().mockResolvedValue(undefined)
   const deps = (country: string) => ({
     tokenPackages: {
       findActive: jest.fn().mockResolvedValue(PACKAGE),
     } as unknown as TokenPackageService,
     tokenWallets: tokenWallets as unknown as TokenWalletService,
     billingCountry: jest.fn().mockResolvedValue(country),
+    assertProviderAvailable,
     quoteUsdCopRate,
   })
   const req = { brandId: 'brand-1', userId: 'user-1', provider: 'stripe', packageId: PACKAGE.id }
@@ -46,6 +48,18 @@ describe('token package checkout', () => {
     })
     expect(prepared.rate).toBeUndefined()
     expect(quoteUsdCopRate).not.toHaveBeenCalled()
+  })
+
+  it('refuses a provider not enabled for the country before asking for the TRM', async () => {
+    // R15: red when the provider check moves after chargeFor: the TRM is asked and its 503 wins.
+    const notEnabled = new Error('PROVIDER_NOT_AVAILABLE')
+    assertProviderAvailable.mockRejectedValueOnce(notEnabled)
+    quoteUsdCopRate.mockRejectedValueOnce(new Error('EXCHANGE_RATE_UNAVAILABLE'))
+
+    await expect(prepareTokenPackage(req, deps('co'))).rejects.toBe(notEnabled)
+    expect(assertProviderAvailable).toHaveBeenCalledWith('CO')
+    expect(quoteUsdCopRate).not.toHaveBeenCalled()
+    expect(tokenWallets.getOrCreate).not.toHaveBeenCalled()
   })
 
   it('credits only the purchased tokens of a package without bonus', async () => {

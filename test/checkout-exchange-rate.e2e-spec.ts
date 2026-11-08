@@ -21,7 +21,7 @@ import {
   packageId,
   paymentsOf,
 } from './support/token-package.fixture'
-import { TrmSource, startTrmSource } from './support/trm-source.fixture'
+import { TRM_DAY, TrmSource, startTrmSource } from './support/trm-source.fixture'
 import { RaceInstance, startInstance, stopInstance } from './support/wallet-race.fixture'
 
 dotenvConfig({ path: '.env' })
@@ -57,8 +57,14 @@ describe('Checkout charged with the TRM (PostgreSQL)', () => {
   it('stores the rate and its date on the package payment that uses it', async () => {
     // Mutation: drop the exchangeRate spread in processCheckout and the row reads null.
     const row = await paymentOf(await buy())
-    expect(row.exchangeRate).toBe('4000.00')
-    expect(row.exchangeRateDate).toBe('2026-11-06')
+    expect(Number(row.exchangeRate)).toBe(4000)
+    expect(row.exchangeRateDate).toBe(TRM_DAY)
+  })
+
+  it('reads the stored rate back as a number, not as the text pg returns for a decimal', async () => {
+    // Mutation: drop the transformer from Payment.exchangeRate and the row reads '4000.00'.
+    const row = await paymentOf(await buy())
+    expect(typeof row.exchangeRate).toBe('number')
   })
 
   it('queries the source once for two package payments in the same hour', async () => {
@@ -109,7 +115,7 @@ describe('Checkout charged with the TRM (PostgreSQL)', () => {
     const [row] = await paymentsOf(instance.dataSource, BRAND)
     expect(row.id).toBe(failed.id)
     expect(row.status).toBe(PaymentStatus.PENDING)
-    expect(row.exchangeRate).toBe('3999.50')
+    expect(Number(row.exchangeRate)).toBe(3999.5)
     expect(row.exchangeRateDate).toBe('2026-11-05')
     expect(source.hits).toBe(0)
   })

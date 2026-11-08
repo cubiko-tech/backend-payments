@@ -1,3 +1,5 @@
+// R6: one responsibility, the token wallet's movement guard (`move`) and the movements that go
+// through it; splitting them apart would expose `move` to callers that skip its lock and key.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, QueryRunner, Repository } from 'typeorm'
@@ -10,8 +12,22 @@ import {
 import { RequestException } from '../shared/exception/request.exception'
 import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
 import { TOKEN_CURRENCY, TokenOrigin, isTokenCurrency } from './token-origin'
-import { TokenBuckets, fromCents, planTokenSpend, toCents } from './token-spend'
+import {
+  TokenBuckets,
+  fromCents,
+  owedByDebit,
+  planTokenRefund,
+  planTokenSpend,
+  toCents,
+} from './token-spend'
 import { MovementAudit } from '../transaction/movement-audit'
+import {
+  applyLimits,
+  connectWithin,
+  isLimitHit,
+  MovementLimits,
+  walletBusy,
+} from './movement-limits'
 
 const BUCKET_COLUMN: Record<TokenOrigin, 'giftTokens' | 'purchasedTokens' | 'dropiTokens'> = {
   [TokenOrigin.GIFT]: 'giftTokens',
@@ -87,7 +103,7 @@ export class TokenWalletService {
       throw fail('INVALID_TOKEN_ORIGIN', 'Unknown token origin', HttpStatus.BAD_REQUEST)
     }
     const expected = { walletId, type: TransactionType.CREDIT, cents, origin }
-    return this.move(walletId, data, idempotencyKey, expected, audit, (wallet) => {
+    return this.move(walletId, data, idempotencyKey, expected, audit, undefined, (wallet) => {
       if (wallet.status === WalletStatus.CLOSED) {
         throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
       }
@@ -107,11 +123,12 @@ export class TokenWalletService {
     context: { brandId: string; inDropi?: boolean },
     data: Partial<Transaction> = {},
     idempotencyKey?: string,
+    limits?: MovementLimits,
   ): Promise<TokenMovement> {
     const cents = assertAmount(amount)
     const expected = { walletId, type: TransactionType.DEBIT, cents, origin: null }
     const txData = { ...data, brandId: context.brandId }
-    return this.move(walletId, txData, idempotencyKey, expected, undefined, (wallet) => {
+    return this.move(walletId, txData, idempotencyKey, expected, undefined, limits, (wallet) => {
       if (wallet.status !== WalletStatus.ACTIVE) {
         throw fail(
           'WALLET_NOT_ACTIVE',
@@ -136,19 +153,106 @@ export class TokenWalletService {
     })
   }
 
+  /**
+   * Gives back `amount` tokens of the debit recorded under `debitKey`, in the reverse order of the
+   * spend and never past what that debit took from each origin minus its earlier refunds. 404 when
+   * the wallet has no such debit, 422 past the debit. Frozen wallets take it; closed ones do not.
+   */
+  async refundDebit(
+    walletId: string,
+    amount: number,
+    context: { brandId: string; debitKey: string },
+    data: Partial<Transaction> = {},
+    refundKey?: string,
+  ): Promise<TokenMovement> {
+    const cents = assertAmount(amount)
+    const expected = { walletId, type: TransactionType.CREDIT, cents, origin: null }
+    const txData = { ...data, brandId: context.brandId, referenceType: DEBIT_REFUND_REFERENCE }
+    return this.move(
+      walletId,
+      txData,
+      refundKey,
+      expected,
+      undefined,
+      undefined,
+      async (wallet, manager) => {
+        if (wallet.status === WalletStatus.CLOSED) {
+          throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
+        }
+        const debit = await manager.findOne(Transaction, {
+          where: { idempotencyKey: context.debitKey },
+        })
+        if (!debit || debit.type !== TransactionType.DEBIT || debit.walletId !== wallet.id) {
+          throw fail(
+            'DEBIT_NOT_FOUND',
+            'No debit with this key on the wallet',
+            HttpStatus.NOT_FOUND,
+          )
+        }
+        const earlier = await manager.find(Transaction, {
+          where: { referenceType: DEBIT_REFUND_REFERENCE, referenceId: debit.id },
+        })
+        const owed = owedByDebit(
+          debit.metadata?.tokenSplit,
+          earlier.map((refund) => refund.metadata?.tokenSplit),
+        )
+        const split = planTokenRefund(owed, cents)
+        if (!split) {
+          throw fail(
+            'REFUND_EXCEEDS_DEBIT',
+            'Refund exceeds the debit',
+            HttpStatus.UNPROCESSABLE_ENTITY,
+          )
+        }
+        wallet.giftTokens = fromCents(toCents(wallet.giftTokens) + split.gift)
+        wallet.purchasedTokens = fromCents(toCents(wallet.purchasedTokens) + split.purchased)
+        wallet.dropiTokens = fromCents(toCents(wallet.dropiTokens) + split.dropi)
+        const tokenSplit = {
+          gift: fromCents(split.gift),
+          purchased: fromCents(split.purchased),
+          dropi: fromCents(split.dropi),
+        }
+        const metadata = { ...data.metadata, tokenSplit, debitId: debit.id }
+        return {
+          type: TransactionType.CREDIT,
+          tokenOrigin: null,
+          delta: cents,
+          metadata,
+          referenceId: debit.id,
+        }
+      },
+    )
+  }
+
+  /** Id of the brand token wallet, or `null` when the brand has none; never creates it. */
+  async findTokenWalletId(brandId: string): Promise<string | null> {
+    const wallet = await this.walletRepository.findOne({
+      where: { brandId, provider: WalletProvider.INTERNAL as string, currency: TOKEN_CURRENCY },
+    })
+    return wallet?.id ?? null
+  }
+
   private async move(
     walletId: string,
     data: Partial<Transaction> & { brandId: string },
     idempotencyKey: string | undefined,
     expected: ExpectedMovement,
     audit: MovementAudit | undefined,
-    apply: (wallet: Wallet) => AppliedMovement,
+    limits: MovementLimits | undefined,
+    apply: (wallet: Wallet, manager: EntityManager) => AppliedMovement | Promise<AppliedMovement>,
   ): Promise<TokenMovement> {
     const key = idempotencyKey ?? data.idempotencyKey
     const queryRunner = this.dataSource.createQueryRunner()
-    await queryRunner.connect()
+    if (limits) {
+      await connectWithin(queryRunner, limits.connectTimeoutMs).catch((error) => {
+        throw isLimitHit(error) ? walletBusy() : error
+      })
+    } else {
+      await queryRunner.connect()
+    }
     await queryRunner.startTransaction()
     try {
+      if (limits) await applyLimits(queryRunner, limits)
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
         lock: { mode: 'pessimistic_write' },
@@ -172,7 +276,7 @@ export class TokenWalletService {
       }
 
       const balanceBefore = toCents(wallet.balance)
-      const applied = apply(wallet)
+      const applied = await apply(wallet, queryRunner.manager)
       wallet.balance = fromCents(balanceBefore + applied.delta)
       await queryRunner.manager.save(Wallet, wallet)
       const transaction = await queryRunner.manager.save(
@@ -188,6 +292,7 @@ export class TokenWalletService {
           status: TransactionStatus.COMPLETED,
           tokenOrigin: applied.tokenOrigin,
           metadata: applied.metadata ?? data.metadata,
+          referenceId: applied.referenceId ?? data.referenceId,
           idempotencyKey: key,
         }),
       )
@@ -196,11 +301,20 @@ export class TokenWalletService {
       this.logger.log(`Token ${applied.type} of ${expected.cents / 100} on wallet ${walletId}`)
       return { wallet: toView(wallet), transaction, replayed: false }
     } catch (error) {
-      if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
+      const limitHit = limits !== undefined && isLimitHit(error)
+      if (queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction()
+        } catch (rollbackError) {
+          // transaction_timeout ends the session: the server already rolled back.
+          if (!limitHit) throw rollbackError
+        }
+      }
       if (key && isUniqueConstraintViolation(error)) {
         // Awaited here: `finally` releases the query runner this lookup uses.
         return await this.replayAfterConflict(queryRunner, walletId, key, expected)
       }
+      if (limitHit) throw walletBusy()
       throw error
     } finally {
       await queryRunner.release()
@@ -234,7 +348,11 @@ interface AppliedMovement {
   tokenOrigin: TokenOrigin | null
   delta: number
   metadata?: Record<string, unknown>
+  referenceId?: string
 }
+
+/** `referenceType` of a refund; its `referenceId` is the refunded debit. */
+export const DEBIT_REFUND_REFERENCE = 'token_debit_refund'
 
 /**
  * The movement already recorded under `key` when it is this same movement, `null` when the key is

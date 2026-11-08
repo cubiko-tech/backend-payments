@@ -58,9 +58,15 @@ export function apmDouble(): ApmDouble {
 /**
  * The recharge route behind the real guard, service, TRM client and token wallet, on `dataSource`.
  * Doubles only what is remote or shared by every suite, each with its reason below. `MEMBER_ID`
- * is a member of `brandId` only; each suite passes its own brand, since suites run at once.
+ * is a member of `brandId` only; each suite passes its own brand, since suites run at once. With
+ * `realPlatform`, the real platform client asks `SERVICE_PLATFORM` instead.
  */
-export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, brandId: string) {
+export async function startRechargeApp(
+  dataSource: DataSource,
+  trm: Pick<TrmSource, 'url'>,
+  brandId: string,
+  options: { realPlatform?: boolean } = {},
+) {
   const jwt = new JwtService({ secret: JWT_SECRET })
   // R17: tax_config is reference data shared by every suite; the case fixes the 19 % it prices with.
   const tax = { getTaxForCountry: jest.fn().mockResolvedValue(COLOMBIAN_VAT) }
@@ -100,7 +106,9 @@ export async function startRechargeApp(dataSource: DataSource, trm: TrmSource, b
       repo(Wallet, 'DBWrite'),
       repo(BillingProfile, 'DBRead'),
       { provide: TaxService, useValue: tax },
-      { provide: ClientPlatformService, useValue: platform },
+      options.realPlatform
+        ? ClientPlatformService
+        : { provide: ClientPlatformService, useValue: platform },
       { provide: ServiceCredentialService, useValue: credentials },
       // R17: the recharge route uses the service mark, never a roles permission.
       { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },

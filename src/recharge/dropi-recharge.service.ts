@@ -49,6 +49,9 @@ export interface CreatedDropiRecharge {
 
 export const dropiRechargeKey = (requestId: string) => `dropi-recharge:${requestId}`
 
+/** The TRM's share of the recharge budget (see `DropiRechargeController`). */
+export const RECHARGE_TRM_TIMEOUT_MS = 3000
+
 /**
  * Creates the `pending` payment of a recharge paid with the Dropi balance. Nothing closes it here
  * and no sweep expires it: only the result ROAX Ads reports does (LOC-175).
@@ -72,8 +75,8 @@ export class DropiRechargeService {
    * Prices `tokens` at the day's TRM plus the country's VAT and saves the recharge `pending`. A
    * retry with the same `requestId` and tokens gets the same recharge; with other tokens, 409.
    * Tokens are fixed, priced and compared at two decimals: noise below the hundredth is dropped.
-   * Rejects with no payment saved: a non-CO brand (422), no TRM (503), no readable VAT (422) and a
-   * closed token wallet (422). The token wallet itself may be left created.
+   * Rejects with no payment saved: a non-CO brand (422), no TRM within 3 s (503), no readable VAT
+   * (422) and a closed token wallet (422). The token wallet itself may be left created.
    */
   async create(
     brandId: string,
@@ -94,7 +97,7 @@ export class DropiRechargeService {
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
     }
-    const quote = await this.trm.getUsdCopRate()
+    const quote = await this.trm.getUsdCopRate(RECHARGE_TRM_TIMEOUT_MS)
     const tax = await resolveRechargeTax(this.taxService, country, this.log)
     const rate = storedRate(quote.rate)
     const amount = rechargePesos(tokens, rate, tax.taxRate)

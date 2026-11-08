@@ -410,12 +410,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
-- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:76` (`chargeFor`)
-- **Qué lo dispara**: `datos.gov.co` sin responder, con error o con una fila ilegible, y sin una tasa consultada
-  en la última hora por esa instancia. El caché es por instancia: N instancias hacen hasta N consultas por hora.
-- **Qué rompe**: el checkout de un paquete de tokens de una marca colombiana responde 503
-  `EXCHANGE_RATE_UNAVAILABLE` y no guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06).
-  Es el único precio que se cobra con la TRM.
+- **Dónde**: `src/trm/trm.service.ts:54` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:80` (`chargeFor`),
+  `src/recharge/dropi-recharge.service.ts:100` (la recarga, con tope de 3 s)
+- **Qué lo dispara**: `datos.gov.co` sin responder, con error, sin fila vigente hoy o con una tasa fuera de
+  2.000–10.000, y sin una tasa vigente consultada en la última hora por esa instancia. La recarga además se rinde a
+  los 3 s. El caché es por instancia: N instancias hacen hasta N consultas por hora.
+- **Qué rompe**: el checkout de un paquete de tokens y la recarga desde Dropi de una marca colombiana responden 503
+  `EXCHANGE_RATE_UNAVAILABLE` y no guardan el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06).
 - **Estado**: abierto — aceptado por diseño; lo reabre un respaldo decidido por quien aprueba.
 
 ## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)
@@ -555,3 +556,20 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: ROAX Ads informa la operación de una marca sobre la recarga de otra.
 - **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
 - **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).
+
+## Un débito de ROAX Ads que commitea después de que ROAX Ads se rindió queda sin reintegrar (LOC-187)
+
+- **Dónde**: `src/wallet/token-debit.controller.ts:24-26` (el presupuesto) y `:120`,
+  `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
+- **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
+  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
+  antes del `SET LOCAL` (`token-wallet.service.ts:245-247`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
+  lo da por fallido y pide el reintegro antes de ver el débito.
+- **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
+  generación. Ningún barrido de Pagos lo repara.
+- **Estado**: mitigado por un presupuesto de 4,5 s: auth 1 s, platform 1 s, la búsqueda de la wallet 0,5 s, la conexión
+  del pool 0,5 s y la transacción entera 1,5 s (`transaction_timeout`, que PostgreSQL aplica en el servidor y
+  revierte aunque el proceso ya no espere); y por el contrato del 404: «todavía no hay débito con esa llave, reintentá
+  con la misma». Abierto — lo cierra LOC-191 reintentando el reintegro con la misma llave ante un 404.
+  `transaction_timeout` existe desde PostgreSQL 17: la base local es 18.1 (medido); en una base anterior el `SET LOCAL`
+  falla y todo débito responde 500. La versión de dev, staging y producción no se miró.
