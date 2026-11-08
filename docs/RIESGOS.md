@@ -410,12 +410,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
-- **Dónde**: `src/trm/trm.service.ts:32` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:76` (`chargeFor`)
-- **Qué lo dispara**: `datos.gov.co` sin responder, con error o con una fila ilegible, y sin una tasa consultada
-  en la última hora por esa instancia. El caché es por instancia: N instancias hacen hasta N consultas por hora.
-- **Qué rompe**: el checkout de un paquete de tokens de una marca colombiana responde 503
-  `EXCHANGE_RATE_UNAVAILABLE` y no guarda el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06).
-  Es el único precio que se cobra con la TRM.
+- **Dónde**: `src/trm/trm.service.ts:54` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:80` (`chargeFor`),
+  `src/recharge/dropi-recharge.service.ts:100` (la recarga, con tope de 3 s)
+- **Qué lo dispara**: `datos.gov.co` sin responder, con error, sin fila vigente hoy o con una tasa fuera de
+  2.000–10.000, y sin una tasa vigente consultada en la última hora por esa instancia. La recarga además se rinde a
+  los 3 s. El caché es por instancia: N instancias hacen hasta N consultas por hora.
+- **Qué rompe**: el checkout de un paquete de tokens y la recarga desde Dropi de una marca colombiana responden 503
+  `EXCHANGE_RATE_UNAVAILABLE` y no guardan el pago; no hay tasa de respaldo (decisión de quien aprueba, 2026-11-06).
 - **Estado**: abierto — aceptado por diseño; lo reabre un respaldo decidido por quien aprueba.
 
 ## Un paquete de tokens cobrado queda sin tokens si la wallet `TKN` se cierra antes del aviso (LOC-136)
