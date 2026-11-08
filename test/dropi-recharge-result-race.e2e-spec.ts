@@ -59,6 +59,16 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
     await holder.startTransaction()
     await holder.query('SELECT 1 FROM wallets WHERE id = $1 FOR UPDATE', [payment.walletId])
   }
+  const holdPayment = async () => {
+    holder = a.dataSource.createQueryRunner()
+    await holder.connect()
+    await holder.startTransaction()
+    await holder.query('SELECT 1 FROM payments WHERE id = $1 FOR UPDATE', [payment.id])
+  }
+  const closeEvents = () =>
+    recharge.apm.events
+      .filter((event) => event.type === 'DropiRecharge' && event.attributes.status !== 'pending')
+      .map((event) => event.attributes.status)
   const releaseWallet = async () => {
     await holder?.commitTransaction()
     await holder?.release()
@@ -90,6 +100,7 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
     payment = await a.dataSource
       .getRepository(Payment)
       .findOneByOrFail({ id: created.body.data.id })
+    recharge.apm.events.length = 0
   })
 
   afterEach(async () => {
@@ -134,6 +145,50 @@ describe('Two results of one recharge from Dropi at once (PostgreSQL, LOC-175)',
     expect(statuses).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
     expect(await balance()).toBe(10)
     expect(await creditsOf(a.dataSource, payment.id)).toHaveLength(1)
+  })
+
+  it('two charged reports at once leave a single close event, from the call that closed it', async () => {
+    // R15: red when the overtaken charged call also signals its close: two charged events.
+    await holdWallet()
+    const calls = [send(result('charged', 'op-1')), send(result('charged', 'op-2'))]
+    expect(await sessionsWaitOnRowLock(a.dataSource, 2)).toBe(true)
+    await releaseWallet()
+
+    const statuses = (await Promise.all(calls)).map((res) => res.status).sort()
+
+    expect(statuses).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
+    expect(closeEvents()).toEqual(['charged'])
+  })
+
+  it('a charged report overtaken by a failed one leaves only the failed close event', async () => {
+    // R15: red when the charged call closed meanwhile signals anyway: a charged event appears.
+    await holdWallet()
+    const late = send(result('charged', 'op-1'))
+    expect(await someoneWaitsOnRowLock(a.dataSource)).toBe(true)
+
+    const first = await send(result('failed'))
+    await releaseWallet()
+    const second = await late
+
+    expect([first.status, second.status]).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
+    expect(closeEvents()).toEqual(['failed'])
+  })
+
+  it('a failed report overtaken by a charged one gets 409 and leaves only the charged event', async () => {
+    // R15: red when the failed call that found it closed signals anyway: a failed event appears.
+    await holdPayment()
+    const charged = send(result('charged', 'op-1'))
+    expect(await someoneWaitsOnRowLock(a.dataSource)).toBe(true)
+    const failed = send(result('failed'))
+    expect(await sessionsWaitOnRowLock(a.dataSource, 2)).toBe(true)
+    await releaseWallet()
+
+    const answers = await Promise.all([charged, failed])
+
+    expect(answers.map((res) => res.status)).toEqual([HttpStatus.OK, HttpStatus.CONFLICT])
+    const stored = await a.dataSource.getRepository(Payment).findOneByOrFail({ id: payment.id })
+    expect(stored.status).toBe(PaymentStatus.COMPLETED)
+    expect(closeEvents()).toEqual(['charged'])
   })
 
   it('a charged report overtaken by a failed one gets 409 and its credit is rolled back', async () => {
