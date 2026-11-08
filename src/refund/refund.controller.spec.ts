@@ -8,6 +8,7 @@ import { ClientPlatformService } from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { Refund, RefundReason, RefundStatus } from './entities/refund.entity'
 import { RefundController } from './refund.controller'
 import { RefundService } from './refund.service'
@@ -93,6 +94,7 @@ describe('RefundController and RefundService brand payment ownership and operato
         RefundService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: ClientPlatformService, useValue: platformClient },

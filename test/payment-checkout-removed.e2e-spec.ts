@@ -23,6 +23,7 @@ import { PaymentService } from '../src/payment/payment.service'
 import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { ProviderFactory } from '../src/provider/provider.factory'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { unknownServiceKeys } from './support/service-credential.double'
 import { EnterprisePricingService } from '../src/subscription/enterprise-pricing.service'
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
@@ -103,6 +104,7 @@ describe('POST /payment/checkout removal e2e (PostgreSQL, LOC-93)', () => {
       controllers: [PaymentController, CheckoutController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         JwtService,
         PaymentService,
         CheckoutService,

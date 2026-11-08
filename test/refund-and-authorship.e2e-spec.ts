@@ -53,6 +53,7 @@ import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
+import { unknownServiceKeys } from './support/service-credential.double'
 
 const [BRAND_A, USER_A, SUPERADMIN_ID] = [
   'a1150001-1111-4111-8111-111111111111',
@@ -147,6 +148,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         AuditService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         provideRepo(Refund, 'DBWrite'),

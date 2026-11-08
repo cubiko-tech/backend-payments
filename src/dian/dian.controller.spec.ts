@@ -10,6 +10,7 @@ import { BillingProfile } from '../billing-profile/entities/billingProfile.entit
 import { ClientRolesService } from '../client/client-roles.service'
 import { Invoice, InvoiceType } from '../invoice/entities/invoice.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { DianController } from './dian.controller'
 import { DianProvider } from './dian.interface'
 import { DianService } from './dian.service'
@@ -110,6 +111,7 @@ describe('DianController operator authorization (LOC-78)', () => {
         DianService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: getRepositoryToken(Invoice, 'DBWrite'), useValue: invoiceRepo },

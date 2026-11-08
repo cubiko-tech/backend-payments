@@ -20,6 +20,7 @@ import { AuditLog } from '../src/audit/entities/auditLog.entity'
 import { ClientPlatformService } from '../src/client/client-platform.service'
 import { ClientRolesService } from '../src/client/client-roles.service'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { unknownServiceKeys } from './support/service-credential.double'
 import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { Wallet } from '../src/wallet/entities/wallet.entity'
@@ -117,6 +118,7 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
         TokenWalletService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[Wallet, AuditLog].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),

@@ -9,6 +9,7 @@ import { ClientPlatformService } from '../src/client/client-platform.service'
 import { ClientRolesService } from '../src/client/client-roles.service'
 import { EventBusService } from '../src/event-bus/event-bus.service'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { unknownServiceKeys } from './support/service-credential.double'
 import { ConfioCancellationService } from '../src/subscription/confio-cancellation.service'
 import { ConfioTrialService } from '../src/subscription/confio-trial.service'
 import { EnterprisePricingService } from '../src/subscription/enterprise-pricing.service'
@@ -78,6 +79,7 @@ describe('PATCH /subscription/plan removal e2e (PostgreSQL, LOC-109)', () => {
       controllers: [SubscriptionController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         JwtService,
         SubscriptionService,
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },

@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, HttpStatus, Injectable, Optional } from '@nestjs/common'
+import { CanActivate, ExecutionContext, HttpStatus, Injectable } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
 import { timingSafeEqual } from 'crypto'
@@ -50,8 +50,7 @@ export class ApiAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
     private readonly roles: ClientRolesService,
-    // Optional so test modules that provide the guard alone still compile; without it a key gets 401.
-    @Optional() private readonly serviceCredentials?: ServiceCredentialService,
+    private readonly serviceCredentials: ServiceCredentialService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -124,7 +123,7 @@ export class ApiAuthGuard implements CanActivate {
     }
 
     if (token.startsWith(SERVICE_KEY_PREFIX)) {
-      const client = await this.serviceCredentials?.authenticate(token)
+      const client = await this.serviceCredentials.authenticate(token)
       return client
         ? { id: `service:${client}`, isSuperAdmin: false, brand: null, serviceClient: client }
         : null

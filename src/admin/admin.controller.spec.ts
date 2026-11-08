@@ -18,6 +18,7 @@ import { MetricsService } from '../metrics/metrics.service'
 import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
@@ -204,6 +205,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       controllers: [AdminController, MetricsController],
       providers: [
         ApiAuthGuard,
+        unknownServiceKeys,
         Reflector,
         { provide: JwtService, useValue: jwtService },
         { provide: ClientRolesService, useValue: rolesService },

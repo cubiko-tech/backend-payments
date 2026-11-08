@@ -1,4 +1,5 @@
 import { HttpStatus } from '@nestjs/common'
+import { unknownServiceKeys } from '../../../test/support/service-credential.double'
 import { ApiAuthGuard } from './api-auth.guard'
 import {
   API_PERMISSION_KEY,
@@ -22,7 +23,8 @@ describe('ApiAuthGuard', () => {
   const roles = { checkPermission: jest.fn() } as any
   let fetchMock: jest.Mock
 
-  const makeGuard = (verify: jest.Mock) => new ApiAuthGuard(reflector, { verify } as any, roles)
+  const makeGuard = (verify: jest.Mock) =>
+    new ApiAuthGuard(reflector, { verify } as any, roles, unknownServiceKeys.useValue as never)
 
   beforeEach(() => {
     jest.clearAllMocks()

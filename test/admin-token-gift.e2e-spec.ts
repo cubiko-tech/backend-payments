@@ -34,6 +34,7 @@ import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
+import { unknownServiceKeys } from './support/service-credential.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -138,6 +139,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
         TokenWalletService,
         Reflector,
         ApiAuthGuard,
+        unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[Subscription, Payment, Wallet, ProviderConfig, Transaction, AuditLog].flatMap((e) => [

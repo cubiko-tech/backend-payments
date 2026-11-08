@@ -1,6 +1,7 @@
 import { ExecutionContext, HttpStatus } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
+import { Test } from '@nestjs/testing'
 
 import { ClientRolesService } from '../../client/client-roles.service'
 import { ApiAuthGuard } from './api-auth.guard'
@@ -23,12 +24,12 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
   const fetchMock = jest.fn()
 
   // R17: verify stands for JwtService.verify, so a case can make a session token valid or not.
-  const guard = (verify = jest.fn(), withCredentials = true) =>
+  const guard = (verify = jest.fn()) =>
     new ApiAuthGuard(
       reflector as unknown as Reflector,
       { verify } as unknown as JwtService,
       roles as unknown as ClientRolesService,
-      withCredentials ? (credentials as unknown as ServiceCredentialService) : undefined,
+      credentials as unknown as ServiceCredentialService,
     )
   const onRoute = (authorization: string, meta: Record<string, unknown>) => {
     const handlerTarget = () => undefined
@@ -84,14 +85,18 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('answers 401 to a key when the guard has no credential service', async () => {
-    // R15: red when a missing service lets the key resolve to an identity: it answers 403.
-    const { context } = onRoute(`Bearer ${ADS_KEY}`, {})
+  it('fails to build a module that mounts the guard without the credential service', async () => {
+    // R15: red when the dependency is optional again: the module compiles and every key gets 401.
+    const wiring = Test.createTestingModule({
+      providers: [
+        ApiAuthGuard,
+        Reflector,
+        { provide: JwtService, useValue: {} },
+        { provide: ClientRolesService, useValue: roles },
+      ],
+    }).compile()
 
-    // R17: the key never reaches JwtService here; verify only fills the constructor.
-    await expect(guard(jest.fn(), false).canActivate(context)).rejects.toMatchObject({
-      status: HttpStatus.UNAUTHORIZED,
-    })
+    await expect(wiring).rejects.toThrow(/ApiAuthGuard[\s\S]*ServiceCredentialService/)
   })
 
   it.each([
