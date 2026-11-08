@@ -1,8 +1,9 @@
 import { HttpStatus, Injectable } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { createHash, randomBytes, timingSafeEqual } from 'crypto'
-import { EntityManager, QueryFailedError, Repository } from 'typeorm'
+import { EntityManager, Repository } from 'typeorm'
 
+import { isUniqueConstraintViolation } from '../../checkout/checkout-idempotency'
 import { RequestException } from '../exception/request.exception'
 import { ServiceCredential } from './entities/service-credential.entity'
 
@@ -61,7 +62,7 @@ export class ServiceCredentialService {
         return { ...toView(row), key }
       })
     } catch (error) {
-      if (isUniqueViolation(error)) {
+      if (isUniqueConstraintViolation(error)) {
         throw new RequestException(
           { code: 'SERVICE_CREDENTIAL_EXISTS', message: 'The client already has a credential' },
           HttpStatus.CONFLICT,
@@ -125,8 +126,4 @@ function hashKey(key: string): string {
 
 function toView(row: ServiceCredential): ServiceCredentialView {
   return { id: row.id, client: row.client, active: row.active }
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof QueryFailedError && (error as { code?: string }).code === '23505'
 }
