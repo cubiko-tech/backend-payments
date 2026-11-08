@@ -70,7 +70,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
   `src/client/client-roles.service.ts:351` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
-  (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:88`
+  (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
   al asignar el plan; (c) el proceso muere entre el cierre y `assignPlanInRoles`; (d) un `failed` con
@@ -124,7 +124,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
 
-- **Dónde**: `src/checkout/wallet-payment-close.ts:56` (`lockBrandPlan`);
+- **Dónde**: `src/checkout/wallet-payment-close.ts:59` (`lockBrandPlan`);
   `src/tasks/subscription-lock.ts:18`, `:41` (`lockAndReread`, `acquireSubscriptionLock`)
 - **Qué lo dispara**: bajo el candado se llama a roles, al proveedor y a ConfioPagos. Basta un checkout o
   un webhook de la marca mientras un cron procesa su fila; para agotar el pool, tantos cierres esperando
@@ -215,7 +215,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:49` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
-  (`providerLetsExpire`); `src/admin/admin.controller.ts:297` (`paymentsPending`, con la ruta en `:294`)
+  (`providerLetsExpire`); `src/admin/admin.controller.ts:301` (`paymentsPending`, con la ruta en `:298`)
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id` por una ruta que no existe o por un cobro que no
   existe: no se distinguen. Se midió contra el core-back local; la API real no se conoce.
 - **Qué rompe**: un `pending` abandonado no vence, sin tope, hasta que el usuario lo cancela: una llamada y
@@ -514,15 +514,6 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: el aviso recibe 422 `WALLET_CLOSED` y la recarga sigue `pending`: Dropi ya descontó el saldo y la
   marca no recibe los tokens. Nada la devuelve en Dropi.
 - **Estado**: abierto — lo cierra una decisión de producto (devolver el saldo en Dropi o reabrir la wallet).
-
-## El reintento del admin reabre una recarga que Dropi informó fallida (LOC-175)
-
-- **Dónde**: `src/admin/admin.controller.ts:368-378` (`retryPayment` pasa cualquier pago fallido a pendiente)
-- **Qué lo dispara**: un admin reintenta una recarga `dropi_wallet` cerrada `failed`, y después llega un aviso
-  `charged`.
-- **Qué rompe**: la recarga reabierta acepta el `charged` y acredita sus tokens, aunque Dropi la había informado
-  fallida.
-- **Estado**: abierto — lo cierra LOC-176, que reescribe ese reintento: excluir `dropi_wallet` de él.
 
 ## Reembolsar una recarga desde Dropi deja sus tokens en la wallet (LOC-175)
 

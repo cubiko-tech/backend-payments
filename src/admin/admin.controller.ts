@@ -17,13 +17,17 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository, MoreThan, In, Between } from 'typeorm'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { MovementAudit } from '../transaction/movement-audit'
 import { AuditService } from '../audit/audit.service'
+import {
+  claimFailedPaymentForRetry,
+  WalletCheckoutLostError,
+} from '../checkout/wallet-payment-close'
 import { CreditService } from '../credit/credit.service'
 import {
   CREDIT_ACTIVATION_REQUEST_STATUSES,
@@ -365,6 +369,7 @@ export class AdminController {
   @Post('payments/:id/retry')
   @ApiOperation({ summary: 'Reintentar cobro de pago fallido manualmente (Admin)' })
   @ApiResponse({ status: 200, description: 'Pago marcado para reintento' })
+  @ApiResponse({ status: 409, description: 'El pago tiene débito o crédito, o cambió de estado' })
   async retryPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const payment = await this.paymentWriteRepo.findOne({ where: { id } })
     if (!payment) {
@@ -373,9 +378,21 @@ export class AdminController {
     if (payment.status !== PaymentStatus.FAILED) {
       return { error: `Pago no está en estado failed (actual: ${payment.status})` }
     }
+    // Only the result Dropi reports may reopen a recharge paid with its balance.
+    if (payment.provider === PaymentProvider.DROPI_WALLET) {
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_RETRYABLE', message: 'Una recarga desde Dropi no se reintenta' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
-    payment.status = PaymentStatus.PENDING
-    await this.paymentWriteRepo.save(payment)
+    const claimed = await this.claimForAdminRetry(payment)
+    if (!claimed.affected) {
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_FAILED', message: 'El pago cambió de estado durante el reintento' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
     await this.auditService.log(
       req?.user?.id || 'admin',
@@ -387,6 +404,30 @@ export class AdminController {
     )
 
     return { data: { message: 'Pago marcado para reintento', paymentId: id } }
+  }
+
+  /**
+   * Moves a failed payment without a debit back to `pending` through the checkout's claim, keeping
+   * its `createdAt`. Throws 409 when its money was credited back or it still holds a debit.
+   */
+  private async claimForAdminRetry(payment: Payment) {
+    try {
+      return await claimFailedPaymentForRetry(
+        payment.id,
+        { status: PaymentStatus.PENDING },
+        payment.createdAt,
+        this.paymentWriteRepo.manager.connection,
+        { refuseDebited: true },
+      )
+    } catch (error) {
+      if (error instanceof WalletCheckoutLostError) {
+        throw new RequestException(
+          { code: 'PAYMENT_CREDITED_BACK', message: 'El dinero del pago ya se devolvió' },
+          HttpStatus.CONFLICT,
+        )
+      }
+      throw error
+    }
   }
 
   @Get('credit/activation-requests')
