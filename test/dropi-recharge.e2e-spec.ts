@@ -10,8 +10,10 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../src/payment/entities/payment.entity'
+import { dropiRechargeKey, DropiRechargeService } from '../src/recharge/dropi-recharge.service'
 import { RequestException } from '../src/shared/exception/request.exception'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { TrmService } from '../src/trm/trm.service'
 import {
   ACCESS_SERVER,
   ADS_KEY,
@@ -36,6 +38,7 @@ import {
 } from './support/trm-source.fixture'
 import {
   cleanBrand,
+  createGate,
   RaceInstance,
   startInstance,
   stopInstance,
@@ -45,6 +48,7 @@ dotenvConfig({ path: '.env' })
 
 const RECHARGE_BRAND = 'a1740000-0000-4000-8000-0000000000e2'
 const REQUEST_ID = 'b1740000-0000-4000-8000-000000000001'
+const OTHER_REQUEST_ID = 'b1740000-0000-4000-8000-000000000189'
 
 describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
   const envSnapshot = { ...process.env }
@@ -233,6 +237,52 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     expect(res.status).toBe(HttpStatus.SERVICE_UNAVAILABLE)
     expect(res.body.code).toBe('EXCHANGE_RATE_UNAVAILABLE')
     expect(await rechargesOf(a.dataSource, RECHARGE_BRAND)).toHaveLength(0)
+  })
+
+  it('refuses a recharge that joins, after midnight, a TRM query started the day before', async () => {
+    // R15: red when getUsdCopRate drops the `until` check on the shared query: B saves at 4,000.
+    const yesterday = trmDayPlus(-1)
+    trm.reply = () => ({ status: 200, body: [trmRow('4000.00', yesterday)] })
+    trm.gate = createGate()
+    const trmService = recharge.moduleRef.get(TrmService)
+    const quote = trmService.getUsdCopRate.bind(trmService)
+    let joined!: () => void
+    const bJoined = new Promise<void>((resolve) => (joined = resolve))
+    let calls = 0
+    // R17: only a spy that calls through can say when B has joined the query A holds open.
+    jest.spyOn(trmService, 'getUsdCopRate').mockImplementation((ms?: number) => {
+      const pending = quote(ms)
+      if (++calls === 2) joined()
+      return pending
+    })
+    const recharges = recharge.moduleRef.get(DropiRechargeService)
+    const hitsBefore = trm.hits
+    // Fixed clock: A asks at 23:59:59 in Bogota and B at 00:00:01, while A's query is held.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(`${TRM_DAY}T04:59:59Z`))
+    try {
+      const beforeMidnight = recharges.create(RECHARGE_BRAND, MEMBER_ID, 10, REQUEST_ID)
+      await trm.gate.reached
+      clock.mockReturnValue(Date.parse(`${TRM_DAY}T05:00:01Z`))
+      const afterMidnight = recharges.create(RECHARGE_BRAND, MEMBER_ID, 10, OTHER_REQUEST_ID)
+      await bJoined
+      trm.gate.release()
+
+      const [first, second] = await Promise.allSettled([beforeMidnight, afterMidnight])
+      expect(first).toMatchObject({
+        status: 'fulfilled',
+        value: { created: true, recharge: { exchangeRate: 4000, exchangeRateDate: yesterday } },
+      })
+      expect(second).toMatchObject({
+        status: 'rejected',
+        reason: { status: 503, code: 'EXCHANGE_RATE_UNAVAILABLE' },
+      })
+    } finally {
+      jest.restoreAllMocks()
+      trm.gate = undefined
+    }
+    expect(trm.hits - hitsBefore).toBe(1)
+    const rows = await rechargesOf(a.dataSource, RECHARGE_BRAND)
+    expect(rows.map((row) => row.idempotencyKey)).toEqual([dropiRechargeKey(REQUEST_ID)])
   })
 
   it('answers 503 and saves nothing when the source sends a rate of 1e10', async () => {

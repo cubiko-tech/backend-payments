@@ -41,20 +41,22 @@ export function bogotaDay(epochMs: number): string {
 export class TrmService {
   private readonly log = new Logger(TrmService.name)
   private cached?: { value: UsdCopRate; until: string; expiresAt: number }
-  private inFlight?: Promise<UsdCopRate>
+  private inFlight?: Promise<{ value: UsdCopRate; until: string }>
 
   constructor(
     @Optional() @Inject(TRM_SOURCE_URL) private readonly sourceUrl: string = DEFAULT_TRM_SOURCE_URL,
   ) {}
 
   /**
-   * The rate in force today. With `timeoutMs`, this caller stops waiting after it with a 503; the
-   * query itself keeps its own timeout and still fills the cache for the next caller.
+   * The rate in force on the caller's day in Bogota, taken when it calls. With `timeoutMs`, this
+   * caller stops waiting after it with a 503; the query itself keeps its own timeout and still
+   * fills the cache for the next caller.
    */
   async getUsdCopRate(timeoutMs?: number): Promise<UsdCopRate> {
     const now = Date.now()
+    const today = bogotaDay(now)
     const cached = this.cached
-    if (cached && now < cached.expiresAt && bogotaDay(now) <= cached.until) {
+    if (cached && now < cached.expiresAt && today <= cached.until) {
       return cached.value
     }
     // Concurrent callers share one request to the source.
@@ -63,15 +65,24 @@ export class TrmService {
         this.inFlight = undefined
       })
     }
-    if (!timeoutMs) return this.inFlight
-    return withinMs(this.inFlight, timeoutMs).catch((error) => {
+    const quote = await (timeoutMs ? this.within(this.inFlight, timeoutMs) : this.inFlight)
+    // A query started before midnight may bring a row that ended yesterday for this caller.
+    if (today > quote.until) {
+      this.log.error(`TRM row in force until ${quote.until} is no longer valid on ${today}`)
+      throw exchangeRateUnavailable()
+    }
+    return quote.value
+  }
+
+  private within<T>(query: Promise<T>, timeoutMs: number): Promise<T> {
+    return withinMs(query, timeoutMs).catch((error) => {
       if (error instanceof RequestException) throw error
       this.log.error(`TRM source did not answer within ${timeoutMs} ms`)
       throw exchangeRateUnavailable()
     })
   }
 
-  private async fetchRate(): Promise<UsdCopRate> {
+  private async fetchRate(): Promise<{ value: UsdCopRate; until: string }> {
     const today = bogotaDay(Date.now())
     const inForce = `vigenciadesde <= '${today}T00:00:00' AND vigenciahasta >= '${today}T00:00:00'`
     const url =
@@ -98,8 +109,9 @@ export class TrmService {
       throw exchangeRateUnavailable()
     }
     const value = { rate, date: dayOf(row.vigenciadesde) }
-    this.cached = { value, until: dayOf(row.vigenciahasta), expiresAt: Date.now() + CACHE_TTL_MS }
-    return value
+    const until = dayOf(row.vigenciahasta)
+    this.cached = { value, until, expiresAt: Date.now() + CACHE_TTL_MS }
+    return { value, until }
   }
 }
 

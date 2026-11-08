@@ -124,6 +124,22 @@ describe('TrmService', () => {
     expect(source.hits).toBe(2)
   })
 
+  it('refuses with 503 a caller that joins, after midnight, a query started the day before', async () => {
+    // Mutation: drop the `until` check after the shared query in getUsdCopRate and B gets 4000.
+    const yesterday = trmDayPlus(-1)
+    source.reply = () => ({ status: 200, body: [trmRow('4000.00', yesterday)] })
+    const service = new TrmService(source.url)
+    // Fixed clock: A asks at 23:59:59 in Bogota and B joins its query at 00:00:01.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(`${TRM_DAY}T04:59:59Z`))
+    const a = service.getUsdCopRate()
+    clock.mockReturnValue(Date.parse(`${TRM_DAY}T05:00:01Z`))
+    const b = service.getUsdCopRate()
+
+    await expect(a).resolves.toEqual({ rate: 4000, date: yesterday })
+    await expect(b).rejects.toMatchObject(UNAVAILABLE)
+    expect(source.hits).toBe(1)
+  })
+
   it('queries again once the hour has passed', async () => {
     // Mutation: drop the expiry from the cache check and hits stays at 1.
     const service = new TrmService(source.url)

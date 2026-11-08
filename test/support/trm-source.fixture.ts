@@ -2,6 +2,7 @@ import { createServer, Server } from 'http'
 import { AddressInfo } from 'net'
 
 import { bogotaDay } from '../../src/trm/trm.service'
+import type { Gate } from './wallet-race.fixture'
 
 export type TrmReply = { status: number; body: unknown }
 
@@ -31,6 +32,8 @@ export interface TrmSource {
   /** Path and query of the last request, as the service sent it. */
   lastQuery: string
   reply: () => TrmReply
+  /** When set, a request arrives at it and the answer waits for its release. */
+  gate?: Gate
   close: () => Promise<void>
 }
 
@@ -48,9 +51,13 @@ export async function startTrmSource(reply: () => TrmReply = trmOk): Promise<Trm
     reply,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
-  server = createServer((req, res) => {
+  server = createServer(async (req, res) => {
     source.hits++
     source.lastQuery = req.url ?? ''
+    if (source.gate) {
+      source.gate.arrive()
+      await source.gate.wait
+    }
     const { status, body } = source.reply()
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(body))
