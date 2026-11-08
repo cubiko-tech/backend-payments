@@ -29,6 +29,11 @@ export enum PaymentPurpose {
 @Entity('payments')
 @Index(['brandId', 'status', 'createdAt'])
 @Index(['providerPaymentId'])
+// One Dropi operation closes one recharge; only recharges carry `metadata.dropiRecharge`.
+@Index('UQ_payments_dropi_operation', ['providerPaymentId'], {
+  unique: true,
+  where: `"providerPaymentId" IS NOT NULL AND "metadata" -> 'dropiRecharge' IS NOT NULL`,
+})
 @Index(['brandId', 'idempotencyKey'], { unique: true })
 export class Payment extends Content {
   @Column() brandId: string

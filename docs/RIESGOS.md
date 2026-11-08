@@ -532,3 +532,20 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: se pide y se aprueba el reembolso de una recarga `dropi_wallet` ya `completed`.
 - **Qué rompe**: el reembolso se registra y los tokens del origen `dropi` quedan en la wallet de la marca.
 - **Estado**: abierto — el alcance (rechazar ese reembolso o recuperar los tokens) lo decide quien aprueba.
+
+## La migración de LOC-182 no sube si un ambiente ya tiene dos recargas con la misma operación
+
+- **Dónde**: `src/payment/entities/payment.entity.ts:33` (`UQ_payments_dropi_operation`, que crea la migración
+  1794106072424-AddDropiOperationUnique)
+- **Qué lo dispara**: antes del despliegue, el defecto de `d2f764d` cerró dos recargas con un mismo
+  `dropiOperationId` en ese ambiente.
+- **Qué rompe**: el `up` falla y con él todas las migraciones pendientes del release, que corren en una transacción.
+- **Estado**: abierto — a propósito: las filas son dinero acreditado de más; se miran y se resuelven a mano antes
+  de desplegar, no las corrige la migración.
+
+## Una operación de Dropi que pertenece a otra marca acredita en la primera que la informa (LOC-182)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:104` (el índice es global, no por marca)
+- **Qué lo dispara**: ROAX Ads informa la operación de una marca sobre la recarga de otra.
+- **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
+- **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).

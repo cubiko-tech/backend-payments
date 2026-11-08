@@ -1,4 +1,4 @@
-import { HttpStatus, Injectable } from '@nestjs/common'
+import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, Repository } from 'typeorm'
 
@@ -23,14 +23,22 @@ export const dropiTokensKey = (paymentId: string) => `payment:${paymentId}:token
 /** Thrown inside the credit transaction when another call closed the recharge first. */
 class ClosedMeanwhile extends Error {}
 
+/** Thrown inside the credit transaction when the Dropi operation already closed another recharge. */
+class OperationUsedElsewhere extends Error {}
+
+const DROPI_OPERATION_INDEX = 'UQ_payments_dropi_operation'
+
 /**
  * Closes a recharge from Dropi with the result ROAX Ads reports: `charged` credits its fixed tokens
  * to the `dropi` origin, `failed` closes it with none. The credit, the close and their audit commit
  * together. Rejects: an unknown or other brand's recharge (404), another amount (422), a report
- * that does not match a closed recharge (409) and a closed token wallet (422, stays pending).
+ * that does not match a closed recharge (409), a Dropi operation that already charged another
+ * recharge (409, stays pending) and a closed token wallet (422, stays pending).
  */
 @Injectable()
 export class DropiRechargeResultService {
+  private readonly logger = new Logger(DropiRechargeResultService.name)
+
   constructor(
     @InjectRepository(Payment, 'DBWrite')
     private readonly payments: Repository<Payment>,
@@ -93,7 +101,11 @@ export class DropiRechargeResultService {
             paidAt: new Date(),
             providerPaymentId: dropiOperationId,
           }
-          if (!(await closePending(manager, payment.id, changes))) throw new ClosedMeanwhile()
+          const closed = await closePending(manager, payment.id, changes).catch((error) => {
+            // Not the 23505 the wallet reads as a replayed key: this one answers on its own.
+            throw violates(error, DROPI_OPERATION_INDEX) ? new OperationUsedElsewhere() : error
+          })
+          if (!closed) throw new ClosedMeanwhile()
           await this.auditService.record(manager, {
             userId: ROAX_ADS_CLIENT,
             action: 'dropi_recharge_charged',
@@ -113,6 +125,16 @@ export class DropiRechargeResultService {
       return movement.replayed ? this.decideAgain(payment.id, body) : this.closedView(payment.id)
     } catch (error) {
       if (error instanceof ClosedMeanwhile) return this.decideAgain(payment.id, body)
+      if (error instanceof OperationUsedElsewhere) {
+        this.logger.warn(
+          `Dropi operation ${dropiOperationId} already closed another recharge; ${payment.id} stays pending`,
+        )
+        throw fail(
+          'DROPI_OPERATION_ALREADY_USED',
+          'This Dropi operation already closed another recharge',
+          HttpStatus.CONFLICT,
+        )
+      }
       throw error
     }
   }
@@ -173,6 +195,12 @@ async function closePending(
     .setParameters(parameters)
     .execute()
   return result.affected === 1
+}
+
+/** A unique violation (23505) of the index `constraint`, as the pg driver reports it. */
+function violates(error: unknown, constraint: string): boolean {
+  const driver = (error as { driverError?: { code?: string; constraint?: string } })?.driverError
+  return driver?.code === '23505' && driver.constraint === constraint
 }
 
 function storedOf(payment: Payment) {
