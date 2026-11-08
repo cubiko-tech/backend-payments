@@ -555,3 +555,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: ROAX Ads informa la operación de una marca sobre la recarga de otra.
 - **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
 - **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).
+
+## Un débito de ROAX Ads que commitea después de que ROAX Ads se rindió queda sin reintegrar (LOC-187)
+
+- **Dónde**: `src/wallet/token-debit.controller.ts:24-25` (el presupuesto) y `:116`, `src/wallet/token-wallet.service.ts:172`
+  (el 404 `DEBIT_NOT_FOUND` del reintegro)
+- **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por algo que no es auth, platform, el lock de la
+  fila ni una sentencia (cada uno tiene su tope); ROAX Ads lo da por fallido y pide el reintegro antes de que commitee.
+- **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
+  generación. Ningún barrido de Pagos lo repara.
+- **Estado**: mitigado por los topes (1,5 s auth, 1,5 s platform, 500 ms lock y sentencia) y por el contrato del 404:
+  «todavía no hay débito con esa llave, reintentá con la misma». Abierto — lo cierra LOC-191 reintentando el
+  reintegro con la misma llave ante un 404.

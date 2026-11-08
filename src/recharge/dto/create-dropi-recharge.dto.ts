@@ -12,7 +12,7 @@ export function isTokenAmount(value: unknown): boolean {
 }
 
 // Not `IsNumber({ maxDecimalPlaces })`: class-validator throws on `1e-7`, which has no '.'.
-const IsTokenAmount = () =>
+export const IsTokenAmount = () =>
   ValidateBy({
     name: 'isTokenAmount',
     validator: {

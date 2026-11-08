@@ -41,3 +41,11 @@ export const ON_BEHALF_OF_HEADER = 'x-user-authorization'
  * person in `req.onBehalfOf`. The server token and service credentials are never accepted there.
  */
 export const RequireOnBehalfOfUser = () => SetMetadata(API_ON_BEHALF_OF_KEY, true)
+
+export const API_UPSTREAM_TIMEOUT_KEY = 'upstream_timeout_ms'
+
+/**
+ * Caps at `ms` the call to auth that resolves the person of `X-User-Authorization`, and makes auth
+ * not answering a 503 instead of a 401. Routes without it keep the 10 s and the 401.
+ */
+export const UpstreamTimeout = (ms: number) => SetMetadata(API_UPSTREAM_TIMEOUT_KEY, ms)

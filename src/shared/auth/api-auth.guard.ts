@@ -12,6 +12,7 @@ import {
   API_SERVICE_CLIENT_KEY,
   API_SESSION_ONLY_KEY,
   API_SUPER_ADMIN_KEY,
+  API_UPSTREAM_TIMEOUT_KEY,
   ON_BEHALF_OF_HEADER,
 } from './require-permission.decorator'
 import { SERVICE_KEY_PREFIX, ServiceCredentialService } from './service-credential.service'
@@ -25,6 +26,12 @@ interface GuardUser {
   /** Set only when the request carried a valid service credential: the client it belongs to. */
   serviceClient?: string
 }
+
+const authUnavailable = () =>
+  new RequestException(
+    { code: 'AUTH_UNAVAILABLE', message: 'The user token cannot be checked right now' },
+    HttpStatus.SERVICE_UNAVAILABLE,
+  )
 
 function readAuthSecret(value: string | undefined): string | null {
   if (!value || !value.trim() || value !== value.trim() || value === 'CHANGEME') {
@@ -79,7 +86,7 @@ export class ApiAuthGuard implements CanActivate {
     }
 
     if (readMeta<boolean>(API_ON_BEHALF_OF_KEY)) {
-      const person = await this.resolveOnBehalfOf(req)
+      const person = await this.resolveOnBehalfOf(req, readMeta<number>(API_UPSTREAM_TIMEOUT_KEY))
       if (!person) {
         throw new RequestException(
           { error: 'unauthorized', code: 'unauthorized' },
@@ -134,14 +141,15 @@ export class ApiAuthGuard implements CanActivate {
 
   /**
    * The person of `X-User-Authorization`; null when absent or invalid. Read only as a person's
-   * JWT, so the server token and service keys there resolve to nobody.
+   * JWT, so the server token and service keys there resolve to nobody. With `timeoutMs`, auth gets
+   * that long and not answering is a 503.
    */
-  private async resolveOnBehalfOf(req: Request): Promise<GuardUser | null> {
+  private async resolveOnBehalfOf(req: Request, timeoutMs?: number): Promise<GuardUser | null> {
     const token = this.bearerOf(req.headers[ON_BEHALF_OF_HEADER])
-    return token ? this.resolvePersonToken(token) : null
+    return token ? this.resolvePersonToken(token, timeoutMs) : null
   }
 
-  private async resolvePersonToken(token: string): Promise<GuardUser | null> {
+  private async resolvePersonToken(token: string, timeoutMs?: number): Promise<GuardUser | null> {
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
     if (this.JWT_SECRET) {
       try {
@@ -157,7 +165,7 @@ export class ApiAuthGuard implements CanActivate {
     // ROTA), así que payments NO puede guardarlo. Los valida el auth-service,
     // que conoce el secreto vigente de cada cliente. Ver backend-auth
     // POST /client/validate-token.
-    return this.validateViaAuth(token)
+    return this.validateViaAuth(token, timeoutMs)
   }
 
   /**
@@ -165,21 +173,28 @@ export class ApiAuthGuard implements CanActivate {
    * propio token (decode sin verificar firma) y el auth verifica con el
    * `clientSecret` vigente. Devuelve el usuario o null.
    */
-  private async validateViaAuth(token: string): Promise<GuardUser | null> {
+  private async validateViaAuth(token: string, timeoutMs?: number): Promise<GuardUser | null> {
     if (!this.SERVICE_AUTH) return null
     const client = this.decodeClaims(token)?.client
     if (!client) return null
 
+    let res: globalThis.Response
     try {
-      const res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
+      res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ client }),
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(timeoutMs ?? 10000),
       })
+    } catch {
+      if (timeoutMs) throw authUnavailable()
+      return null
+    }
+    if (timeoutMs && res.status >= 500) throw authUnavailable()
+    try {
       if (!res.ok) return null
       const body: any = await res.json()
       if (body?.code !== 'tokenValidate' || !body?.data) return null
