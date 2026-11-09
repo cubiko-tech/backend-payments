@@ -568,6 +568,16 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — lo cierra desplegar Pagos antes que backend-ads en cada ambiente; se borra cuando los dos
   estén en todos.
 
+## Mientras backend-ads no mande `automatic`, toda recarga desde Dropi se factura como manual (LOC-206)
+
+- **Dónde**: `src/recharge/dropi-recharge.controller.ts:68` (sin el campo, `automatic` es `false`) y
+  `src/recharge/dropi-recharge-result.service.ts:102` (toda recarga no automática recibe su factura al cobrarse)
+- **Qué lo dispara**: un ambiente con el Pagos de LOC-206 y un backend-ads anterior al 012, que no manda el campo; es
+  la ventana que abre el orden de la entrada anterior.
+- **Qué rompe**: cada recarga automática recibe su propia factura al completarse y el cierre mensual no tiene nada que
+  agrupar. No se factura dos veces ni se pierde; sólo no se consolida.
+- **Estado**: abierto — lo cierra desplegar el backend-ads del 012 en ese ambiente; se borra cuando esté en todos.
+
 ## Una recarga manual cuya factura no se escribe queda `pending` aunque Dropi ya cobró (LOC-206)
 
 - **Dónde**: `src/recharge/dropi-recharge-result.service.ts:132-142` (la factura va en la transacción del crédito y su
