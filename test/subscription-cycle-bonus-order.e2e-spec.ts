@@ -1,10 +1,17 @@
-import { Logger } from '@nestjs/common'
+import { INestApplication, Logger } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import * as request from 'supertest'
 import { DataSource } from 'typeorm'
 
+import { ClientPlatformService } from '../src/client/client-platform.service'
 import { buildConfioWebhookEventId } from '../src/provider/confio/confio-webhook'
+import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { EnterprisePricingService } from '../src/subscription/enterprise-pricing.service'
 import { Subscription, SubscriptionStatus } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
+import { SubscriptionController } from '../src/subscription/subscription.controller'
 import { SubscriptionService } from '../src/subscription/subscription.service'
+import { signatureChecksumDigest } from '../src/webhook/confio-traza.util'
 import { WebhookEvent, WebhookStatus } from '../src/webhook/entities/webhookEvent.entity'
 import { SubscriptionBonusService } from '../src/webhook/subscription-bonus.service'
 import {
@@ -70,6 +77,7 @@ describe('Subscription cycle bonus order (PostgreSQL, LOC-235)', () => {
   let b: RaceInstance
   let chain: BonusChain
   let other: BonusChain
+  let historyApp: INestApplication
   let subscriptions: SubscriptionService
   const originalEnv = process.env
 
@@ -100,6 +108,30 @@ describe('Subscription cycle bonus order (PostgreSQL, LOC-235)', () => {
       {} as any,
       {} as any,
     )
+    const historyMod = await Test.createTestingModule({
+      controllers: [SubscriptionController],
+      providers: [
+        { provide: SubscriptionService, useValue: subscriptions },
+        // R17: Only GET /subscription/history runs here; enterprise pricing is not called.
+        { provide: EnterprisePricingService, useValue: {} },
+        // R17: Platform is another service; the brand member can view its brand's history.
+        {
+          provide: ClientPlatformService,
+          useValue: { canViewBrandCredit: () => Promise.resolve(true) },
+        },
+      ],
+    })
+      // R17: Authenticates a brand member so GET /subscription/history runs assertBrandAccess.
+      .overrideGuard(ApiAuthGuard)
+      .useValue({
+        canActivate: (ctx: any) => {
+          ctx.switchToHttp().getRequest().user = { id: 'member-235' }
+          return true
+        },
+      })
+      .compile()
+    historyApp = historyMod.createNestApplication()
+    await historyApp.init()
   })
 
   beforeEach(async () => {
@@ -117,6 +149,7 @@ describe('Subscription cycle bonus order (PostgreSQL, LOC-235)', () => {
     try {
       if (a) await cleanBonusBrand(a.dataSource, BRAND_A)
     } finally {
+      await historyApp?.close()
       await chain?.app.close()
       await other?.app.close()
       await stopInstance(a)
@@ -146,6 +179,26 @@ describe('Subscription cycle bonus order (PostgreSQL, LOC-235)', () => {
     expect(refusals(warn)).toEqual([
       expect.stringContaining('checksum of an already applied notice'),
     ])
+  })
+
+  it('GET /subscription/history after a paid charge does not expose the signed checksum', async () => {
+    // R15: red if the movement trace stores the raw signed checksum instead of its digest.
+    await seedConfioSubscription(ds(), BRAND_A, 'pro-500')
+    const original = signedCharge(BRAND_A, 'SUCCEEDED', 1)
+    await send(chain, original)
+
+    const res = await request(historyApp.getHttpServer())
+      .get('/subscription/history')
+      .query({ brandId: BRAND_A })
+
+    expect(res.status).toBe(200)
+    expect(res.body.data).toHaveLength(1)
+    expect(JSON.stringify(res.body).toLowerCase()).not.toContain(
+      original.signature.checksum.toLowerCase(),
+    )
+    expect(res.body.data[0].metadata.signatureChecksum).toBe(
+      signatureChecksumDigest(original.signature.checksum),
+    )
   })
 
   it('shifted cycle of a charge that gave no bonus still credits nothing', async () => {

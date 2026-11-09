@@ -655,7 +655,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado re-partido pasa la firma y acuña otro ciclo (LOC-235)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:435-438` (concatenación sin separador),
-  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:119` (`signatureChecksum`)
+  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:121` (`signatureChecksum`)
 - **Qué lo dispara**: mover un dígito entre campos vecinos de un aviso ya firmado (`1/1990000` → `11/990000`): el
   checksum no cambia y `buildConfioWebhookEventId` acuña otro id.
 - **Qué rompe**: el bono ya no — no acredita un checksum ya aplicado a la fila ni un ciclo no posterior al último

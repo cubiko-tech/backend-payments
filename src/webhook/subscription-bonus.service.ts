@@ -10,6 +10,7 @@ import { Transaction } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenWalletService } from '../wallet/token-wallet.service'
+import { signatureChecksumDigest } from './confio-traza.util'
 import { subscriptionBonusKey } from './subscription-bonus-key'
 import { subscriptionBonusLimits } from './subscription-bonus-limits'
 import { bonusRefusal } from './subscription-bonus-rule'
@@ -200,7 +201,9 @@ async function checksumApplied(
   const count = await manager
     .createQueryBuilder(SubscriptionEvent, 'e')
     .where('e."subscriptionId" = :subscriptionId', { subscriptionId })
-    .andWhere("e.metadata ->> 'signatureChecksum' = :checksum", { checksum })
+    .andWhere("e.metadata ->> 'signatureChecksum' = :digest", {
+      digest: signatureChecksumDigest(checksum),
+    })
     .getCount()
   return count > 0
 }

@@ -1514,7 +1514,7 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         amountCents: 1990000,
         currencyCode: 'COP',
         cycleNumber: 3,
-        signatureChecksum: '4F6A',
+        signatureChecksum: '077df018f1a419e885e7f1ce85c3542c7108f63b4fbacb04e0839d33952c870d',
         providerRef: { name: SUB_NAME, payment: 'organizations/o/stores/s/payments/p3' },
         roles: {
           accion: 'reponer',

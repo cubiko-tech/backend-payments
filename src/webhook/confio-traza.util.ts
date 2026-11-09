@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { DeepPartial } from 'typeorm'
 
 import { Subscription } from '../subscription/entities/subscription.entity'
@@ -115,8 +116,10 @@ export function armarTrazaDelMovimiento({
       amountCents: data.amountCents,
       currencyCode: data.currencyCode,
       cycleNumber: data.cycleNumber,
-      // Every re-split of one signed notice keeps it: the cycle bonus refuses a checksum seen here.
-      ...(typeof checksum === 'string' ? { signatureChecksum: checksum } : {}),
+      // Every re-split of one signed notice keeps this digest: the cycle bonus refuses it on replay.
+      ...(typeof checksum === 'string' && checksum.length > 0
+        ? { signatureChecksum: signatureChecksumDigest(checksum) }
+        : {}),
       ...(Object.keys(providerRef).length ? { providerRef } : {}),
       // `brandId`/`planSlug` aparecen DOS VECES en el mismo metadata y NO es
       // basura a limpiar: los de arriba salen de la fila bloqueada (lo que pide
@@ -137,4 +140,9 @@ export function armarTrazaDelMovimiento({
         : {}),
     },
   }
+}
+
+/** One-way digest of a signed checksum, safe to return from `GET /subscription/history`. */
+export function signatureChecksumDigest(checksum: string): string {
+  return createHash('sha256').update(checksum).digest('hex')
 }
