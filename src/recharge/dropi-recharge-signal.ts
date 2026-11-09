@@ -6,6 +6,7 @@ import type { DropiRechargeTerms } from './dropi-recharge.service'
 
 export const DROPI_RECHARGE_EVENT = 'DropiRecharge'
 export const DROPI_RECHARGE_BACKLOG_EVENT = 'DropiRechargeBacklog'
+export const RECHARGE_INVOICE_CLOSE_FAILED_EVENT = 'RechargeInvoiceCloseFailed'
 
 const STATUS_OF: Partial<Record<PaymentStatus, string>> = {
   [PaymentStatus.PENDING]: 'pending',
@@ -18,8 +19,9 @@ const secondsSince = (from: Date, now: Date) =>
   Math.max(0, Math.floor((now.getTime() - new Date(from).getTime()) / 1000))
 
 /**
- * What a recharge from Dropi tells New Relic: one `DropiRecharge` event per state change and one
- * `DropiRechargeBacklog` per sweep. Never the user, their token or the ROAX Ads credential. A
+ * What a recharge from Dropi tells New Relic: one `DropiRecharge` event per state change, one
+ * `DropiRechargeBacklog` per sweep and one `RechargeInvoiceCloseFailed` per brand the monthly close
+ * could not invoice. Never the user, their token, the ROAX Ads credential or an error message. A
  * failing agent is logged and never reaches the caller: the recharge already committed.
  */
 @Injectable()
@@ -43,6 +45,10 @@ export class DropiRechargeSignal {
 
   backlog(pending: number, oldestPendingSeconds: number): void {
     this.record(DROPI_RECHARGE_BACKLOG_EVENT, () => ({ pending, oldestPendingSeconds }))
+  }
+
+  closeFailed(brandId: string, period: string): void {
+    this.record(RECHARGE_INVOICE_CLOSE_FAILED_EVENT, () => ({ brandId, period }))
   }
 
   private record(eventType: string, attributes: () => ApmAttributes): void {

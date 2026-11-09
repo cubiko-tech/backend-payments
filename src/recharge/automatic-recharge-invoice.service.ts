@@ -17,6 +17,7 @@ import {
   PaymentStatus,
 } from '../payment/entities/payment.entity'
 import { closingPeriod } from './billing-period'
+import { DropiRechargeSignal } from './dropi-recharge-signal'
 import { sendRechargeInvoiceToDian } from './send-recharge-invoice'
 
 /**
@@ -56,9 +57,13 @@ export class AutomaticRechargeInvoiceService {
     private readonly billingProfiles: Repository<BillingProfile>,
     private readonly auditService: AuditService,
     private readonly dian: DianService,
+    private readonly signal: DropiRechargeSignal,
   ) {}
 
-  /** Closes the month before `now`'s, brand by brand; a brand that fails is logged, not retried. */
+  /**
+   * Closes the month before `now`'s, brand by brand. A brand that fails is logged and alerted, not
+   * retried: its recharges go into the next close's invoice.
+   */
   async closeMonth(now: Date): Promise<BrandClose[]> {
     const { period, cutoff } = closingPeriod(now)
     const brands: { brandId: string }[] = await this.dataSource.query(
@@ -73,6 +78,7 @@ export class AutomaticRechargeInvoiceService {
       } catch (error) {
         this.logger.error(`Recharge invoice of ${brandId} for ${period} failed: ${error?.message}`)
         closes.push({ brandId, error: String(error?.message ?? error) })
+        this.signal.closeFailed(brandId, period)
       }
     }
     return closes

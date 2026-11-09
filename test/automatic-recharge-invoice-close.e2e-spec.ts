@@ -8,6 +8,7 @@ import { config as dotenvConfig } from 'dotenv'
 import { DataSource } from 'typeorm'
 
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
+import { apmDouble, dianDouble } from './support/dropi-recharge.fixture'
 import {
   BOGOTA,
   closeOn,
@@ -18,6 +19,7 @@ import {
   NOVEMBER_CUTOFF,
   OCTOBER_CUTOFF,
   refundGift,
+  takeMonthlyInvoiceNumber,
 } from './support/recharge-invoice.fixture'
 import {
   cleanBrand,
@@ -229,6 +231,48 @@ describe('The monthly close of automatic recharges from Dropi (PostgreSQL, LOC-2
     const invoices = await invoicesOf(a.dataSource, BRAND)
     expect(invoices.map((invoice) => invoice.period)).toEqual(['2026-10'])
     expect(await invoiceIdOf(a.dataSource, november.id)).toBeNull()
+  })
+
+  it('CA3 (LOC-211): a brand whose close fails raises the alert; the other brand gets its invoice', async () => {
+    // R15: red when the close's catch stops emitting the event: no RechargeInvoiceCloseFailed is recorded.
+    const failing = await completedRecharge(a.dataSource, BRAND, BOGOTA.oct15)
+    const healthy = await completedRecharge(a.dataSource, OTHER_BRAND, BOGOTA.oct15)
+    const taken = await takeMonthlyInvoiceNumber(a.dataSource, BRAND, '2026-10')
+    const apm = apmDouble()
+
+    const closes = await closeOn(a.dataSource, dianDouble(), apm).closeMonth(BOGOTA.nov1FirstSecond)
+
+    expect(closes.find((close) => close.brandId === BRAND)?.error).toBeDefined()
+    expect(apm.events).toContainEqual({
+      type: 'RechargeInvoiceCloseFailed',
+      attributes: { brandId: BRAND, period: '2026-10' },
+    })
+    expect(apm.events.filter((event) => event.attributes.brandId === OTHER_BRAND)).toEqual([])
+    expect((await invoicesOf(a.dataSource, BRAND)).map((invoice) => invoice.id)).toEqual([taken.id])
+    expect(await invoiceIdOf(a.dataSource, failing.id)).toBeNull()
+    const [other] = await invoicesOf(a.dataSource, OTHER_BRAND)
+    expect(other.period).toBe('2026-10')
+    expect(await invoiceIdOf(a.dataSource, healthy.id)).toBe(other.id)
+  })
+
+  it('CA3 (LOC-211): a healthy close of two brands emits two invoices and no failure event', async () => {
+    // R15: red when the close alerts every brand it closes, not only one that fails.
+    for (const brandId of [BRAND, OTHER_BRAND]) {
+      await completedRecharge(a.dataSource, brandId, BOGOTA.oct15)
+    }
+    const apm = apmDouble()
+
+    await closeOn(a.dataSource, dianDouble(), apm).closeMonth(BOGOTA.nov1FirstSecond)
+
+    for (const brandId of [BRAND, OTHER_BRAND]) {
+      expect((await invoicesOf(a.dataSource, brandId)).map((invoice) => invoice.period)).toEqual([
+        '2026-10',
+      ])
+    }
+    const ours = apm.events.filter((event) =>
+      [BRAND, OTHER_BRAND].includes(event.attributes.brandId as string),
+    )
+    expect(ours).toEqual([])
   })
 
   it('a manual recharge from before LOC-206, with no invoice, is not taken by the close', async () => {

@@ -581,15 +581,16 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la factura queda `paid` sin CUFE; ningún barrido la reenvía.
 - **Estado**: abierto — se repara a mano con `POST /dian/:invoiceId/send` (con `reclaimStale` si quedó reclamada).
 
-## Un cierre mensual que falla para una marca no se repite hasta el mes siguiente (LOC-206)
+## Un cierre mensual que falla para una marca no se repite hasta el mes siguiente (LOC-206, LOC-211)
 
 - **Dónde**: `src/tasks/automatic-recharge-invoice-close.ts:16` (sólo el día 1) y
-  `src/recharge/automatic-recharge-invoice.service.ts:73` (la marca que falla se loguea)
+  `src/recharge/automatic-recharge-invoice.service.ts:78-81` (la marca que falla se loguea y alerta)
 - **Qué lo dispara**: la corrida del día 1 cae, o una marca falla (base, candado de 30 s, escritura).
 - **Qué rompe**: sus recargas quedan sin factura hasta el cierre siguiente, que las factura con el período siguiente
   (las de octubre en la factura de noviembre). No se pierden ni se duplican.
-- **Estado**: abierto — lo cierra re-correr `closeMonth` el mismo mes (cierra el mismo período) o un reintento del cron;
-  decisión pendiente de quien aprueba.
+- **Estado**: mitigado por la alerta: la marca que falla emite `RechargeInvoiceCloseFailed` con la marca y el período
+  (`src/recharge/dropi-recharge-signal.ts:50`), sin reintento automático (decisión de quien aprueba, 2026-11-08); la
+  alerta en New Relic se crea en la entrega. Abierto: una corrida del día 1 que cae entera no emite nada.
 
 ## Un débito de ROAX Ads que commitea después de que ROAX Ads se rindió queda sin reintegrar (LOC-187)
 

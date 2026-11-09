@@ -13,11 +13,13 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../../src/payment/entities/payment.entity'
+import { monthlyRechargeInvoiceNumber } from '../../src/invoice/recharge-invoice'
 import { AutomaticRechargeInvoiceService } from '../../src/recharge/automatic-recharge-invoice.service'
+import { DropiRechargeSignal } from '../../src/recharge/dropi-recharge-signal'
 import { Wallet } from '../../src/wallet/entities/wallet.entity'
 import { TokenOrigin } from '../../src/wallet/token-origin'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
-import { dianDouble, DianDouble } from './dropi-recharge.fixture'
+import { apmDouble, ApmDouble, dianDouble, DianDouble } from './dropi-recharge.fixture'
 
 /** 10 tokens at TRM 4,000 plus 19 % VAT, the shape `DropiRechargeService.create` stores. */
 const TEN_TOKENS = { amount: 47600, subtotal: 40000, taxAmount: 7600 }
@@ -87,6 +89,23 @@ export async function invoiceIdOf(dataSource: DataSource, paymentId: string) {
   return (await dataSource.getRepository(Payment).findOneByOrFail({ id: paymentId })).invoiceId
 }
 
+/**
+ * Makes the brand's close of `period` fail in the database: an invoice with no period already holds
+ * the monthly number, so the insert hits the unique number and no period invoice explains it.
+ */
+export function takeMonthlyInvoiceNumber(dataSource: DataSource, brandId: string, period: string) {
+  const repo = dataSource.getRepository(Invoice)
+  return repo.save(
+    repo.create({
+      brandId,
+      invoiceNumber: monthlyRechargeInvoiceNumber(brandId, period),
+      subtotal: 0,
+      total: 0,
+      currency: 'COP',
+    }),
+  )
+}
+
 /** A refund made as a gift of tokens, the way the admin gift route credits it: no payment. */
 export async function refundGift(dataSource: DataSource, brandId: string) {
   const tokens = new TokenWalletService(dataSource.getRepository(Wallet), dataSource)
@@ -102,8 +121,12 @@ export async function refundGift(dataSource: DataSource, brandId: string) {
   return movement.transaction
 }
 
-/** The real close on `dataSource`, one per service instance; only the DIAN is a double. */
-export function closeOn(dataSource: DataSource, dian: DianDouble = dianDouble()) {
+/** The real close on `dataSource`, one per service instance; only the DIAN and New Relic are doubles. */
+export function closeOn(
+  dataSource: DataSource,
+  dian: DianDouble = dianDouble(),
+  apm: ApmDouble = apmDouble(),
+) {
   const audit = new AuditService(
     dataSource.getRepository(AuditLog),
     dataSource.getRepository(AuditLog),
@@ -113,5 +136,6 @@ export function closeOn(dataSource: DataSource, dian: DianDouble = dianDouble())
     dataSource.getRepository(BillingProfile),
     audit,
     dian as unknown as DianService,
+    new DropiRechargeSignal(apm),
   )
 }
