@@ -117,6 +117,23 @@ describe('The monthly close of automatic recharges from Dropi (PostgreSQL, LOC-2
     expect(await invoiceIdOf(a.dataSource, last.id)).toBe(october.id)
   })
 
+  it('CA3: the window is half-open: paid at the cutoff instant waits, half a second before goes in', async () => {
+    // R15: red when the cutoff is closed (`<= cutoff`): the one paid at 00:00:00.000 lands in October.
+    const before = await completedRecharge(
+      a.dataSource,
+      BRAND,
+      new Date('2026-11-01T04:59:59.500Z'),
+    )
+    const atCutoff = await completedRecharge(a.dataSource, BRAND, OCTOBER_CUTOFF)
+
+    await closeNovember()
+
+    const [october] = await invoicesOf(a.dataSource, BRAND)
+    expect(october.items.map((item) => item.referenceId)).toEqual([before.id])
+    expect(await invoiceIdOf(a.dataSource, before.id)).toBe(october.id)
+    expect(await invoiceIdOf(a.dataSource, atCutoff.id)).toBeNull()
+  })
+
   it('CA3: running the close twice emits no second invoice, even with a recharge left to claim', async () => {
     // R15: red when a unique violation stops reading the period's invoice: the second close throws.
     await completedRecharge(a.dataSource, BRAND, BOGOTA.oct15)
@@ -133,7 +150,8 @@ describe('The monthly close of automatic recharges from Dropi (PostgreSQL, LOC-2
   })
 
   it('two instances closing the same month at once emit one invoice per brand', async () => {
-    // R15: red when neither the lock nor the claim holds: both instances invoice the recharges.
+    // R15: red only with the lock, the `invoiceId IS NULL` claim and the 23505 reread all gone: an error.
+    // Each defense alone is held by another; the lock case and the migration's index case redden them.
     for (const brandId of [BRAND, OTHER_BRAND]) {
       await completedRecharge(a.dataSource, brandId, BOGOTA.oct15)
       await completedRecharge(a.dataSource, brandId, BOGOTA.oct31LastSecond)
