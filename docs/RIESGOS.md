@@ -620,7 +620,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
 - **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
   credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
-  antes del `SET LOCAL` (`token-wallet.service.ts:245-247`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
+  antes del `SET LOCAL` (`token-wallet.service.ts:259-261`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
   lo da por fallido y pide el reintegro antes de ver el débito.
 - **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
   generación. Ningún barrido de Pagos lo repara.
@@ -630,3 +630,23 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   con la misma». Abierto — lo cierra LOC-191 reintentando el reintegro con la misma llave ante un 404.
   `transaction_timeout` existe desde PostgreSQL 17: la base local es 18.1 (medido); en una base anterior el `SET LOCAL`
   falla y todo débito responde 500. La versión de dev, staging y producción no se miró.
+
+## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
+
+- **Dónde**: `src/client/client-roles.service.ts:240` y `:276` (campo ausente → 0),
+  `src/webhook/subscription-bonus.service.ts:68`
+- **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
+- **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a acreditar.
+  Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
+- **Estado**: abierto — lo cierra desplegar roles con LOC-227 antes que este Pagos (condición de la entrega).
+
+## El bono de un ciclo sale de un aviso de un tercero; sus topes por defecto son supuestos (LOC-214)
+
+- **Dónde**: `src/webhook/subscription-bonus.service.ts:107` y `:114`, `src/webhook/subscription-bonus-limits.ts:14`
+- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo; un ciclo de prueba con `SUCCEEDED`, si
+  ConfioPagos lo emite, también acredita (no se mira `amountCents`).
+- **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes calendario
+  UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por defecto, valores
+  supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
+- **Estado**: mitigado por la firma del aviso, una llave por suscripción y ciclo y los dos topes; abierto — los valores
+  de los topes los fija quien aprueba, por ambiente, en Infisical.

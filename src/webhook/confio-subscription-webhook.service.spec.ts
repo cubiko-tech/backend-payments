@@ -24,6 +24,7 @@ import {
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { ClientRolesService } from '../client/client-roles.service'
+import { SubscriptionBonusService } from './subscription-bonus.service'
 
 /**
  * Corte y reposición del acceso pro en `backend-roles` según el resultado del
@@ -168,6 +169,11 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: ConfioProvider, useValue: confio },
         { provide: ClientRolesService, useValue: roles },
+        // R17: the cycle bonus has its own e2e with the real wallet; these cases give none.
+        {
+          provide: SubscriptionBonusService,
+          useValue: { plan: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile()
 
@@ -1701,6 +1707,11 @@ describe('WebhookService — roles caído marca el webhook para reintento', () =
           },
         },
         { provide: getQueueToken('webhook-retry'), useValue: queue },
+        // R17: the cycle bonus has its own e2e with the real wallet; these cases give none.
+        {
+          provide: SubscriptionBonusService,
+          useValue: { plan: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile()
 

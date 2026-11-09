@@ -7,16 +7,21 @@ import { AuditLog } from '../../src/audit/entities/auditLog.entity'
  * transaction or `AuditService.log` through its repository, which delegates to the same `save`.
  */
 export function failNextAuditWrite() {
+  return failNextWriteOf(AuditLog)
+}
+
+/** Fails the next `EntityManager.save` of `entity`, in or out of a transaction; later ones pass. */
+export function failNextWriteOf(entity: unknown) {
   const save = EntityManager.prototype.save as (...args: unknown[]) => Promise<unknown>
   let failed = false
-  // R17: a healthy PostgreSQL does not refuse one audit insert on demand.
+  // R17: a healthy PostgreSQL does not refuse one insert on demand.
   return jest.spyOn(EntityManager.prototype, 'save').mockImplementation(async function (
     this: EntityManager,
     ...args: unknown[]
   ) {
-    if (args[0] === AuditLog && !failed) {
+    if (args[0] === entity && !failed) {
       failed = true
-      throw new Error('audit write failed')
+      throw new Error('write failed')
     }
     return save.apply(this, args)
   } as EntityManager['save'])
