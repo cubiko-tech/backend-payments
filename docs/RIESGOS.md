@@ -557,6 +557,40 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
 - **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).
 
+## Mientras ROAX Ads no mande `automatic`, toda recarga desde Dropi se factura como manual (LOC-206)
+
+- **Dónde**: `src/recharge/dropi-recharge.controller.ts:68` (sin el campo, `automatic` es `false`) y
+  `src/recharge/dropi-recharge-result.service.ts:133` (la manual se factura al cobrarse)
+- **Qué lo dispara**: backend-ads crea la recarga automática sin el campo `automatic: true`.
+- **Qué rompe**: cada recarga automática recibe su propia factura al completarse y el cierre mensual no tiene nada que
+  agrupar. No se factura dos veces ni se pierde; sólo no se consolida.
+- **Estado**: abierto — lo cierra el cambio de backend-ads que manda el campo; la decisión está pendiente de quien
+  aprueba.
+
+## Las recargas manuales completadas antes de LOC-206 no tienen factura
+
+- **Dónde**: `src/recharge/automatic-recharge-invoice.service.ts:26-28` (el cierre toma sólo `'automatic' = 'true'`)
+- **Qué lo dispara**: una recarga desde Dropi que se completó antes de este cambio no lleva `automatic` ni factura.
+- **Qué rompe**: esa recarga queda sin factura; ni el cobro, que ya pasó, ni el cierre la toman.
+- **Estado**: abierto — a propósito: la facturación retroactiva la decide quien aprueba y se hace a mano.
+
+## Una factura de recarga sin CUFE no se reenvía sola (LOC-206)
+
+- **Dónde**: `src/recharge/send-recharge-invoice.ts:10` (envío en segundo plano tras el commit, como el checkout)
+- **Qué lo dispara**: la DIAN falla o el proceso cae entre el commit de la factura y el envío.
+- **Qué rompe**: la factura queda `paid` sin CUFE; ningún barrido la reenvía.
+- **Estado**: abierto — se repara a mano con `POST /dian/:invoiceId/send` (con `reclaimStale` si quedó reclamada).
+
+## Un cierre mensual que falla para una marca no se repite hasta el mes siguiente (LOC-206)
+
+- **Dónde**: `src/tasks/automatic-recharge-invoice-close.ts:16` (sólo el día 1) y
+  `src/recharge/automatic-recharge-invoice.service.ts:73` (la marca que falla se loguea)
+- **Qué lo dispara**: la corrida del día 1 cae, o una marca falla (base, candado de 30 s, escritura).
+- **Qué rompe**: sus recargas quedan sin factura hasta el cierre siguiente, que las factura con el período siguiente
+  (las de octubre en la factura de noviembre). No se pierden ni se duplican.
+- **Estado**: abierto — lo cierra re-correr `closeMonth` el mismo mes (cierra el mismo período) o un reintento del cron;
+  decisión pendiente de quien aprueba.
+
 ## Un débito de ROAX Ads que commitea después de que ROAX Ads se rindió queda sin reintegrar (LOC-187)
 
 - **Dónde**: `src/wallet/token-debit.controller.ts:24-26` (el presupuesto) y `:120`,

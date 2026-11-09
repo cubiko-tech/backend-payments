@@ -116,7 +116,12 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     })
     expect(Number(row.amount)).toBe(47_600)
     expect(row.metadata).toMatchObject({ subtotal: 40_000, taxAmount: 7_600 })
-    expect(row.metadata.dropiRecharge).toEqual({ tokens: 10, tokenPriceUsd: 1, bonusTokens: 0 })
+    expect(row.metadata.dropiRecharge).toEqual({
+      tokens: 10,
+      tokenPriceUsd: 1,
+      bonusTokens: 0,
+      automatic: false,
+    })
     const credits = await a.dataSource.getRepository(Transaction).count({
       where: { walletId: row.walletId },
     })

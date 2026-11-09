@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger'
-import { IsUUID, Max, Min, ValidateBy } from 'class-validator'
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { IsBoolean, IsUUID, Max, Min, ValidateBy, ValidateIf } from 'class-validator'
 
 /** Upper bound of one recharge; at TRM 10,000 plus 19 % it stays far inside `payments.amount`. */
 export const MAX_DROPI_RECHARGE_TOKENS = 1_000_000
@@ -35,4 +35,14 @@ export class CreateDropiRechargeDto {
   @ApiProperty({ description: 'Id of this request at ROAX Ads; a retry with it gets the same one' })
   @IsUUID()
   requestId: string
+
+  @ApiPropertyOptional({
+    description:
+      'True when ROAX Ads recharged on its own: invoiced in the monthly close, not on completion',
+    default: false,
+  })
+  // Not `IsOptional`: it lets `null` through, and only an absent field means manual.
+  @ValidateIf((dto) => dto.automatic !== undefined)
+  @IsBoolean()
+  automatic?: boolean
 }

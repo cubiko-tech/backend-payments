@@ -65,6 +65,7 @@ export class DropiRechargeController {
       userId,
       body.tokens,
       body.requestId,
+      body.automatic ?? false,
     )
     res.status(created ? HttpStatus.CREATED : HttpStatus.OK)
     return { data: recharge }

@@ -16,6 +16,7 @@ import { CheckoutModule } from '../checkout/checkout.module'
 import { WebhookModule } from '../webhook/webhook.module'
 import { RechargeModule } from '../recharge/recharge.module'
 import { DropiRechargeBacklogTask } from './dropi-recharge-backlog'
+import { AutomaticRechargeInvoiceCloseTask } from './automatic-recharge-invoice-close'
 
 @Module({
   imports: [
@@ -45,6 +46,6 @@ import { DropiRechargeBacklogTask } from './dropi-recharge-backlog'
     WebhookModule,
     RechargeModule,
   ],
-  providers: [TasksService, DropiRechargeBacklogTask],
+  providers: [TasksService, DropiRechargeBacklogTask, AutomaticRechargeInvoiceCloseTask],
 })
 export class TasksModule {}

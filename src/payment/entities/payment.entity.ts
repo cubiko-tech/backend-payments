@@ -64,4 +64,6 @@ export class Payment extends Content {
   @Column({ type: 'timestamptz', nullable: true }) paidAt: Date
   @Column({ type: 'timestamptz', nullable: true }) expiresAt: Date
   @Column({ type: 'jsonb', nullable: true }) metadata: any
+  // The invoice a recharge from Dropi went into; null until it is invoiced.
+  @Column({ type: 'uuid', nullable: true }) invoiceId: string | null
 }

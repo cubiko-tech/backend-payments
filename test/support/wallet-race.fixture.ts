@@ -198,6 +198,8 @@ export async function cleanBrand(dataSource: DataSource, brandId: string): Promi
     'DELETE FROM transactions WHERE "brandId" = $1',
     'DELETE FROM payments WHERE "brandId" = $1',
     'DELETE FROM wallets WHERE "brandId" = $1',
+    // A recharge from Dropi charged as manual leaves its invoice (LOC-206).
+    'DELETE FROM invoices WHERE "brandId" = $1',
   ]) {
     await dataSource.query(sql, [brandId])
   }
