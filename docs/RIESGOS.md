@@ -557,15 +557,27 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
 - **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).
 
-## Mientras ROAX Ads no mande `automatic`, toda recarga desde Dropi se factura como manual (LOC-206)
+## Un backend-ads que manda `automatic` antes del Pagos de LOC-206 deja sin recargas desde Dropi
 
-- **Dónde**: `src/recharge/dropi-recharge.controller.ts:68` (sin el campo, `automatic` es `false`) y
-  `src/recharge/dropi-recharge-result.service.ts:133` (la manual se factura al cobrarse)
-- **Qué lo dispara**: backend-ads crea la recarga automática sin el campo `automatic: true`.
-- **Qué rompe**: cada recarga automática recibe su propia factura al completarse y el cierre mensual no tiene nada que
-  agrupar. No se factura dos veces ni se pierde; sólo no se consolida.
-- **Estado**: abierto — lo cierra el cambio de backend-ads que manda el campo; la decisión está pendiente de quien
-  aprueba.
+- **Dónde**: `src/recharge/dto/create-dropi-recharge.dto.ts:45-47` (el campo nace con LOC-206) y
+  `src/shared/validation/global-validation-pipe.ts:15` (`forbidNonWhitelisted`: un campo desconocido es 400)
+- **Qué lo dispara**: en un ambiente se despliega el backend-ads del 012, que manda `automatic`, antes que el Pagos
+  que lo acepta.
+- **Qué rompe**: ese Pagos responde 400 a toda recarga desde Dropi hasta que se despliega el suyo. No se crea ni se
+  cobra nada.
+- **Estado**: abierto — lo cierra desplegar Pagos antes que backend-ads en cada ambiente; se borra cuando los dos
+  estén en todos.
+
+## Una recarga manual cuya factura no se escribe queda `pending` aunque Dropi ya cobró (LOC-206)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:132-142` (la factura va en la transacción del crédito y su
+  error sale como `InvoiceWriteFailed`) y `:176` (se relanza sin filtro: 500)
+- **Qué lo dispara**: el aviso `charged` de una recarga manual y una escritura de la factura o sus ítems que falla.
+- **Qué rompe**: se revierte todo —tokens, `completed`, factura y auditoría—; el aviso recibe 500 y la recarga sigue
+  `pending` con el saldo de Dropi ya descontado. Si la falla persiste en cada reintento, la marca pagó y no recibe
+  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:378-387`).
+- **Estado**: abierto — lo cierra acreditar sin esperar la factura y escribirla después, o una corrección manual que
+  decida quien aprueba.
 
 ## Las recargas manuales completadas antes de LOC-206 no tienen factura
 
