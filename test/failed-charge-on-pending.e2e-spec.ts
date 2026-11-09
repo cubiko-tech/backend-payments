@@ -101,6 +101,8 @@ describe('A failed Confio charge on a pending signup (PostgreSQL, LOC-163)', () 
         }),
       } as any,
       roles as any,
+      // R17: the cycle bonus has its own e2e; these signups give none.
+      { plan: jest.fn().mockResolvedValue(null) } as any,
     )
     const webhook = new WebhookService(
       events,

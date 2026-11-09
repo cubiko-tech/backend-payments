@@ -33,6 +33,7 @@ import {
 import { armarTrazaDelMovimiento } from './confio-traza.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 import { escapeLogValue } from '../shared/logger/log-value'
+import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.service'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -314,6 +315,7 @@ export class ConfioSubscriptionWebhookService {
     private readonly dataSource: DataSource,
     private readonly confio: ConfioProvider,
     private readonly clientRoles: ClientRolesService,
+    private readonly bonus: SubscriptionBonusService,
   ) {}
 
   async handle(event: WebhookEvent): Promise<void> {
@@ -352,11 +354,17 @@ export class ConfioSubscriptionWebhookService {
         : await this.planearCambioDeEstado(data, sub)
     if (!efecto) return
 
+    // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
+    const bono =
+      efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
+        ? await this.bonus.plan(payload, sub)
+        : null
+
     if (efecto.roles) {
       await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
     }
 
-    await this.aplicar(sub.id, efecto, payload, event.providerEventId, markerIds)
+    await this.aplicar(sub.id, efecto, payload, event.providerEventId, markerIds, bono)
   }
 
   /**
@@ -996,6 +1004,7 @@ export class ConfioSubscriptionWebhookService {
     payload: ConfioWebhookPayload,
     providerEventId: string,
     markerIds: string | string[] = providerEventId,
+    bono: PlannedBonus | null = null,
   ): Promise<void> {
     await this.dataSource.transaction(async (manager: EntityManager) => {
       const sub = await manager.findOne(Subscription, {
@@ -1043,6 +1052,7 @@ export class ConfioSubscriptionWebhookService {
       }
 
       await manager.save(sub)
+      if (bono) await this.bonus.credit(manager, bono, sub)
 
       // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
       // usuario y plan salen de esa fila y no de una relectura posterior.

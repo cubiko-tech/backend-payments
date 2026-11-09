@@ -18,6 +18,7 @@ import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { SubscriptionBonusService } from './subscription-bonus.service'
 import { WebhookController } from './webhook.controller'
 import { WebhookService } from './webhook.service'
 
@@ -56,6 +57,7 @@ function realWebhookChain(found: Subscription | null = null) {
     {} as DataSource,
     {} as ConfioProvider,
     {} as ClientRolesService,
+    {} as SubscriptionBonusService,
   )
   const writeRepo = {
     findOne: jest.fn().mockResolvedValue(null),

@@ -98,19 +98,25 @@ export class TokenWalletService {
     idempotencyKey?: string,
     audit?: MovementAudit,
   ): Promise<TokenMovement> {
-    const cents = assertAmount(amount)
-    if (!Object.values(TokenOrigin).includes(origin)) {
-      throw fail('INVALID_TOKEN_ORIGIN', 'Unknown token origin', HttpStatus.BAD_REQUEST)
-    }
-    const expected = { walletId, type: TransactionType.CREDIT, cents, origin }
-    return this.move(walletId, data, idempotencyKey, expected, audit, undefined, (wallet) => {
-      if (wallet.status === WalletStatus.CLOSED) {
-        throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
-      }
-      const column = BUCKET_COLUMN[origin]
-      wallet[column] = fromCents(toCents(wallet[column]) + cents)
-      return { type: TransactionType.CREDIT, tokenOrigin: origin, delta: cents }
-    })
+    const { expected, apply } = planCredit(walletId, amount, origin)
+    return this.move(walletId, data, idempotencyKey, expected, audit, undefined, apply)
+  }
+
+  /**
+   * The credit of `creditTokens`, inside the caller's transaction through its `manager`: it commits
+   * or rolls back with it. A key already used by another movement aborts that transaction.
+   */
+  async creditTokensIn(
+    manager: EntityManager,
+    walletId: string,
+    amount: number,
+    origin: TokenOrigin,
+    data: Partial<Transaction> & { brandId: string },
+    idempotencyKey: string,
+    audit?: MovementAudit,
+  ): Promise<TokenMovement> {
+    const { expected, apply } = planCredit(walletId, amount, origin)
+    return this.moveIn(manager, walletId, data, idempotencyKey, expected, audit, apply)
   }
 
   /**
@@ -253,53 +259,24 @@ export class TokenWalletService {
     await queryRunner.startTransaction()
     try {
       if (limits) await applyLimits(queryRunner, limits)
-      const wallet = await queryRunner.manager.findOne(Wallet, {
-        where: { id: walletId },
-        lock: { mode: 'pessimistic_write' },
-      })
-      if (!wallet || !data.brandId || wallet.brandId !== data.brandId) {
-        throw fail('WALLET_NOT_FOUND', 'Wallet not found for this brand', HttpStatus.NOT_FOUND)
-      }
-      if (!isTokenCurrency(wallet.currency)) {
-        throw fail(
-          'WALLET_CURRENCY_MISMATCH',
-          'Not a token wallet',
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      }
-      if (key) {
-        const replay = await findReplay(queryRunner.manager, key, expected)
-        if (replay) {
-          await queryRunner.rollbackTransaction()
-          return { wallet: toView(wallet), transaction: replay, replayed: true }
-        }
-      }
-
-      const balanceBefore = toCents(wallet.balance)
-      const applied = await apply(wallet, queryRunner.manager)
-      wallet.balance = fromCents(balanceBefore + applied.delta)
-      await queryRunner.manager.save(Wallet, wallet)
-      const transaction = await queryRunner.manager.save(
-        Transaction,
-        queryRunner.manager.create(Transaction, {
-          ...data,
-          walletId,
-          brandId: wallet.brandId,
-          type: applied.type,
-          amount: fromCents(Math.abs(applied.delta)),
-          balanceBefore: fromCents(balanceBefore),
-          balanceAfter: wallet.balance,
-          status: TransactionStatus.COMPLETED,
-          tokenOrigin: applied.tokenOrigin,
-          metadata: applied.metadata ?? data.metadata,
-          referenceId: applied.referenceId ?? data.referenceId,
-          idempotencyKey: key,
-        }),
+      const movement = await this.moveIn(
+        queryRunner.manager,
+        walletId,
+        data,
+        key,
+        expected,
+        audit,
+        apply,
       )
-      if (audit) await audit(queryRunner.manager, transaction)
+      if (movement.replayed) {
+        await queryRunner.rollbackTransaction()
+        return movement
+      }
       await queryRunner.commitTransaction()
-      this.logger.log(`Token ${applied.type} of ${expected.cents / 100} on wallet ${walletId}`)
-      return { wallet: toView(wallet), transaction, replayed: false }
+      this.logger.log(
+        `Token ${movement.transaction.type} of ${expected.cents / 100} on wallet ${walletId}`,
+      )
+      return movement
     } catch (error) {
       const limitHit = limits !== undefined && isLimitHit(error)
       if (queryRunner.isTransactionActive) {
@@ -319,6 +296,56 @@ export class TokenWalletService {
     } finally {
       await queryRunner.release()
     }
+  }
+
+  /** Locks the wallet, replays a used key, applies the movement and writes it with its audit. */
+  private async moveIn(
+    manager: EntityManager,
+    walletId: string,
+    data: Partial<Transaction> & { brandId: string },
+    key: string | undefined,
+    expected: ExpectedMovement,
+    audit: MovementAudit | undefined,
+    apply: (wallet: Wallet, manager: EntityManager) => AppliedMovement | Promise<AppliedMovement>,
+  ): Promise<TokenMovement> {
+    const wallet = await manager.findOne(Wallet, {
+      where: { id: walletId },
+      lock: { mode: 'pessimistic_write' },
+    })
+    if (!wallet || !data.brandId || wallet.brandId !== data.brandId) {
+      throw fail('WALLET_NOT_FOUND', 'Wallet not found for this brand', HttpStatus.NOT_FOUND)
+    }
+    if (!isTokenCurrency(wallet.currency)) {
+      throw fail('WALLET_CURRENCY_MISMATCH', 'Not a token wallet', HttpStatus.UNPROCESSABLE_ENTITY)
+    }
+    if (key) {
+      const replay = await findReplay(manager, key, expected)
+      if (replay) return { wallet: toView(wallet), transaction: replay, replayed: true }
+    }
+
+    const balanceBefore = toCents(wallet.balance)
+    const applied = await apply(wallet, manager)
+    wallet.balance = fromCents(balanceBefore + applied.delta)
+    await manager.save(Wallet, wallet)
+    const transaction = await manager.save(
+      Transaction,
+      manager.create(Transaction, {
+        ...data,
+        walletId,
+        brandId: wallet.brandId,
+        type: applied.type,
+        amount: fromCents(Math.abs(applied.delta)),
+        balanceBefore: fromCents(balanceBefore),
+        balanceAfter: wallet.balance,
+        status: TransactionStatus.COMPLETED,
+        tokenOrigin: applied.tokenOrigin,
+        metadata: applied.metadata ?? data.metadata,
+        referenceId: applied.referenceId ?? data.referenceId,
+        idempotencyKey: key,
+      }),
+    )
+    if (audit) await audit(manager, transaction)
+    return { wallet: toView(wallet), transaction, replayed: false }
   }
 
   private async replayAfterConflict(
@@ -370,6 +397,24 @@ async function findReplay(manager: EntityManager, key: string, expected: Expecte
     throw fail('IDEMPOTENCY_KEY_CONFLICT', 'Key already used', HttpStatus.CONFLICT)
   }
   return existing
+}
+
+/** The checked credit of `amount` tokens from `origin`: what a replay must match, and its effect. */
+function planCredit(walletId: string, amount: number, origin: TokenOrigin) {
+  const cents = assertAmount(amount)
+  if (!Object.values(TokenOrigin).includes(origin)) {
+    throw fail('INVALID_TOKEN_ORIGIN', 'Unknown token origin', HttpStatus.BAD_REQUEST)
+  }
+  const expected: ExpectedMovement = { walletId, type: TransactionType.CREDIT, cents, origin }
+  const apply = (wallet: Wallet): AppliedMovement => {
+    if (wallet.status === WalletStatus.CLOSED) {
+      throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
+    }
+    const column = BUCKET_COLUMN[origin]
+    wallet[column] = fromCents(toCents(wallet[column]) + cents)
+    return { type: TransactionType.CREDIT, tokenOrigin: origin, delta: cents }
+  }
+  return { expected, apply }
 }
 
 function assertAmount(amount: number): number {

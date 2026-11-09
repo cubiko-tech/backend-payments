@@ -7,6 +7,7 @@ import { QueryFailedError } from 'typeorm'
 
 import { WebhookService } from './webhook.service'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { SubscriptionBonusService } from './subscription-bonus.service'
 import { sumarUnCicloMensual } from './confio-period.util'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
 import { Payment, PaymentProvider } from '../payment/entities/payment.entity'
@@ -277,6 +278,11 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
         // OK para que estos casos midan sólo el estado local.
         { provide: ClientRolesService, useValue: roles },
         { provide: getQueueToken('webhook-retry'), useValue: { add: jest.fn() } },
+        // R17: the cycle bonus has its own e2e with the real wallet; these cases give none.
+        {
+          provide: SubscriptionBonusService,
+          useValue: { plan: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile()
 

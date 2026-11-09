@@ -557,15 +557,37 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la primera que llega cierra con 10 tokens; la dueña real recibe 409 y queda `pending`.
 - **Estado**: abierto — lo cierra comprobar la operación contra Dropi; hoy se confía en ROAX Ads (su credencial).
 
-## Mientras ROAX Ads no mande `automatic`, toda recarga desde Dropi se factura como manual (LOC-206)
+## Un backend-ads que manda `automatic` antes del Pagos de LOC-206 deja sin recargas desde Dropi
+
+- **Dónde**: `src/recharge/dto/create-dropi-recharge.dto.ts:45-47` (el campo nace con LOC-206) y
+  `src/shared/validation/global-validation-pipe.ts:15` (`forbidNonWhitelisted`: un campo desconocido es 400)
+- **Qué lo dispara**: en un ambiente se despliega el backend-ads del 012, que manda `automatic`, antes que el Pagos
+  que lo acepta.
+- **Qué rompe**: ese Pagos responde 400 a toda recarga desde Dropi hasta que se despliega el suyo. No se crea ni se
+  cobra nada.
+- **Estado**: abierto — lo cierra desplegar Pagos antes que backend-ads en cada ambiente; se borra cuando los dos
+  estén en todos.
+
+## Mientras backend-ads no mande `automatic`, toda recarga desde Dropi se factura como manual (LOC-206)
 
 - **Dónde**: `src/recharge/dropi-recharge.controller.ts:68` (sin el campo, `automatic` es `false`) y
-  `src/recharge/dropi-recharge-result.service.ts:133` (la manual se factura al cobrarse)
-- **Qué lo dispara**: backend-ads crea la recarga automática sin el campo `automatic: true`.
+  `src/recharge/dropi-recharge-result.service.ts:102` (toda recarga no automática recibe su factura al cobrarse)
+- **Qué lo dispara**: un ambiente con el Pagos de LOC-206 y un backend-ads anterior al 012, que no manda el campo; es
+  la ventana que abre el orden de la entrada anterior.
 - **Qué rompe**: cada recarga automática recibe su propia factura al completarse y el cierre mensual no tiene nada que
   agrupar. No se factura dos veces ni se pierde; sólo no se consolida.
-- **Estado**: abierto — lo cierra el cambio de backend-ads que manda el campo; la decisión está pendiente de quien
-  aprueba.
+- **Estado**: abierto — lo cierra desplegar el backend-ads del 012 en ese ambiente; se borra cuando esté en todos.
+
+## Una recarga manual cuya factura no se escribe queda `pending` aunque Dropi ya cobró (LOC-206)
+
+- **Dónde**: `src/recharge/dropi-recharge-result.service.ts:132-142` (la factura va en la transacción del crédito y su
+  error sale como `InvoiceWriteFailed`) y `:176` (se relanza sin filtro: 500)
+- **Qué lo dispara**: el aviso `charged` de una recarga manual y una escritura de la factura o sus ítems que falla.
+- **Qué rompe**: se revierte todo —tokens, `completed`, factura y auditoría—; el aviso recibe 500 y la recarga sigue
+  `pending` con el saldo de Dropi ya descontado. Si la falla persiste en cada reintento, la marca pagó y no recibe
+  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:378-387`).
+- **Estado**: abierto — lo cierra acreditar sin esperar la factura y escribirla después, o una corrección manual que
+  decida quien aprueba.
 
 ## Las recargas manuales completadas antes de LOC-206 no tienen factura
 
@@ -598,7 +620,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
 - **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
   credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
-  antes del `SET LOCAL` (`token-wallet.service.ts:245-247`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
+  antes del `SET LOCAL` (`token-wallet.service.ts:259-261`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
   lo da por fallido y pide el reintegro antes de ver el débito.
 - **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
   generación. Ningún barrido de Pagos lo repara.
@@ -608,3 +630,35 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   con la misma». Abierto — lo cierra LOC-191 reintentando el reintegro con la misma llave ante un 404.
   `transaction_timeout` existe desde PostgreSQL 17: la base local es 18.1 (medido); en una base anterior el `SET LOCAL`
   falla y todo débito responde 500. La versión de dev, staging y producción no se miró.
+
+## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
+
+- **Dónde**: `src/client/client-roles.service.ts:240` y `:276` (campo ausente → 0),
+  `src/webhook/subscription-bonus.service.ts:77`
+- **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
+- **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a
+  acreditar. Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
+- **Estado**: abierto — lo cierra desplegar roles con LOC-227 antes que este Pagos (condición de la entrega).
+
+## El bono de un ciclo sale de un aviso de un tercero; sus topes por defecto son supuestos (LOC-214)
+
+- **Dónde**: `src/webhook/subscription-bonus.service.ts:124` y `:131`,
+  `src/webhook/subscription-bonus-limits.ts:14`
+- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo; un ciclo de prueba con `SUCCEEDED`, si
+  ConfioPagos lo emite, también acredita (no se mira `amountCents`).
+- **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes
+  calendario UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por
+  defecto, valores supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
+- **Estado**: mitigado por la firma del aviso, la llave por fila, suscripción de Confío y ciclo, y los dos topes;
+  abierto — los valores de los topes los fija quien aprueba, por ambiente, en Infisical.
+
+## Un aviso firmado re-partido pasa la firma y acuña otro ciclo (LOC-235)
+
+- **Dónde**: `src/provider/confio/confio-webhook-signature.ts:435-438` (concatenación sin separador),
+  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:121` (`signatureChecksum`)
+- **Qué lo dispara**: mover un dígito entre campos vecinos de un aviso ya firmado (`1/1990000` → `11/990000`): el
+  checksum no cambia y `buildConfioWebhookEventId` acuña otro id.
+- **Qué rompe**: el bono ya no — no acredita un checksum ya aplicado a la fila ni un ciclo no posterior al último
+  bonificado de su suscripción de Confío. El efecto del cobro sí se re-aplica (estado, período, roles).
+- **Estado**: mitigado para el bono por la regla del checksum y del ciclo creciente; abierto para el efecto del
+  cobro — fuera de LOC-235, pendiente de unidad propia.
