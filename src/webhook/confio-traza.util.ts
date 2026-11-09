@@ -83,6 +83,7 @@ export function armarTrazaDelMovimiento({
   reason,
 }: TrazaDelMovimiento): DeepPartial<SubscriptionEvent> {
   const data = payload?.data || {}
+  const checksum = payload?.signature?.checksum
 
   // Sólo las claves que el payload trajo: el cobro exitoso da `payment`, el
   // fallido da `reason` y la cancelación ninguna de las dos. Si queda vacío se
@@ -114,6 +115,8 @@ export function armarTrazaDelMovimiento({
       amountCents: data.amountCents,
       currencyCode: data.currencyCode,
       cycleNumber: data.cycleNumber,
+      // Every re-split of one signed notice keeps it: the cycle bonus refuses a checksum seen here.
+      ...(typeof checksum === 'string' ? { signatureChecksum: checksum } : {}),
       ...(Object.keys(providerRef).length ? { providerRef } : {}),
       // `brandId`/`planSlug` aparecen DOS VECES en el mismo metadata y NO es
       // basura a limpiar: los de arriba salen de la fila bloqueada (lo que pide

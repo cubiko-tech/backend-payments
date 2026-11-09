@@ -634,19 +634,31 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
 
 - **Dónde**: `src/client/client-roles.service.ts:240` y `:276` (campo ausente → 0),
-  `src/webhook/subscription-bonus.service.ts:68`
+  `src/webhook/subscription-bonus.service.ts:77`
 - **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
-- **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a acreditar.
-  Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
+- **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a
+  acreditar. Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
 - **Estado**: abierto — lo cierra desplegar roles con LOC-227 antes que este Pagos (condición de la entrega).
 
 ## El bono de un ciclo sale de un aviso de un tercero; sus topes por defecto son supuestos (LOC-214)
 
-- **Dónde**: `src/webhook/subscription-bonus.service.ts:107` y `:114`, `src/webhook/subscription-bonus-limits.ts:14`
+- **Dónde**: `src/webhook/subscription-bonus.service.ts:124` y `:131`,
+  `src/webhook/subscription-bonus-limits.ts:14`
 - **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo; un ciclo de prueba con `SUCCEEDED`, si
   ConfioPagos lo emite, también acredita (no se mira `amountCents`).
-- **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes calendario
-  UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por defecto, valores
-  supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
-- **Estado**: mitigado por la firma del aviso, una llave por suscripción y ciclo y los dos topes; abierto — los valores
-  de los topes los fija quien aprueba, por ambiente, en Infisical.
+- **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes
+  calendario UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por
+  defecto, valores supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
+- **Estado**: mitigado por la firma del aviso, la llave por fila, suscripción de Confío y ciclo, y los dos topes;
+  abierto — los valores de los topes los fija quien aprueba, por ambiente, en Infisical.
+
+## Un aviso firmado re-partido pasa la firma y acuña otro ciclo (LOC-235)
+
+- **Dónde**: `src/provider/confio/confio-webhook-signature.ts:435-438` (concatenación sin separador),
+  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:119` (`signatureChecksum`)
+- **Qué lo dispara**: mover un dígito entre campos vecinos de un aviso ya firmado (`1/1990000` → `11/990000`): el
+  checksum no cambia y `buildConfioWebhookEventId` acuña otro id.
+- **Qué rompe**: el bono ya no — no acredita un checksum ya aplicado a la fila ni un ciclo no posterior al último
+  bonificado de su suscripción de Confío. El efecto del cobro sí se re-aplica (estado, período, roles).
+- **Estado**: mitigado para el bono por la regla del checksum y del ciclo creciente; abierto para el efecto del
+  cobro — fuera de LOC-235, pendiente de unidad propia.

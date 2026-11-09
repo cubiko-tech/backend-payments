@@ -12,35 +12,60 @@ const paid = (data: Record<string, unknown> = {}, properties: unknown = PROPS): 
 })
 
 describe('subscriptionBonusKey', () => {
-  it('is built from the subscription and the cycle of the notice, with its own prefix', () => {
-    // R15: red if the key stops coming from the cycle (provider event id, time, payment).
-    expect(subscriptionBonusKey(paid())).toBe(`subscription-bonus:${NAME}:ciclo-3`)
+  const SUB = { id: 'row-1', providerSubscriptionId: NAME }
+
+  it('is built from the subscription row, its Confio subscription and the cycle', () => {
+    // R15: red if the key stops coming from the row or the cycle (event id, time, payment).
+    expect(subscriptionBonusKey(paid(), SUB)).toBe(`subscription-bonus:row-1:${NAME}:ciclo-3`)
+  })
+
+  it('does not change with the data.name of the notice', () => {
+    // R15: red if the key goes back to data.name: a re-split name would mint another key.
+    expect(subscriptionBonusKey(paid({ name: `${NAME}9` }), SUB)).toBe(
+      subscriptionBonusKey(paid(), SUB),
+    )
+  })
+
+  it('differs for a new Confio subscription stored on the same row', () => {
+    // R15: red if the Confio subscription leaves the key: a new signup's cycle 1 reads as credited.
+    const renewed = { ...SUB, providerSubscriptionId: `${NAME}-2` }
+
+    expect(subscriptionBonusKey(paid(), renewed)).not.toBe(subscriptionBonusKey(paid(), SUB))
   })
 
   it('is the same for another attempt and another delivery time of the same cycle', () => {
     // R15: red if the key takes the payment attempt or the timestamp of the notice.
     const later = { ...paid({ payment: 'p-2' }), timestamp: 1768999999 }
 
-    expect(subscriptionBonusKey(later)).toBe(subscriptionBonusKey(paid()))
+    expect(subscriptionBonusKey(later, SUB)).toBe(subscriptionBonusKey(paid(), SUB))
   })
 
   it('differs between two cycles of the same subscription', () => {
     // R15: red if the cycle number leaves the key: every later cycle reads as already credited.
-    expect(subscriptionBonusKey(paid({ cycleNumber: 4 }))).not.toBe(subscriptionBonusKey(paid()))
+    expect(subscriptionBonusKey(paid({ cycleNumber: 4 }), SUB)).not.toBe(
+      subscriptionBonusKey(paid(), SUB),
+    )
   })
+
+  it.each([null, '', 'x'.repeat(257)])(
+    'is null when the row holds Confio subscription %p',
+    (name) => {
+      // R15: red if a row without its Confio subscription still gets a key.
+      expect(subscriptionBonusKey(paid(), { id: 'row-1', providerSubscriptionId: name })).toBeNull()
+    },
+  )
 
   it.each([
     ['name is not signed', paid({}, ['cycleNumber', 'status'])],
     ['cycleNumber is not signed', paid({}, ['name', 'status'])],
     ['properties is missing', paid({}, null)],
-    ['name is missing', paid({ name: undefined })],
-    ['name is too long', paid({ name: 'x'.repeat(257) })],
     ['cycleNumber is a string', paid({ cycleNumber: '3' })],
     ['cycleNumber is null', paid({ cycleNumber: null })],
     ['cycleNumber is fractional', paid({ cycleNumber: 1e-7 })],
     ['cycleNumber is negative', paid({ cycleNumber: -1 })],
   ])('is null when %s', (_name, payload) => {
-    expect(subscriptionBonusKey(payload)).toBeNull()
+    // R15: red if the signed-field or integer-cycle check is dropped from the key.
+    expect(subscriptionBonusKey(payload, SUB)).toBeNull()
   })
 })
 
@@ -51,6 +76,7 @@ describe('subscriptionBonusLimits', () => {
   })
 
   it('reads both caps from the environment', () => {
+    // R15: red if either cap stops reading its variable and keeps the default.
     process.env = {
       ...OLD_ENV,
       SUBSCRIPTION_BONUS_MAX_TOKENS: '700',

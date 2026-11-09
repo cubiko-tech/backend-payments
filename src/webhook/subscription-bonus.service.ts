@@ -5,12 +5,14 @@ import { AuditService } from '../audit/audit.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 import { Subscription } from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenWalletService } from '../wallet/token-wallet.service'
 import { subscriptionBonusKey } from './subscription-bonus-key'
 import { subscriptionBonusLimits } from './subscription-bonus-limits'
+import { bonusRefusal } from './subscription-bonus-rule'
 
 /** Author of every cycle bonus in `audit_log`: no person gives it. */
 export const SUBSCRIPTION_BONUS_AUTHOR = 'system:confio-subscription'
@@ -27,11 +29,15 @@ export enum SubscriptionBonusReason {
 export interface PlannedBonus {
   key: string
   tokens: number
+  /** The brand's token wallet, never `subscriptions.walletId` (the payment wallet). */
   walletId: string
   brandId: string
   planSlug: string
   subscriptionId: string
+  providerSubscriptionId: string
   cycleNumber: number
+  /** Signed checksum of the notice; every re-split of it keeps this value. */
+  checksum: string
 }
 
 /**
@@ -54,9 +60,12 @@ export class SubscriptionBonusService {
    * stored subscription, never from the notice. Throws when the plan catalog is unavailable.
    */
   async plan(payload: ConfioWebhookPayload, sub: Subscription): Promise<PlannedBonus | null> {
-    const key = subscriptionBonusKey(payload)
-    if (!key) {
-      this.logger.warn(`Cycle bonus skipped for ${sub.id}: no signed subscription and cycle`)
+    const key = subscriptionBonusKey(payload, sub)
+    const checksum = payload?.signature?.checksum
+    if (!key || typeof checksum !== 'string' || checksum.length === 0) {
+      this.logger.warn(
+        `Cycle bonus skipped for ${sub.id}: no signed subscription, cycle and checksum`,
+      )
       return null
     }
     if (!sub.brandId || !sub.planSlug) {
@@ -79,27 +88,35 @@ export class SubscriptionBonusService {
       brandId: sub.brandId,
       planSlug: sub.planSlug,
       subscriptionId: sub.id,
+      providerSubscriptionId: sub.providerSubscriptionId,
       cycleNumber: payload.data.cycleNumber,
+      checksum,
     }
   }
 
   /**
-   * Credits `bonus` inside the caller's transaction, under the wallet lock. A closed wallet, a used
-   * key or a cap reached credit nothing and return; a database failure throws and rolls all back.
+   * Credits `bonus` inside the caller's transaction. `locked` is the subscription row the caller
+   * holds under `pessimistic_write`, which serializes every bonus of that row. Any refusal of
+   * `bonusRefusal` or a cap reached credits nothing and returns; a database failure throws and
+   * rolls all back.
    */
-  async credit(manager: EntityManager, bonus: PlannedBonus): Promise<void> {
+  async credit(manager: EntityManager, bonus: PlannedBonus, locked: Subscription): Promise<void> {
     const wallet = await manager.findOne(Wallet, {
       where: { id: bonus.walletId },
       lock: { mode: 'pessimistic_write' },
     })
-    if (!wallet || wallet.status === WalletStatus.CLOSED) {
-      this.logger.warn(`Cycle bonus skipped: token wallet of brand ${bonus.brandId} closed or gone`)
-      return
-    }
-    // By the key alone, whatever the amount: a plan edited between two notices of one cycle
-    // would otherwise reach the 409 of `findReplay` and roll the charge back forever.
-    if (await manager.findOne(Transaction, { where: { idempotencyKey: bonus.key } })) {
-      this.logger.log(`Cycle bonus ${bonus.key} already credited`)
+    const refusal = bonusRefusal({
+      planned: bonus,
+      locked,
+      wallet: wallet && { brandId: wallet.brandId, closed: wallet.status === WalletStatus.CLOSED },
+      // By the key alone, whatever the amount: a plan edited between two notices of one cycle
+      // would otherwise reach the 409 of `findReplay` and roll the charge back forever.
+      keyUsed: !!(await manager.findOne(Transaction, { where: { idempotencyKey: bonus.key } })),
+      checksumSeen: await checksumApplied(manager, locked.id, bonus.checksum),
+      lastCycle: await lastBonifiedCycle(manager, locked),
+    })
+    if (refusal) {
+      this.logger.warn(`Cycle bonus ${bonus.key} skipped for brand ${locked.brandId}: ${refusal}`)
       return
     }
 
@@ -126,12 +143,17 @@ export class SubscriptionBonusService {
       bonus.tokens,
       TokenOrigin.GIFT,
       {
-        brandId: bonus.brandId,
+        brandId: locked.brandId,
         category: 'gift',
         description: `Subscription cycle ${bonus.cycleNumber} bonus`,
         referenceType: SUBSCRIPTION_BONUS_REFERENCE,
-        referenceId: bonus.subscriptionId,
-        metadata: { reason, planSlug: bonus.planSlug, cycleNumber: bonus.cycleNumber },
+        referenceId: locked.id,
+        metadata: {
+          reason,
+          planSlug: locked.planSlug,
+          providerSubscriptionId: locked.providerSubscriptionId,
+          cycleNumber: bonus.cycleNumber,
+        },
       },
       bonus.key,
       (txManager, transaction) =>
@@ -141,10 +163,10 @@ export class SubscriptionBonusService {
           entityType: 'wallet',
           entityId: bonus.walletId,
           changes: {
-            brandId: bonus.brandId,
+            brandId: locked.brandId,
             amount: bonus.tokens,
             reason,
-            subscriptionId: bonus.subscriptionId,
+            subscriptionId: locked.id,
             cycleNumber: bonus.cycleNumber,
             transactionId: transaction.id,
           },
@@ -167,4 +189,35 @@ async function creditedThisMonth(manager: EntityManager, walletId: string): Prom
     .andWhere('t."createdAt" >= :monthStart', { monthStart })
     .getRawOne<{ total: string }>()
   return Number(row?.total ?? 0)
+}
+
+/** Whether an applied movement of `subscriptionId` already carries the signed `checksum`. */
+async function checksumApplied(
+  manager: EntityManager,
+  subscriptionId: string,
+  checksum: string,
+): Promise<boolean> {
+  const count = await manager
+    .createQueryBuilder(SubscriptionEvent, 'e')
+    .where('e."subscriptionId" = :subscriptionId', { subscriptionId })
+    .andWhere("e.metadata ->> 'signatureChecksum' = :checksum", { checksum })
+    .getCount()
+  return count > 0
+}
+
+/** Highest cycle bonified for the row and the Confio subscription it holds now, `null` if none. */
+async function lastBonifiedCycle(
+  manager: EntityManager,
+  sub: Subscription,
+): Promise<number | null> {
+  const row = await manager
+    .createQueryBuilder(Transaction, 't')
+    .select("MAX((t.metadata ->> 'cycleNumber')::bigint)", 'last')
+    .where('t."referenceType" = :ref', { ref: SUBSCRIPTION_BONUS_REFERENCE })
+    .andWhere('t."referenceId" = :id', { id: sub.id })
+    .andWhere("t.metadata ->> 'providerSubscriptionId' = :confio", {
+      confio: sub.providerSubscriptionId,
+    })
+    .getRawOne<{ last: string | null }>()
+  return row?.last == null ? null : Number(row.last)
 }

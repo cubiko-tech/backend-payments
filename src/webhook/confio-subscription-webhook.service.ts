@@ -1052,7 +1052,7 @@ export class ConfioSubscriptionWebhookService {
       }
 
       await manager.save(sub)
-      if (bono) await this.bonus.credit(manager, bono)
+      if (bono) await this.bonus.credit(manager, bono, sub)
 
       // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
       // usuario y plan salen de esa fila y no de una relectura posterior.

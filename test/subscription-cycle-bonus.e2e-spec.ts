@@ -83,7 +83,7 @@ describe('Subscription cycle bonus (PostgreSQL, LOC-214)', () => {
       walletId: wallet.id,
       tokenOrigin: 'gift',
       referenceId: sub.id,
-      idempotencyKey: `subscription-bonus:${subName(BRAND_A)}:ciclo-1`,
+      idempotencyKey: `subscription-bonus:${sub.id}:${subName(BRAND_A)}:ciclo-1`,
     })
     const audit = await auditOf(ds(), wallet.id)
     expect(audit).toHaveLength(1)
