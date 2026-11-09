@@ -6,9 +6,11 @@ import { BONUS_CATALOG_MAX_AGE_MS, ClientRolesService } from './client-roles.ser
  */
 const REAL_FETCH = global.fetch
 
+// R17: backend-roles is another service; the client that reads its catalog stays real.
 const catalog = (plans: unknown[]) =>
   jest.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ data: plans }) })
 
+// R17: a refused connection is how fetch fails when backend-roles is down.
 const rolesDown = () => jest.fn().mockRejectedValue(new Error('ECONNREFUSED'))
 
 describe('ClientRolesService.getTokensPerCycle', () => {
@@ -18,6 +20,7 @@ describe('ClientRolesService.getTokensPerCycle', () => {
   beforeEach(() => {
     process.env = { ...OLD_ENV, SERVICE_ROLES: 'https://roles.test.local', ACCESS_SERVER: 'tok' }
     service = new ClientRolesService()
+    // R17: silences the expected warnings; no case asserts on the log.
     jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined)
     jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined)
     jest.spyOn((service as any).logger, 'log').mockImplementation(() => undefined)
@@ -59,6 +62,7 @@ describe('ClientRolesService.getTokensPerCycle', () => {
   })
 
   it('gives 0 for a plan the catalog does not list', async () => {
+    // R15: red if a plan the catalog does not list gets another plan's bonus or throws.
     global.fetch = catalog([{ slug: 'pro', tokensPerCycle: 500, prices: [] }]) as any
 
     expect(await service.getTokensPerCycle('other')).toBe(0)
@@ -73,6 +77,7 @@ describe('ClientRolesService.getTokensPerCycle', () => {
   })
 
   it('serves a stale catalog younger than the bonus max age when backend-roles is down', async () => {
+    // R15: red if any failed refresh throws, even with a catalog younger than the max age.
     jest.useFakeTimers({
       doNotFake: ['nextTick', 'setImmediate'],
       now: new Date('2026-11-09T10:00Z'),

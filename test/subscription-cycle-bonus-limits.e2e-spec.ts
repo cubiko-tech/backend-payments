@@ -60,6 +60,7 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
 
   const ds = () => a.dataSource
   const subscription = (id: string) => ds().getRepository(Subscription).findOneByOrFail({ id })
+  // R17: a spy that keeps logging; the cap cases read the line that names the brand.
   const warnings = () => jest.spyOn(Logger.prototype, 'warn')
 
   it('S6: a bonus over the per-credit cap credits nothing and logs the brand', async () => {

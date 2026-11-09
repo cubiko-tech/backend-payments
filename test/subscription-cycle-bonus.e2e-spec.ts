@@ -129,6 +129,7 @@ describe('Subscription cycle bonus (PostgreSQL, LOC-214)', () => {
   })
 
   it('S3b: the next cycle of the same subscription credits its own bonus', async () => {
+    // R15: red if the cycle number leaves the key: the second cycle reads as already credited.
     await seedConfioSubscription(ds(), BRAND_A, 'pro-500')
 
     await deliver(chain, BRAND_A, 'SUCCEEDED', 1, 'loc214-payment-1')
@@ -156,6 +157,7 @@ describe('Subscription cycle bonus (PostgreSQL, LOC-214)', () => {
   })
 
   it('S5: a notice with another signature gets 401 and credits nothing', async () => {
+    // R15: red if the bonus is planned before the signature check, or the route stops checking it.
     await seedConfioSubscription(ds(), BRAND_A, 'pro-500')
 
     const forged = signedCharge(BRAND_A, 'SUCCEEDED', 1, 'loc214-payment-1', 'another-key')
@@ -166,6 +168,7 @@ describe('Subscription cycle bonus (PostgreSQL, LOC-214)', () => {
   })
 
   it('S8: a failed charge credits nothing', async () => {
+    // R15: red if the bonus is planned for every billing notice instead of only PAYMENT_SUCCEEDED.
     const sub = await seedConfioSubscription(ds(), BRAND_A, 'pro-500')
 
     const notice = await deliver(chain, BRAND_A, 'FAILED')
@@ -191,6 +194,7 @@ describe('Subscription cycle bonus (PostgreSQL, LOC-214)', () => {
   })
 
   it('S12: the active confirmation grants the plan without crediting a bonus', async () => {
+    // R15: red if the active confirmation also plans the bonus: it is not a charge.
     const sub = await seedConfioSubscription(ds(), BRAND_A, 'pro-500')
     const repo = ds().getRepository(Subscription)
     await repo.update(sub.id, { status: SubscriptionStatus.PENDING })

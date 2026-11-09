@@ -18,12 +18,14 @@ describe('subscriptionBonusKey', () => {
   })
 
   it('is the same for another attempt and another delivery time of the same cycle', () => {
+    // R15: red if the key takes the payment attempt or the timestamp of the notice.
     const later = { ...paid({ payment: 'p-2' }), timestamp: 1768999999 }
 
     expect(subscriptionBonusKey(later)).toBe(subscriptionBonusKey(paid()))
   })
 
   it('differs between two cycles of the same subscription', () => {
+    // R15: red if the cycle number leaves the key: every later cycle reads as already credited.
     expect(subscriptionBonusKey(paid({ cycleNumber: 4 }))).not.toBe(subscriptionBonusKey(paid()))
   })
 
