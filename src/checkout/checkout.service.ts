@@ -411,6 +411,13 @@ export class CheckoutService implements OnModuleInit {
   }
 
   private async assertProviderAvailable(req: CheckoutRequest, country?: string) {
+    // The deprecated `dropi` provider sells no token package, on a first checkout or on a retry.
+    if (req.purpose === 'token_package' && req.provider === PaymentProvider.DROPI) {
+      throw new RequestException({
+        code: 'PROVIDER_NOT_AVAILABLE',
+        message: `Provider '${req.provider}' does not sell token packages`,
+      })
+    }
     const gateCountry = country || (await this.getBillingCountry(req.brandId))
     const available = await this.providerConfig.isProviderAvailable(gateCountry, req.provider)
     if (!available) {

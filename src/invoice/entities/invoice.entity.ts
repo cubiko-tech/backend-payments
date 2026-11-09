@@ -23,9 +23,16 @@ export const DIAN_SENDING_FLAG = 'dianSendingAt'
 @Index(['brandId', 'createdAt'])
 @Index(['invoiceNumber'], { unique: true })
 @Index('UQ_invoices_payment_id', ['paymentId'], { unique: true })
+// One consolidated recharge invoice per brand and month.
+@Index('UQ_invoices_brand_period', ['brandId', 'period'], {
+  unique: true,
+  where: `"period" IS NOT NULL`,
+})
 export class Invoice extends Content {
   @Column() brandId: string
   @Column({ type: 'uuid', nullable: true }) paymentId: string
+  // `YYYY-MM` in America/Bogota of a monthly recharge invoice; null on every other invoice.
+  @Column({ type: 'varchar', length: 7, nullable: true }) period: string | null
   @Column({ type: 'uuid', nullable: true }) subscriptionId: string
   @Column({ type: 'uuid', nullable: true }) billingProfileId: string
   @Column({ type: 'enum', enum: InvoiceType, default: InvoiceType.INVOICE }) type: InvoiceType

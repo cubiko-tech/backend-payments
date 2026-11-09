@@ -1,8 +1,12 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
+import { randomUUID } from 'crypto'
 import { DataSource, EntityManager, Repository } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
+import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
+import { DianService } from '../dian/dian.service'
+import { insertRechargeInvoice, manualRechargeInvoiceNumber } from '../invoice/recharge-invoice'
 import {
   Payment,
   PaymentProvider,
@@ -15,8 +19,14 @@ import { toCents } from '../wallet/token-spend'
 import { TokenWalletService, fail } from '../wallet/token-wallet.service'
 import { DropiChargeResult, decideRechargeResult } from './dropi-recharge-result'
 import { DropiRechargeSignal } from './dropi-recharge-signal'
-import { DropiRechargeTerms, DropiRechargeView, toView } from './dropi-recharge.service'
+import {
+  DropiRechargeTerms,
+  DropiRechargeView,
+  isAutomaticRecharge,
+  toView,
+} from './dropi-recharge.service'
 import { ReportDropiRechargeResultDto } from './dto/report-dropi-recharge-result.dto'
+import { sendRechargeInvoiceToDian } from './send-recharge-invoice'
 
 export const dropiTokensKey = (paymentId: string) => `payment:${paymentId}:tokens:dropi`
 
@@ -26,12 +36,17 @@ class ClosedMeanwhile extends Error {}
 /** Thrown inside the credit transaction when the Dropi operation already closed another recharge. */
 class OperationUsedElsewhere extends Error {}
 
+/** Wraps a failed invoice write so the token wallet does not read its 23505 as a replayed key. */
+class InvoiceWriteFailed extends Error {}
+
 const DROPI_OPERATION_INDEX = 'UQ_payments_dropi_operation'
 
 /**
  * Closes a recharge from Dropi with the result ROAX Ads reports: `charged` credits its fixed tokens
- * to the `dropi` origin, `failed` closes it with none. The credit, the close and their audit commit
- * together. Rejects: an unknown or other brand's recharge (404), another amount (422), a report
+ * to the `dropi` origin, `failed` closes it with none. The credit, the close, the invoice of a manual
+ * recharge and their audit commit together; an automatic one waits for the monthly close. After the
+ * commit the invoice goes to the DIAN in the background.
+ * Rejects: an unknown or other brand's recharge (404), another amount (422), a report
  * that does not match a closed recharge (409), a Dropi operation that already charged another
  * recharge (409, stays pending) and a closed token wallet (422, stays pending).
  */
@@ -44,9 +59,12 @@ export class DropiRechargeResultService {
     private readonly payments: Repository<Payment>,
     @InjectDataSource('DBWrite')
     private readonly dataSource: DataSource,
+    @InjectRepository(BillingProfile, 'DBRead')
+    private readonly billingProfiles: Repository<BillingProfile>,
     private readonly tokenWallets: TokenWalletService,
     private readonly auditService: AuditService,
     private readonly signal: DropiRechargeSignal,
+    private readonly dian: DianService,
   ) {}
 
   async report(id: string, body: ReportDropiRechargeResultDto): Promise<DropiRechargeView> {
@@ -81,6 +99,10 @@ export class DropiRechargeResultService {
     const terms: DropiRechargeTerms = payment.metadata.dropiRecharge
     const tokens = Number(terms.tokens)
     const dropiOperationId = body.dropiOperationId
+    const invoiceId = isAutomaticRecharge(payment) ? null : randomUUID()
+    const billingProfile = invoiceId
+      ? await this.billingProfiles.findOne({ where: { brandId: payment.brandId } })
+      : null
     try {
       const movement = await this.tokenWallets.creditTokens(
         payment.walletId,
@@ -100,12 +122,25 @@ export class DropiRechargeResultService {
             status: PaymentStatus.COMPLETED,
             paidAt: new Date(),
             providerPaymentId: dropiOperationId,
+            invoiceId,
           }
           const closed = await closePending(manager, payment.id, changes).catch((error) => {
             // Not the 23505 the wallet reads as a replayed key: this one answers on its own.
             throw violates(error, DROPI_OPERATION_INDEX) ? new OperationUsedElsewhere() : error
           })
           if (!closed) throw new ClosedMeanwhile()
+          if (invoiceId) {
+            await insertRechargeInvoice(manager, {
+              id: invoiceId,
+              brandId: payment.brandId,
+              invoiceNumber: manualRechargeInvoiceNumber(payment.id),
+              paymentId: payment.id,
+              billingProfile,
+              recharges: [payment],
+            }).catch((error) => {
+              throw new InvoiceWriteFailed(`Invoice of recharge ${payment.id}: ${error?.message}`)
+            })
+          }
           await this.auditService.record(manager, {
             userId: ROAX_ADS_CLIENT,
             action: 'dropi_recharge_charged',
@@ -116,13 +151,16 @@ export class DropiRechargeResultService {
               tokens,
               dropiOperationId,
               transactionId: transaction.id,
+              invoiceId,
             },
             description: `Recharge from Dropi charged: ${tokens} tokens`,
           })
         },
       )
       // A replay did not run the close above: what the recharge holds now decides the answer.
-      return movement.replayed ? this.decideAgain(payment.id, body) : this.closedView(payment.id)
+      if (movement.replayed) return this.decideAgain(payment.id, body)
+      if (invoiceId) sendRechargeInvoiceToDian(this.dian, invoiceId, this.logger)
+      return this.closedView(payment.id)
     } catch (error) {
       if (error instanceof ClosedMeanwhile) return this.decideAgain(payment.id, body)
       if (error instanceof OperationUsedElsewhere) {

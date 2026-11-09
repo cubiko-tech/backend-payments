@@ -12,7 +12,9 @@ import { AuditLog } from '../../src/audit/entities/auditLog.entity'
 import { BillingProfile } from '../../src/billing-profile/entities/billingProfile.entity'
 import { ClientPlatformService } from '../../src/client/client-platform.service'
 import { ClientRolesService } from '../../src/client/client-roles.service'
+import { DianService } from '../../src/dian/dian.service'
 import { Payment } from '../../src/payment/entities/payment.entity'
+import { AutomaticRechargeInvoiceService } from '../../src/recharge/automatic-recharge-invoice.service'
 import { DropiRechargeResultController } from '../../src/recharge/dropi-recharge-result.controller'
 import { DropiRechargeResultService } from '../../src/recharge/dropi-recharge-result.service'
 import { DropiRechargeSignal } from '../../src/recharge/dropi-recharge-signal'
@@ -42,6 +44,17 @@ export interface RechargeApp {
   tax: { getTaxForCountry: jest.Mock }
   platform: { canViewBrandCredit: jest.Mock }
   apm: ApmDouble
+  dian: DianDouble
+}
+
+export interface DianDouble {
+  isConfigured: () => boolean
+  sendInvoice: jest.Mock
+}
+
+// R17: the DIAN (Siigo) is an external service with a cost; the double keeps which invoices went.
+export function dianDouble(): DianDouble {
+  return { isConfigured: () => true, sendInvoice: jest.fn().mockResolvedValue({ success: true }) }
 }
 
 /** What the New Relic double was handed, in order. */
@@ -81,6 +94,7 @@ export async function startRechargeApp(
     authenticate: jest.fn(async (key: string) => (key === ADS_KEY ? 'roax-ads' : null)),
   }
   const apm = apmDouble()
+  const dian = dianDouble()
   const repo = (entity: unknown, connection: string) => ({
     provide: getRepositoryToken(entity as never, connection),
     useValue: dataSource.getRepository(entity as never),
@@ -91,6 +105,8 @@ export async function startRechargeApp(
       DropiRechargeService,
       DropiRechargeResultService,
       DropiRechargeSignal,
+      AutomaticRechargeInvoiceService,
+      { provide: DianService, useValue: dian },
       { provide: APM_AGENT, useValue: apm },
       AuditService,
       repo(AuditLog, 'DBWrite'),
@@ -117,7 +133,7 @@ export async function startRechargeApp(
   const app = moduleRef.createNestApplication()
   app.useGlobalPipes(createGlobalValidationPipe())
   await app.init()
-  return { app, moduleRef, jwt, tax, platform, apm } as RechargeApp
+  return { app, moduleRef, jwt, tax, platform, apm, dian } as RechargeApp
 }
 
 /** Drops the TRM cached by an earlier case: the cache lasts an hour and each case sets its rate. */

@@ -21,6 +21,11 @@ import { readWebhookSecret } from '../../shared/env/webhook-secret'
  * - Se le envía un cobro y Dropi lo procesa asincrónicamente
  * - Confirma via webhook cuando el usuario paga
  * - Soporta cobros masivos (batch)
+ *
+ * @deprecated Paying with the Dropi balance goes through the `dropi_wallet` recharge
+ * (`src/recharge/`), and a token package no longer accepts this provider. Delete it, with
+ * `POST /webhook/dropi`, once no subscription renews with `provider = 'dropi'` and no payment
+ * with that provider is left pending.
  */
 @Injectable()
 export class DropiProvider implements PaymentProvider {

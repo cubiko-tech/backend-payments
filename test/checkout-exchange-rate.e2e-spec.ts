@@ -16,7 +16,7 @@ import {
 } from '../src/payment/entities/payment.entity'
 import {
   cleanPackageBrand,
-  fakeDropi,
+  fakeExternalProvider,
   packageCheckout,
   packageId,
   paymentsOf,
@@ -44,7 +44,7 @@ describe('Checkout charged with the TRM (PostgreSQL)', () => {
     instance = await startInstance({ realBilling: true, trmUrl: source.url })
     id = await packageId(instance.dataSource)
     await cleanPackageBrand(instance.dataSource, BRAND)
-    fakeDropi(instance)
+    fakeExternalProvider(instance)
   })
 
   afterEach(async () => {
@@ -99,7 +99,7 @@ describe('Checkout charged with the TRM (PostgreSQL)', () => {
         brandId: BRAND,
         userId: req.userId,
         idempotencyKey: req.idempotencyKey,
-        provider: PaymentProvider.DROPI,
+        provider: PaymentProvider.CONFIO,
         amount: 99950,
         currency: 'COP',
         exchangeRate: 3999.5,

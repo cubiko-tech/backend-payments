@@ -60,6 +60,16 @@ describe('DropiRechargeSignal', () => {
     })
   })
 
+  it('a failed monthly close is recorded as its own event with only the brand and period', () => {
+    // R15: red when closeFailed reuses another event type or sends more than the brand and period.
+    signal.closeFailed('brand-1', '2026-10')
+
+    expect(agent.recordCustomEvent).toHaveBeenCalledWith('RechargeInvoiceCloseFailed', {
+      brandId: 'brand-1',
+      period: '2026-10',
+    })
+  })
+
   it('an agent that throws, or a recharge it cannot read, never reaches the caller', () => {
     // R15: red when record drops its try: the agent error escapes changed().
     agent.recordCustomEvent.mockImplementation(() => {

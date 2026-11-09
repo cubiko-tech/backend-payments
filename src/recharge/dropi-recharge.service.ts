@@ -23,12 +23,20 @@ import { exactTokens, rechargePesos, storedRate } from './dropi-recharge-pricing
 import { DropiRechargeSignal } from './dropi-recharge-signal'
 import { TOKEN_PRICE_USD } from './token-price'
 
-/** What a recharge from Dropi fixes when it is created; LOC-175 credits these tokens, no others. */
+/**
+ * What a recharge from Dropi fixes when it is created; LOC-175 credits these tokens, no others. An
+ * `automatic` one is invoiced in the monthly close; one without it (older ones too) on completion.
+ */
 export interface DropiRechargeTerms {
   tokens: number
   tokenPriceUsd: number
   bonusTokens: 0
+  automatic?: boolean
 }
+
+/** True for a recharge ROAX Ads made on its own; absent means manual. */
+export const isAutomaticRecharge = (payment: Payment) =>
+  payment.metadata?.dropiRecharge?.automatic === true
 
 export interface DropiRechargeView {
   id: string
@@ -73,7 +81,7 @@ export class DropiRechargeService {
 
   /**
    * Prices `tokens` at the day's TRM plus the country's VAT and saves the recharge `pending`. A
-   * retry with the same `requestId` and tokens gets the same recharge; with other tokens, 409.
+   * retry with the same `requestId`, tokens and `automatic` gets the same recharge; otherwise, 409.
    * Tokens are fixed, priced and compared at two decimals: noise below the hundredth is dropped.
    * Rejects with no payment saved: a non-CO brand (422), no TRM within 3 s (503), no readable VAT
    * (422) and a closed token wallet (422). The token wallet itself may be left created.
@@ -83,11 +91,14 @@ export class DropiRechargeService {
     userId: string,
     requestedTokens: number,
     requestId: string,
+    automatic = false,
   ): Promise<CreatedDropiRecharge> {
     const tokens = exactTokens(requestedTokens)
     const idempotencyKey = dropiRechargeKey(requestId)
     const existing = await this.payments.findOne({ where: { brandId, idempotencyKey } })
-    if (existing) return { created: false, recharge: sameRequestOrConflict(existing, tokens) }
+    if (existing) {
+      return { created: false, recharge: sameRequestOrConflict(existing, tokens, automatic) }
+    }
 
     const country = await this.billingCountry(brandId)
     if (country !== 'CO') {
@@ -112,7 +123,12 @@ export class DropiRechargeService {
       )
     }
 
-    const terms: DropiRechargeTerms = { tokens, tokenPriceUsd: TOKEN_PRICE_USD, bonusTokens: 0 }
+    const terms: DropiRechargeTerms = {
+      tokens,
+      tokenPriceUsd: TOKEN_PRICE_USD,
+      bonusTokens: 0,
+      automatic,
+    }
     const payment = this.payments.create({
       brandId,
       userId,
@@ -142,7 +158,7 @@ export class DropiRechargeService {
       if (!isUniqueConstraintViolation(error)) throw error
       // Another call with the same requestId inserted first.
       const winner = await this.payments.findOneOrFail({ where: { brandId, idempotencyKey } })
-      return { created: false, recharge: sameRequestOrConflict(winner, tokens) }
+      return { created: false, recharge: sameRequestOrConflict(winner, tokens, automatic) }
     }
   }
 
@@ -155,10 +171,15 @@ export class DropiRechargeService {
   }
 }
 
-function sameRequestOrConflict(existing: Payment, tokens: number): DropiRechargeView {
+function sameRequestOrConflict(
+  existing: Payment,
+  tokens: number,
+  automatic: boolean,
+): DropiRechargeView {
   const sameRequest =
     existing.provider === PaymentProvider.DROPI_WALLET &&
-    Number(existing.metadata?.dropiRecharge?.tokens) === tokens
+    Number(existing.metadata?.dropiRecharge?.tokens) === tokens &&
+    isAutomaticRecharge(existing) === automatic
   if (!sameRequest) throw createIdempotencyConflictException()
   return toView(existing)
 }
