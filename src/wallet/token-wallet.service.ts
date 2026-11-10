@@ -119,6 +119,37 @@ export class TokenWalletService {
   }
 
   /**
+   * Debits `amount` gift tokens only. Frozen wallets take gift debits; closed ones do not.
+   * Refuses with 400 INSUFFICIENT_GIFT_TOKENS when `giftTokens` or `balance` does not cover it.
+   */
+  async debitGiftTokens(
+    walletId: string,
+    amount: number,
+    data: Partial<Transaction> & { brandId: string },
+    idempotencyKey?: string,
+    audit?: MovementAudit,
+  ): Promise<TokenMovement> {
+    const cents = assertAmount(amount)
+    const expected: ExpectedMovement = {
+      walletId,
+      type: TransactionType.DEBIT,
+      cents,
+      origin: TokenOrigin.GIFT,
+    }
+    return this.move(walletId, data, idempotencyKey, expected, audit, undefined, (wallet) => {
+      if (wallet.status === WalletStatus.CLOSED) {
+        throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+      const giftCents = toCents(wallet.giftTokens)
+      if (cents > giftCents || cents > toCents(wallet.balance)) {
+        throw fail('INSUFFICIENT_GIFT_TOKENS', 'Insufficient gift tokens', HttpStatus.BAD_REQUEST)
+      }
+      wallet.giftTokens = fromCents(giftCents - cents)
+      return { type: TransactionType.DEBIT, tokenOrigin: TokenOrigin.GIFT, delta: -cents }
+    })
+  }
+
+  /**
    * The credit of `creditTokens`, inside the caller's transaction through its `manager`: it commits
    * or rolls back with it. A key already used by another movement aborts that transaction.
    */
