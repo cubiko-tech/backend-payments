@@ -5,6 +5,7 @@ import { AuditModule } from '../audit/audit.module'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { TokenGiftBatch } from './entities/token-gift-batch.entity'
 import { TokenGiftBatchItem } from './entities/token-gift-batch-item.entity'
+import { TokenGiftNotice } from './entities/token-gift-notice.entity'
 import { TokenPackage } from './entities/token-package.entity'
 import { Wallet } from './entities/wallet.entity'
 import { WalletBalanceSnapshot } from './entities/walletBalanceSnapshot.entity'
@@ -28,10 +29,14 @@ import { WalletService } from './wallet.service'
         TokenPackage,
         TokenGiftBatch,
         TokenGiftBatchItem,
+        TokenGiftNotice,
       ],
       'DBWrite',
     ),
-    TypeOrmModule.forFeature([Wallet, WalletBalanceSnapshot, Transaction], 'DBRead'),
+    TypeOrmModule.forFeature(
+      [Wallet, WalletBalanceSnapshot, Transaction, TokenGiftNotice],
+      'DBRead',
+    ),
     BullModule.registerQueue({ name: TOKEN_GIFT_BATCH_QUEUE }),
     AuditModule,
   ],

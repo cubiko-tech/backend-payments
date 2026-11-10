@@ -17,6 +17,7 @@ import { AuditService } from '../audit/audit.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { TokenGiftBatchService } from '../wallet/token-gift-batch.service'
+import { recordTokenGiftNotice } from '../wallet/token-gift-notice'
 import { TokenOrigin } from '../wallet/token-origin'
 import { fail, TokenWalletService } from '../wallet/token-wallet.service'
 import { adminIdempotencyKey } from './admin-idempotency-key'
@@ -106,15 +107,22 @@ export class AdminTokenGiftController {
         metadata: { authorId, reason },
       },
       adminIdempotencyKey(body.idempotencyKey),
-      (manager, transaction) =>
-        this.auditService.record(manager, {
+      async (manager, transaction) => {
+        await this.auditService.record(manager, {
           userId: authorId,
           action: 'token_gift',
           entityType: 'wallet',
           entityId: wallet.id,
           changes: { brandId, amount: body.amount, reason, transactionId: transaction.id },
           description: `Gift of ${body.amount} tokens: ${reason}`,
-        }),
+        })
+        await recordTokenGiftNotice(manager, {
+          brandId,
+          amount: body.amount,
+          balanceAfter: Number(transaction.balanceAfter),
+          movementKey: transaction.idempotencyKey!,
+        })
+      },
     )
     return { data: movement }
   }
@@ -150,15 +158,22 @@ export class AdminTokenGiftController {
         metadata: { authorId, reason },
       },
       adminIdempotencyKey(body.idempotencyKey),
-      (manager, transaction) =>
-        this.auditService.record(manager, {
+      async (manager, transaction) => {
+        await this.auditService.record(manager, {
           userId: authorId,
           action: 'token_gift_debit',
           entityType: 'wallet',
           entityId: walletId,
           changes: { brandId, amount: body.amount, reason, transactionId: transaction.id },
           description: `Gift debit of ${body.amount} tokens: ${reason}`,
-        }),
+        })
+        await recordTokenGiftNotice(manager, {
+          brandId,
+          amount: -body.amount,
+          balanceAfter: Number(transaction.balanceAfter),
+          movementKey: transaction.idempotencyKey!,
+        })
+      },
     )
     return { data: movement }
   }

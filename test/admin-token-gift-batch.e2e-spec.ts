@@ -18,6 +18,7 @@ import { DataSource } from 'typeorm'
 
 import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
 import { AddTokenGiftBatches1794300000000 } from '../migrations/1794300000000-AddTokenGiftBatches'
+import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -27,6 +28,7 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { TokenGiftBatch } from '../src/wallet/entities/token-gift-batch.entity'
 import { TokenGiftBatchItem } from '../src/wallet/entities/token-gift-batch-item.entity'
+import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet, WalletProvider, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { TokenGiftBatchProcessor } from '../src/wallet/token-gift-batch.processor'
 import {
@@ -130,6 +132,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   const clean = async () => {
     if (!dataSource?.isInitialized) return
     queueDouble.add.mockClear()
+    await dataSource.query('DELETE FROM "token_gift_notices"')
     await dataSource.query('DELETE FROM "token_gift_batch_items"')
     await dataSource.query('DELETE FROM "token_gift_batches"')
     await dataSource.query(
@@ -157,7 +160,14 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Wallet, Transaction, AuditLog, TokenGiftBatch, TokenGiftBatchItem],
+      entities: [
+        Wallet,
+        Transaction,
+        AuditLog,
+        TokenGiftBatch,
+        TokenGiftBatchItem,
+        TokenGiftNotice,
+      ],
       synchronize: false,
     })
     await dataSource.initialize()
@@ -175,6 +185,12 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
       )
       if (!hasBatches.length) {
         await new AddTokenGiftBatches1794300000000().up(runner)
+      }
+      const hasNotices = await runner.query(
+        `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+      )
+      if (!hasNotices.length) {
+        await new AddTokenGiftNotices1794350000000().up(runner)
       }
     } finally {
       await runner.release()
@@ -202,10 +218,14 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: getQueueToken(TOKEN_GIFT_BATCH_QUEUE), useValue: queueDouble },
-        ...[Wallet, Transaction, AuditLog, TokenGiftBatch, TokenGiftBatchItem].flatMap((e) => [
-          repo(e, 'DBWrite'),
-          repo(e, 'DBRead'),
-        ]),
+        ...[
+          Wallet,
+          Transaction,
+          AuditLog,
+          TokenGiftBatch,
+          TokenGiftBatchItem,
+          TokenGiftNotice,
+        ].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
         // R17: these routes use @RequireSuperAdmin, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
       ],
@@ -217,7 +237,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     processor = app.get(TokenGiftBatchProcessor)
   })
 
-  beforeEach(clean)
+  beforeEach(clean, 30000)
   afterEach(() => {
     jest.restoreAllMocks()
     process.env.TOKEN_GIFT_MAX_TOKENS_PER_BRAND = '10000'
@@ -229,7 +249,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     await app?.close()
     if (dataSource?.isInitialized) await dataSource.destroy()
     process.env = { ...envSnapshot }
-  })
+  }, 30000)
 
   it('CA6 — preview: with 4 open TKN wallets and 1 closed at 50 per brand, all_open returns 4 brands and total 200 without moving anything', async () => {
     // R15: red when preview includes closed wallets or mutates balances.

@@ -11,6 +11,7 @@ import {
   GiftBatchOmitReason,
   TokenGiftBatchItem,
 } from './entities/token-gift-batch-item.entity'
+import { TokenGiftNotice, TokenGiftNoticeStatus } from './entities/token-gift-notice.entity'
 import { TokenGiftBatchProcessor } from './token-gift-batch.processor'
 import { TOKEN_GIFT_BATCH_QUEUE, TokenGiftBatchService } from './token-gift-batch.service'
 import { TokenWalletService } from './token-wallet.service'
@@ -243,5 +244,58 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
       { id: BATCH_ID },
       expect.objectContaining({ status: GiftBatchStatus.FAILED }),
     )
+  })
+
+  it('executeBatch writes a pending token_gift_notice without reason or author inside the credit audit callback', async () => {
+    // R15: red if processItem skips recordTokenGiftNotice inside the creditTokens callback.
+    batchRepo.findOne.mockResolvedValueOnce({
+      id: BATCH_ID,
+      status: GiftBatchStatus.PENDING,
+      amount: 50,
+      reason: 'Secret batch reason',
+      authorId: 'admin-secret',
+    })
+    itemRepo.find
+      .mockResolvedValueOnce([
+        { id: 'i-ok', batchId: BATCH_ID, seq: 1, brandId: BRAND_A, walletId: WALLET_A },
+      ])
+      .mockResolvedValueOnce([])
+
+    // R17: In-memory EntityManager passed to the creditTokens audit callback to inspect notice writes in unit scope.
+    const itemManager = {
+      // R17: Mirrors manager.create and manager.save inside the movement transaction without PostgreSQL.
+      create: jest.fn((_cls, data) => data),
+      save: jest.fn(async (_cls, entity) => entity),
+    }
+    tokenWallets.creditTokens.mockImplementationOnce(
+      async (_walletId, _amount, _origin, _data, key, auditCb) => {
+        const tx = {
+          id: 'tx-1',
+          balanceAfter: '125.00',
+          idempotencyKey: key,
+          metadata: { giftBatchId: BATCH_ID },
+        }
+        await auditCb(itemManager, tx)
+        return { wallet: { id: WALLET_A }, transaction: tx, replayed: false }
+      },
+    )
+
+    await service.executeBatch(BATCH_ID)
+
+    expect(auditService.record).toHaveBeenCalledWith(
+      itemManager,
+      expect.objectContaining({
+        userId: 'admin-secret',
+        action: 'token_gift',
+        entityId: WALLET_A,
+      }),
+    )
+    expect(itemManager.save).toHaveBeenCalledWith(TokenGiftNotice, {
+      brandId: BRAND_A,
+      amount: 50,
+      balanceAfter: 125,
+      movementKey: `gift-batch:${BATCH_ID}:${BRAND_A}`,
+      status: TokenGiftNoticeStatus.PENDIENTE,
+    })
   })
 })

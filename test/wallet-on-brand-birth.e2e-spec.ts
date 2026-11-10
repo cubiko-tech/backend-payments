@@ -11,6 +11,7 @@ import { config as dotenvConfig } from 'dotenv'
 import * as request from 'supertest'
 import { DataSource, In } from 'typeorm'
 
+import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AdminController } from '../src/admin/admin.controller'
 import { MAX_MONEY_AMOUNT } from '../src/admin/dto/money-input'
@@ -29,6 +30,7 @@ import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
 import { runBackfillTokenWalletsCli } from '../src/wallet/backfill-token-wallets'
+import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet, WalletProvider, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
@@ -147,6 +149,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
 
   const clean = async () => {
     if (!dataSource?.isInitialized) return
+    await dataSource.getRepository(TokenGiftNotice).delete({ brandId: In(ALL_BRANDS) })
     await dataSource.query(
       `DELETE FROM audit_log WHERE "entityType" = 'wallet' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = ANY($1))`,
       [ALL_BRANDS],
@@ -176,10 +179,22 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
         ProviderConfig,
         Transaction,
         AuditLog,
+        TokenGiftNotice,
       ],
       synchronize: false,
     })
     await dataSource.initialize()
+    const hasNotices = await dataSource.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+    )
+    if (!hasNotices.length) {
+      const runner = dataSource.createQueryRunner()
+      try {
+        await new AddTokenGiftNotices1794350000000().up(runner)
+      } finally {
+        await runner.release()
+      }
+    }
 
     const jwtService = new JwtService({ secret: JWT_SECRET })
     superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
@@ -206,10 +221,15 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
         unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
-        ...[Subscription, Payment, Wallet, ProviderConfig, Transaction, AuditLog].flatMap((e) => [
-          repo(e, 'DBWrite'),
-          repo(e, 'DBRead'),
-        ]),
+        ...[
+          Subscription,
+          Payment,
+          Wallet,
+          ProviderConfig,
+          Transaction,
+          AuditLog,
+          TokenGiftNotice,
+        ].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
         repo(WalletBalanceSnapshot, 'DBRead'),
         // R17: AdminController requires CreditService in its constructor; wallet routes do not call it.
         { provide: CreditService, useValue: {} },

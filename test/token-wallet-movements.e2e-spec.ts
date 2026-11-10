@@ -1,6 +1,8 @@
 /**
  * Token wallet movements for the brand (`GET /v1/token-wallet/movements`) and redaction of admin
  * reason and author on `GET /wallet/:id/transactions` over HTTP against PostgreSQL.
+ * R6: one responsibility, the brand token movement history endpoint and member transaction
+ * redaction behind one test app and database.
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -11,6 +13,7 @@ import { config as dotenvConfig } from 'dotenv'
 import * as request from 'supertest'
 import { DataSource } from 'typeorm'
 
+import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -19,6 +22,7 @@ import { ClientRolesService } from '../src/client/client-roles.service'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
 import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { TokenOrigin } from '../src/wallet/token-origin'
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
@@ -78,6 +82,7 @@ describe('Brand token wallet movements and member transaction redaction (Postgre
   const clean = async () => {
     if (!dataSource?.isInitialized) return
     const brands = [BRAND_A, BRAND_B, BRAND_EMPTY]
+    await dataSource.query('DELETE FROM token_gift_notices WHERE "brandId" = ANY($1)', [brands])
     await dataSource.query(
       'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = ANY($1))',
       [brands],
@@ -138,10 +143,21 @@ describe('Brand token wallet movements and member transaction redaction (Postgre
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Wallet, Transaction, AuditLog],
+      entities: [Wallet, Transaction, AuditLog, TokenGiftNotice],
       synchronize: false,
     })
     await dataSource.initialize()
+    const hasNotices = await dataSource.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+    )
+    if (!hasNotices.length) {
+      const runner = dataSource.createQueryRunner()
+      try {
+        await new AddTokenGiftNotices1794350000000().up(runner)
+      } finally {
+        await runner.release()
+      }
+    }
 
     const jwtService = new JwtService({ secret: JWT_SECRET })
     memberA = jwtService.sign({ id: MEMBER_A_ID, isSuperAdmin: false, brand: BRAND_A })
@@ -164,7 +180,10 @@ describe('Brand token wallet movements and member transaction redaction (Postgre
         unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
-        ...[Wallet, Transaction, AuditLog].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
+        ...[Wallet, Transaction, AuditLog, TokenGiftNotice].flatMap((e) => [
+          repo(e, 'DBWrite'),
+          repo(e, 'DBRead'),
+        ]),
         // R17: these routes use @RequireSuperAdmin or brand membership, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
       ],

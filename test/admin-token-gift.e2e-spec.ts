@@ -12,6 +12,7 @@ import * as request from 'supertest'
 import { DataSource, EntityManager } from 'typeorm'
 
 import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
+import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AdminController } from '../src/admin/admin.controller'
 import { AuditService } from '../src/audit/audit.service'
@@ -28,6 +29,7 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
@@ -82,6 +84,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
   const clean = async () => {
     if (!dataSource?.isInitialized) return
     for (const sql of [
+      'DELETE FROM token_gift_notices WHERE "brandId" = $1',
       'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = $1)',
       'DELETE FROM transactions WHERE "brandId" = $1',
       'DELETE FROM wallets WHERE "brandId" = $1',
@@ -109,6 +112,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
         ProviderConfig,
         Transaction,
         AuditLog,
+        TokenGiftNotice,
       ],
       synchronize: false,
     })
@@ -120,6 +124,17 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
       const runner = dataSource.createQueryRunner()
       try {
         await new AddTokenWalletOrigins1793949572497().up(runner)
+      } finally {
+        await runner.release()
+      }
+    }
+    const hasNotices = await dataSource.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+    )
+    if (!hasNotices.length) {
+      const runner = dataSource.createQueryRunner()
+      try {
+        await new AddTokenGiftNotices1794350000000().up(runner)
       } finally {
         await runner.release()
       }
@@ -142,10 +157,15 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
         unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
-        ...[Subscription, Payment, Wallet, ProviderConfig, Transaction, AuditLog].flatMap((e) => [
-          repo(e, 'DBWrite'),
-          repo(e, 'DBRead'),
-        ]),
+        ...[
+          Subscription,
+          Payment,
+          Wallet,
+          ProviderConfig,
+          Transaction,
+          AuditLog,
+          TokenGiftNotice,
+        ].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
         repo(WalletBalanceSnapshot, 'DBRead'),
         // R17: AdminController needs it in its constructor; no wallet route calls it.
         { provide: CreditService, useValue: {} },

@@ -24,6 +24,7 @@ import {
 } from './entities/token-gift-batch-item.entity'
 import { WalletProvider, WalletStatus } from './entities/wallet.entity'
 import { giftBatchBrandKey, tokenGiftLimits } from './token-gift-limits'
+import { recordTokenGiftNotice } from './token-gift-notice'
 import { TOKEN_CURRENCY, TokenOrigin } from './token-origin'
 import { fromCents, toCents } from './token-spend'
 import { fail, TokenWalletService } from './token-wallet.service'
@@ -319,8 +320,8 @@ export class TokenGiftBatchService {
           metadata: { authorId: batch.authorId, reason: batch.reason, giftBatchId: batch.id },
         },
         key,
-        (manager, transaction) =>
-          this.auditService.record(manager, {
+        async (manager, transaction) => {
+          await this.auditService.record(manager, {
             userId: batch.authorId,
             action: 'token_gift',
             entityType: 'wallet',
@@ -333,7 +334,14 @@ export class TokenGiftBatchService {
               giftBatchId: batch.id,
             },
             description: `Gift of ${amount} tokens: ${batch.reason}`,
-          }),
+          })
+          await recordTokenGiftNotice(manager, {
+            brandId: item.brandId,
+            amount,
+            balanceAfter: Number(transaction.balanceAfter),
+            movementKey: transaction.idempotencyKey!,
+          })
+        },
       )
       const creditedByThisBatch =
         !movement.replayed || movement.transaction.metadata?.giftBatchId === batch.id
