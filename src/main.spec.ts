@@ -2,7 +2,7 @@ import * as cookieParser from 'cookie-parser'
 import helmet from 'helmet'
 import * as request from 'supertest'
 import { INestApplication } from '@nestjs/common'
-import { NestFactory } from '@nestjs/core'
+import { NestApplication, NestFactory } from '@nestjs/core'
 import { SwaggerModule } from '@nestjs/swagger'
 import { IsInt } from 'class-validator'
 import { bootstrap } from './main'
@@ -204,13 +204,16 @@ describe('bootstrap (Swagger documentation exposure by environment)', () => {
       () => (_req: unknown, _res: unknown, next: () => void) => next(),
     )
 
+    // NestFactory returns a Proxy whose set trap drops assignments, so listen is stubbed on the prototype.
+    jest.spyOn(NestApplication.prototype, 'listen').mockImplementation(async function (
+      this: NestApplication,
+    ) {
+      await this.init()
+      return this.getHttpServer()
+    })
     jest.spyOn(NestFactory, 'create').mockImplementation(async (moduleCls, options) => {
       const app = await realNestCreate(moduleCls, { ...(options as object), logger: false })
       createdApp = app
-      app.listen = jest.fn(async () => {
-        await app.init()
-        return app.getHttpServer()
-      }) as never
       return app
     })
   })
