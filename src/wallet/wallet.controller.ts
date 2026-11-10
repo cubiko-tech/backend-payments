@@ -16,6 +16,7 @@ import { CreateWalletDto } from './dto/create-wallet.dto'
 import { TransferWalletDto } from './dto/transfer-wallet.dto'
 import { ListWalletTransactionsQueryDto } from './dto/list-wallet-transactions-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
@@ -175,53 +176,29 @@ export class WalletController {
   // ============================================
 
   @Post(':id/freeze')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Congelar wallet (bloquea débitos)' })
   @ApiResponse({ status: 200, description: 'Wallet congelada' })
-  async freeze(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/freeze',
-      )
-    }
+  async freeze(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.freeze(id)
   }
 
   @Post(':id/unfreeze')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Descongelar wallet' })
   @ApiResponse({ status: 200, description: 'Wallet descongelada' })
-  async unfreeze(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/unfreeze',
-      )
-    }
+  async unfreeze(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.unfreeze(id)
   }
 
   @Post(':id/close')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Cerrar wallet (requiere balance 0)' })
   @ApiResponse({ status: 200, description: 'Wallet cerrada' })
-  async close(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/close',
-      )
-    }
+  async close(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.close(id)
   }
 }

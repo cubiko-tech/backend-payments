@@ -5,7 +5,11 @@ import { AdminTokenGiftController } from '../../admin/admin-token-gift.controlle
 import { AdminTokenPackageController } from '../../admin/admin-token-package.controller'
 import { AdminServiceCredentialController } from '../../admin/admin-service-credential.controller'
 import { ApiAuthGuard } from './api-auth.guard'
-import { API_PERMISSION_KEY, API_SUPER_ADMIN_KEY } from './require-permission.decorator'
+import {
+  API_PERMISSION_KEY,
+  API_SESSION_ONLY_KEY,
+  API_SUPER_ADMIN_KEY,
+} from './require-permission.decorator'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
 import { CheckoutController } from '../../checkout/checkout.controller'
 import { DianController } from '../../dian/dian.controller'
@@ -224,4 +228,31 @@ describe('admin and metrics controllers require superadmin operator', () => {
     const handler: unknown = Reflect.get(DianController.prototype, 'isConfigured')
     expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
   })
+
+  it.each(['freeze', 'unfreeze', 'close'] as const)(
+    'WalletController.%s declares @RequireSuperAdmin() and @RequireSessionUser()',
+    (handlerName) => {
+      // R15: red when @RequireSuperAdmin() or @RequireSessionUser() is removed from the handler.
+      const handler: unknown = Reflect.get(WalletController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+      expect(Reflect.getMetadata(API_SESSION_ONLY_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it.each([
+    'findByBrand',
+    'getGlobalBalance',
+    'findById',
+    'create',
+    'getTransactions',
+    'getBalance',
+    'transfer',
+  ] as const)(
+    'WalletController.%s does not declare @RequireSuperAdmin() or @RequireSessionUser()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(WalletController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+      expect(Reflect.getMetadata(API_SESSION_ONLY_KEY, handler as object)).toBeUndefined()
+    },
+  )
 })

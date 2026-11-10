@@ -662,3 +662,16 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   bonificado de su suscripción de Confío. El efecto del cobro sí se re-aplica (estado, período, roles).
 - **Estado**: mitigado para el bono por la regla del checksum y del ciclo creciente; abierto para el efecto del
   cobro — fuera de LOC-235, pendiente de unidad propia.
+
+## El toggle de admin congela y descongela wallets con el token de servidor, sin persona (LOC-262)
+
+- **Dónde**: `src/admin/admin.controller.ts:63`, `:607` (`toggleFreezeWallet`);
+  `src/shared/auth/api-auth.guard.ts:128-130` (`isServerToken`)
+- **Qué lo dispara**: `POST /admin/wallets/:id/toggle-freeze` autenticado con `ACCESS_SERVER`, sin sesión de
+  usuario.
+- **Qué rompe**: quien posea `ACCESS_SERVER` congela o descongela cualquier wallet (incluida una `TKN`
+  congelada) y la auditoría queda a nombre de `'server'` (`src/admin/admin.controller.ts:628`), sin persona.
+  `POST /wallet/:id/freeze`, `unfreeze` y `close` ya exigen `@RequireSessionUser()`.
+- **Estado**: abierto — lo cierra exigir sesión de super admin en esa ruta junto con el resto de mutaciones
+  de admin que aún aceptan `ACCESS_SERVER` (INBOX
+  `backend-payments-token-de-servidor-aprueba-reembolsos-y-reintenta-avisos`).
