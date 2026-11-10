@@ -18,7 +18,7 @@ export class TokenGiftNotice extends Content {
   @Column({ type: 'decimal', precision: 15, scale: 2 })
   balanceAfter: number
 
-  @Column({ type: 'varchar', length: 200 })
+  @Column({ type: 'varchar', length: 255 })
   movementKey: string
 
   @Column({ type: 'varchar', length: 20, default: TokenGiftNoticeStatus.PENDIENTE })

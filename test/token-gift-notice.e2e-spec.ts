@@ -18,6 +18,7 @@ import { DataSource, In } from 'typeorm'
 import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
 import { AddTokenGiftBatches1794300000000 } from '../migrations/1794300000000-AddTokenGiftBatches'
 import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
+import { WidenTokenGiftNoticeMovementKey1794350100000 } from '../migrations/1794350100000-WidenTokenGiftNoticeMovementKey'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -192,6 +193,12 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
       )
       if (!hasNotices.length) {
         await new AddTokenGiftNotices1794350000000().up(runner)
+      }
+      const widenedKey = await runner.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = 'token_gift_notices' AND column_name = 'movementKey' AND character_maximum_length >= 255`,
+      )
+      if (!widenedKey.length) {
+        await new WidenTokenGiftNoticeMovementKey1794350100000().up(runner)
       }
     } finally {
       await runner.release()
@@ -495,17 +502,43 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
     expect(serialized).not.toContain(SUPERADMIN_ID)
   })
 
-  it('Migration AddTokenGiftNotices1794350000000 runs up, enforces unique movementKey, and runs down cleanly on a disposable database', async () => {
-    // R15: red when up omits UQ_token_gift_notices_movement_key or down fails to drop token_gift_notices.
+  it('Max-length idempotencyKey (200 chars) on gift and gift-debit answers 201 and writes 206-char movementKey notices without overflowing', async () => {
+    // R15: red when token_gift_notices.movementKey is capped at 200 chars instead of 255.
+    const giftKey200 = 'k'.repeat(200)
+    const debitKey200 = 'd'.repeat(200)
+
+    const giftRes = await gift({ amount: 20, reason: 'max key gift', idempotencyKey: giftKey200 })
+    const debitRes = await debitGift({
+      amount: 5,
+      reason: 'max key debit',
+      idempotencyKey: debitKey200,
+    })
+
+    expect([giftRes.status, debitRes.status]).toEqual([HttpStatus.CREATED, HttpStatus.CREATED])
+    const wallet = (await tokenWallet(BRAND_1))!
+    expect([Number(wallet.balance), Number(wallet.giftTokens)]).toEqual([15, 15])
+    const notices = await noticesOf([BRAND_1])
+    expect(notices).toHaveLength(2)
+    expect(notices.map((n) => [n.movementKey, n.movementKey.length, Number(n.amount)])).toEqual([
+      [`admin:${giftKey200}`, 206, 20],
+      [`admin:${debitKey200}`, 206, -5],
+    ])
+  })
+
+  it('Migrations AddTokenGiftNotices1794350000000 and WidenTokenGiftNoticeMovementKey1794350100000 run up, accept 206-char movementKey, enforce uniqueness, and run down cleanly on a disposable database', async () => {
+    // R15: red when up omits UQ_token_gift_notices_movement_key or 255-char movementKey, or down fails to revert cleanly.
     const migration = new AddTokenGiftNotices1794350000000()
+    const widenMigration = new WidenTokenGiftNoticeMovementKey1794350100000()
+    const longKey = `admin:${'m'.repeat(200)}`
     const usedDb = await withDisposableDatabase(adminDataSource, async (runner) => {
       await runner.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"')
       await migration.up(runner)
+      await widenMigration.up(runner)
 
       await runner.query(
         `INSERT INTO "token_gift_notices" ("brandId", "amount", "balanceAfter", "movementKey")
          VALUES ($1, $2, $3, $4)`,
-        [BRAND_1, 20, 20, 'admin:mig-k1'],
+        [BRAND_1, 20, 20, longKey],
       )
       const [inserted] = await runner.query(
         `SELECT "brandId", "amount", "balanceAfter", "movementKey", "status" FROM "token_gift_notices"`,
@@ -514,7 +547,7 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
         brandId: BRAND_1,
         amount: '20.00',
         balanceAfter: '20.00',
-        movementKey: 'admin:mig-k1',
+        movementKey: longKey,
         status: 'pendiente',
       })
 
@@ -523,11 +556,13 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
         runner.query(
           `INSERT INTO "token_gift_notices" ("brandId", "amount", "balanceAfter", "movementKey")
            VALUES ($1, $2, $3, $4)`,
-          [BRAND_1, 20, 40, 'admin:mig-k1'],
+          [BRAND_1, 20, 40, longKey],
         ),
       ).rejects.toThrow()
       await runner.rollbackTransaction()
 
+      await runner.query(`DELETE FROM "token_gift_notices"`)
+      await widenMigration.down(runner)
       await migration.down(runner)
       const tables = await runner.query(
         `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
@@ -535,6 +570,7 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
       expect(tables).toHaveLength(0)
 
       await migration.up(runner)
+      await widenMigration.up(runner)
       const recreated = await runner.query(
         `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
       )
