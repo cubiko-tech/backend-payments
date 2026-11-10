@@ -12,6 +12,7 @@ import {
   ParseUUIDPipe,
   BadRequestException,
   HttpStatus,
+  Optional,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
@@ -41,6 +42,7 @@ import {
 } from '../shared/auth/require-permission.decorator'
 import { RequestException } from '../shared/exception/request.exception'
 import { assertNotTokenCurrency, isTokenCurrency } from '../wallet/token-origin'
+import { TokenWalletService } from '../wallet/token-wallet.service'
 import { WalletService } from '../wallet/wallet.service'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
 import { adminIdempotencyKey } from './admin-idempotency-key'
@@ -86,6 +88,7 @@ export class AdminController {
     private readonly auditService: AuditService,
     private readonly creditService: CreditService,
     private readonly walletService: WalletService,
+    @Optional() private readonly tokenWallets?: TokenWalletService,
   ) {}
 
   // ============================================
@@ -566,17 +569,28 @@ export class AdminController {
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
     // The brand token wallet comes only from TokenWalletService: one per brand, balance by origin.
     assertNotTokenCurrency(body.currency)
+    if (req?.user?.isServer && (body.balance ?? 0) !== 0) {
+      throw new RequestException(
+        {
+          code: 'SERVER_INITIAL_BALANCE_FORBIDDEN',
+          message: 'Server token cannot open a wallet with a non-zero initial balance',
+        },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+    const userId = body.userId || body.brandId
     // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
     })
     if (existing) {
+      await this.tokenWallets!.getOrCreate(body.brandId, userId)
       return { error: `Ya existe una wallet ${body.provider}/${body.currency} para esta marca` }
     }
 
     const wallet = this.walletWriteRepo.create({
       brandId: body.brandId,
-      userId: body.userId || body.brandId,
+      userId,
       provider: body.provider as any,
       currency: body.currency.toUpperCase(),
       label: body.label || null,
@@ -585,6 +599,7 @@ export class AdminController {
     })
 
     const saved = await this.walletWriteRepo.save(wallet)
+    await this.tokenWallets!.getOrCreate(body.brandId, userId)
 
     await this.auditService.log(
       req?.user?.id || 'admin',

@@ -1,6 +1,7 @@
 // R6: one WalletService whose movements share this setup; splitting it is a task of its own.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
+import { Not } from 'typeorm'
 import { WalletService } from './wallet.service'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
@@ -76,18 +77,19 @@ describe('WalletService', () => {
   })
 
   describe('findByBrand', () => {
-    it('retorna las wallets de una marca', async () => {
+    it('returns the brand money wallets and excludes token wallets', async () => {
       const wallets = [
-        { id: 'w1', brandId: 'brand-1', balance: 100 },
-        { id: 'w2', brandId: 'brand-1', balance: 50 },
+        { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 100 },
+        { id: 'w2', brandId: 'brand-1', currency: 'USD', balance: 50 },
+        { id: 'w3', brandId: 'brand-1', currency: 'TKN', balance: 0 },
       ]
       walletReadRepo.find.mockResolvedValue(wallets)
 
       const result = await service.findByBrand('brand-1')
 
-      expect(result.data).toEqual(wallets)
+      expect(result.data).toEqual([wallets[0], wallets[1]])
       expect(walletReadRepo.find).toHaveBeenCalledWith({
-        where: { brandId: 'brand-1' },
+        where: { brandId: 'brand-1', currency: Not('TKN') },
         order: { createdAt: 'DESC' },
       })
     })

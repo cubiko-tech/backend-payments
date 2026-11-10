@@ -665,13 +665,27 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El toggle de admin congela y descongela wallets con el token de servidor, sin persona (LOC-262)
 
-- **Dónde**: `src/admin/admin.controller.ts:63`, `:607` (`toggleFreezeWallet`);
+- **Dónde**: `src/admin/admin.controller.ts:64`, `:622` (`toggleFreezeWallet`);
   `src/shared/auth/api-auth.guard.ts:128-130` (`isServerToken`)
 - **Qué lo dispara**: `POST /admin/wallets/:id/toggle-freeze` autenticado con `ACCESS_SERVER`, sin sesión de
   usuario.
 - **Qué rompe**: quien posea `ACCESS_SERVER` congela o descongela cualquier wallet (incluida una `TKN`
-  congelada) y la auditoría queda a nombre de `'server'` (`src/admin/admin.controller.ts:628`), sin persona.
+  congelada) y la auditoría queda a nombre de `'server'` (`src/admin/admin.controller.ts:643`), sin persona.
   `POST /wallet/:id/freeze`, `unfreeze` y `close` ya exigen `@RequireSessionUser()`.
 - **Estado**: abierto — lo cierra exigir sesión de super admin en esa ruta junto con el resto de mutaciones
   de admin que aún aceptan `ACCESS_SERVER` (INBOX
   `backend-payments-token-de-servidor-aprueba-reembolsos-y-reintenta-avisos`).
+
+## `POST /admin/wallets` no verifica que la marca exista y con sesión de super admin abre saldo sin movimiento (LOC-251)
+
+- **Dónde**: `src/admin/admin.controller.ts:569`, `:587`, `:591-599`, `:597` y `:602` (`createWallet`);
+  `src/admin/dto/admin-wallet.dto.ts:20`, `:48-54` (`AdminCreateWalletDto`)
+- **Qué lo dispara**: (a) un pedido autenticado a `POST /admin/wallets` con un `brandId` UUID que no
+  corresponde a ninguna marca en `backend-platform`; (b) un super admin con sesión que envía `balance > 0`
+  desde el diálogo «Crear wallet» del admin (`admin` `src/app/(finance)/finance/wallets/page.tsx:201`).
+- **Qué rompe**: (a) se abren la wallet de dinero y la `internal/TKN` para un UUID sin marca; (b) la wallet
+  de dinero nace con `balance: body.balance` y auditoría `wallet_created`, pero sin fila en `transactions`.
+  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:572-580`).
+- **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
+  `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
+  registrar la transacción inicial al crear desde sesión.

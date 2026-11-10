@@ -14,7 +14,7 @@ import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
 import { lockPayment } from '../payment/payment-lock'
 import { AuditLog } from '../audit/entities/auditLog.entity'
 import { MovementAudit } from '../transaction/movement-audit'
-import { assertNotTokenCurrency, isTokenCurrency } from './token-origin'
+import { assertNotTokenCurrency, isTokenCurrency, TOKEN_CURRENCY } from './token-origin'
 
 @Injectable()
 export class WalletService {
@@ -39,10 +39,10 @@ export class WalletService {
   async findByBrand(brandId: string) {
     try {
       const wallets = await this.walletReadRepository.find({
-        where: { brandId },
+        where: { brandId, currency: Not(TOKEN_CURRENCY) },
         order: { createdAt: 'DESC' },
       })
-      return { data: wallets }
+      return { data: wallets.filter((wallet) => !isTokenCurrency(wallet.currency)) }
     } catch (error) {
       this.logger.error(`Error al obtener wallets de marca ${brandId}: ${error.message}`)
       return { error: error.message }
