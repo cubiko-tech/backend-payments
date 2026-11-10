@@ -137,6 +137,7 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
     })
 
     it('enforces brand ownership on wallet :id routes (findById, getTransactions, getBalance, transfer)', async () => {
+      // R15: red when assertResourceBrandAccess is removed from findById, getTransactions, getBalance or transfer.
       const { controller, walletService } = buildSubject(false)
 
       await expect(controller.findById(RESOURCE_ID, userReq)).rejects.toMatchObject({

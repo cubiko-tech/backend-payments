@@ -250,6 +250,7 @@ describe('admin and metrics controllers require superadmin operator', () => {
   ] as const)(
     'WalletController.%s does not declare @RequireSuperAdmin() or @RequireSessionUser()',
     (handlerName) => {
+      // R15: red when @RequireSuperAdmin() or @RequireSessionUser() is added to a brand-scoped wallet handler.
       const handler: unknown = Reflect.get(WalletController.prototype, handlerName)
       expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
       expect(Reflect.getMetadata(API_SESSION_ONLY_KEY, handler as object)).toBeUndefined()
