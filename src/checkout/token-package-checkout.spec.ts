@@ -3,7 +3,17 @@ import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenPackageService } from '../wallet/token-package.service'
 import { TokenWalletService } from '../wallet/token-wallet.service'
-import { creditTokenPackage, prepareTokenPackage } from './token-package-checkout'
+import {
+  assertMatchingIdempotencyPayload,
+  buildIdempotencyFingerprint,
+} from './checkout-idempotency'
+import { CheckoutRequest } from './checkout.service'
+import {
+  creditTokenAmount,
+  creditTokenPackage,
+  prepareTokenAmount,
+  prepareTokenPackage,
+} from './token-package-checkout'
 
 const PACKAGE = {
   id: 'pkg-10',
@@ -76,5 +86,87 @@ describe('token package checkout', () => {
     expect(tokenWallets.creditTokens.mock.calls.map((call) => [call[1], call[2], call[4]])).toEqual(
       [[10, TokenOrigin.PURCHASED, 'payment:pay-1:tokens:purchased']],
     )
+  })
+
+  it('prices a US token_amount checkout at USD 1 per token without asking for the TRM', async () => {
+    // R15: red when prepareTokenAmount asks for the TRM on a non-CO brand or misprices tokens.
+    const prepared = await prepareTokenAmount(
+      {
+        brandId: 'brand-us',
+        userId: 'user-1',
+        provider: 'confio',
+        tokens: 250,
+        successUrl: 'https://ads.roax.ai/tokens/return',
+      },
+      { ...deps('US'), allowedReturnUrls: 'https://ads.roax.ai/tokens/return' },
+    )
+
+    expect(prepared).toEqual({
+      amount: 250,
+      currency: 'USD',
+      country: 'US',
+      walletId: 'tkn-1',
+      snapshot: { priceUsd: 250, purchasedTokens: 250 },
+    })
+    expect(quoteUsdCopRate).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 when TOKEN_CHECKOUT_ALLOWED_RETURN_URLS is empty or unset', async () => {
+    // R15: red when assertAllowedReturnUrls allows any return URL when the env var is empty.
+    await expect(
+      prepareTokenAmount(
+        {
+          brandId: 'brand-us',
+          userId: 'user-1',
+          provider: 'confio',
+          tokens: 250,
+          successUrl: 'https://ads.roax.ai/tokens/return',
+        },
+        { ...deps('US'), allowedReturnUrls: ' , ' },
+      ),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: 'TOKEN_CHECKOUT_RETURN_URLS_NOT_CONFIGURED',
+    })
+  })
+
+  it('credits a completed token_amount payment as purchased with its payment key', async () => {
+    // R15: red when creditTokenAmount omits the idempotency key or credits gift instead of purchased.
+    const payment = {
+      id: 'pay-amt-1',
+      brandId: 'brand-1',
+      walletId: 'tkn-1',
+      metadata: { tokenAmount: { priceUsd: 250, purchasedTokens: 250 } },
+    } as unknown as Payment
+
+    await creditTokenAmount(payment, tokenWallets as unknown as TokenWalletService)
+
+    expect(tokenWallets.creditTokens.mock.calls.map((call) => [call[1], call[2], call[4]])).toEqual(
+      [[250, TokenOrigin.PURCHASED, 'payment:pay-amt-1:tokens:purchased']],
+    )
+  })
+
+  it('includes tokens in the idempotency fingerprint so another token count conflicts with 409', () => {
+    // R15: red when buildIdempotencyFingerprint omits tokens: 250 and 300 share the same fingerprint.
+    const base: CheckoutRequest = {
+      brandId: 'brand-1',
+      userId: 'user-1',
+      purpose: 'token_amount',
+      provider: 'confio',
+      tokens: 250,
+      successUrl: 'https://ads.roax.ai/tokens/return',
+      idempotencyKey: 'idem-1',
+    }
+    const fp250 = buildIdempotencyFingerprint(base)
+    const fp300 = buildIdempotencyFingerprint({ ...base, tokens: 300 })
+
+    expect(fp250).not.toBe(fp300)
+    expect(() =>
+      assertMatchingIdempotencyPayload(
+        { metadata: { idempotencyFingerprint: fp250 } } as unknown as Payment,
+        { ...base, tokens: 300 },
+        fp300,
+      ),
+    ).toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_CONFLICT' }))
   })
 })

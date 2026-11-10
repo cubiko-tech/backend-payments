@@ -147,6 +147,7 @@ export function buildIdempotencyFingerprint(req: CheckoutRequest): string {
     renewal: Boolean(req.renewal),
     // Only when present: payments stored before token packages keep their fingerprint.
     ...(req.packageId ? { packageId: req.packageId } : {}),
+    ...(req.tokens !== undefined && req.tokens !== null ? { tokens: Number(req.tokens) } : {}),
   })
 }
 
@@ -191,6 +192,13 @@ export function assertMatchingIdempotencyPayload(
     req.currency !== undefined &&
     existing.currency !== undefined &&
     String(existing.currency).toUpperCase() !== String(req.currency).toUpperCase()
+  ) {
+    throw createIdempotencyConflictException()
+  }
+  if (
+    req.tokens !== undefined &&
+    existing.metadata?.tokenAmount?.purchasedTokens !== undefined &&
+    Number(existing.metadata.tokenAmount.purchasedTokens) !== Number(req.tokens)
   ) {
     throw createIdempotencyConflictException()
   }

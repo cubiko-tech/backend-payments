@@ -24,6 +24,7 @@ export enum PaymentPurpose {
   SERVICE_PAYMENT = 'service_payment',
   TOKEN_PACKAGE = 'token_package',
   TOKEN_RECHARGE = 'token_recharge',
+  TOKEN_AMOUNT = 'token_amount',
 }
 
 @Entity('payments')
