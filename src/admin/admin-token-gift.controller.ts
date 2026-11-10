@@ -1,10 +1,14 @@
 import {
   Body,
   Controller,
+  Get,
+  HttpCode,
   HttpStatus,
+  Optional,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common'
@@ -12,10 +16,16 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { AuditService } from '../audit/audit.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { TokenGiftBatchService } from '../wallet/token-gift-batch.service'
 import { TokenOrigin } from '../wallet/token-origin'
 import { fail, TokenWalletService } from '../wallet/token-wallet.service'
 import { adminIdempotencyKey } from './admin-idempotency-key'
-import { GiftTokensDto } from './dto/admin-token-gift.dto'
+import {
+  CreateGiftBatchDto,
+  GetGiftBatchQueryDto,
+  PreviewGiftBatchDto,
+} from './dto/admin-token-gift-batch.dto'
+import { DebitGiftTokensDto, GiftTokensDto } from './dto/admin-token-gift.dto'
 
 /**
  * Gift tokens a super admin gives or removes on a brand: origin `gift`, with reason and author, no
@@ -30,7 +40,43 @@ export class AdminTokenGiftController {
   constructor(
     private readonly tokenWallets: TokenWalletService,
     private readonly auditService: AuditService,
+    // Optional so single-brand specs that instantiate this controller with two args keep working.
+    @Optional()
+    private readonly giftBatches?: TokenGiftBatchService,
   ) {}
+
+  @Post('gift-batches/preview')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Preview brand count and total tokens for a gift batch (Admin)' })
+  @ApiResponse({ status: 200, description: 'Matching brand count and total tokens' })
+  @ApiResponse({ status: 400, description: 'Invalid filter or amount over the per-brand cap' })
+  @ApiResponse({ status: 403, description: 'Not a super admin session (server token included)' })
+  async previewGiftBatch(@Body() body: PreviewGiftBatchDto) {
+    const preview = await this.giftBatches!.preview(body)
+    return { data: preview }
+  }
+
+  @Post('gift-batches')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Create and enqueue a token gift batch operation (Admin)' })
+  @ApiResponse({ status: 202, description: 'Batch accepted, or the existing one under this key' })
+  @ApiResponse({ status: 400, description: 'Invalid filter, amount, reason, or idempotency key' })
+  @ApiResponse({ status: 403, description: 'Not a super admin session (server token included)' })
+  @ApiResponse({ status: 409, description: 'Total changed since preview or idempotency conflict' })
+  async createGiftBatch(@Body() body: CreateGiftBatchDto, @Req() req: { user: { id: string } }) {
+    const batch = await this.giftBatches!.create(body, req.user.id)
+    return { data: batch }
+  }
+
+  @Get('gift-batches/:id')
+  @ApiOperation({ summary: 'Get the status, counts, and omitted brands of a gift batch (Admin)' })
+  @ApiResponse({ status: 200, description: 'Gift batch report with paginated omitted brands' })
+  @ApiResponse({ status: 403, description: 'Not a super admin session (server token included)' })
+  @ApiResponse({ status: 404, description: 'GIFT_BATCH_NOT_FOUND: batch does not exist' })
+  async getGiftBatch(@Param('id', ParseUUIDPipe) id: string, @Query() query: GetGiftBatchQueryDto) {
+    const report = await this.giftBatches!.getReport(id, query)
+    return { data: report }
+  }
 
   @Post(':brandId/gifts')
   @ApiOperation({ summary: 'Give gift tokens to a brand, once per idempotency key (Admin)' })
@@ -83,7 +129,7 @@ export class AdminTokenGiftController {
   @ApiResponse({ status: 422, description: 'WALLET_CLOSED: the token wallet is closed' })
   async debitGift(
     @Param('brandId', ParseUUIDPipe) brandId: string,
-    @Body() body: GiftTokensDto,
+    @Body() body: DebitGiftTokensDto,
     @Req() req: { user: { id: string } },
   ) {
     const authorId: string = req.user.id

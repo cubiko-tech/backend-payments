@@ -211,6 +211,10 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
       { amount: 0.005, reason: 'Bonus', idempotencyKey: 'loc139-g2' },
     ],
     ['with 1e-7 (exponent form)', { amount: 1e-7, reason: 'Bonus', idempotencyKey: 'loc139-g3' }],
+    [
+      'with 10001 (over the 10000 per-brand cap, LOC-253)',
+      { amount: 10001, reason: 'Bonus', idempotencyKey: 'loc253-g1' },
+    ],
   ])('CA2 a gift %s answers 400 and moves nothing', async (_label, body) => {
     // R15: red when the DTO drops that rule (reason, amount bounds or key): it answers 201 or 500.
     const res = await gift(body)
