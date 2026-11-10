@@ -9,13 +9,17 @@ import {
   UseGuards,
   ParseUUIDPipe,
   Logger,
+  HttpStatus,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
 import { RequestRefundDto } from './dto/request-refund.dto'
 import { ApproveRefundDto } from './dto/approve-refund.dto'
+import { ListRefundsQueryDto } from './dto/list-refunds-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
+import { RequestException } from '../shared/exception/request.exception'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
@@ -57,7 +61,11 @@ export class RefundController {
       resolveRequestBrandId(req, brandId),
       'POST /refund',
     )
-    return this.refundService.request({ ...data, brandId: validBrandId })
+    return this.refundService.request({
+      ...data,
+      brandId: validBrandId,
+      requestedBy: req?.user?.id,
+    })
   }
 
   @Get()
@@ -65,7 +73,7 @@ export class RefundController {
   @ApiResponse({ status: 200, description: 'Reembolsos obtenidos correctamente' })
   async findByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; status?: string },
+    @Query() filters: ListRefundsQueryDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(
@@ -94,23 +102,17 @@ export class RefundController {
   }
 
   @Post(':id/approve')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
   async approve(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() data: ApproveRefundDto,
+    @Body() _data?: ApproveRefundDto,
     @Req() req?: any,
   ) {
     if (!isPrivilegedCaller(req)) {
-      const refund = await this.refundService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        refund?.data?.brandId,
-        'POST /refund/:id/approve',
-      )
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
-    return this.refundService.approve(id, data.approvedBy)
+    return this.refundService.approve(id, req.user.id)
   }
 }

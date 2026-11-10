@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common'
-import { createHmac, timingSafeEqual } from 'crypto'
+import { createHash, createHmac, timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
   CreateCheckoutParams,
@@ -11,6 +11,7 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
 /**
  * Implementación de Dropi como proveedor de pagos.
@@ -20,6 +21,11 @@ import { logger } from '../../shared/logger/logger'
  * - Se le envía un cobro y Dropi lo procesa asincrónicamente
  * - Confirma via webhook cuando el usuario paga
  * - Soporta cobros masivos (batch)
+ *
+ * @deprecated Paying with the Dropi balance goes through the `dropi_wallet` recharge
+ * (`src/recharge/`), and a token package no longer accepts this provider. Delete it, with
+ * `POST /webhook/dropi`, once no subscription renews with `provider = 'dropi'` and no payment
+ * with that provider is left pending.
  */
 @Injectable()
 export class DropiProvider implements PaymentProvider {
@@ -56,6 +62,11 @@ export class DropiProvider implements PaymentProvider {
       signal: AbortSignal.timeout(15000),
     })
 
+    // A missing route answers the same 404 as a missing charge, so it says nothing about the payment.
+    if (response.status === 404) {
+      logger.log('error', `Dropi answered 404 on ${path}: no answer about the payment`)
+      throw new Error(`Dropi error 404 on ${path}`)
+    }
     const body = await response.json()
     if (!response.ok) {
       throw new Error(`Dropi error: ${body.message || response.statusText}`)
@@ -114,6 +125,7 @@ export class DropiProvider implements PaymentProvider {
       metadata: {
         dropiStatus: charge.status,
         dropiUserId: charge.userId,
+        amount: charge.amount,
       },
     }
   }
@@ -165,7 +177,7 @@ export class DropiProvider implements PaymentProvider {
   }
 
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
-    const secret = process.env.DROPI_WEBHOOK_SECRET
+    const secret = readWebhookSecret('DROPI_WEBHOOK_SECRET')
     if (!secret || typeof signature !== 'string') return false
 
     const expected = Buffer.from(createHmac('sha256', secret).update(payload).digest('hex'), 'utf8')
@@ -173,6 +185,22 @@ export class DropiProvider implements PaymentProvider {
     if (received.length !== expected.length) return false
 
     return timingSafeEqual(received, expected)
+  }
+
+  /**
+   * Deduplication key of a notification whose signature was already validated: keeps `payload.eventId`
+   * when it is a non-empty string or finite number, and falls back to the SHA-256 of the signed raw body.
+   */
+  webhookEventId(rawBody: Buffer, payload?: { eventId?: unknown } | null): string {
+    const rawId = payload?.eventId
+    if (typeof rawId === 'string' && rawId.trim() !== '') {
+      return rawId.trim()
+    }
+    if (typeof rawId === 'number' && Number.isFinite(rawId)) {
+      return String(rawId)
+    }
+    const digest = createHash('sha256').update(rawBody).digest('hex')
+    return `dropi:sha256:${digest}`
   }
 
   // ===========================================

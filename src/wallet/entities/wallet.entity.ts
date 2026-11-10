@@ -24,6 +24,10 @@ export class Wallet extends Content {
   @Column({ length: 3 }) currency: string
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) balance: number
   @Column({ type: 'enum', enum: WalletStatus, default: WalletStatus.ACTIVE }) status: WalletStatus
+  // Token balance by origin; only TKN wallets move them, and `balance` moves by the same amount.
+  @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) giftTokens: number
+  @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) purchasedTokens: number
+  @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) dropiTokens: number
   @Column({ nullable: true }) label: string
   @Column({ type: 'jsonb', nullable: true }) metadata: any
 }

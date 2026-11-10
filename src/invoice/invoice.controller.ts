@@ -13,6 +13,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Response } from 'express'
 import { InvoiceService } from './invoice.service'
 import { InvoicePdfService } from './invoice-pdf.service'
+import { ListInvoicesQueryDto } from './dto/list-invoices-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
@@ -46,7 +47,7 @@ export class InvoiceController {
   @ApiResponse({ status: 200, description: 'Facturas obtenidas correctamente' })
   async findByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; type?: string },
+    @Query() filters: ListInvoicesQueryDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(

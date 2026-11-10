@@ -1,3 +1,4 @@
+// R6: Single-responsibility unit suite for WebhookService idempotency and Confio subscription event dispatch.
 import { Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
@@ -6,9 +7,10 @@ import { QueryFailedError } from 'typeorm'
 
 import { WebhookService } from './webhook.service'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { SubscriptionBonusService } from './subscription-bonus.service'
 import { sumarUnCicloMensual } from './confio-period.util'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider } from '../payment/entities/payment.entity'
 import {
   Subscription,
   SubscriptionProvider,
@@ -16,20 +18,20 @@ import {
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
+import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { ClientRolesService } from '../client/client-roles.service'
 
 /**
- * Error tal como lo entrega el driver: `code` y `constraint` copiados de una
- * sonda real contra la BD de dev (insert duplicado en `webhook_events`, que
- * devolvió `code=23505 constraint=UQ_webhook_events_provider_id`). TypeORM
- * asigna las propiedades del error del driver sobre el `QueryFailedError`.
+ * Driver error shape for a duplicate insert on `webhook_events` (`code=23505`,
+ * `constraint=UQ_webhook_events_provider_event`); TypeORM copies the driver
+ * error properties onto `QueryFailedError`.
  */
 function violacionDeUnico(): Error {
   const driverError: any = new Error(
-    'duplicate key value violates unique constraint "UQ_webhook_events_provider_id"',
+    'duplicate key value violates unique constraint "UQ_webhook_events_provider_event"',
   )
   driverError.code = '23505'
-  driverError.constraint = 'UQ_webhook_events_provider_id'
+  driverError.constraint = 'UQ_webhook_events_provider_event'
   driverError.severity = 'ERROR'
   return new QueryFailedError('INSERT INTO webhook_events', [], driverError)
 }
@@ -70,6 +72,8 @@ describe('WebhookService.receive', () => {
         { provide: getQueueToken('webhook-retry'), useValue: queue },
         // El ramo firmado tiene su propio bloque más abajo, con el handler real.
         { provide: ConfioSubscriptionWebhookService, useValue: { handle: jest.fn() } },
+        // R17: `receive` tests only Confio idempotency; Mercado Pago is not called.
+        { provide: MercadoPagoProvider, useValue: { getNoticePayment: jest.fn() } },
       ],
     }).compile()
 
@@ -80,10 +84,13 @@ describe('WebhookService.receive', () => {
     return service.receive('confio', 'subscription.billingStatusChanged', EVENT_ID, { event: 'x' })
   }
 
-  it('consulta la idempotencia contra la escritura, no contra la réplica', async () => {
+  it('queries idempotency by provider and providerEventId against DBWrite, not DBRead', async () => {
+    // R15: red if receive() drops provider from the lookup or queries DBRead instead of DBWrite.
     await recibir()
 
-    expect(writeRepo.findOne).toHaveBeenCalledWith({ where: { providerEventId: EVENT_ID } })
+    expect(writeRepo.findOne).toHaveBeenCalledWith({
+      where: { provider: 'confio', providerEventId: EVENT_ID },
+    })
     expect(readRepo.findOne).not.toHaveBeenCalled()
   })
 
@@ -210,6 +217,7 @@ function suscripcion(over: Record<string, any> = {}): any {
 describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
   let service: WebhookService
   let writeRepo: any
+  let paymentReadRepo: { findOne: jest.Mock }
   let subRepo: { findOne: jest.Mock }
   let eventRepo: { createQueryBuilder: jest.Mock }
   let manager: any
@@ -233,6 +241,8 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       create: jest.fn((d) => d),
       save: jest.fn((d) => Promise.resolve({ id: 'we-1', ...d })),
     }
+    // R17: In-memory stub for Payment read repository in this unit suite; SQL queries run in e2e.
+    paymentReadRepo = { findOne: jest.fn().mockResolvedValue(null) }
     subRepo = { findOne: jest.fn().mockResolvedValue(null) }
     eventRepo = { createQueryBuilder: jest.fn(() => qb(null)) }
     manager = {
@@ -256,16 +266,23 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
         ConfioSubscriptionWebhookService,
         { provide: getRepositoryToken(WebhookEvent, 'DBWrite'), useValue: writeRepo },
         { provide: getRepositoryToken(WebhookEvent, 'DBRead'), useValue: { findOne: jest.fn() } },
-        { provide: getRepositoryToken(Payment, 'DBRead'), useValue: { findOne: jest.fn() } },
+        { provide: getRepositoryToken(Payment, 'DBRead'), useValue: paymentReadRepo },
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subRepo },
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: eventRepo },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: ConfioProvider, useValue: confio },
+        // R17: Only Confio subscription webhooks run in this block; Mercado Pago is not called.
+        { provide: MercadoPagoProvider, useValue: { getNoticePayment: jest.fn() } },
         // El corte de acceso en roles tiene su propio spec
         // (`confio-subscription-webhook.service.spec.ts`); acá el canal responde
         // OK para que estos casos midan sólo el estado local.
         { provide: ClientRolesService, useValue: roles },
         { provide: getQueueToken('webhook-retry'), useValue: { add: jest.fn() } },
+        // R17: the cycle bonus has its own e2e with the real wallet; these cases give none.
+        {
+          provide: SubscriptionBonusService,
+          useValue: { plan: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile()
 
@@ -498,23 +515,73 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
 
   // ------------------------------------------------------------ resolución (1)
   describe('resolución de la suscripción', () => {
-    it('resuelve por providerSubscriptionId === data.name', async () => {
+    it('resolves by providerSubscriptionId === data.name and provider === confio', async () => {
+      // R15: red if resolverSuscripcion omits provider: SubscriptionProvider.CONFIO on name lookup.
       conSuscripcion(suscripcion())
 
       await despachar(cambioDeEstado('EXPIRED'))
 
-      expect(subRepo.findOne).toHaveBeenCalledWith({ where: { providerSubscriptionId: SUB_NAME } })
+      expect(subRepo.findOne).toHaveBeenCalledWith({
+        where: {
+          provider: SubscriptionProvider.CONFIO,
+          providerSubscriptionId: SUB_NAME,
+        },
+      })
     })
 
     it('cae al correlationId cuando es un UUID y el name no resuelve', async () => {
-      const sub = suscripcion()
+      const sub = suscripcion({ providerSubscriptionId: null })
       subRepo.findOne.mockResolvedValueOnce(null).mockResolvedValue(sub)
       manager.findOne.mockResolvedValue(sub)
 
       await despachar(cambioDeEstado('EXPIRED', { correlationId: SUB_ID }))
 
-      expect(subRepo.findOne).toHaveBeenCalledWith({ where: { id: SUB_ID } })
+      expect(subRepo.findOne).toHaveBeenCalledWith({
+        where: { id: SUB_ID, provider: SubscriptionProvider.CONFIO },
+      })
       expect(suscripcionGuardada().status).toBe(SubscriptionStatus.EXPIRED)
+    })
+
+    it('rejects correlationId fallback when the subscription belongs to another provider or another Confio resource name', async () => {
+      // R15: red if resolverSuscripcion allows correlationId fallback onto another provider or resource.
+      const otherProviderSub = suscripcion({
+        id: SUB_ID,
+        provider: SubscriptionProvider.STRIPE,
+        providerSubscriptionId: null,
+      })
+      subRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(otherProviderSub)
+
+      await despachar(cambioDeEstado('CANCELED', { correlationId: SUB_ID }))
+
+      expect(manager.save).not.toHaveBeenCalled()
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+
+      const mismatchedNameSub = suscripcion({
+        id: SUB_ID,
+        provider: SubscriptionProvider.CONFIO,
+        providerSubscriptionId: 'stores/s/subscription-plans/p/subscriptions/other-sub',
+      })
+      subRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(mismatchedNameSub)
+
+      await despachar(cambioDeEstado('CANCELED', { correlationId: SUB_ID }))
+
+      expect(manager.save).not.toHaveBeenCalled()
+      expect(roles.removePlanFromBrand).not.toHaveBeenCalled()
+    })
+
+    it('prefers sub.providerSubscriptionId over data.name when reading the remote period', async () => {
+      // R15: red if leerPeriodoDelProveedor prefers data.name over sub.providerSubscriptionId.
+      const sub = suscripcion({
+        providerSubscriptionId: SUB_NAME,
+      })
+      confio.getSubscription.mockResolvedValue({})
+
+      await (service['confioSubscriptions'] as any).leerPeriodoDelProveedor(
+        { name: 'stores/s/subscription-plans/p/subscriptions/attacker-resource' },
+        sub,
+      )
+
+      expect(confio.getSubscription).toHaveBeenCalledWith(SUB_NAME)
     })
 
     it('un correlationId que no es UUID nunca llega al repositorio', async () => {
@@ -578,6 +645,24 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
       expect(historial()).toHaveLength(0)
     })
 
+    it('checks both the signed-timestamp key and the pre-deploy legacy updateTime key for subscriptionStatusChanged', async () => {
+      // R15: red if buscarMarcador omits buildLegacyConfioStatusChangedEventId when checking SubscriptionEvent markers.
+      conSuscripcion(suscripcion())
+      const builder = qb({ id: 'se-legacy' })
+      eventRepo.createQueryBuilder.mockReturnValue(builder)
+      const payload = cambioDeEstado('PAST_DUE')
+      const newEventId = `${SUB_NAME}:subscription.subscriptionStatusChanged:PAST_DUE:1768384800`
+      const legacyEventId = `${SUB_NAME}:subscription.subscriptionStatusChanged:PAST_DUE:2026-02-14T10:00:00Z`
+
+      await despachar(payload, newEventId)
+
+      expect(builder.andWhere).toHaveBeenCalledWith(
+        "e.metadata ->> 'providerEventId' IN (:...pids)",
+        { pids: [newEventId, legacyEventId] },
+      )
+      expect(manager.save).not.toHaveBeenCalled()
+    })
+
     it('relee la fila bloqueada con pessimistic_write', async () => {
       conSuscripcion(suscripcion())
 
@@ -590,14 +675,148 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     })
   })
 
-  // -------------------------------------------------------- regresión one-shot
-  it('el evento del link one-shot sigue tomando el camino viejo por data.status', async () => {
-    await despachar({
-      event: 'payment.statusChanged',
-      data: { name: 'stores/s/payments/p', status: 'FUNDED', correlationId: 'pay-1' },
+  describe('provider-scoped payment dispatch (Layer 1)', () => {
+    const PAY_UUID = '22222222-2222-4222-8222-222222222222'
+
+    it('routes a Confio one-shot payment notice through the legacy status path when the payment belongs to Confio', async () => {
+      // R15: red if dispatchEvent stops routing Confio one-shot notices when isCompleted(data.status).
+      paymentReadRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.id === PAY_UUID && where?.provider === PaymentProvider.CONFIO) {
+          return {
+            id: PAY_UUID,
+            provider: PaymentProvider.CONFIO,
+            providerPaymentId: 'stores/s/payments/p',
+          }
+        }
+        return null
+      })
+
+      await despachar({
+        event: 'payment.statusChanged',
+        data: { name: 'stores/s/payments/p', status: 'FUNDED', correlationId: PAY_UUID },
+      })
+
+      expect(checkout.completeExternalPayment).toHaveBeenCalledWith(
+        PAY_UUID,
+        expect.any(Object),
+        PaymentProvider.CONFIO,
+      )
+      expect(subRepo.findOne).not.toHaveBeenCalled()
     })
 
-    expect(checkout.completeExternalPayment).toHaveBeenCalledWith('pay-1', expect.any(Object))
-    expect(subRepo.findOne).not.toHaveBeenCalled()
+    it('does not call completeExternalPayment when a Confio one-shot notice targets a payment of another provider or mismatched providerPaymentId', async () => {
+      // R15: red if findPaymentByProviderIds or findPaymentByCorrelationId omits the provider check.
+      paymentReadRepo.findOne.mockImplementation(async ({ where }: any) => {
+        if (where?.providerPaymentId === 'stores/s/payments/p') {
+          return null
+        }
+        return {
+          id: PAY_UUID,
+          provider: PaymentProvider.STRIPE,
+          providerPaymentId: 'cs_live_1',
+        }
+      })
+
+      await despachar({
+        event: 'payment.statusChanged',
+        data: { name: 'stores/s/payments/p', status: 'FUNDED', correlationId: PAY_UUID },
+      })
+
+      expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
+
+      paymentReadRepo.findOne.mockResolvedValue({
+        id: PAY_UUID,
+        provider: PaymentProvider.CONFIO,
+        providerPaymentId: 'stores/s/payments/other-payment',
+      })
+
+      await despachar({
+        event: 'payment.statusChanged',
+        data: { name: 'stores/s/payments/p', status: 'FUNDED', correlationId: PAY_UUID },
+      })
+
+      expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
+    })
+
+    it('does not call completeExternalPayment when a Dropi notice targets a non-Dropi payment', async () => {
+      // R15: red if findPaymentByProviderIds omits the provider === PaymentProvider.DROPI filter on Dropi notices.
+      paymentReadRepo.findOne.mockResolvedValue({
+        id: PAY_UUID,
+        provider: PaymentProvider.CONFIO,
+        providerPaymentId: 'dropi-ch-1',
+      })
+
+      await service['processEvent']({
+        id: 'we-dropi-1',
+        provider: 'dropi',
+        eventType: 'charge.completed',
+        providerEventId: 'dropi-ev-1',
+        payload: { chargeId: 'dropi-ch-1', amount: 100000 },
+        status: WebhookStatus.RECEIVED,
+        retryCount: 0,
+      } as any)
+
+      expect(paymentReadRepo.findOne).toHaveBeenCalledWith({
+        where: { providerPaymentId: 'dropi-ch-1', provider: PaymentProvider.DROPI },
+      })
+      expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
+    })
+
+    it('does not call completeExternalPayment on Stripe checkout.session.completed when payment_status is not paid, and ignores metadata.paymentId', async () => {
+      // R15: red if dispatchEvent omits payment_status !== 'paid' or resolves via metadata.paymentId.
+      paymentReadRepo.findOne.mockResolvedValue({
+        id: PAY_UUID,
+        provider: PaymentProvider.STRIPE,
+        providerPaymentId: 'cs_test_unpaid',
+      })
+
+      await service['processEvent']({
+        id: 'we-stripe-unpaid',
+        provider: 'stripe',
+        eventType: 'checkout.session.completed',
+        providerEventId: 'evt_unpaid',
+        payload: {
+          data: {
+            object: {
+              id: 'cs_test_unpaid',
+              payment_status: 'unpaid',
+              amount_total: 10000,
+              metadata: { paymentId: PAY_UUID },
+            },
+          },
+        },
+        status: WebhookStatus.RECEIVED,
+        retryCount: 0,
+      } as any)
+
+      expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
+
+      // Paid session, but session.id does not match any Stripe payment (even though metadata.paymentId is set):
+      paymentReadRepo.findOne.mockResolvedValue(null)
+
+      await service['processEvent']({
+        id: 'we-stripe-paid-forged-meta',
+        provider: 'stripe',
+        eventType: 'checkout.session.completed',
+        providerEventId: 'evt_paid_forged',
+        payload: {
+          data: {
+            object: {
+              id: 'cs_unknown',
+              payment_status: 'paid',
+              amount_total: 10000,
+              metadata: { paymentId: PAY_UUID },
+            },
+          },
+        },
+        status: WebhookStatus.RECEIVED,
+        retryCount: 0,
+      } as any)
+
+      expect(paymentReadRepo.findOne).toHaveBeenCalledWith({
+        where: { providerPaymentId: 'cs_unknown', provider: PaymentProvider.STRIPE },
+      })
+      expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
+    })
   })
 })

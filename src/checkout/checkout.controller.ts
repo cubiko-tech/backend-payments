@@ -1,7 +1,9 @@
 import { Controller, Get, Post, Body, Query, Req, UseGuards, HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
-import { CheckoutService, CheckoutRequest } from './checkout.service'
+import { CheckoutService } from './checkout.service'
+import { CheckoutRequestDto } from './dto/checkout-request.dto'
+import { CheckoutReturnQueryDto } from './dto/checkout-return-query.dto'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
@@ -39,7 +41,7 @@ export class CheckoutController {
     description:
       'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
       '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
-      '(pago con wallet sin walletId)',
+      '(pago con wallet o recarga sin walletId)',
   })
   @ApiResponse({
     status: 403,
@@ -53,7 +55,10 @@ export class CheckoutController {
   })
   @ApiResponse({
     status: 409,
-    description: 'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body',
+    description:
+      'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body. ' +
+      'IDEMPOTENT_RETRY_EXPIRED: the payment is past its retry window; nothing was charged, ' +
+      'place a new order with another Idempotency-Key',
   })
   @ApiResponse({
     status: 422,
@@ -65,23 +70,21 @@ export class CheckoutController {
     status: 503,
     description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
   })
-  async processCheckout(@Body() body: CheckoutRequest, @Req() req?: any) {
-    if (req?.user?.id !== 'server') {
+  async processCheckout(@Body() body: CheckoutRequestDto, @Req() req?: any) {
+    if (req?.user?.isServer !== true) {
       const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, body?.brandId)
       if (!allowed) {
         throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
       }
     }
     const idempotencyKey = this.extractIdempotencyKey(req)
-    // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
-    // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
-    // global no tiene metatype contra el cual recortar y NO descarta claves
-    // desconocidas: sin este borrado un llamador HTTP podría pedir el camino de
-    // precios legacy y cobrarse en la moneda que él mande.
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : body?.userId
+    // The DTO accepts `renewal` only to discard it here: legacy renewal pricing belongs to the cron.
     return {
       data: await this.checkoutService.processCheckout({
         ...body,
-        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        userId,
+        idempotencyKey,
         renewal: undefined,
       }),
     }
@@ -116,11 +119,26 @@ export class CheckoutController {
     summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)',
   })
   @ApiResponse({ status: 200, description: 'Estado reconciliado del pago' })
-  async paymentReturn(
-    @Query('paymentId') paymentId?: string,
-    @Query('correlation_id') correlationId?: string,
-  ) {
+  @ApiResponse({
+    status: 400,
+    description: 'INVALID_REQUEST: paymentId (or correlation_id) is missing or not a valid UUID',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'PAYMENT_NOT_FOUND: payment does not exist or belongs to another brand',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'BRAND_LOOKUP_UNAVAILABLE: backend-platform did not respond',
+  })
+  async paymentReturn(@Query() query: CheckoutReturnQueryDto, @Req() req?: any) {
     // ConfioPagos redirige con correlation_id = nuestro paymentId.
-    return { data: await this.checkoutService.reconcilePayment(paymentId || correlationId) }
+    const paymentId = query.paymentId || query.correlation_id
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : ''
+    return {
+      data: await this.checkoutService.reconcilePayment(paymentId, (brandId) =>
+        this.platformClient.canViewBrandCredit(userId, brandId),
+      ),
+    }
   }
 }

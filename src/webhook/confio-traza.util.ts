@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { DeepPartial } from 'typeorm'
 
 import { Subscription } from '../subscription/entities/subscription.entity'
@@ -39,7 +40,7 @@ interface TrazaDelMovimiento {
  *     y no entra en `webhook.module.ts`.
  *
  * (2) **Esta fila SE SIRVE POR API.** `GET /subscription/history`
- *     (`subscription.controller.ts:111` → `subscription.service.ts:606-620`)
+ *     (`subscription.controller.ts:110` → `subscription.service.ts:606-620`)
  *     hace `find()` sin `select` y devuelve las filas ENTERAS; el controller
  *     tiene autenticación SOLA —ningún `@RequirePermission` y ninguna validación
  *     de que el `brandId` pedido sea del que llama—. O sea que todo lo que caiga
@@ -83,6 +84,7 @@ export function armarTrazaDelMovimiento({
   reason,
 }: TrazaDelMovimiento): DeepPartial<SubscriptionEvent> {
   const data = payload?.data || {}
+  const checksum = payload?.signature?.checksum
 
   // Sólo las claves que el payload trajo: el cobro exitoso da `payment`, el
   // fallido da `reason` y la cancelación ninguna de las dos. Si queda vacío se
@@ -114,6 +116,10 @@ export function armarTrazaDelMovimiento({
       amountCents: data.amountCents,
       currencyCode: data.currencyCode,
       cycleNumber: data.cycleNumber,
+      // Every re-split of one signed notice keeps this digest: the cycle bonus refuses it on replay.
+      ...(typeof checksum === 'string' && checksum.length > 0
+        ? { signatureChecksum: signatureChecksumDigest(checksum) }
+        : {}),
       ...(Object.keys(providerRef).length ? { providerRef } : {}),
       // `brandId`/`planSlug` aparecen DOS VECES en el mismo metadata y NO es
       // basura a limpiar: los de arriba salen de la fila bloqueada (lo que pide
@@ -134,4 +140,9 @@ export function armarTrazaDelMovimiento({
         : {}),
     },
   }
+}
+
+/** One-way digest of a signed checksum, safe to return from `GET /subscription/history`. */
+export function signatureChecksumDigest(checksum: string): string {
+  return createHash('sha256').update(checksum).digest('hex')
 }

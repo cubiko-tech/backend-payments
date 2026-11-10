@@ -53,10 +53,18 @@ export function classifyConfioWebhookEvent(event: unknown): ConfioWebhookRamo {
   return 'fuera_de_contrato'
 }
 
+function isSignedDataProperty(payload: ConfioWebhookPayload, prop: string): boolean {
+  const props = payload?.signature?.properties
+  return !Array.isArray(props) || props.includes(prop)
+}
+
 export function buildConfioWebhookEventId(payload: ConfioWebhookPayload): string {
   const data = payload?.data || {}
   const event = payload?.event
-  const resource = data.name || data.correlationId || 'unknown'
+  const isSignedEvent = classifyConfioWebhookEvent(event) === 'firmado'
+  const resource = isSignedEvent
+    ? (isSignedDataProperty(payload, 'name') && data.name) || 'unknown'
+    : data.name || data.correlationId || 'unknown'
 
   // Cobro del ciclo: `name` + `status` se repiten en cada período (dos cobros
   // exitosos son los dos `SUCCEEDED` de la misma suscripción), así que el ciclo
@@ -64,31 +72,57 @@ export function buildConfioWebhookEventId(payload: ConfioWebhookPayload): string
   // `failedCount` en el fallo— separa los reintentos dentro de un mismo ciclo.
   if (event === 'subscription.billingStatusChanged') {
     const cycle =
-      data.cycleNumber !== undefined && data.cycleNumber !== null
+      isSignedDataProperty(payload, 'cycleNumber') &&
+      data.cycleNumber !== undefined &&
+      data.cycleNumber !== null
         ? `ciclo-${data.cycleNumber}`
         : // Fallback when cycleNumber is missing: signed timestamp stays stable
           // across redeliveries whereas a constant would recreate the collision bug.
           `ts-${payload?.timestamp}`
-    const attempt = data.payment
-      ? data.payment
-      : data.failedCount !== undefined && data.failedCount !== null
-        ? `intento-${data.failedCount}`
-        : ''
+    const status = isSignedDataProperty(payload, 'status') ? data.status || '' : ''
+    const attempt =
+      isSignedDataProperty(payload, 'payment') && data.payment
+        ? data.payment
+        : isSignedDataProperty(payload, 'failedCount') &&
+            data.failedCount !== undefined &&
+            data.failedCount !== null
+          ? `intento-${data.failedCount}`
+          : ''
 
-    return [resource, event, cycle, data.status || '', attempt].join(':')
+    return [resource, event, cycle, status, attempt].join(':')
   }
 
-  // Cambio de estado de la suscripción: ACTIVE → PAST_DUE → ACTIVE es una
-  // secuencia legítima con el mismo `name` y el mismo `status` en las puntas;
-  // el instante del cambio es lo que las distingue.
+  // Subscription status transitions use the signed envelope timestamp so
+  // unsigned updateTime/createTime cannot alter the idempotency key.
   if (event === 'subscription.subscriptionStatusChanged') {
-    const changedAt = data.updateTime || data.createTime || payload?.timestamp
+    const status = isSignedDataProperty(payload, 'status') ? data.status || '' : ''
+    const changedAt = payload?.timestamp ?? ''
 
-    return [resource, event, data.status || '', changedAt].join(':')
+    return [resource, event, status, changedAt].join(':')
   }
 
   // Camino legacy CONGELADO a propósito: los eventos del link de pago one-shot
   // que estén en vuelo durante el deploy tienen que seguir resolviendo a la
   // misma fila, o se procesarían por segunda vez.
   return `${resource}:${data.status || event}`
+}
+
+/**
+ * Legacy pre-deploy idempotency key for `subscription.subscriptionStatusChanged`
+ * when `updateTime` or `createTime` was used as the timestamp segment, so an
+ * in-flight redelivery crossing the deploy still matches its `SubscriptionEvent`.
+ *
+ * @deprecated Replaced by the key `buildConfioWebhookEventId` derives. Remove it, and its lookup in
+ * `confio-subscription-webhook.service.ts`, once ConfioPagos' redelivery window has passed since the
+ * deploy that introduced that key: no redelivery can still carry a legacy-keyed event.
+ */
+export function buildLegacyConfioStatusChangedEventId(
+  payload: ConfioWebhookPayload,
+): string | null {
+  if (payload?.event !== 'subscription.subscriptionStatusChanged') return null
+  const data = payload?.data || {}
+  const legacyChangedAt = data.updateTime || data.createTime
+  if (typeof legacyChangedAt !== 'string' || legacyChangedAt.length === 0) return null
+  const resource = data.name || 'unknown'
+  return [resource, payload.event, data.status || '', legacyChangedAt].join(':')
 }

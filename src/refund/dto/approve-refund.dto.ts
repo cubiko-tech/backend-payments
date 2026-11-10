@@ -1,8 +1,8 @@
-import { IsNotEmpty, IsString, MaxLength } from 'class-validator'
+import { IsOptional, IsString, MaxLength } from 'class-validator'
 
 export class ApproveRefundDto {
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @MaxLength(100)
-  approvedBy: string
+  approvedBy?: string
 }

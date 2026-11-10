@@ -57,6 +57,14 @@ describe('DropiProvider - validateWebhookSignature', () => {
     expect(provider.validateWebhookSignature(PAYLOAD, VALID_SIGNATURE)).toBe(false)
   })
 
+  it('rejects a webhook signed with CHANGEME when DROPI_WEBHOOK_SECRET is CHANGEME', () => {
+    process.env.DROPI_WEBHOOK_SECRET = 'CHANGEME'
+    const provider = new DropiProvider()
+    const changemeSignature = crypto.createHmac('sha256', 'CHANGEME').update(PAYLOAD).digest('hex')
+
+    expect(provider.validateWebhookSignature(PAYLOAD, changemeSignature)).toBe(false)
+  })
+
   it('compares the signature in constant time using crypto.timingSafeEqual', () => {
     const spy = jest.spyOn(crypto, 'timingSafeEqual')
     const provider = new DropiProvider()
@@ -70,5 +78,31 @@ describe('DropiProvider - validateWebhookSignature', () => {
 
     spy.mockReturnValueOnce(false)
     expect(provider.validateWebhookSignature(PAYLOAD, VALID_SIGNATURE)).toBe(false)
+  })
+})
+
+describe('DropiProvider - webhookEventId', () => {
+  it('returns payload.eventId when it is a non-empty string or finite number', () => {
+    // R15: red if explicit eventId is ignored: returns the hash prefix instead of the eventId.
+    const provider = new DropiProvider()
+
+    expect(provider.webhookEventId(PAYLOAD, { eventId: 'evt_dropi_42' })).toBe('evt_dropi_42')
+    expect(provider.webhookEventId(PAYLOAD, { eventId: 9001 })).toBe('9001')
+  })
+
+  it('derives a deterministic sha256 key from rawBody when eventId is absent or blank', () => {
+    // R15: red if the fallback uses Date.now(): two calls at different times produce different keys.
+    const provider = new DropiProvider()
+    const bodyA = Buffer.from('{"event":"charge.completed","chargeId":"ch_1","amount":15000}')
+    const bodyB = Buffer.from('{"event":"charge.completed","chargeId":"ch_2","amount":15000}')
+    const expectedHash = crypto.createHash('sha256').update(bodyA).digest('hex')
+
+    const key1 = provider.webhookEventId(bodyA, {})
+    const key2 = provider.webhookEventId(bodyA, { eventId: '   ' })
+    const keyOther = provider.webhookEventId(bodyB, {})
+
+    expect(key1).toBe(`dropi:sha256:${expectedHash}`)
+    expect(key2).toBe(key1)
+    expect(keyOther).not.toBe(key1)
   })
 })

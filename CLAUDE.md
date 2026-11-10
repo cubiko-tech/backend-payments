@@ -24,12 +24,14 @@ con separación lectura/escritura (`DBRead` / `DBWrite` en `src/orm/`) y colas/e
 | `src/payment/` | Creación y consulta de pagos e intentos de cobro (`/payment`). |
 | `src/payment-method/` | CRUD de métodos de pago guardados por marca (`/payment-method`). |
 | `src/provider/` | Registro y adaptadores de pasarelas (`ProviderFactory`): Stripe (`src/provider/stripe/`), MercadoPago (`src/provider/mercadopago/`), Dropi (`src/provider/dropi/`) y Confío (`src/provider/confio/`). |
+| `src/recharge/` | Recarga de tokens pagada con el saldo Dropi (`/recharge/dropi`): la pide ROAX Ads con su credencial y el token del usuario, nace `pending` con la TRM, los pesos con IVA y los tokens fijados, y no vence sola. |
 | `src/refund/` | Solicitud, listado y procesamiento de reembolsos (`/refund`). |
 | `src/shared/` | Guard de autenticación y permisos (`src/shared/auth/`), middleware (`src/shared/middleware/`), logger (`src/shared/logger/`), excepciones (`src/shared/exception/`), entidad base (`src/shared/entities/`) y entorno (`src/shared/env/`). |
 | `src/subscription/` | Ciclo de vida de suscripciones (`/subscription`), trials y cancelaciones de Confío, precios enterprise e historial de eventos. |
 | `src/tasks/` | Tareas programadas (cron) para expiración de suscripciones, reintentos de cobro y snapshots. |
 | `src/tax/` | Cálculo de impuestos aplicables según la configuración activa por país (`tax_config`). |
 | `src/transaction/` | Entidad de movimientos contables (`transactions`, crédito/débito) asociados a cada wallet. |
+| `src/trm/` | Consulta de la TRM USD→COP en `datos.gov.co`, con caché de una hora y 503 sin tasa, para el pago que la usa. |
 | `src/wallet/` | Billeteras por marca y moneda (`/wallet`), recargas, débitos, transferencias y snapshots de saldo. |
 | `src/webhook/` | Recepción y validación de webhooks de pasarelas (`/webhook`) y cola BullMQ de reintentos (`webhook-retry`). |
 

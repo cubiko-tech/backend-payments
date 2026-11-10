@@ -22,13 +22,14 @@
  * NO se hace `trim()`: espejar al vecino vale más que inventar una regla más
  * estricta, y un secreto con espacios al borde es un secreto distinto.
  */
-export function readConfioWebhookKey(env: NodeJS.ProcessEnv = process.env): string | null {
-  const key = env.CONFIO_WEBHOOK_KEY
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
-  return key && key !== 'CHANGEME' ? key : null
+export function readConfioWebhookKey(env: NodeJS.ProcessEnv = process.env): string | null {
+  return readWebhookSecret('CONFIO_WEBHOOK_KEY', env)
 }
 
 // `isProductionEnv` se mudó a `shared/env/is-production` porque su tercer
 // consumidor es el logger, y `shared/` no puede depender de un provider de pagos.
 // Se re-exporta para no romper a quien ya la importaba desde acá.
 export { isProductionEnv } from '../../shared/env/is-production'
+export { readWebhookSecret } from '../../shared/env/webhook-secret'

@@ -5,16 +5,10 @@ import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum'
 import { WalletController } from '../../wallet/wallet.controller'
 import { WalletService } from '../../wallet/wallet.service'
 import { WalletProvider, WalletStatus } from '../../wallet/entities/wallet.entity'
-import { PaymentController } from '../../payment/payment.controller'
-import { PaymentService } from '../../payment/payment.service'
-import {
-  PaymentProvider,
-  PaymentPurpose,
-  PaymentStatus,
-} from '../../payment/entities/payment.entity'
 import { RefundController } from '../../refund/refund.controller'
 import { RefundService } from '../../refund/refund.service'
 import { RefundReason, RefundStatus } from '../../refund/entities/refund.entity'
+import { PaymentStatus } from '../../payment/entities/payment.entity'
 import { PaymentMethodController } from '../../payment-method/payment-method.controller'
 import { PaymentMethodService } from '../../payment-method/payment-method.service'
 import {
@@ -213,14 +207,7 @@ describe('Body DTO whitelist and repository sanitization (LOC-44)', () => {
     )
   })
 
-  describe('POST /payment/checkout, POST /refund, POST /payment-method', () => {
-    const validCheckoutBody = {
-      provider: PaymentProvider.STRIPE,
-      amount: 50,
-      currency: 'USD',
-      purpose: PaymentPurpose.WALLET_RECHARGE,
-    }
-
+  describe('POST /refund, POST /payment-method', () => {
     const validRefundBody = {
       paymentId: VALID_UUID,
       amount: 25,
@@ -234,20 +221,6 @@ describe('Body DTO whitelist and repository sanitization (LOC-44)', () => {
       type: PaymentMethodType.CARD,
       last4: '4242',
     }
-
-    it.each(['status', 'id', 'brandId', 'balance'])(
-      'rejects prohibited field "%s" in POST /payment/checkout with 400',
-      async (prohibitedField) => {
-        const metatype = getBodyMetatype(PaymentController, 'createCheckout')
-
-        await expect(
-          pipe.transform(
-            { ...validCheckoutBody, [prohibitedField]: 'forbidden' },
-            { type: 'body', metatype },
-          ),
-        ).rejects.toBeInstanceOf(BadRequestException)
-      },
-    )
 
     it.each(['status', 'id', 'brandId', 'balance'])(
       'rejects prohibited field "%s" in POST /refund with 400',
@@ -277,32 +250,24 @@ describe('Body DTO whitelist and repository sanitization (LOC-44)', () => {
       },
     )
 
-    it('sanitizes fields passed to repositories in PaymentService, RefundService, and PaymentMethodService', async () => {
-      const paymentRepo = {
-        create: jest.fn((d) => d),
-        save: jest.fn((d) => Promise.resolve({ id: 'pay-1', ...d })),
-      }
-      const paymentService = new PaymentService(
-        paymentRepo as any,
-        {} as any,
-        {} as any,
-        {} as any,
-        {} as any,
-      )
-      await paymentService.createCheckout({
-        ...validCheckoutBody,
-        brandId: OWN_BRAND_ID,
-        id: 'injected-pay-id',
-        status: PaymentStatus.COMPLETED,
-      } as any)
-      expect(paymentRepo.create.mock.calls[0][0]).not.toHaveProperty('id')
-      expect(paymentRepo.create.mock.calls[0][0].status).toBe(PaymentStatus.PENDING)
-
+    it('sanitizes fields passed to repositories in RefundService and PaymentMethodService', async () => {
+      // R15 (Mutation): spreading raw data into refundRepository.create or paymentMethodRepository.create turns this red.
       const refundRepo = {
         create: jest.fn((d) => d),
         save: jest.fn((d) => Promise.resolve({ id: 'ref-1', ...d })),
+        // R17: no active refunds, so the request reaches create() whose payload this case inspects.
+        find: jest.fn().mockResolvedValue([]),
       }
-      const refundService = new RefundService(refundRepo as any, {} as any)
+      const paymentReadRepo = {
+        findOne: jest.fn().mockResolvedValue({
+          id: VALID_UUID,
+          brandId: OWN_BRAND_ID,
+          amount: 100,
+          currency: 'USD',
+          status: PaymentStatus.COMPLETED,
+        }),
+      }
+      const refundService = new RefundService(refundRepo as any, {} as any, paymentReadRepo as any)
       await refundService.request({
         ...validRefundBody,
         brandId: OWN_BRAND_ID,

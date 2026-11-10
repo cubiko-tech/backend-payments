@@ -117,31 +117,18 @@ describe('isProductionEnv — sus tres consumidores', () => {
 
   describe('service risk documentation and contract comments (LOC-36)', () => {
     const repoRoot = path.resolve(__dirname, '../../..')
-    const closedRiskTitles = [
-      'Una recarga de wallet acredita también el impuesto como saldo (C1)',
-      'Completar un pago externo puede acreditar dos veces (C2)',
-      'El cobro y el crédito de wallet no tienen llave de idempotencia (C2)',
-      'Un pago de servicio puede debitar una wallet de otra moneda o de tokens (C3)',
-      '`WalletService.debit` no exige `walletId` ni pertenencia de la wallet a la marca (C3)',
-      'La renovación por wallet pide precio fijo en COP, omite la moneda en `debit` y `processWalletPayment` oculta fallos del débito (C3)',
-    ]
 
-    it('keeps every docs/RIESGOS.md anchor pointing to existing symbols and no closed entry marked open', () => {
+    it('keeps every docs/RIESGOS.md anchor pointing to existing symbols and no closed entry in the file', () => {
       const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
       const sections = risksDoc.split(/^## /m).slice(1)
-      const headingsFound = new Set<string>()
 
       for (const section of sections) {
-        const heading = section.split('\n')[0].trim()
-        headingsFound.add(heading)
-
         const estadoParts = section.split('- **Estado**:')
         expect(estadoParts.length).toBe(2)
         const estadoText = estadoParts[1].trim()
 
-        if (closedRiskTitles.includes(heading)) {
-          expect(estadoText).not.toMatch(/^abiert[oa]\b/i)
-        }
+        // Mutation: restore a `cerrado` entry to docs/RIESGOS.md and this goes red (R33 deletes it).
+        expect(estadoText).not.toMatch(/^cerrad[oa]\b/i)
 
         const dondeMatch = section.match(/- \*\*Dónde\*\*:\s*([\s\S]*?)(?=\n- \*\*|$)/)
         expect(dondeMatch).not.toBeNull()
@@ -188,10 +175,21 @@ describe('isProductionEnv — sus tres consumidores', () => {
           }
         }
       }
+    })
 
-      for (const closedTitle of closedRiskTitles) {
-        expect(headingsFound.has(closedTitle)).toBe(true)
-      }
+    const riskSection = (titleStart: string): string => {
+      const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
+      return risksDoc.split(/^## /m).find((section) => section.startsWith(titleStart)) ?? ''
+    }
+
+    it('keeps the session brand claim risk open with its anchor in resolveBrandId', () => {
+      // Mutation: mark this entry `mitigado`, or drop `resolveBrandId` from its anchor, and this case goes red.
+      const section = riskSection('Con el claim `brand` del token')
+
+      expect(section).toMatch(/- \*\*Estado\*\*: abierto\b/)
+      expect(section).toMatch(
+        /- \*\*Dónde\*\*: `src\/subscription\/subscription\.controller\.ts:[^;]*`resolveBrandId`/,
+      )
     })
 
     it('keeps comments on isProductionEnv, WalletService.debit, and assertWalletCurrency aligned with the contract in English', () => {

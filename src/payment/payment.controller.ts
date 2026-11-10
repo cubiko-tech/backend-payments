@@ -2,7 +2,6 @@ import {
   Controller,
   Get,
   Post,
-  Body,
   Param,
   Query,
   Req,
@@ -12,14 +11,13 @@ import {
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { PaymentService } from './payment.service'
-import { CreatePaymentCheckoutDto } from './dto/create-payment-checkout.dto'
+import { ListPaymentsQueryDto } from './dto/list-payments-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
   assertResourceBrandAccess,
   isPrivilegedCaller,
-  resolveRequestBrandId,
 } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Payment')
@@ -41,24 +39,6 @@ export class PaymentController {
     private readonly platformClient: ClientPlatformService,
   ) {}
 
-  @Post('checkout')
-  @ApiOperation({ summary: 'Crear un checkout de pago' })
-  @ApiResponse({ status: 201, description: 'Checkout creado correctamente' })
-  async createCheckout(
-    @Body() data: CreatePaymentCheckoutDto,
-    @Req() req?: any,
-    @Query('brandId') brandId?: string,
-  ) {
-    const validBrandId = await assertBrandAccess(
-      this.platformClient,
-      this.logger,
-      req,
-      resolveRequestBrandId(req, brandId),
-      'POST /payment/checkout',
-    )
-    return this.paymentService.createCheckout({ ...data, brandId: validBrandId })
-  }
-
   @Get(':id')
   @ApiOperation({ summary: 'Obtener detalle de un pago' })
   @ApiResponse({ status: 200, description: 'Pago obtenido correctamente' })
@@ -79,7 +59,7 @@ export class PaymentController {
   @ApiResponse({ status: 200, description: 'Pagos obtenidos correctamente' })
   async getPaymentsByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; status?: string },
+    @Query() filters: ListPaymentsQueryDto,
     @Req() req?: any,
   ) {
     const validBrandId = await assertBrandAccess(

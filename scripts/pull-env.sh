@@ -72,6 +72,22 @@ fi
 
 OUT_PATH="${SERVICE_DIR}/${OUT_FILE}"
 
+# A work line's tree shares Infisical with development; its own container name, IP and start switches live in
+# .line-vars, appended last so they win. Only these keys are allowed, so no secret can enter that way.
+LINE_VARS="${SERVICE_DIR}/.line-vars"
+LINE_VARS_ALLOWED="COMPOSE_PROJECT_NAME CONTAINER_NAME CONTAINER_SLUG CONTAINER_IP RUN_MIGRATIONS RUN_FIXTURES"
+if [ -f "$LINE_VARS" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    case " $LINE_VARS_ALLOWED " in
+      *" $key "*) ;;
+      *) echo "Error: .line-vars no admite ${key} (sólo: ${LINE_VARS_ALLOWED}); no se escribió ${OUT_FILE}" >&2
+         exit 1 ;;
+    esac
+  done < "$LINE_VARS"
+fi
+
 # --- Funcion para descargar secretos de un path --------------------------
 
 fetch_secrets() {
@@ -108,8 +124,12 @@ fi
   echo "# $(date '+%Y-%m-%d %H:%M:%S')"
   echo ""
   JQ_FILTER='.secrets[] | if ((.secretValue // "") | tostring | contains("\n")) then "\(.secretKey)=\(.secretValue|@sh)" else "\(.secretKey)=\(.secretValue)" end'
-  echo "$SHARED" | jq -r "$JQ_FILTER" 2>/dev/null
-  echo "$SERVICE" | jq -r "$JQ_FILTER" 2>/dev/null
+  # The last occurrence of a key wins and is the only one kept, so .line-vars overrides without a duplicate line.
+  {
+    echo "$SHARED" | jq -r "$JQ_FILTER" 2>/dev/null
+    echo "$SERVICE" | jq -r "$JQ_FILTER" 2>/dev/null
+    if [ -f "$LINE_VARS" ]; then grep -Ev '^[[:space:]]*(#|$)' "$LINE_VARS" || true; fi
+  } | tac | awk -F= 'NF && !seen[$1]++' | tac
 } > "$OUT_PATH"
 
 echo "Listo: $TOTAL variables descargadas a ${OUT_FILE} ($SHARED_COUNT shared + $SERVICE_COUNT service)"

@@ -6,12 +6,38 @@ import { Request } from 'express'
 
 import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
-import { API_PERMISSION_KEY } from './require-permission.decorator'
+import {
+  API_ON_BEHALF_OF_KEY,
+  API_PERMISSION_KEY,
+  API_SERVICE_CLIENT_KEY,
+  API_SESSION_ONLY_KEY,
+  API_SUPER_ADMIN_KEY,
+  API_UPSTREAM_TIMEOUT_KEY,
+  ON_BEHALF_OF_HEADER,
+} from './require-permission.decorator'
+import { SERVICE_KEY_PREFIX, ServiceCredentialService } from './service-credential.service'
 
 interface GuardUser {
   id: string
   isSuperAdmin: boolean
   brand?: string | null
+  /** Set only when the request carried `ACCESS_SERVER`; no token claim can set it. */
+  isServer?: boolean
+  /** Set only when the request carried a valid service credential: the client it belongs to. */
+  serviceClient?: string
+}
+
+const authUnavailable = () =>
+  new RequestException(
+    { code: 'AUTH_UNAVAILABLE', message: 'The user token cannot be checked right now' },
+    HttpStatus.SERVICE_UNAVAILABLE,
+  )
+
+function readAuthSecret(value: string | undefined): string | null {
+  if (!value || !value.trim() || value !== value.trim() || value === 'CHANGEME') {
+    return null
+  }
+  return value
 }
 
 /**
@@ -23,18 +49,21 @@ interface GuardUser {
 @Injectable()
 export class ApiAuthGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
-  private readonly ACCESS_SERVER = process.env.ACCESS_SERVER
-  private readonly JWT_SECRET = process.env.JWT_SECRET
+  private readonly ACCESS_SERVER = readAuthSecret(process.env.ACCESS_SERVER)
+  private readonly JWT_SECRET = readAuthSecret(process.env.JWT_SECRET)
   private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
 
   constructor(
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
     private readonly roles: ClientRolesService,
+    private readonly serviceCredentials: ServiceCredentialService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest<Request & { user?: GuardUser }>()
+    const req = context
+      .switchToHttp()
+      .getRequest<Request & { user?: GuardUser; onBehalfOf?: GuardUser }>()
     const user = await this.resolveUser(req)
     if (!user) {
       throw new RequestException(
@@ -44,16 +73,49 @@ export class ApiAuthGuard implements CanActivate {
     }
     req.user = user
 
-    const required = this.reflector.get<string>(API_PERMISSION_KEY, context.getHandler())
-    if (!required) return true
-    if (user.isSuperAdmin) return true
+    const handler = context.getHandler()
+    const controllerClass = typeof context.getClass === 'function' ? context.getClass() : undefined
+    const readMeta = <T>(key: string): T | undefined =>
+      this.reflector.get<T>(key, handler) ??
+      (controllerClass ? this.reflector.get<T>(key, controllerClass) : undefined)
 
-    const allowed = await this.roles.checkPermission(user.id, required)
-    if (!allowed) {
-      throw new RequestException(
-        { error: 'forbidden', code: 'forbidden', permission: required },
-        HttpStatus.FORBIDDEN,
-      )
+    // Before every other check: the permission branch below returns early.
+    const serviceClient = readMeta<string>(API_SERVICE_CLIENT_KEY)
+    if ((serviceClient || user.serviceClient) && user.serviceClient !== serviceClient) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
+
+    if (readMeta<boolean>(API_ON_BEHALF_OF_KEY)) {
+      const person = await this.resolveOnBehalfOf(req, readMeta<number>(API_UPSTREAM_TIMEOUT_KEY))
+      if (!person) {
+        throw new RequestException(
+          { error: 'unauthorized', code: 'unauthorized' },
+          HttpStatus.UNAUTHORIZED,
+        )
+      }
+      req.onBehalfOf = person
+    }
+
+    if (readMeta<boolean>(API_SESSION_ONLY_KEY) && user.isServer) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
+
+    const required = this.reflector.get<string>(API_PERMISSION_KEY, handler)
+    if (required) {
+      if (user.isSuperAdmin) return true
+
+      const allowed = await this.roles.checkPermission(user.id, required)
+      if (!allowed) {
+        throw new RequestException(
+          { error: 'forbidden', code: 'forbidden', permission: required },
+          HttpStatus.FORBIDDEN,
+        )
+      }
+      return true
+    }
+
+    if (readMeta<boolean>(API_SUPER_ADMIN_KEY) && !user.isSuperAdmin) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
     }
     return true
   }
@@ -63,22 +125,47 @@ export class ApiAuthGuard implements CanActivate {
     const token = cookie || this.extractBearer(req)
     if (!token) return null
 
-    if (this.isServerToken(token)) return { id: 'server', isSuperAdmin: true, brand: null }
+    if (this.isServerToken(token)) {
+      return { id: 'server', isSuperAdmin: true, brand: null, isServer: true }
+    }
 
+    if (token.startsWith(SERVICE_KEY_PREFIX)) {
+      const client = await this.serviceCredentials.authenticate(token)
+      return client
+        ? { id: `service:${client}`, isSuperAdmin: false, brand: null, serviceClient: client }
+        : null
+    }
+
+    return this.resolvePersonToken(token)
+  }
+
+  /**
+   * The person of `X-User-Authorization`; null when absent or invalid. Read only as a person's
+   * JWT, so the server token and service keys there resolve to nobody. With `timeoutMs`, auth gets
+   * that long and not answering is a 503.
+   */
+  private async resolveOnBehalfOf(req: Request, timeoutMs?: number): Promise<GuardUser | null> {
+    const token = this.bearerOf(req.headers[ON_BEHALF_OF_HEADER])
+    return token ? this.resolvePersonToken(token, timeoutMs) : null
+  }
+
+  private async resolvePersonToken(token: string, timeoutMs?: number): Promise<GuardUser | null> {
     // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
-    try {
-      const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
-      const id = payload.id || payload.user
-      if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
-    } catch {
-      /* sigue a la validación contra el auth-service */
+    if (this.JWT_SECRET) {
+      try {
+        const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
+        const id = payload.id || payload.user
+        if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
+      } catch {
+        /* fall through to auth-service validation */
+      }
     }
 
     // 2) Tokens de auto-login: firmados con el `clientSecret` del cliente (que
     // ROTA), así que payments NO puede guardarlo. Los valida el auth-service,
     // que conoce el secreto vigente de cada cliente. Ver backend-auth
     // POST /client/validate-token.
-    return this.validateViaAuth(token)
+    return this.validateViaAuth(token, timeoutMs)
   }
 
   /**
@@ -86,29 +173,49 @@ export class ApiAuthGuard implements CanActivate {
    * propio token (decode sin verificar firma) y el auth verifica con el
    * `clientSecret` vigente. Devuelve el usuario o null.
    */
-  private async validateViaAuth(token: string): Promise<GuardUser | null> {
+  private async validateViaAuth(token: string, timeoutMs?: number): Promise<GuardUser | null> {
     if (!this.SERVICE_AUTH) return null
     const client = this.decodeClaims(token)?.client
     if (!client) return null
 
+    const signal = AbortSignal.timeout(timeoutMs ?? 10000)
+    let res: globalThis.Response
     try {
-      const res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
+      res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
         body: JSON.stringify({ client }),
-        signal: AbortSignal.timeout(10000),
+        signal,
       })
-      if (!res.ok) return null
-      const body: any = await res.json()
+    } catch {
+      if (timeoutMs) throw authUnavailable()
+      return null
+    }
+    if (timeoutMs && res.status >= 500) {
+      // Drop the unread body so the connection does not wait on it.
+      await res.body?.cancel().catch(() => undefined)
+      throw authUnavailable()
+    }
+    if (!res.ok) return null
+    let body: any
+    try {
+      body = await res.json()
+    } catch {
+      // The signal still runs while the body is read: auth sent headers and stalled.
+      if (timeoutMs && signal.aborted) throw authUnavailable()
+      return null
+    }
+    try {
       if (body?.code !== 'tokenValidate' || !body?.data) return null
       const id = body.data.user || body.data.id
       if (!id) return null
       return {
         id,
-        isSuperAdmin: body.data.role === 'superadmin' || !!body.data.isSuperAdmin,
+        // Auth echoes the payload the client signed, so no claim of it may grant super admin.
+        isSuperAdmin: false,
         brand: body.data.brand ?? this.decodeClaims(token)?.brand ?? null,
       }
     } catch {
@@ -126,8 +233,11 @@ export class ApiAuthGuard implements CanActivate {
   }
 
   private extractBearer(req: Request): string {
-    const auth = req.headers.authorization || ''
-    const parts = auth.split(' ')
+    return this.bearerOf(req.headers.authorization)
+  }
+
+  private bearerOf(header: string | string[] | undefined): string {
+    const parts = (typeof header === 'string' ? header : '').split(' ')
     return parts.length > 1 && parts[0].toLowerCase() === 'bearer' ? parts[1] : ''
   }
 

@@ -35,7 +35,6 @@ export class RequestRefundDto {
 
   @IsOptional()
   @IsString()
-  @IsNotEmpty()
   @MaxLength(100)
   requestedBy?: string
 

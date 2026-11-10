@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common'
 import Stripe from 'stripe'
 import {
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   CreateCheckoutParams,
   CheckoutResult,
   PaymentStatusResult,
@@ -11,6 +12,7 @@ import {
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
+import { readWebhookSecret } from '../../shared/env/webhook-secret'
 
 @Injectable()
 export class StripeProvider implements PaymentProvider {
@@ -78,17 +80,23 @@ export class StripeProvider implements PaymentProvider {
   async getPaymentStatus(providerPaymentId: string): Promise<PaymentStatusResult> {
     this.ensureConfigured()
 
-    const session = await this.stripe.checkout.sessions.retrieve(providerPaymentId)
+    const session = await this.stripe.checkout.sessions
+      .retrieve(providerPaymentId)
+      .catch((error) => {
+        if (error?.statusCode === 404) throw new ProviderPaymentNotFoundError(error.message)
+        throw error
+      })
 
-    const statusMap: Record<string, PaymentStatusResult['status']> = {
-      complete: 'completed',
-      expired: 'failed',
-      open: 'pending',
-    }
+    const isPaid = session.status === 'complete' && session.payment_status === 'paid'
+    const status: PaymentStatusResult['status'] = isPaid
+      ? 'completed'
+      : session.status === 'expired'
+        ? 'failed'
+        : 'pending'
 
     return {
-      status: statusMap[session.status] || 'pending',
-      paidAt: session.status === 'complete' ? new Date(session.created * 1000) : undefined,
+      status,
+      paidAt: isPaid ? new Date(session.created * 1000) : undefined,
       metadata: {
         paymentIntent: session.payment_intent,
         customerEmail: session.customer_details?.email,
@@ -197,7 +205,7 @@ export class StripeProvider implements PaymentProvider {
   }
 
   validateWebhookSignature(payload: Buffer, signature: string): boolean {
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+    const webhookSecret = readWebhookSecret('STRIPE_WEBHOOK_SECRET')
     if (!webhookSecret || !this.stripe) return false
     try {
       this.stripe.webhooks.constructEvent(payload, signature, webhookSecret)
@@ -212,10 +220,10 @@ export class StripeProvider implements PaymentProvider {
    */
   constructWebhookEvent(payload: Buffer, signature: string): Stripe.Event {
     this.ensureConfigured()
-    return this.stripe.webhooks.constructEvent(
-      payload,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET,
-    )
+    const webhookSecret = readWebhookSecret('STRIPE_WEBHOOK_SECRET')
+    if (!webhookSecret) {
+      throw new Error('Stripe webhook secret is not configured')
+    }
+    return this.stripe.webhooks.constructEvent(payload, signature, webhookSecret)
   }
 }

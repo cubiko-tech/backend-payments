@@ -1,3 +1,4 @@
+// R6: CheckoutService unit suite shares one mocked repository and provider graph across checkout scenarios.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { HttpStatus } from '@nestjs/common'
@@ -33,6 +34,7 @@ import { EnterprisePricingService } from '../subscription/enterprise-pricing.ser
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { walletCloseDataSource } from '../../test/support/wallet-close-double'
 
 /**
  * Marca de agua para detectar caídas accidentales al camino legacy de precios
@@ -111,7 +113,10 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionRepo },
         { provide: getRepositoryToken(SubscriptionEvent, 'DBWrite'), useValue: createMockRepo() },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: createMockRepo() },
-        { provide: getDataSourceToken('DBWrite'), useValue: { createQueryRunner: jest.fn() } },
+        {
+          provide: getDataSourceToken('DBWrite'),
+          useValue: walletCloseDataSource(() => service as any),
+        },
         {
           provide: WalletService,
           // `findById` es lo que lee el checkout para comparar la moneda de la wallet
@@ -1158,6 +1163,40 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
   })
 
   describe('wallet recharge completion (tax-inclusive VAT breakdown, saved taxRate, and provider amount check)', () => {
+    it.each([
+      ['omitted', undefined],
+      ['empty', ''],
+      ['whitespace', '   '],
+    ])(
+      'rejects wallet_recharge via external provider with 400 MISSING_WALLET_ID when walletId is %s without creating a payment or calling the provider',
+      async (_label, walletId) => {
+        taxService.getTaxForCountry.mockResolvedValue({
+          taxName: 'IVA',
+          taxRate: 0.19,
+          isInclusive: false,
+        })
+        expect.assertions(6)
+        try {
+          await service.processCheckout({
+            brandId: BRAND_ID,
+            userId: 'u-1',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            amount: 100000,
+            currency: 'COP',
+            walletId,
+          })
+        } catch (error) {
+          expect((error as RequestException).code).toBe('MISSING_WALLET_ID')
+          expect((error as RequestException).getStatus()).toBe(HttpStatus.BAD_REQUEST)
+        }
+        expect(walletService.findById).not.toHaveBeenCalled()
+        expect(paymentRepo.create).not.toHaveBeenCalled()
+        expect(paymentRepo.save).not.toHaveBeenCalled()
+        expect(createCheckout).not.toHaveBeenCalled()
+      },
+    )
+
     it('charges 100,000 COP via Confio, breaks down VAT inside 100,000 using the saved taxRate, identifies the digital service and buyer on the invoice, and credits 100,000 COP once', async () => {
       const billingProfileRepo = (service as any).billingProfileRepo
       billingProfileRepo.findOne.mockResolvedValue({
@@ -1452,7 +1491,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       await service.completeExternalPayment('pay-mismatch-99', {
         data: { status: 'Pagado', amountCents: 10000000 },
       })
-      const returnPageResult = await service.reconcilePayment('pay-mismatch-99')
+      const returnPageResult = await service.reconcilePayment('pay-mismatch-99', null)
 
       const persistedRow = getDbRow()
       expect(walletService.credit).toHaveBeenCalledTimes(0)
@@ -1590,13 +1629,15 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       expect(invoiceService.create).not.toHaveBeenCalled()
     })
 
-    it('completes a Mercado Pago payment when webhook payload omits amount as declared in provider specs', async () => {
-      paymentRepo.findOne.mockResolvedValue({
+    it('leaves a payment pending without marking failed when a provider notice omits the confirmed amount, and completes it on reconciliation with the status amount', async () => {
+      // R15: red if assertProviderConfirmedAmount returns true when a provider notice omits the confirmed amount.
+      const { getDbRow } = wirePersistedPaymentRow({
         id: 'pay-mp-1',
         brandId: BRAND_ID,
         userId: 'u-1',
         walletId: 'w-1',
         provider: 'mercadopago',
+        providerPaymentId: 'mp-pref-1',
         amount: 100000,
         currency: 'COP',
         status: 'pending',
@@ -1604,10 +1645,30 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         metadata: { country: 'CO', taxRate: 0.19, taxName: 'IVA' },
       })
 
-      await service.completeExternalPayment('pay-mp-1', {
-        mpPaymentId: 'mp-987654',
+      const noticeCompleted = await service.completeExternalPayment(
+        'pay-mp-1',
+        { mpPaymentId: 'mp-987654' },
+        'mercadopago',
+      )
+
+      expect(noticeCompleted).toBe(false)
+      expect(getDbRow().status).toBe(PaymentStatus.PENDING)
+      expect(getDbRow().metadata.amountMismatch).toBeUndefined()
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
+
+      // R17: External provider HTTP call in reconcilePayment is stubbed to return the confirmed amount.
+      providerFactory.getProvider.mockReturnValue({
+        createCheckout,
+        getPaymentStatus: jest.fn().mockResolvedValue({
+          status: 'completed',
+          metadata: { transactionAmount: 100000 },
+        }),
       })
 
+      const reconciled = await service.reconcilePayment('pay-mp-1', null)
+      expect(reconciled.status).toBe('completed')
+      expect(getDbRow().status).toBe(PaymentStatus.COMPLETED)
       expect(walletService.credit).toHaveBeenCalledTimes(1)
       expect(walletService.credit).toHaveBeenCalledWith(
         'w-1',
@@ -1619,6 +1680,34 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           referenceId: 'pay-mp-1',
         }),
       )
+    })
+
+    it('rejects completing a payment in completeExternalPayment when expectedProvider does not match payment.provider (Layer 2)', async () => {
+      // R15: red if completeExternalPayment omits the expectedProvider filter or in-memory provider check.
+      const { getDbRow } = wirePersistedPaymentRow({
+        id: 'pay-stripe-cross-provider',
+        brandId: BRAND_ID,
+        userId: 'u-1',
+        walletId: 'w-usd',
+        provider: 'stripe',
+        providerPaymentId: 'cs_live_cross_1',
+        amount: 100,
+        currency: 'USD',
+        status: 'pending',
+        purpose: 'wallet_recharge',
+        metadata: { country: 'US' },
+      })
+
+      const completed = await service.completeExternalPayment(
+        'pay-stripe-cross-provider',
+        { amount: 10000, data: { status: 'FUNDED', amountCents: 10000 } },
+        'confio',
+      )
+
+      expect(completed).toBe(false)
+      expect(getDbRow().status).toBe(PaymentStatus.PENDING)
+      expect(walletService.credit).not.toHaveBeenCalled()
+      expect(invoiceService.create).not.toHaveBeenCalled()
     })
 
     it('credits the full payment.amount without deducting provider commission when provider payload includes fee and netAmount', async () => {
@@ -1781,7 +1870,20 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         walletReadRepo as any,
         createMockRepo() as any,
         createMockRepo() as any,
-        { createQueryRunner: jest.fn(() => mockQueryRunner) } as any,
+        {
+          // R17: Doubled runner; the payment lock and its status re-read are proven in the e2e.
+          createQueryRunner: jest.fn(() => ({
+            ...mockQueryRunner,
+            query: jest.fn(),
+            manager: {
+              ...mockQueryRunner.manager,
+              findOne: (entity: unknown, opts: unknown) =>
+                entity === Payment
+                  ? Promise.resolve({ status: PaymentStatus.PENDING })
+                  : mockQueryRunner.manager.findOne(entity, opts),
+            },
+          })),
+        } as any,
       )
 
       walletService.findById.mockImplementation((id: string) => realWalletService.findById(id))
@@ -2017,6 +2119,12 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
         }
         storedPayments.set(payment.id, { ...payment })
         return payment
+      })
+      paymentRepo.update.mockImplementation(async (criteria: any, partial: any) => {
+        const target = storedPayments.get(criteria.id)
+        if (!target) return { affected: 0 }
+        storedPayments.set(target.id, { ...target, ...partial })
+        return { affected: 1 }
       })
     })
 

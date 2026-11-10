@@ -434,14 +434,25 @@ describe('CheckoutService external payment completion concurrency (real database
 
   describe('External payment completion intermediate status and retry (Postgres)', () => {
     let checkoutWithRealPersistence: CheckoutService
+    let realPersistenceController: CheckoutController
     let realInvoiceService: InvoiceService
     let dianServiceMock: { isConfigured: jest.Mock; sendInvoice: jest.Mock }
+    let createCheckoutMock: jest.Mock
+    let getProviderMock: jest.Mock
     let failNextTransactionSaveReason: string | null = null
     let failNextInvoiceSaveReason: string | null = null
 
     beforeEach(async () => {
       failNextTransactionSaveReason = null
       failNextInvoiceSaveReason = null
+      createCheckoutMock = jest.fn().mockResolvedValue({
+        providerPaymentId: `confio-e2e-${Date.now()}`,
+        checkoutUrl: 'https://pay.confio.test/e2e',
+      })
+      getProviderMock = jest.fn(() => ({
+        createCheckout: createCheckoutMock,
+        getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
+      }))
 
       // R17 test double over realDataSource.createQueryRunner that delegates to Postgres
       // and injects a single transient write failure when configured by a test case.
@@ -490,6 +501,7 @@ describe('CheckoutService external payment completion concurrency (real database
       }
 
       const module: TestingModule = await Test.createTestingModule({
+        controllers: [CheckoutController],
         providers: [
           CheckoutService,
           { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: realPaymentRepo },
@@ -523,9 +535,7 @@ describe('CheckoutService external payment completion concurrency (real database
           {
             provide: ProviderFactory,
             useValue: {
-              getProvider: jest.fn(() => ({
-                getPaymentStatus: jest.fn().mockResolvedValue({ status: 'completed' }),
-              })),
+              getProvider: getProviderMock,
             },
           },
           {
@@ -562,9 +572,13 @@ describe('CheckoutService external payment completion concurrency (real database
           },
           { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
         ],
-      }).compile()
+      })
+        .overrideGuard(ApiAuthGuard)
+        .useValue({ canActivate: () => true })
+        .compile()
 
       checkoutWithRealPersistence = module.get<CheckoutService>(CheckoutService)
+      realPersistenceController = module.get<CheckoutController>(CheckoutController)
     })
 
     const seedWalletAndPendingRecharge = async () => {
@@ -886,6 +900,109 @@ describe('CheckoutService external payment completion concurrency (real database
         where: { paymentId: payment.id },
       })
       expect(invoicesAfterRetry).toHaveLength(1)
+    })
+
+    it('rejects POST /checkout wallet_recharge via confio without walletId with 400 MISSING_WALLET_ID, persists 0 payments for the brand, and does not call the provider', async () => {
+      const uniqueBrandId = `11111111-2222-4333-8444-${Date.now().toString(16).padStart(12, '0').slice(-12)}`
+
+      let status = 201
+      let responseBody: any = null
+      try {
+        responseBody = await realPersistenceController.processCheckout(
+          {
+            brandId: uniqueBrandId,
+            userId: 'u-loc59',
+            purpose: 'wallet_recharge',
+            provider: 'confio',
+            amount: 100000,
+            currency: 'COP',
+          },
+          { headers: {} },
+        )
+        if (responseBody?.data?.paymentId) {
+          createdPaymentIds.push(responseBody.data.paymentId)
+        }
+      } catch (err) {
+        if (err instanceof HttpException) {
+          status = err.getStatus()
+          responseBody = err.getResponse()
+        } else {
+          throw err
+        }
+      }
+
+      expect(status).toBe(400)
+      expect(responseBody).toEqual(
+        expect.objectContaining({
+          code: 'MISSING_WALLET_ID',
+        }),
+      )
+
+      const paymentsForBrand = await realPaymentRepo.find({ where: { brandId: uniqueBrandId } })
+      expect(paymentsForBrand).toHaveLength(0)
+      expect(getProviderMock).not.toHaveBeenCalled()
+      expect(createCheckoutMock).not.toHaveBeenCalled()
+    })
+
+    it('responds 201 pending on POST /checkout wallet_recharge via confio with a COP walletId and on completion marks completed, credits 100000 to the wallet, and persists the 84033.61 + 15966.39 invoice', async () => {
+      const uniqueBrandId = `22222222-3333-4444-8555-${Date.now().toString(16).padStart(12, '0').slice(-12)}`
+      const wallet = await realWalletRepo.save(
+        realWalletRepo.create({
+          brandId: uniqueBrandId,
+          userId: 'u-loc59',
+          provider: 'internal',
+          currency: 'COP',
+          balance: 0,
+          status: WalletStatus.ACTIVE,
+        }),
+      )
+      createdWalletIds.push(wallet.id)
+
+      const response = await realPersistenceController.processCheckout(
+        {
+          brandId: uniqueBrandId,
+          userId: 'u-loc59',
+          purpose: 'wallet_recharge',
+          provider: 'confio',
+          walletId: wallet.id,
+          amount: 100000,
+          currency: 'COP',
+        },
+        { headers: {} },
+      )
+      const paymentId = response.data.paymentId
+      createdPaymentIds.push(paymentId)
+
+      expect(response.data.status).toBe('pending')
+      expect(createCheckoutMock).toHaveBeenCalledTimes(1)
+      expect(createCheckoutMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          amount: 100000,
+          currency: 'COP',
+          purpose: 'wallet_recharge',
+        }),
+      )
+
+      await checkoutWithRealPersistence.completeExternalPayment(paymentId, {
+        data: { status: 'Pagado', amountCents: 10000000 },
+      })
+
+      const storedPayment = await realPaymentRepo.findOne({ where: { id: paymentId } })
+      expect(storedPayment?.status).toBe(PaymentStatus.COMPLETED)
+      expect(storedPayment?.paidAt).toBeInstanceOf(Date)
+
+      const updatedWallet = await realWalletRepo.findOne({ where: { id: wallet.id } })
+      expect(Number(updatedWallet?.balance)).toBe(100000)
+
+      const transactions = await realTransactionRepo.find({ where: { walletId: wallet.id } })
+      expect(transactions).toHaveLength(1)
+      expect(Number(transactions[0].amount)).toBe(100000)
+
+      const invoices = await realInvoiceRepo.find({ where: { paymentId } })
+      expect(invoices).toHaveLength(1)
+      expect(Number(invoices[0].subtotal)).toBe(84033.61)
+      expect(Number(invoices[0].taxTotal)).toBe(15966.39)
+      expect(Number(invoices[0].total)).toBe(100000)
     })
   })
 })

@@ -1,8 +1,13 @@
+// R6: Keeps the Confio subscription webhook state machine, period resolution, and role sync together.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, EntityManager, Repository, SelectQueryBuilder } from 'typeorm'
 
-import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
+import {
+  Subscription,
+  SubscriptionProvider,
+  SubscriptionStatus,
+} from '../subscription/entities/subscription.entity'
 import {
   SubscriptionEvent,
   SubscriptionEventType,
@@ -14,6 +19,8 @@ import {
   ConfioSubscriptionStatusWire,
   ConfioWebhookPayload,
 } from '../provider/confio/confio.types'
+import { MAX_CONFIO_STRING_LENGTH } from '../provider/confio/confio-webhook-signature'
+import { buildLegacyConfioStatusChangedEventId } from '../provider/confio/confio-webhook'
 import { WebhookEvent } from './entities/webhookEvent.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import {
@@ -25,6 +32,8 @@ import {
 } from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
+import { escapeLogValue } from '../shared/logger/log-value'
+import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.service'
 
 /**
  * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
@@ -306,6 +315,7 @@ export class ConfioSubscriptionWebhookService {
     private readonly dataSource: DataSource,
     private readonly confio: ConfioProvider,
     private readonly clientRoles: ClientRolesService,
+    private readonly bonus: SubscriptionBonusService,
   ) {}
 
   async handle(event: WebhookEvent): Promise<void> {
@@ -315,17 +325,23 @@ export class ConfioSubscriptionWebhookService {
     const sub = await this.resolverSuscripcion(data)
     if (!sub) {
       this.logger.warn(
-        `Confio suscripción no resuelta: name=${data.name} correlationId=${data.correlationId}`,
+        `Confio suscripción no resuelta: name=${escapeLogValue(data.name)} ` +
+          `correlationId=${escapeLogValue(data.correlationId)}`,
       )
       return
     }
+
+    const markerIds = [
+      event.providerEventId,
+      buildLegacyConfioStatusChangedEventId(payload),
+    ].filter((id): id is string => typeof id === 'string' && id.length > 0)
 
     // Atajo de re-despacho: evita volver a consultar al proveedor. NO es la
     // garantía —esa es la relectura bajo el lock, más abajo—, es sólo el ahorro.
     const yaAplicado = await ConfioSubscriptionWebhookService.buscarMarcador(
       this.subscriptionEventRepository.createQueryBuilder('e'),
       sub.id,
-      event.providerEventId,
+      markerIds,
     )
     if (yaAplicado) {
       this.logger.log(`Confio efecto ya aplicado para ${event.providerEventId}, no se repite`)
@@ -338,11 +354,17 @@ export class ConfioSubscriptionWebhookService {
         : await this.planearCambioDeEstado(data, sub)
     if (!efecto) return
 
+    // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
+    const bono =
+      efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
+        ? await this.bonus.plan(payload, sub)
+        : null
+
     if (efecto.roles) {
       await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
     }
 
-    await this.aplicar(sub.id, efecto, payload, event.providerEventId)
+    await this.aplicar(sub.id, efecto, payload, event.providerEventId, markerIds, bono)
   }
 
   /**
@@ -359,16 +381,38 @@ export class ConfioSubscriptionWebhookService {
   private async resolverSuscripcion(
     data: ConfioWebhookPayload['data'],
   ): Promise<Subscription | null> {
-    if (data?.name) {
+    if (
+      typeof data?.name === 'string' &&
+      data.name.length > 0 &&
+      data.name.length <= MAX_CONFIO_STRING_LENGTH
+    ) {
       const porNombre = await this.subscriptionRepository.findOne({
-        where: { providerSubscriptionId: data.name },
+        where: {
+          provider: SubscriptionProvider.CONFIO,
+          providerSubscriptionId: data.name,
+        },
       })
-      if (porNombre) return porNombre
+      if (
+        porNombre &&
+        porNombre.provider === SubscriptionProvider.CONFIO &&
+        porNombre.providerSubscriptionId === data.name
+      ) {
+        return porNombre
+      }
     }
 
     const correlationId = data?.correlationId
     if (typeof correlationId === 'string' && UUID_RE.test(correlationId)) {
-      return await this.subscriptionRepository.findOne({ where: { id: correlationId } })
+      const porId = await this.subscriptionRepository.findOne({
+        where: { id: correlationId, provider: SubscriptionProvider.CONFIO },
+      })
+      if (
+        porId &&
+        porId.provider === SubscriptionProvider.CONFIO &&
+        (!porId.providerSubscriptionId || !data?.name || porId.providerSubscriptionId === data.name)
+      ) {
+        return porId
+      }
     }
 
     return null
@@ -390,13 +434,6 @@ export class ConfioSubscriptionWebhookService {
       // («exitoso o fallido», tabla de eventos del contrato): hoy no hay estado
       // intermedio. Si Confío agrega uno, este predicado lo leería como impago.
       //
-      // ⚠️ DINERO: escribir `past_due` arma un cron VIEJO. `retryFailedPayments`
-      // (`tasks.service.ts:216-250`, cada 6h) toma `PAST_DUE + autoRenew` y para
-      // `provider === 'confio'` emite un link de pago REAL con aviso al usuario;
-      // `expireSubscriptions` después la vence por `retryCount`. Con la recurrencia
-      // delegada eso cobraría por un segundo riel. Hoy es LATENTE (ninguna
-      // suscripción confío tiene resource name) y retirarlo es de
-      // `alta-crea-suscripcion-en-confiopagos`: no se toca un camino que gasta plata.
       // Un cobro fallido sobre una fila YA dada de baja no tiene efecto: mover a
       // `past_due` la convertiría en un moroso vivo, que es peor que no hacer
       // nada —la fila deja de ser una baja y pasa a ser una deuda—, y el acceso
@@ -406,13 +443,26 @@ export class ConfioSubscriptionWebhookService {
       if (yaDadaDeBaja(sub)) {
         this.logger.log(
           `Confio cobro no exitoso sobre una suscripción ya dada de baja (${sub.id}): ` +
-            `sin efecto, status=${data?.status}`,
+            `sin efecto, status=${escapeLogValue(data?.status)}`,
         )
 
         return null
       }
 
-      this.logger.warn(`Confio cobro no exitoso para ${sub.id}: status=${data?.status}`)
+      // `past_due` makes `retryFailedPayments` issue and notify a new payment link, so a signup
+      // that was never activated would get a second link for its first period.
+      if (sub.status === SubscriptionStatus.PENDING) {
+        this.logger.log(
+          `Confio failed charge on a still pending subscription (${sub.id}): ` +
+            `no effect, status=${escapeLogValue(data?.status)}`,
+        )
+
+        return null
+      }
+
+      this.logger.warn(
+        `Confio cobro no exitoso para ${sub.id}: status=${escapeLogValue(data?.status)}`,
+      )
       return {
         eventType: SubscriptionEventType.PAYMENT_FAILED,
         toStatus: SubscriptionStatus.PAST_DUE,
@@ -557,7 +607,7 @@ export class ConfioSubscriptionWebhookService {
     sub: Subscription,
     yaLeida?: ConfioSubscriptionResult,
   ): Promise<PeriodoConfio | undefined> {
-    const resourceName = data?.name || sub.providerSubscriptionId
+    const resourceName = sub.providerSubscriptionId || data?.name
     if (!resourceName) {
       this.logger.warn(
         `Confio sin resource name para ${sub.id}: se avanza un ciclo local (no es un fallo del proveedor)`,
@@ -590,7 +640,7 @@ export class ConfioSubscriptionWebhookService {
 
       this.logger.warn(
         `Confio devolvió un período incompleto para ${sub.id} (fuente=${
-          data?.name ? 'data.name' : 'providerSubscriptionId'
+          sub.providerSubscriptionId ? 'providerSubscriptionId' : 'data.name'
         }): se avanza un ciclo local`,
       )
       return undefined
@@ -616,7 +666,9 @@ export class ConfioSubscriptionWebhookService {
     const wire: ConfioSubscriptionStatusWire = data?.status || ''
 
     if (CONFIO_ESTADOS_SIN_EFECTO.includes(wire)) {
-      this.logger.log(`Confio estado del alta ignorado: ${wire} (${data?.name})`)
+      this.logger.log(
+        `Confio estado del alta ignorado: ${escapeLogValue(wire)} (${escapeLogValue(data?.name)})`,
+      )
       return null
     }
 
@@ -632,7 +684,9 @@ export class ConfioSubscriptionWebhookService {
       ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
       : undefined
     if (!toStatus) {
-      this.logger.warn(`Confio estado no mapeado: ${wire} (${data?.name})`)
+      this.logger.warn(
+        `Confio estado no mapeado: ${escapeLogValue(wire)} (${escapeLogValue(data?.name)})`,
+      )
       return null
     }
 
@@ -949,6 +1003,8 @@ export class ConfioSubscriptionWebhookService {
     efecto: EfectoConfio,
     payload: ConfioWebhookPayload,
     providerEventId: string,
+    markerIds: string | string[] = providerEventId,
+    bono: PlannedBonus | null = null,
   ): Promise<void> {
     await this.dataSource.transaction(async (manager: EntityManager) => {
       const sub = await manager.findOne(Subscription, {
@@ -960,7 +1016,7 @@ export class ConfioSubscriptionWebhookService {
       const marcador = await ConfioSubscriptionWebhookService.buscarMarcador(
         manager.createQueryBuilder(SubscriptionEvent, 'e'),
         subscriptionId,
-        providerEventId,
+        markerIds,
       )
       if (marcador) {
         this.logger.log(
@@ -996,6 +1052,7 @@ export class ConfioSubscriptionWebhookService {
       }
 
       await manager.save(sub)
+      if (bono) await this.bonus.credit(manager, bono, sub)
 
       // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
       // usuario y plan salen de esa fila y no de una relectura posterior.
@@ -1043,11 +1100,21 @@ export class ConfioSubscriptionWebhookService {
   private static buscarMarcador(
     qb: SelectQueryBuilder<SubscriptionEvent>,
     subscriptionId: string,
-    providerEventId: string,
+    providerEventId: string | string[],
   ): Promise<SubscriptionEvent | null> {
+    const ids = (Array.isArray(providerEventId) ? providerEventId : [providerEventId]).filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    )
+    const uniqueIds = Array.from(new Set(ids))
+    if (uniqueIds.length <= 1) {
+      return qb
+        .where('e."subscriptionId" = :sid', { sid: subscriptionId })
+        .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: uniqueIds[0] })
+        .getOne()
+    }
     return qb
       .where('e."subscriptionId" = :sid', { sid: subscriptionId })
-      .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
+      .andWhere("e.metadata ->> 'providerEventId' IN (:...pids)", { pids: uniqueIds })
       .getOne()
   }
 }

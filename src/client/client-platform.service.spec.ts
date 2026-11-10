@@ -1,3 +1,4 @@
+import { HttpStatus } from '@nestjs/common'
 import {
   ALLOWED_BRAND_ROLES,
   BRAND_LOOKUP_UNAVAILABLE,
@@ -346,14 +347,26 @@ describe('ClientPlatformService — país de la marca', () => {
       expect(fetchMock).not.toHaveBeenCalled()
     })
 
-    it('fails closed when platform does not respond or returns an error status', async () => {
+    it('throws 503 BRAND_LOOKUP_UNAVAILABLE when platform does not respond, returns an error status, or is unconfigured', async () => {
       global.fetch = jest
         .fn()
         .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
-      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).rejects.toMatchObject({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: BRAND_LOOKUP_UNAVAILABLE,
+      })
 
       global.fetch = mockStatus(503, { statusCode: 503 }) as unknown as typeof fetch
-      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).resolves.toBe(false)
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).rejects.toMatchObject({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: BRAND_LOOKUP_UNAVAILABLE,
+      })
+
+      process.env.SERVICE_PLATFORM = ''
+      await expect(service.canViewBrandCredit(USER_ID, BRAND_ID)).rejects.toMatchObject({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: BRAND_LOOKUP_UNAVAILABLE,
+      })
     })
   })
 })

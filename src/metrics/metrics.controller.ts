@@ -2,6 +2,7 @@ import { Controller, Get, Query, UseGuards, UsePipes, ValidationPipe } from '@ne
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { MetricsService } from './metrics.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import {
   MetricsDaysQueryDto,
   MetricsHistoryQueryDto,
@@ -10,15 +11,8 @@ import {
 
 @ApiTags('Admin Metrics')
 @Controller('admin/metrics')
-/**
- * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
- * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
- * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
- * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
- * `@RequirePermission` por handler, así que esto no le agrega requisitos a
- * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
- */
 @UseGuards(ApiAuthGuard)
+@RequireSuperAdmin()
 @UsePipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }))
 export class MetricsController {
   constructor(private readonly metricsService: MetricsService) {}
