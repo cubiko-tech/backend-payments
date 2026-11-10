@@ -104,20 +104,6 @@ import {
   prepareTokenPackage,
 } from './token-package-checkout'
 
-/**
- * Servicio orquestador de checkout.
- *
- * Coordina el flujo completo de pago de punta a punta:
- * 1. Validar datos y calcular impuestos
- * 2. Crear registro de pago
- * 3. Procesar pago (wallet interna o redirect a Stripe/MP/Dropi)
- * 4. Si es pago de plan → crear/renovar suscripción
- * 5. Generar factura con items e impuestos
- * 6. Enviar factura a la DIAN
- * 7. Asignar plan en backend-roles
- * 8. Registrar en audit log
- */
-
 export interface CheckoutRequest {
   brandId: string
   userId: string
@@ -128,9 +114,7 @@ export interface CheckoutRequest {
     | 'token_package'
     | 'token_amount'
   provider: 'wallet' | 'stripe' | 'mercadopago' | 'dropi' | 'confio'
-  // Para plan_purchase
   planSlug?: string
-  // Para wallet_recharge / service_payment
   amount?: number
   currency?: string
   walletId?: string
@@ -138,30 +122,19 @@ export interface CheckoutRequest {
   packageId?: string
   // token_amount: the token count chosen by the brand; priced in Payments at TOKEN_PRICE_USD
   tokens?: number
-  // URLs de redirect (Stripe/MP/Confio)
   successUrl?: string
   cancelUrl?: string
-  // Datos del comprador (requeridos por ConfioPagos: email + teléfono E.164)
+  // Required by ConfioPagos (email and E.164 phoneNumber).
   buyer?: { firstName?: string; lastName?: string; email?: string; phoneNumber?: string }
   idempotencyKey?: string
-  /**
-   * Renovación emitida por el cron (`TasksService.issueExternalCharge`), NO un alta.
-   * Es una bandera EXPLÍCITA del llamador: nunca se deduce de los datos y nunca se
-   * acepta por HTTP (el controller la borra). Sólo elige el camino de precios LEGACY
-   * —el de hoy— para que el cron no cambie de comportamiento; no relaja el gate de
-   * proveedor, ni el impuesto, ni el débito de wallet.
-   */
+  /** Set only by the renewal cron (stripped by the HTTP controller) to allow legacy pricing fallback without relaxing provider, tax, or wallet checks. */
   renewal?: boolean
 }
 
 /**
- * Monto y moneda ya resueltos para este checkout.
- *
- * `country` viaja informado SÓLO cuando el precio salió del catálogo por país; es
- * lo que permite gatear al proveedor y calcular el impuesto contra el MISMO país
- * que decidió el precio, en vez de contra el perfil de facturación. Queda vacío en
- * el precio negociado enterprise, en el fallback legacy de la renovación y en los
- * `purpose` que no son compra de plan.
+ * `country` is populated only when the price came from the country catalog so
+ * provider gating and tax calculation use the same country that set the price
+ * (omitted for enterprise custom pricing, legacy renewal fallback, and non-plan purposes).
  */
 interface ResolvedPricing {
   amount: number
@@ -222,24 +195,14 @@ export class CheckoutService implements OnModuleInit {
     @Optional() private tokenPackages?: TokenPackageService,
   ) {}
 
-  /**
-   * Registrarse en WebhookService (inyección tardía para evitar dependencia
-   * circular Checkout↔Webhook): así los webhooks de pago externo pueden
-   * completar el checkout (asignar plan, generar factura, etc.).
-   */
+  /** Late registration breaks the CheckoutService <-> WebhookService circular dependency. */
   onModuleInit() {
     this.webhookService.setCheckoutService(this)
     this.log.log('CheckoutService registrado en WebhookService')
   }
 
-  /**
-   * Flujo principal de checkout.
-   */
   async processCheckout(request: CheckoutRequest): Promise<CheckoutResult> {
-    // 0. El brandId se normaliza UNA sola vez y ANTES de cualquier consulta que lo
-    // use (gate de proveedor, `enterprise_pricing`, platform). Devuelve una copia:
-    // mutar la request del llamador escondía el efecto y le reescribía el objeto al
-    // cron, que nos pasa datos derivados de una fila viva de `subscriptions`.
+    // Normalize once into a new object before any lookup so the cron caller's live subscription data is not mutated.
     const req = this.normalizeRequest(request)
     const idempotencyFingerprint = req.idempotencyKey ? buildIdempotencyFingerprint(req) : undefined
 
@@ -265,9 +228,6 @@ export class CheckoutService implements OnModuleInit {
       }
     }
 
-    // 1. Precio y moneda. En `plan_purchase` los decide el país REGISTRADO de la
-    // marca; `country` viene informado SÓLO cuando el precio salió del catálogo por
-    // país (no en el precio negociado enterprise ni en el fallback legacy).
     const tokenPackage =
       req.purpose === 'token_package' ? await this.prepareTokenPackage(req) : undefined
     const tokenAmount =
@@ -277,10 +237,7 @@ export class CheckoutService implements OnModuleInit {
       tokenCheckout ?? (await this.resolveAmountAndCurrency(req))
     const rate = tokenCheckout?.rate
 
-    // 2. El proveedor se valida contra el MISMO país que decidió el precio. Gatear
-    // por el perfil de facturación (`|| 'CO'`) mientras el monto viaja en la moneda
-    // del país de la marca dejaba pasar un cobro en USD a un proveedor habilitado
-    // sólo para CO y nunca validado para esa moneda.
+    // Gate the provider against the same country that determined the catalog price, not the billing profile fallback.
     if (req.provider !== 'wallet' && !tokenCheckout) {
       // Not for a token checkout: prepareTokenPackage/prepareTokenAmount checked it before quoting the TRM.
       await this.assertProviderAvailable(req, country)
@@ -296,17 +253,7 @@ export class CheckoutService implements OnModuleInit {
       await this.assertWalletCurrency(req, currency)
     }
 
-    // 4. UN SOLO DUEÑO DEL PAÍS: el que ya decidió el precio. Antes esto se conformaba
-    // con `currency !== 'COP'`, que es un PROXY de «hay país del precio» y falla donde
-    // más importa: una marca mexicana con precio en COP pagaba 19% de IVA colombiano en
-    // vez de su 16%. Si `resolveAmountAndCurrency` resolvió un país, ése manda; el perfil
-    // de facturación sólo cubre el alta enterprise, que no trae precio de catálogo.
-    //
-    // Censo de `tax_config` al 2026-09-01 (base local): CO 19%, MX 16%, US 0% «Sales tax»,
-    // las tres activas. O sea que un país con configuración propia YA no cae al 19%, y uno
-    // sin fila cae a la rama de 0% + warn que `TaxService` ya tiene: la aceptación («o no
-    // lleva impuesto, o falla con un error que lo dice») se cumple sin inventar un error
-    // nuevo sobre un endpoint de plata.
+    // Tax uses the country that set the catalog price; the billing profile covers only checkouts without a country-catalog price.
     const taxCountry = country || (await this.getBillingCountry(req.brandId))
     const isWalletRecharge = req.purpose === 'wallet_recharge'
     const isWalletConsumption = req.provider === 'wallet' && !isWalletRecharge
@@ -321,7 +268,6 @@ export class CheckoutService implements OnModuleInit {
     const taxAmount = directTaxBreakdown ? directTaxBreakdown.taxAmount : 0
     const totalAmount = directTaxBreakdown ? directTaxBreakdown.totalAmount : amount
 
-    // 2. Crear registro de pago
     const payment = this.paymentRepo.create({
       brandId: req.brandId,
       userId: req.userId,
@@ -334,12 +280,7 @@ export class CheckoutService implements OnModuleInit {
       status: PaymentStatus.PENDING,
       purpose: req.purpose as PaymentPurpose,
       purposeId: req.planSlug || null,
-      // El país viaja CON el pago porque el camino externo factura después, en otro
-      // request (`completeExternalPayment`), donde `resolveAmountAndCurrency` ya no está.
-      // Sin esto, esa factura vuelve a resolver por perfil de facturación y una marca sin
-      // perfil cae al 19% colombiano — el bug que esta tarea cierra. Va en `metadata` y no
-      // en una columna nueva: es un dato del checkout, no del dominio del pago, y no
-      // necesita migración.
+      // Persist the resolved tax country in metadata so deferred external payment completion invoices against the same country.
       metadata: {
         country: taxCountry,
         ...(!isWalletConsumption
@@ -580,8 +521,6 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Pago con wallet interna — inmediato.
-   *
    * Wallet consumptions debit the published price (`taxAmount = 0`) and do not emit
    * a tax invoice because VAT was already caused and invoiced on the wallet recharge.
    */
@@ -595,7 +534,6 @@ export class CheckoutService implements OnModuleInit {
   ): Promise<CheckoutResult> {
     const totalAmount = Math.round((subtotal + taxAmount) * 100) / 100
 
-    // Registrar intento
     await this.attemptRepo.save(
       this.attemptRepo.create({
         paymentId: payment.id,
@@ -669,7 +607,6 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    // Marcar pago como completado
     const result: CheckoutResult = {
       paymentId: payment.id,
       status: 'completed',
@@ -726,7 +663,6 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    // Publicar evento en Redis Streams
     this.eventBus.publishPaymentCompleted({
       brandId: req.brandId,
       paymentId: payment.id,
@@ -736,7 +672,6 @@ export class CheckoutService implements OnModuleInit {
       planSlug: req.planSlug,
     })
 
-    // Notificar al usuario
     this.eventBus.notifyPaymentSuccess(
       req.brandId,
       payment.id,
@@ -783,9 +718,6 @@ export class CheckoutService implements OnModuleInit {
     )
   }
 
-  /**
-   * Pago con Stripe/MercadoPago/Dropi — redirección.
-   */
   private async processExternalPayment(
     payment: Payment,
     req: CheckoutRequest,
@@ -812,7 +744,6 @@ export class CheckoutService implements OnModuleInit {
         checkoutUrl: checkout.checkoutUrl,
       }
 
-      // Actualizar pago con datos del provider
       payment.providerPaymentId = checkout.providerPaymentId
       payment.checkoutUrl = checkout.checkoutUrl
       payment.expiresAt = new Date(Date.now() + checkoutExpiryHours() * 3600000)
@@ -824,7 +755,6 @@ export class CheckoutService implements OnModuleInit {
       }
       await this.paymentRepo.save(payment)
 
-      // Registrar intento
       await this.attemptRepo.save(
         this.attemptRepo.create({
           paymentId: payment.id,
@@ -862,12 +792,7 @@ export class CheckoutService implements OnModuleInit {
     )
   }
 
-  /**
-   * Completar pago externo (llamado desde webhook).
-   * Este es el flujo que ejecuta el webhook cuando Stripe/MP/Dropi confirma el pago.
-   *
-   * @returns true only if this call left the payment `completed`.
-   */
+  /** @returns true only if this call left the payment `completed`. */
   async completeExternalPayment(
     paymentId: string,
     providerData?: Record<string, unknown>,
@@ -988,9 +913,7 @@ export class CheckoutService implements OnModuleInit {
       )
     }
 
-    // Calcular impuestos para factura. El país sale del pago —lo decidió el checkout con
-    // el mismo criterio que el precio—, y el perfil de facturación queda de respaldo para
-    // los pagos anteriores a este cambio, que no lo llevan.
+    // Use the tax country stored on the payment at checkout; fall back to the billing profile when absent.
     const country = payment.metadata?.country || (await this.getBillingCountry(payment.brandId))
     const isWalletRecharge = payment.purpose === PaymentPurpose.WALLET_RECHARGE
     const isTokenPackage = payment.purpose === PaymentPurpose.TOKEN_PACKAGE
@@ -1054,7 +977,6 @@ export class CheckoutService implements OnModuleInit {
       await creditTokenAmount(payment, this.tokenWallets)
     }
 
-    // Generar factura
     const invoice = await this.generateInvoice(
       payment,
       {
@@ -1105,7 +1027,6 @@ export class CheckoutService implements OnModuleInit {
       `Pago externo completado via ${payment.provider}`,
     )
 
-    // Publicar evento en Redis Streams
     this.eventBus.publishPaymentCompleted({
       brandId: payment.brandId,
       paymentId: payment.id,
@@ -1115,7 +1036,6 @@ export class CheckoutService implements OnModuleInit {
       planSlug: payment.purposeId,
     })
 
-    // Notificar al usuario
     this.eventBus.notifyPaymentSuccess(
       payment.brandId,
       payment.id,
@@ -1278,67 +1198,34 @@ export class CheckoutService implements OnModuleInit {
     )
   }
 
-  // =============================================================
-  // Helpers
-  // =============================================================
-
-  /**
-   * Resolver monto y moneda según el tipo de checkout.
-   */
   private async resolveAmountAndCurrency(req: CheckoutRequest): Promise<ResolvedPricing> {
-    // El `planSlug` es parte del CONTRATO de `plan_purchase`, no un opcional: la rama
-    // NO se gatea con `&& req.planSlug`. Cuando lo hacía, una compra de plan sin slug
-    // caía a la rama genérica de abajo y cobraba el `amount`/`currency` que eligió el
-    // llamador, con `purposeId=null`, la wallet debitada y una factura "Plan undefined";
-    // el precio por país nunca se consultaba. Ahora entra siempre y la guarda decide.
-    //
-    // Se reusa el 400 `INVALID_PLAN_SLUG` en vez de crear un `MISSING_PLAN_SLUG`: es la
-    // simetría exacta de `INVALID_BRAND_ID`, que ya cubre "ausente o que no es un UUID",
-    // y no obliga a ningún cliente a aprender un código nuevo para el mismo rechazo.
-    //
-    // Vale también para `renewal: true`: la indulgencia del cron (`renewalPlanPrice`)
-    // está acotada por diseño a los CÓDIGOS de resolución de país/precio, no al
-    // contrato —sin slug no hay precio legacy que resolver—. Ese caso ya moría antes,
-    // sólo que con `MISSING_AMOUNT`; para `TasksService` el desenlace observable sigue
-    // siendo excepción → `past_due`, ahora con un código que dice la verdad.
+    // Gate on purpose alone so a missing planSlug cannot fall through to the generic caller-priced branch.
     if (req.purpose === 'plan_purchase') {
       this.assertUsablePlanSlug(req.planSlug)
 
-      // Moneda pedida por el llamador. Sobrevive SÓLO para el precio negociado
-      // enterprise y para el fallback de la renovación: el alta no la mira.
+      // Caller-requested currency is used only for legacy renewal fallback and legacy enterprise renewal.
       const legacyCurrency = req.currency || 'COP'
 
-      // Para plan enterprise, verificar si hay precio personalizado
       if (req.planSlug === 'enterprise') {
         const customPricing = await this.enterprisePricing.getForBrand(req.brandId)
         if (customPricing) {
-          // Alta: la moneda del precio negociado es un dato DERIVADO de la fila, igual
-          // que en el catálogo por país. Compararla contra `req.currency` dejaba que el
-          // llamador se saliera de lo negociado mandando otra moneda: hoy eso cae al
-          // catálogo por país —que siempre tiene fila— y cobra el precio de lista.
+          // Initial sign-up uses the currency stored on the negotiated row so the caller cannot bypass it by sending another currency.
           if (!req.renewal) {
             return { amount: Number(customPricing.monthlyPrice), currency: customPricing.currency }
           }
-          // Renovación: la comparación legacy queda intacta.
           if (customPricing.currency === legacyCurrency) {
             return { amount: Number(customPricing.monthlyPrice), currency: legacyCurrency }
           }
         }
       }
 
-      // Renovación del cron: INDULGENTE (criterio (e)). Intenta el mismo catálogo
-      // por país que el alta y sólo cae al precio legacy si no puede resolverlo.
       if (req.renewal) {
         return this.renewalPlanPrice(req, legacyCurrency)
       }
 
-      // Alta: el precio sale del país de la marca, no de lo que mande el cliente.
       const resolved = await this.resolvePlanPricingByCountry(req.brandId, req.planSlug)
       if (!resolved.ok) {
-        // El servicio no tiene ExceptionFilter global, así que una `HttpException`
-        // lanzada acá no deja rastro: sin este log, un alta rechazada por
-        // PRICE_NOT_FOUND_FOR_COUNTRY o PLAN_NOT_FOUND (el síntoma de un outage de
-        // backend-roles) es invisible en los logs del servicio.
+        // No global ExceptionFilter logs HttpExceptions here, so log catalog/roles failures before throwing.
         this.log.warn(
           `Alta rechazada: brand=${req.brandId} plan=${req.planSlug} ` +
             `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
@@ -1363,10 +1250,7 @@ export class CheckoutService implements OnModuleInit {
     return { amount: req.amount, currency: req.currency }
   }
 
-  /**
-   * Precio del plan por el camino LEGACY (moneda pedida por el llamador).
-   * Conserva tal cual el comportamiento anterior; hoy sólo lo usa la renovación.
-   */
+  /** Resolves plan pricing in the caller-requested currency; used only as the renewal cron fallback. */
   private async legacyPlanPrice(planSlug: string, currency: string): Promise<ResolvedPricing> {
     const price = await this.clientRoles.getPlanPrice(planSlug, currency)
     if (price === null) {
@@ -1379,24 +1263,9 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Precio de la RENOVACIÓN emitida por el cron. Indulgente por diseño, al revés
-   * que el alta: intenta el mismo catálogo por país y sólo cae al precio legacy
-   * cuando no puede resolverlo, dejando un `logger.error` con marca, país y código.
-   *
-   * Por qué indulgente y no estricto: un rechazo acá no es un 4xx para nadie.
-   * `TasksService.issueExternalCharge` atrapa la excepción, marca la suscripción
-   * `past_due` SIN link de pago y tras `MAX_RETRY` la marca se degrada a free — o
-   * sea que cualquier severidad de más en este camino se cobra en ingresos
-   * perdidos, en silencio y sobre suscripciones que hoy se cobran bien.
-   *
-   * Por el mismo motivo el `brandId` NO se valida como UUID: `subscriptions.brandId`
-   * es un `varchar` sin FK ni tipo `uuid` (`subscription.entity.ts`) y la convención
-   * del monorepo es que los ids cross-service son strings. Una suscripción viva con
-   * un id no canónico se sigue cobrando exactamente como hasta hoy.
-   *
-   * La leniencia está acotada a los CÓDIGOS de resolución de país/precio: los dos
-   * colaboradores devuelven resultado discriminado y no lanzan, así que no hay
-   * `catch` que pueda tragarse un error de otra naturaleza.
+   * Renewal pricing tries the country catalog first and falls back to `legacyPlanPrice`
+   * on country/catalog lookup errors so a transient failure or a non-UUID `subscriptions.brandId`
+   * does not turn an active subscription into `past_due`.
    */
   private async renewalPlanPrice(
     req: CheckoutRequest,
@@ -1422,24 +1291,14 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Precio del plan resuelto por el país registrado de la marca. La moneda es un
-   * dato DERIVADO de la fila de precio, no un parámetro del llamador.
-   *
-   * Se usa `resolveBrandCountry` y no el envoltorio `getBrandCountry` porque éste
-   * colapsa los tres modos de fallo en `null`, y acá cada uno mapea a un HTTP
-   * distinto: este camino es exactamente el consumidor para el que se crearon
-   * esos códigos.
-   *
-   * La fila devuelta por `resolvePriceForCountry` es la instancia CACHEADA de
-   * `ClientRolesService`: se lee, nunca se muta.
+   * Uses `resolveBrandCountry` rather than `getBrandCountry` so each failure mode maps to its own HTTP status.
+   * The row returned by `resolvePriceForCountry` comes from `ClientRolesService`'s cache and must not be mutated.
    */
   private async resolvePlanPricingByCountry(
     brandId: string,
     planSlug: string,
   ): Promise<
-    // Los `?: never` de la rama contraria replican el molde de
-    // `PriceResolution`/`BrandCountryResolution`: con `strictNullChecks: false`
-    // TypeScript no estrecha la unión por un discriminante booleano sin ellos.
+    // Opposite-branch `?: never` fields let TypeScript narrow the union with `strictNullChecks: false`.
     | { ok: true; amount: number; currency: string; country: string; code?: never }
     | {
         ok: false
@@ -1455,12 +1314,7 @@ export class CheckoutService implements OnModuleInit {
     const price = await this.clientRoles.resolvePriceForCountry(planSlug, brand.country)
     if (!price.ok) return { ok: false, code: price.code, country: brand.country }
 
-    // La fila viene de un JSON de backend-roles: `Number(price)` da `NaN` con un
-    // decimal malformado y **0 con `price: null`**, y la moneda se persiste verbatim
-    // en `payment.currency`. Cobrar `NaN` o regalar un plan pago porque a la fila le
-    // falta el precio es peor que rechazar el alta. El 0 SÍ es un precio válido —el
-    // plan `free` tiene filas de 0.00, medido en dev el 2026-08-25—, así que se
-    // rechaza la AUSENCIA de precio, no el valor cero.
+    // Reject null/missing or non-finite prices (`Number(null)` coerces to 0, which is valid only when explicitly 0.00).
     const raw = price.price.price
     const amount = Number(raw)
     const currency = String(price.price.currency || '').toUpperCase()
@@ -1477,16 +1331,8 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Copia de la request con el `brandId` ya normalizado, para que el mismo valor
-   * alimente el gate de proveedor, `enterprise_pricing`, platform, el pago, la
-   * suscripción y la asignación de plan. Se devuelve una copia en vez de reescribir
-   * `req.brandId`: la mutación escondía un efecto load-bearing y le reescribía el
-   * objeto al cron, que arma la request desde una fila viva de `subscriptions`.
-   *
-   * El UUID se EXIGE sólo en el alta de plan. La renovación se limita a recortar
-   * espacios (ver `renewalPlanPrice`: un id no canónico de una suscripción viva no
-   * puede convertirse en un cobro fallido), y los demás `purpose` conservan el
-   * comportamiento de hoy — endurecerlos es otra tarea, con sus propios clientes.
+   * Returns a shallow copy with `brandId` normalized; UUID format is enforced only on
+   * initial `plan_purchase` so renewals of existing subscriptions with non-UUID IDs do not fail.
    */
   private normalizeRequest(req: CheckoutRequest): CheckoutRequest {
     const brandId =
@@ -1529,27 +1375,16 @@ export class CheckoutService implements OnModuleInit {
     return { ...req, brandId, idempotencyKey }
   }
 
-  /** UUID canónico: el formato con el que platform indexa `brand.id`. */
   private static readonly BRAND_ID_RE =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-  /** ¿Este brandId se puede consultar en platform sin provocar un 400? */
   private isUsableBrandId(brandId: string): boolean {
     return typeof brandId === 'string' && CheckoutService.BRAND_ID_RE.test(brandId.trim())
   }
 
   /**
-   * `CheckoutRequest` es una interfaz y `@Body() body: CheckoutRequest` no tiene DTO
-   * ni validador, así que un brandId basura llega crudo hasta platform: ahí responde
-   * 400 (`ParseUUIDPipe`) o 404 (`AuthMiddleware`) y `ClientPlatformService` clasifica
-   * ambos como el transitorio `BRAND_LOOKUP_UNAVAILABLE` → 503 por un error del
-   * llamador. Esta guarda hace cierta la suposición que dejó anotada esa dependencia
-   * ("en payments el brandId viene de un DTO ya validado").
-   *
-   * Devuelve el id NORMALIZADO: validar sobre el `trim()` y seguir usando el valor
-   * crudo dejaba pasar un `' <uuid> '` que platform rechaza con 400 → el mismo 503
-   * engañoso que esta guarda existe para evitar, y que además se persistía con
-   * espacios en `payment.brandId`.
+   * Rejects malformed `brandId` values with 400 before calling `backend-platform`, which would
+   * otherwise return 400/404 and be misclassified as 503 `BRAND_LOOKUP_UNAVAILABLE`.
    */
   private assertUsableBrandId(brandId: string): string {
     const normalized = typeof brandId === 'string' ? brandId.trim() : ''
@@ -1563,17 +1398,8 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * El `planSlug` es texto libre del llamador —misma razón que el brandId: no hay
-   * DTO— y termina en dos lugares peligrosos: los logs y la URL de backend-roles.
-   * Un slug con `\n` inyecta líneas falsas en el log (CWE-117) y uno con `/` o `?`
-   * reescribe la ruta de `assignPlanToBrand`. El catálogo real usa `a-z`, `0-9`,
-   * `-` y `_` (`dropi-roax`, `ally_dropi_pro`), así que la clase es holgada.
-   *
-   * El `typeof` es LOAD-BEARING, no ruido defensivo: `regex.test(undefined)` coacciona
-   * el argumento a la cadena `"undefined"`, que MATCHEA la clase y pasaría la guarda.
-   * Sin él, exigir el slug en la rama de plan no cerraría la ausencia —justo el caso
-   * que esta guarda tiene que rechazar—. El valor crudo no se loguea ni se devuelve:
-   * es texto libre del llamador (CWE-117), la misma razón por la que existe la clase.
+   * Restricts `planSlug` to safe identifier characters to prevent log injection (CWE-117) and path
+   * traversal in `assignPlanToBrand`; `typeof` guards against `RegExp.test(undefined)` coercing to `"undefined"`.
    */
   private assertUsablePlanSlug(planSlug: string) {
     if (typeof planSlug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(planSlug)) {
@@ -1642,15 +1468,8 @@ export class CheckoutService implements OnModuleInit {
   }
 
   /**
-   * Mapea el fallo de resolución de país/precio a su HTTP.
-   *
-   * `PLAN_NOT_FOUND` responde 503 y NO 404 a propósito: `getPlanRows()` devuelve un
-   * Map VACÍO cuando backend-roles no contesta y no hay caché, así que durante un
-   * outage de roles TODOS los planes darían `PLAN_NOT_FOUND`; contestar "ese plan no
-   * existe" disfrazaría una caída de backend como un error definitivo del cliente,
-   * justo la inversión del criterio transitorio→503 con que se diseñaron los códigos
-   * de país. Costo aceptado: un planSlug realmente mal escrito recibe 503 en vez de
-   * 400; los slugs vienen de nuestra propia UI y 503 es la dirección segura.
+   * `PLAN_NOT_FOUND` maps to 503 rather than 404 because `getPlanRows()` returns an empty map
+   * when `backend-roles` is unreachable with a cold cache.
    */
   private planPricingException(
     planSlug: string,
@@ -1679,9 +1498,7 @@ export class CheckoutService implements OnModuleInit {
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       case PRICE_NOT_FOUND_FOR_COUNTRY:
-        // El país NO va en el mensaje: el endpoint contesta sin autenticar, así que
-        // devolverlo convierte al checkout en un lector del país de cualquier marca.
-        // Queda en el `logger.warn` del punto de rechazo, que es quien lo necesita.
+        // Omit the country from the error message so the endpoint cannot be used to probe a brand's country.
         return new RequestException(
           {
             code: PRICE_NOT_FOUND_FOR_COUNTRY,
@@ -1698,9 +1515,6 @@ export class CheckoutService implements OnModuleInit {
     }
   }
 
-  /**
-   * Crear o renovar suscripción.
-   */
   private async createOrRenewSubscription(
     req: CheckoutRequest,
     payment: Payment,
@@ -1713,7 +1527,6 @@ export class CheckoutService implements OnModuleInit {
     const periodEnd = new Date()
     periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
 
-    // Buscar suscripción existente
     let subscription = await subscriptionRepo.findOne({
       where: { brandId: req.brandId },
     })
@@ -1730,7 +1543,6 @@ export class CheckoutService implements OnModuleInit {
           }
         }
       }
-      // Renovar/cambiar plan
       const fromPlan = subscription.planSlug
       const fromStatus = subscription.status
       const existingPeriodEnd =
@@ -1779,15 +1591,12 @@ export class CheckoutService implements OnModuleInit {
       subscription.retryCount = 0
       subscription.cancelledAt = null
       subscription.cancelReason = null
-      // Invariante de `accessEndsAt`: no nula ⇔ hay una baja PENDIENTE. La marca que
-      // canceló y después pagó ya no la tiene, y dejarle la fecha de corte vieja la
-      // mostraría en `GET /subscription/current` sobre una suscripción que se renueva.
+      // Non-null `accessEndsAt` means a pending cancellation; clear it on renewal so `GET /subscription/current` does not report a stale cutoff.
       subscription.accessEndsAt = null
       subscription.autoRenew = true
 
       await subscriptionRepo.save(subscription)
 
-      // Registrar evento
       const eventType =
         fromPlan !== req.planSlug
           ? SubscriptionEventType.PLAN_CHANGED
@@ -1820,7 +1629,6 @@ export class CheckoutService implements OnModuleInit {
 
       return { subscription, extended: isSameActivePlanExtension }
     } else {
-      // Crear nueva
       subscription = subscriptionRepo.create({
         brandId: req.brandId,
         userId: req.userId,
@@ -1851,9 +1659,6 @@ export class CheckoutService implements OnModuleInit {
     return { subscription, extended: false }
   }
 
-  /**
-   * Generar factura con items e impuestos.
-   */
   private async generateInvoice(
     payment: Payment,
     req: any,
@@ -2185,9 +1990,6 @@ export class CheckoutService implements OnModuleInit {
     return true
   }
 
-  /**
-   * Enviar factura a DIAN en background (no bloquea el checkout).
-   */
   private sendToDianAsync(invoiceId: string, currency: string) {
     if (!this.canSendToDian(invoiceId, currency)) return
 
@@ -2198,11 +2000,7 @@ export class CheckoutService implements OnModuleInit {
   }
 
   private canSendToDian(invoiceId: string, currency: string): boolean {
-    // La facturación electrónica de este servicio es COLOMBIANA (DIAN/Siigo) y
-    // `DianService.sendInvoice` decide el país por el perfil de facturación, que por
-    // defecto es 'CO'. Desde que la moneda es un dato derivado del país de la marca,
-    // una factura en USD llegaría a la DIAN disfrazada de nacional: se corta acá,
-    // que es donde se conoce la moneda del documento.
+    // DIAN/Siigo electronic invoicing applies only to COP documents; `DianService` defaults missing billing profiles to CO.
     if (currency && currency.toUpperCase() !== 'COP') {
       this.log.warn(
         `Factura ${invoiceId} emitida en ${currency}: no se envía a la DIAN ` +
@@ -2214,10 +2012,6 @@ export class CheckoutService implements OnModuleInit {
     return this.dianService.isConfigured()
   }
 
-  /**
-   * Asignar plan a la marca en backend-roles con expiresAt.
-   * Calcula expiresAt = currentPeriodEnd de la suscripción (BILLING_PERIOD_DAYS).
-   */
   private async assignPlanInRoles(brandId: string, planSlug: string, expiresAt?: Date) {
     let resolvedExpiresAt =
       expiresAt instanceof Date && !Number.isNaN(expiresAt.getTime()) ? expiresAt : null
@@ -2248,11 +2042,7 @@ export class CheckoutService implements OnModuleInit {
     }
   }
 
-  /**
-   * País del perfil de FACTURACIÓN de la marca (para impuestos y gate de proveedor).
-   * No confundir con `clientPlatform.getBrandCountry`, que es el país registrado de
-   * la marca en platform y es el que determina el precio.
-   */
+  /** Country from the brand's billing profile (for tax and provider fallback), distinct from the registration country in `backend-platform`. */
   private async getBillingCountry(brandId: string): Promise<string> {
     const profile = await this.billingProfileRepo.findOne({
       where: { brandId },

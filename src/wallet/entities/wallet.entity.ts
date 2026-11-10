@@ -1,7 +1,7 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-// Mantenemos el enum para referencia en código existente, pero la columna es varchar
+// Known provider values for callers; the DB column is varchar so new providers need no enum migration.
 export enum WalletProvider {
   INTERNAL = 'internal',
   DROPI = 'dropi',

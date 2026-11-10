@@ -33,9 +33,6 @@ export class WalletService {
     private readonly dataSource: DataSource,
   ) {}
 
-  /**
-   * Listar todas las wallets de una marca
-   */
   async findByBrand(brandId: string) {
     try {
       const wallets = await this.walletReadRepository.find({
@@ -49,9 +46,6 @@ export class WalletService {
     }
   }
 
-  /**
-   * Obtener detalle de una wallet por ID
-   */
   async findById(id: string) {
     try {
       const wallet = await this.walletReadRepository.findOne({ where: { id } })
@@ -69,15 +63,10 @@ export class WalletService {
     }
   }
 
-  /**
-   * Crear una wallet nueva.
-   * Máximo 10 wallets por marca.
-   */
   async create(data: Partial<Wallet>) {
     try {
       // The brand token wallet is created only by TokenWalletService, one per brand.
       assertNotTokenCurrency(data.currency)
-      // Validar límite de 10 wallets por marca
       const count = await this.walletReadRepository.count({
         where: { brandId: data.brandId },
       })
@@ -100,9 +89,6 @@ export class WalletService {
   }
 
   /**
-   * Acreditar fondos a una wallet con bloqueo pesimista.
-   * Operación atómica: actualiza balance y crea transacción.
-   *
    * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
    * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
    * failed or duplicate credit leaves the wallet closed.
@@ -129,7 +115,6 @@ export class WalletService {
     await queryRunner.startTransaction()
 
     try {
-      // Bloqueo pesimista para evitar condiciones de carrera
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
         lock: { mode: 'pessimistic_write' },
@@ -142,7 +127,6 @@ export class WalletService {
         )
       }
 
-      // Wallet cerrada no acepta ninguna operación
       const reopening = wallet.status === WalletStatus.CLOSED
       if (reopening && !reopenClosed) {
         throw new RequestException(
@@ -168,11 +152,9 @@ export class WalletService {
       const balanceBefore = Number(wallet.balance)
       const balanceAfter = balanceBefore + numericAmount
 
-      // Actualizar balance
       wallet.balance = balanceAfter
       await queryRunner.manager.save(Wallet, wallet)
 
-      // Crear transacción
       const transaction = queryRunner.manager.create(Transaction, {
         walletId,
         brandId: wallet.brandId,
@@ -264,7 +246,6 @@ export class WalletService {
         await lockPayment(queryRunner, paymentId)
       }
 
-      // Bloqueo pesimista para evitar condiciones de carrera
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
         lock: { mode: 'pessimistic_write' },
@@ -326,7 +307,6 @@ export class WalletService {
         )
       }
 
-      // Wallet congelada o cerrada no permite débitos
       if (wallet.status === WalletStatus.FROZEN) {
         throw new RequestException(
           { code: 'WALLET_FROZEN', message: 'Wallet congelada, no permite débitos' },
@@ -344,7 +324,6 @@ export class WalletService {
       const balanceBefore = Number(wallet.balance)
       const balanceAfter = balanceBefore - numericAmount
 
-      // Verificar saldo suficiente
       if (balanceAfter < 0) {
         if (resolvedKey) {
           const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
@@ -359,11 +338,9 @@ export class WalletService {
         )
       }
 
-      // Actualizar balance
       wallet.balance = balanceAfter
       await queryRunner.manager.save(Wallet, wallet)
 
-      // Crear transacción
       const transaction = queryRunner.manager.create(Transaction, {
         walletId,
         brandId: wallet.brandId,
@@ -476,16 +453,12 @@ export class WalletService {
     }
   }
 
-  /**
-   * Balance global: suma de todas las wallets activas de una marca, agrupado por moneda.
-   */
   async getGlobalBalance(brandId: string) {
     try {
       const wallets = await this.walletReadRepository.find({
         where: { brandId, status: WalletStatus.ACTIVE },
       })
 
-      // Agrupar por moneda
       const balanceByCurrency = new Map<string, { total: number; wallets: any[] }>()
 
       for (const wallet of wallets) {
@@ -514,9 +487,6 @@ export class WalletService {
     }
   }
 
-  /**
-   * Obtener transacciones de una wallet con paginación
-   */
   async getTransactions(
     walletId: string,
     filters: { page?: number; limit?: number; type?: string } = {},
@@ -552,13 +522,6 @@ export class WalletService {
     }
   }
 
-  // =============================================================
-  // Freeze / Close
-  // =============================================================
-
-  /**
-   * Congelar wallet — bloquea débitos, permite créditos.
-   */
   async freeze(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -588,9 +551,6 @@ export class WalletService {
     return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
-  /**
-   * Descongelar wallet — volver a estado activo.
-   */
   async unfreeze(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -620,9 +580,6 @@ export class WalletService {
     return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
-  /**
-   * Cerrar wallet — requiere balance 0, bloquea todas las operaciones.
-   */
   async close(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -657,14 +614,6 @@ export class WalletService {
     return { data: wallet }
   }
 
-  // =============================================================
-  // Transferencias entre wallets
-  // =============================================================
-
-  /**
-   * Transferir fondos entre wallets de la misma marca y moneda.
-   * Operación atómica con doble pessimistic lock.
-   */
   async transfer(data: {
     fromWalletId: string
     toWalletId: string
@@ -693,7 +642,7 @@ export class WalletService {
     await queryRunner.startTransaction()
 
     try {
-      // Lock en orden determinista para evitar deadlocks
+      // Lock in deterministic ID order so concurrent opposite transfers cannot deadlock.
       const [firstId, secondId] =
         fromWalletId < toWalletId ? [fromWalletId, toWalletId] : [toWalletId, fromWalletId]
 
@@ -716,7 +665,6 @@ export class WalletService {
         )
       }
 
-      // Validar misma marca y moneda
       if (fromWallet.brandId !== toWallet.brandId) {
         throw new RequestException(
           { code: 'DIFFERENT_BRAND', message: 'Las wallets deben ser de la misma marca' },
@@ -737,7 +685,6 @@ export class WalletService {
         )
       }
 
-      // Validar estados
       if (fromWallet.status !== WalletStatus.ACTIVE) {
         throw new RequestException(
           { code: 'WALLET_NOT_ACTIVE', message: 'La wallet origen debe estar activa' },
@@ -751,7 +698,6 @@ export class WalletService {
         )
       }
 
-      // Validar saldo
       const fromBalance = Number(fromWallet.balance)
       if (fromBalance < amount) {
         throw new RequestException(
@@ -760,7 +706,6 @@ export class WalletService {
         )
       }
 
-      // Debitar origen
       const fromBalanceAfter = fromBalance - amount
       fromWallet.balance = fromBalanceAfter
       await queryRunner.manager.save(Wallet, fromWallet)
@@ -780,7 +725,6 @@ export class WalletService {
       })
       await queryRunner.manager.save(Transaction, debitTx)
 
-      // Acreditar destino
       const toBalance = Number(toWallet.balance)
       const toBalanceAfter = toBalance + amount
       toWallet.balance = toBalanceAfter

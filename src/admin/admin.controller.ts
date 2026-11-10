@@ -50,15 +50,6 @@ import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
 import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
 
-/**
- * Controller admin centralizado para backend-payments.
- *
- * Agrupa endpoints de gestión para el panel administrativo:
- * - Dashboard de suscripciones (expiring, past-due, summary)
- * - Gestión de cobros (pending, failed, retry)
- * - Resumen de wallets (totales, inconsistencias)
- * - Audit log
- */
 @ApiTags('Admin')
 @Controller('admin')
 @UseGuards(ApiAuthGuard)
@@ -90,10 +81,6 @@ export class AdminController {
     private readonly walletService: WalletService,
     @Optional() private readonly tokenWallets?: TokenWalletService,
   ) {}
-
-  // ============================================
-  // Suscripciones
-  // ============================================
 
   @Get('subscriptions')
   @ApiOperation({ summary: 'Listado paginado de suscripciones con filtros' })
@@ -148,16 +135,13 @@ export class AdminController {
   async subscriptionsSummary() {
     const all = await this.subscriptionReadRepo.find()
 
-    // Agrupar por plan y estado
     const byPlan: Record<string, Record<string, number>> = {}
     const byStatus: Record<string, number> = {}
 
     for (const sub of all) {
-      // Por plan
       if (!byPlan[sub.planSlug]) byPlan[sub.planSlug] = {}
       byPlan[sub.planSlug][sub.status] = (byPlan[sub.planSlug][sub.status] || 0) + 1
 
-      // Por estado
       byStatus[sub.status] = (byStatus[sub.status] || 0) + 1
     }
 
@@ -220,11 +204,8 @@ export class AdminController {
 
     sub.currentPeriodEnd = newEnd
     sub.nextBillingDate = newEnd
-    // Con una baja PENDIENTE el acceso lo gobierna `accessEndsAt`, no el período
-    // (ver la invariante en `subscription.entity.ts`): mover sólo `currentPeriodEnd`
-    // no le daría a la marca ni un día más de servicio. Se corre lo MISMO que el
-    // período, y sólo si la columna ya tenía fecha: escribirla acá afirmaría una
-    // baja que nadie pidió y dejaría la fila lista para el cron de retiro.
+    // Pending cancellations gate access on `accessEndsAt` (`subscription.entity.ts`);
+    // shift it only when already set so active rows are not marked for cancellation.
     if (sub.accessEndsAt) {
       const nuevoFinDeAcceso = new Date(sub.accessEndsAt)
       nuevoFinDeAcceso.setDate(nuevoFinDeAcceso.getDate() + body.days)
@@ -248,10 +229,6 @@ export class AdminController {
 
     return { data: sub }
   }
-
-  // ============================================
-  // Pagos / Cobros
-  // ============================================
 
   @Get('payments')
   @ApiOperation({ summary: 'Listado paginado de pagos con filtros' })
@@ -495,7 +472,6 @@ export class AdminController {
   @ApiOperation({ summary: 'Estado del último batch de cobros Dropi' })
   @ApiResponse({ status: 200, description: 'Estado del batch' })
   async dropiBatchStatus() {
-    // Buscar los pagos más recientes con provider=dropi
     const recentDropiPayments = await this.paymentReadRepo.find({
       where: { provider: 'dropi' as any },
       order: { createdAt: 'DESC' },
@@ -515,10 +491,6 @@ export class AdminController {
       },
     }
   }
-
-  // ============================================
-  // Wallets
-  // ============================================
 
   @Get('wallets')
   @ApiOperation({ summary: 'Listado paginado de wallets con filtros' })
@@ -579,7 +551,6 @@ export class AdminController {
       )
     }
     const userId = body.userId || body.brandId
-    // Verificar que no exista una wallet con mismo brandId+provider+currency
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
     })
@@ -741,7 +712,6 @@ export class AdminController {
       where: { status: In([WalletStatus.ACTIVE, WalletStatus.FROZEN]) },
     })
 
-    // Agrupar por provider + currency
     const groups: Record<
       string,
       { count: number; total: number; currency: string; provider: string }
@@ -782,10 +752,6 @@ export class AdminController {
     return { data: inconsistent, meta: { count: inconsistent.length } }
   }
 
-  // ============================================
-  // Audit Log
-  // ============================================
-
   @Get('audit-log')
   @ApiOperation({ summary: 'Log de auditoría paginado con filtros' })
   @ApiResponse({ status: 200, description: 'Entradas de auditoría' })
@@ -804,10 +770,6 @@ export class AdminController {
       perPage: Number(perPage) || 20,
     })
   }
-
-  // ============================================
-  // Proveedores
-  // ============================================
 
   @Get('providers')
   @ApiOperation({ summary: 'Listar todos los proveedores configurados' })
