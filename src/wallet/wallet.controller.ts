@@ -116,7 +116,8 @@ export class WalletController {
     @Query() filters: ListWalletTransactionsQueryDto,
     @Req() req?: any,
   ) {
-    if (!isPrivilegedCaller(req)) {
+    const privileged = isPrivilegedCaller(req)
+    if (!privileged) {
       const wallet = await this.walletService.findById(id)
       await assertResourceBrandAccess(
         this.platformClient,
@@ -125,6 +126,7 @@ export class WalletController {
         wallet?.data?.brandId,
         'GET /wallet/:id/transactions',
       )
+      return this.walletService.getTransactions(id, filters, { redactForMember: true })
     }
     return this.walletService.getTransactions(id, filters)
   }

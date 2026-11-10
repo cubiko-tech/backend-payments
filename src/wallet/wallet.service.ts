@@ -520,9 +520,12 @@ export class WalletService {
   async getTransactions(
     walletId: string,
     filters: { page?: number; limit?: number; type?: string } = {},
+    options: { redactForMember?: boolean } = {},
   ) {
     try {
-      const { page = 1, limit = 20, type } = filters
+      const page = filters.page || 1
+      const limit = filters.limit || 20
+      const { type } = filters
       const skip = (page - 1) * limit
 
       const where: any = { walletId }
@@ -535,8 +538,12 @@ export class WalletService {
         take: limit,
       })
 
+      const data = options.redactForMember
+        ? transactions.map((tx) => redactMemberTransaction(tx))
+        : transactions
+
       return {
-        data: transactions,
+        data,
         meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
       }
     } catch (error) {
@@ -830,4 +837,15 @@ export class WalletService {
       status: WalletStatus.ACTIVE,
     }
   }
+}
+
+function redactMemberTransaction(tx: Transaction) {
+  const { description: _description, metadata: _metadata, ...rest } = tx
+  const isAdminMovement =
+    tx.referenceType === 'admin' || tx.category === 'gift' || tx.category === 'admin_adjustment'
+  if (isAdminMovement) {
+    const { referenceId: _referenceId, ...withoutReferenceId } = rest
+    return withoutReferenceId
+  }
+  return rest
 }

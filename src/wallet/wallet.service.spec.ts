@@ -720,5 +720,67 @@ describe('WalletService', () => {
         take: 20,
       })
     })
+
+    it('omits description, metadata, and admin referenceId when redactForMember is true', async () => {
+      // R15: red when redactMemberTransaction leaves description, metadata, or admin referenceId in the row.
+      const transactions = [
+        {
+          id: 'tx-gift',
+          walletId: 'w1',
+          amount: 20,
+          type: TransactionType.CREDIT,
+          category: 'gift',
+          description: 'prueba',
+          referenceType: 'admin',
+          referenceId: 'superadmin-1',
+          metadata: { authorId: 'superadmin-1', reason: 'prueba' },
+        },
+        {
+          id: 'tx-purchase',
+          walletId: 'w1',
+          amount: 100,
+          type: TransactionType.CREDIT,
+          category: 'token_package',
+          description: 'Package purchase',
+          referenceType: 'payment',
+          referenceId: 'payment-1',
+          metadata: { packageId: 'pkg-1' },
+        },
+      ]
+      transactionReadRepo.findAndCount.mockResolvedValue([transactions, 2])
+
+      const memberResult = await service.getTransactions(
+        'w1',
+        { page: 1, limit: 20 },
+        { redactForMember: true },
+      )
+      const adminResult = await service.getTransactions('w1', { page: 1, limit: 20 })
+
+      expect(memberResult.data).toEqual([
+        {
+          id: 'tx-gift',
+          walletId: 'w1',
+          amount: 20,
+          type: TransactionType.CREDIT,
+          category: 'gift',
+          referenceType: 'admin',
+        },
+        {
+          id: 'tx-purchase',
+          walletId: 'w1',
+          amount: 100,
+          type: TransactionType.CREDIT,
+          category: 'token_package',
+          referenceType: 'payment',
+          referenceId: 'payment-1',
+        },
+      ])
+      expect(memberResult.data?.[0]).not.toHaveProperty('description')
+      expect(memberResult.data?.[0]).not.toHaveProperty('metadata')
+      expect(memberResult.data?.[0]).not.toHaveProperty('referenceId')
+      expect(memberResult.data?.[1]).not.toHaveProperty('description')
+      expect(memberResult.data?.[1]).not.toHaveProperty('metadata')
+      expect(adminResult.data).toEqual(transactions)
+    })
   })
 })
