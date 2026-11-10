@@ -17,6 +17,7 @@ const BRAND_3 = 'b2510000-0000-4000-8000-000000000003'
 describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-251)', () => {
   describe('parseBackfillBrandIds', () => {
     it('parses newline-separated and JSON brand UUID lists and deduplicates them', () => {
+      // R15: red when parseBackfillBrandIds stops splitting or deduplicating raw/JSON brand UUID lists.
       expect(parseBackfillBrandIds('')).toEqual([])
       expect(parseBackfillBrandIds(`${BRAND_1}\n${BRAND_2}, ${BRAND_1}`)).toEqual([
         BRAND_1,
@@ -30,6 +31,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
     })
 
     it('rejects non-UUID entries or non-array JSON payloads', () => {
+      // R15: red when parseBackfillBrandIds skips UUID validation or accepts non-array JSON payloads.
       expect(() => parseBackfillBrandIds('not-a-uuid')).toThrow(/Invalid brand UUID/)
       expect(() => parseBackfillBrandIds('[123]')).toThrow(/Invalid brand UUID/)
       expect(() => parseBackfillBrandIds('{"id": 1}')).toThrow()
@@ -38,6 +40,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
 
   describe('parseBackfillArgs', () => {
     it('parses --apply and --brands-file in flag, equals, and positional forms', () => {
+      // R15: red when parseBackfillArgs ignores --apply or fails to extract the brands file path.
       expect(parseBackfillArgs([])).toEqual({ apply: false, brandsFilePath: undefined })
       expect(parseBackfillArgs(['--apply', '--brands-file', '/tmp/brands.txt'])).toEqual({
         apply: true,
@@ -58,6 +61,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
     })
 
     it('rejects missing file paths and unknown flags', () => {
+      // R15: red when parseBackfillArgs silently accepts missing paths or unknown CLI flags.
       expect(() => parseBackfillArgs(['--brands-file'])).toThrow(/Missing path/)
       expect(() => parseBackfillArgs(['--file', '--apply'])).toThrow(/Missing path/)
       expect(() => parseBackfillArgs(['--unknown'])).toThrow(/Unknown argument/)
@@ -95,6 +99,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
     }
 
     it('lists missing brands without inserting when apply is false and inserts when apply is true', async () => {
+      // R15: red when backfillTokenWallets inserts during dry-run or omits brands without TKN.
       const { ds, qb, execute } = buildDataSourceDouble([
         { brandId: BRAND_1, userId: 'user-1', provider: WalletProvider.INTERNAL, currency: 'COP' },
         { brandId: BRAND_2, userId: 'user-2', provider: WalletProvider.INTERNAL, currency: 'TKN' },
@@ -135,6 +140,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
     })
 
     it('rejects invalid brandIdsFromFile and destroys the DataSource after CLI execution', async () => {
+      // R15: red when backfillTokenWallets skips brandIdsFromFile UUID validation or leaks the DataSource.
       const { ds } = buildDataSourceDouble([])
       await expect(
         backfillTokenWallets({ dataSource: ds, brandIdsFromFile: ['invalid'] }),

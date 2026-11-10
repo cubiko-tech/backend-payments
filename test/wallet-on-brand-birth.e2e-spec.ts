@@ -286,6 +286,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('CA5 opens the TKN wallet and preserves the duplicate-money-wallet response when the brand already had its COP wallet', async () => {
+    // R15: red when the existing-wallet branch returns before calling tokenWallets.getOrCreate.
     const walletRepo = dataSource.getRepository(Wallet)
     const existingCop = await walletRepo.save(
       walletRepo.create({
@@ -321,6 +322,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('CA5 creates a single TKN wallet when POST /admin/wallets and GET /token-wallet race for the same brand', async () => {
+    // R15: red when concurrent TKN creation stops being idempotent under (brandId, provider, currency).
     const [adminRes, readRes] = await Promise.all([
       http()
         .post('/admin/wallets')
@@ -369,6 +371,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('opens 3 new TKN wallets on the first --apply run and none on the second', async () => {
+    // R15: red when --apply fails to insert missing TKN wallets in 0/active or duplicates on rerun.
     const { walletRepo, brandsFile } = await seedBackfillScenario()
     const countTkn = () => walletRepo.countBy({ brandId: In(BACKFILL_BRANDS), currency: 'TKN' })
 
@@ -408,6 +411,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('excludes the TKN wallet from GET /wallet while returning the money wallet for home', async () => {
+    // R15: red when WalletService.findByBrand stops excluding TKN wallets from GET /wallet.
     const walletRepo = dataSource.getRepository(Wallet)
     await walletRepo.save([
       walletRepo.create({
@@ -460,6 +464,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('rejects POST /admin/wallets with 400 when brandId is not a UUID or balance has an invalid shape, creating nothing', async () => {
+    // R15: red when AdminCreateWalletDto drops @IsUUID on brandId or money bounds on balance.
     for (const badBody of [
       platformCreateWalletBody('x'),
       platformCreateWalletBody(1e-7 as unknown as string),
@@ -483,12 +488,14 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('rejects POST /admin/wallets with 401 when called without credentials and creates nothing', async () => {
+    // R15: red when AdminController loses @UseGuards(JwtOrServerAuthGuard) on POST /admin/wallets.
     const unauthRes = await http().post('/admin/wallets').send(platformCreateWalletBody(BRAND_SEC))
     expect(unauthRes.status).toBe(HttpStatus.UNAUTHORIZED)
     expect(await dataSource.getRepository(Wallet).countBy({ brandId: BRAND_SEC })).toBe(0)
   })
 
   it('rejects POST /admin/wallets with 403 when called with a non-super-admin session and creates nothing', async () => {
+    // R15: red when AdminController loses @UseGuards(SuperAdminGuard) on POST /admin/wallets.
     const forbiddenRes = await http()
       .post('/admin/wallets')
       .set('Authorization', `Bearer ${memberToken}`)
@@ -498,6 +505,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
   })
 
   it('CA10 opens the TKN wallet and credits gift tokens when gifting to a brand without TKN', async () => {
+    // R15: red when creditGift stops calling getOrCreate inside the gift transaction.
     const res = await http()
       .post(`/admin/token-wallets/${BRAND_GIFT}/gifts`)
       .set('Authorization', `Bearer ${superAdminToken}`)

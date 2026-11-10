@@ -78,6 +78,7 @@ describe('WalletService', () => {
 
   describe('findByBrand', () => {
     it('returns the brand money wallets and excludes token wallets', async () => {
+      // R15: red when findByBrand stops filtering out TKN wallets in the query or response list.
       const wallets = [
         { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 100 },
         { id: 'w2', brandId: 'brand-1', currency: 'USD', balance: 50 },
