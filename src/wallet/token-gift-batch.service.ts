@@ -24,6 +24,7 @@ import {
 } from './entities/token-gift-batch-item.entity'
 import { WalletProvider, WalletStatus } from './entities/wallet.entity'
 import { giftBatchBrandKey, tokenGiftLimits } from './token-gift-limits'
+import { runChunk } from './run-chunk'
 import { recordTokenGiftNotice } from './token-gift-notice'
 import { TOKEN_CURRENCY, TokenOrigin } from './token-origin'
 import { fromCents, toCents } from './token-spend'
@@ -555,19 +556,4 @@ function sameBatchRequest(
     return stored.every((id, idx) => id === incoming[idx])
   }
   return true
-}
-
-async function runChunk<T>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T) => Promise<void>,
-): Promise<void> {
-  let index = 0
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (index < items.length) {
-      const current = items[index++]
-      await worker(current)
-    }
-  })
-  await Promise.all(runners)
 }
