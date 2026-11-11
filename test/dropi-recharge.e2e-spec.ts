@@ -92,8 +92,8 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     process.env = { ...envSnapshot }
   })
 
-  it('creates 10 tokens of a Colombian brand at TRM 4,000 as 47,600 pesos pending, no bonus', async () => {
-    // R15: red when the price drops the (1 + VAT) factor: it sees 40,000 instead of 47,600.
+  it('creates 10 tokens of a Colombian brand at TRM 4,000 as 40,000 pesos pending, VAT inside, no bonus', async () => {
+    // R15: red when VAT is added on top of the price again: it sees 47,600 instead of 40,000.
     const res = await postRecharge(recharge, body(), member)
 
     expect(res.status).toBe(HttpStatus.CREATED)
@@ -101,7 +101,7 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
       status: PaymentStatus.PENDING,
       tokens: 10,
       bonusTokens: 0,
-      amount: 47_600,
+      amount: 40_000,
       currency: 'COP',
       exchangeRate: 4000,
       exchangeRateDate: TRM_ROW.vigenciadesde.slice(0, 10),
@@ -114,8 +114,8 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
       status: PaymentStatus.PENDING,
       userId: MEMBER_ID,
     })
-    expect(Number(row.amount)).toBe(47_600)
-    expect(row.metadata).toMatchObject({ subtotal: 40_000, taxAmount: 7_600 })
+    expect(Number(row.amount)).toBe(40_000)
+    expect(row.metadata).toMatchObject({ subtotal: 33_613.45, taxAmount: 6_386.55 })
     expect(row.metadata.dropiRecharge).toEqual({
       tokens: 10,
       tokenPriceUsd: 1,
@@ -129,7 +129,7 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
   })
 
   it('rounds the pesos at TRM 4,000.37 up to the whole peso', async () => {
-    // R15: red when the ceiling becomes a rounding: 1 token, 4,760.44 pesos, sees 4,760.
+    // R15: red when the ceiling becomes a rounding: 1 token, 4,000.37 pesos, sees 4,000.
     trm.reply = () => ({ status: 200, body: [{ ...TRM_ROW, valor: '4000.37' }] })
 
     const res = await postRecharge(recharge, body({ tokens: 10.5 }), member)
@@ -140,21 +140,21 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     )
 
     expect([res.status, one.status]).toEqual([HttpStatus.CREATED, HttpStatus.CREATED])
-    expect(res.body.data.amount).toBe(49_985)
+    expect(res.body.data.amount).toBe(42_004)
     expect(res.body.data.exchangeRate).toBe(4000.37)
-    expect(one.body.data.amount).toBe(4_761)
+    expect(one.body.data.amount).toBe(4_001)
   })
 
-  it('charges 375 tokens at TRM 4,113.60 as 1,835,694 pesos, not one more', async () => {
-    // R15: red when the price goes back to a float product: it gets 1,835,695.
+  it('charges 375 tokens at TRM 4,113.60 as 1,542,600 pesos, not one more', async () => {
+    // R15: red when the price goes back to a float product with a ceiling: it gets 1,542,601.
     trm.reply = () => ({ status: 200, body: [{ ...TRM_ROW, valor: '4113.60' }] })
 
     const res = await postRecharge(recharge, body({ tokens: 375 }), member)
 
     expect(res.status).toBe(HttpStatus.CREATED)
-    expect(res.body.data.amount).toBe(1_835_694)
+    expect(res.body.data.amount).toBe(1_542_600)
     const [row] = await rechargesOf(a.dataSource, RECHARGE_BRAND)
-    expect(Number(row.amount)).toBe(1_835_694)
+    expect(Number(row.amount)).toBe(1_542_600)
   })
 
   it('fixes 10.000000001 tokens as 10 and gives a retry with 10 the same recharge', async () => {
@@ -163,7 +163,7 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     const retry = await postRecharge(recharge, body({ tokens: 10 }), member)
 
     expect([first.status, retry.status]).toEqual([HttpStatus.CREATED, HttpStatus.OK])
-    expect(first.body.data).toMatchObject({ tokens: 10, amount: 47_600 })
+    expect(first.body.data).toMatchObject({ tokens: 10, amount: 40_000 })
     expect(retry.body.data.id).toBe(first.body.data.id)
     const rows = await rechargesOf(a.dataSource, RECHARGE_BRAND)
     expect(rows).toHaveLength(1)
