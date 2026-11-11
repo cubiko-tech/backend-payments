@@ -30,6 +30,7 @@ import { ClientModule } from './client/client.module'
 import { AuthModule } from './shared/auth/auth.module'
 import { CreditModule } from './credit/credit.module'
 import { RechargeModule } from './recharge/recharge.module'
+import { TrmWeeklyModule } from './trm/trm-weekly.module'
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { RechargeModule } from './recharge/recharge.module'
     MetricsModule,
     CreditModule,
     RechargeModule,
+    TrmWeeklyModule,
   ],
   providers: [
     {
