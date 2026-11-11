@@ -167,13 +167,13 @@ export class TokenWalletService {
   }
 
   /**
-   * Debits `amount` tokens: gift first, then purchased; Dropi tokens only when `inDropi` is true.
+   * Debits `amount` tokens: gift first, then purchased, then Dropi tokens.
    * Refuses when those origins, or the wallet balance, do not cover it.
    */
   async debitTokens(
     walletId: string,
     amount: number,
-    context: { brandId: string; inDropi?: boolean },
+    context: { brandId: string },
     data: Partial<Transaction> = {},
     idempotencyKey?: string,
     limits?: MovementLimits,
@@ -189,7 +189,7 @@ export class TokenWalletService {
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
-      const split = planTokenSpend(bucketsOf(wallet), cents, context.inDropi === true)
+      const split = planTokenSpend(bucketsOf(wallet), cents)
       if (!split || cents > toCents(wallet.balance)) {
         throw fail('INSUFFICIENT_BALANCE', 'Insufficient tokens', HttpStatus.UNPROCESSABLE_ENTITY)
       }
