@@ -52,6 +52,22 @@ export interface TokenMovement {
   replayed: boolean
 }
 
+/** Brand-visible view of a token wallet movement: no description, metadata, referenceType or referenceId. */
+export interface TokenWalletMovementView {
+  id: string
+  createdAt: Date
+  type: TransactionType
+  origin: string | null
+  tokenSplit: { gift: number; purchased: number; dropi: number } | null
+  amount: number
+  balanceAfter: number
+}
+
+export interface TokenWalletMovementsPage {
+  data: TokenWalletMovementView[]
+  meta: { total: number; page: number; limit: number; totalPages: number }
+}
+
 export const fail = (code: string, message: string, status: HttpStatus) =>
   new RequestException({ code, message }, status)
 
@@ -100,6 +116,37 @@ export class TokenWalletService {
   ): Promise<TokenMovement> {
     const { expected, apply } = planCredit(walletId, amount, origin)
     return this.move(walletId, data, idempotencyKey, expected, audit, undefined, apply)
+  }
+
+  /**
+   * Debits `amount` gift tokens only. Frozen wallets take gift debits; closed ones do not.
+   * Refuses with 400 INSUFFICIENT_GIFT_TOKENS when `giftTokens` or `balance` does not cover it.
+   */
+  async debitGiftTokens(
+    walletId: string,
+    amount: number,
+    data: Partial<Transaction> & { brandId: string },
+    idempotencyKey?: string,
+    audit?: MovementAudit,
+  ): Promise<TokenMovement> {
+    const cents = assertAmount(amount)
+    const expected: ExpectedMovement = {
+      walletId,
+      type: TransactionType.DEBIT,
+      cents,
+      origin: TokenOrigin.GIFT,
+    }
+    return this.move(walletId, data, idempotencyKey, expected, audit, undefined, (wallet) => {
+      if (wallet.status === WalletStatus.CLOSED) {
+        throw fail('WALLET_CLOSED', 'Wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
+      }
+      const giftCents = toCents(wallet.giftTokens)
+      if (cents > giftCents || cents > toCents(wallet.balance)) {
+        throw fail('INSUFFICIENT_GIFT_TOKENS', 'Insufficient gift tokens', HttpStatus.BAD_REQUEST)
+      }
+      wallet.giftTokens = fromCents(giftCents - cents)
+      return { type: TransactionType.DEBIT, tokenOrigin: TokenOrigin.GIFT, delta: -cents }
+    })
   }
 
   /**
@@ -236,6 +283,51 @@ export class TokenWalletService {
       where: { brandId, provider: WalletProvider.INTERNAL as string, currency: TOKEN_CURRENCY },
     })
     return wallet?.id ?? null
+  }
+
+  /**
+   * Lists the brand token wallet movements from newest to oldest, without creating a wallet when the
+   * brand has none, and projecting only the brand-visible fields (never description, metadata or author).
+   */
+  async listMovements(
+    brandId: string,
+    filters: {
+      page?: number
+      limit?: number
+      type?: TransactionType
+      dateFrom?: string
+      dateTo?: string
+    } = {},
+  ): Promise<TokenWalletMovementsPage> {
+    const page = filters.page || 1
+    const limit = filters.limit || 20
+    const walletId = await this.findTokenWalletId(brandId)
+    if (!walletId) {
+      return { data: [], meta: { total: 0, page, limit, totalPages: 0 } }
+    }
+    const qb = this.dataSource
+      .getRepository(Transaction)
+      .createQueryBuilder('t')
+      .where('t.walletId = :walletId', { walletId })
+    if (filters.type) {
+      qb.andWhere('t.type = :type', { type: filters.type })
+    }
+    if (filters.dateFrom) {
+      qb.andWhere('t.createdAt >= :dateFrom', { dateFrom: new Date(filters.dateFrom) })
+    }
+    if (filters.dateTo) {
+      qb.andWhere('t.createdAt <= :dateTo', { dateTo: new Date(filters.dateTo) })
+    }
+    const [rows, total] = await qb
+      .orderBy('t.createdAt', 'DESC')
+      .addOrderBy('t.id', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount()
+    return {
+      data: rows.map(toMovementView),
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
+    }
   }
 
   private async move(
@@ -447,5 +539,26 @@ function toView(wallet: Wallet): TokenWalletView {
       dropi: fromCents(buckets.dropi),
     },
     unassigned: fromCents(balance - buckets.gift - buckets.purchased - buckets.dropi),
+  }
+}
+
+function toMovementView(tx: Transaction): TokenWalletMovementView {
+  const split = tx.metadata?.tokenSplit
+  const tokenSplit =
+    split && typeof split === 'object'
+      ? {
+          gift: Number(split.gift ?? 0),
+          purchased: Number(split.purchased ?? 0),
+          dropi: Number(split.dropi ?? 0),
+        }
+      : null
+  return {
+    id: tx.id,
+    createdAt: tx.createdAt,
+    type: tx.type,
+    origin: tx.tokenOrigin ?? null,
+    tokenSplit,
+    amount: Number(tx.amount),
+    balanceAfter: Number(tx.balanceAfter),
   }
 }

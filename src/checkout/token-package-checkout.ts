@@ -1,11 +1,16 @@
 import { HttpStatus } from '@nestjs/common'
 
 import { Payment } from '../payment/entities/payment.entity'
+import { isTokenAmount, MAX_DROPI_RECHARGE_TOKENS } from '../recharge/dto/create-dropi-recharge.dto'
+import { TOKEN_PRICE_USD } from '../recharge/token-price'
 import { UsdCopRate } from '../trm/trm.service'
 import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
 import { TokenPackageService, TokenPackageView } from '../wallet/token-package.service'
 import { TokenWalletService, fail } from '../wallet/token-wallet.service'
+
+export const MIN_CHECKOUT_TOKENS = 10
+export const MAX_CHECKOUT_TOKENS = MAX_DROPI_RECHARGE_TOKENS
 
 /** What the payment keeps of the package it bought; completion credits this, never the catalog. */
 export interface TokenPackageSnapshot {
@@ -14,6 +19,12 @@ export interface TokenPackageSnapshot {
   priceUsd: number
   purchasedTokens: number
   bonusTokens: number
+}
+
+/** What the payment keeps of a free-amount token purchase; completion credits this snapshot. */
+export interface TokenAmountSnapshot {
+  priceUsd: number
+  purchasedTokens: number
 }
 
 export interface PreparedTokenPackage {
@@ -25,6 +36,15 @@ export interface PreparedTokenPackage {
   snapshot: TokenPackageSnapshot
 }
 
+export interface PreparedTokenAmount {
+  amount: number
+  currency: 'COP' | 'USD'
+  country: string
+  rate?: UsdCopRate
+  walletId: string
+  snapshot: TokenAmountSnapshot
+}
+
 export interface TokenPackageDeps {
   tokenPackages?: TokenPackageService
   tokenWallets?: TokenWalletService
@@ -32,6 +52,7 @@ export interface TokenPackageDeps {
   /** Rejects when the request's provider is not enabled for `country`. */
   assertProviderAvailable: (country: string) => Promise<void>
   quoteUsdCopRate: () => Promise<UsdCopRate>
+  allowedReturnUrls?: string
 }
 
 export const purchasedTokensKey = (paymentId: string) => `payment:${paymentId}:tokens:purchased`
@@ -45,7 +66,13 @@ export const bonusTokensKey = (paymentId: string) => `payment:${paymentId}:token
  * no TRM (503) and a closed token wallet (422).
  */
 export async function prepareTokenPackage(
-  req: { brandId: string; userId: string; provider: string; packageId?: string },
+  req: {
+    brandId: string
+    userId: string
+    provider: string
+    packageId?: string
+    tokens?: unknown
+  },
   deps: TokenPackageDeps,
 ): Promise<PreparedTokenPackage> {
   if (req.provider === 'wallet') {
@@ -62,27 +89,152 @@ export async function prepareTokenPackage(
       HttpStatus.SERVICE_UNAVAILABLE,
     )
   }
+  if (req.tokens !== undefined) {
+    throw fail(
+      'CONFLICTING_TOKEN_FIELDS',
+      'tokens and packageId cannot be combined',
+      HttpStatus.BAD_REQUEST,
+    )
+  }
   if (typeof req.packageId !== 'string' || !req.packageId) {
     throw fail('MISSING_PACKAGE_ID', 'packageId is required', HttpStatus.BAD_REQUEST)
   }
   const tokenPackage = await deps.tokenPackages.findActive(req.packageId)
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
   await deps.assertProviderAvailable(country)
-  const pricing = await chargeFor(tokenPackage, country, deps)
+  const pricing = await chargeFor(tokenPackage.priceUsd, country, deps)
 
-  const wallet = await deps.tokenWallets.getOrCreate(req.brandId, req.userId)
-  if (wallet.status === WalletStatus.CLOSED) {
-    throw fail('WALLET_CLOSED', 'The brand token wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
-  }
+  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
   return { ...pricing, country, walletId: wallet.id, snapshot: snapshotOf(tokenPackage) }
 }
 
-async function chargeFor(tokenPackage: TokenPackageView, country: string, deps: TokenPackageDeps) {
+/**
+ * Prices a `token_amount` checkout at `tokens * TOKEN_PRICE_USD` (converted to COP at the day's
+ * TRM when the brand bills in CO), validates `successUrl` and `cancelUrl` against the allowlist,
+ * and opens the brand token wallet before saving the payment.
+ */
+export async function prepareTokenAmount(
+  req: {
+    brandId: string
+    userId: string
+    provider: string
+    tokens?: unknown
+    packageId?: unknown
+    successUrl?: string
+    cancelUrl?: string
+  },
+  deps: TokenPackageDeps,
+): Promise<PreparedTokenAmount> {
+  if (req.provider === 'wallet') {
+    throw fail(
+      'TOKEN_PACKAGE_EXTERNAL_ONLY',
+      'Token purchases are paid through an external provider',
+      HttpStatus.UNPROCESSABLE_ENTITY,
+    )
+  }
+  if (!deps.tokenWallets) {
+    throw fail(
+      'TOKEN_PACKAGE_UNAVAILABLE',
+      'Token wallet is not available',
+      HttpStatus.SERVICE_UNAVAILABLE,
+    )
+  }
+  if (req.packageId !== undefined) {
+    throw fail(
+      'CONFLICTING_TOKEN_FIELDS',
+      'tokens and packageId cannot be combined',
+      HttpStatus.BAD_REQUEST,
+    )
+  }
+  if (req.tokens === undefined || req.tokens === null) {
+    throw fail('MISSING_TOKENS', 'tokens is required', HttpStatus.BAD_REQUEST)
+  }
+  if (
+    typeof req.tokens !== 'number' ||
+    !isTokenAmount(req.tokens) ||
+    req.tokens < MIN_CHECKOUT_TOKENS ||
+    req.tokens > MAX_CHECKOUT_TOKENS
+  ) {
+    throw fail(
+      'INVALID_TOKEN_AMOUNT',
+      `tokens must be between ${MIN_CHECKOUT_TOKENS} and ${MAX_CHECKOUT_TOKENS} with at most 2 decimals`,
+      HttpStatus.UNPROCESSABLE_ENTITY,
+    )
+  }
+  assertAllowedReturnUrls(
+    req.successUrl,
+    req.cancelUrl,
+    deps.allowedReturnUrls ?? process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS,
+  )
+
+  const priceUsd = Math.round(req.tokens * TOKEN_PRICE_USD * 100) / 100
+  const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
+  await deps.assertProviderAvailable(country)
+  const pricing = await chargeFor(priceUsd, country, deps)
+  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
+  return {
+    ...pricing,
+    country,
+    walletId: wallet.id,
+    snapshot: { priceUsd, purchasedTokens: req.tokens },
+  }
+}
+
+export function parseAllowedReturnUrls(raw?: string): string[] {
+  if (typeof raw !== 'string') return []
+  return raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+}
+
+export function assertAllowedReturnUrls(
+  successUrl: string | undefined,
+  cancelUrl: string | undefined,
+  rawAllowed?: string,
+) {
+  const allowed = parseAllowedReturnUrls(rawAllowed)
+  if (allowed.length === 0) {
+    throw fail(
+      'TOKEN_CHECKOUT_RETURN_URLS_NOT_CONFIGURED',
+      'TOKEN_CHECKOUT_ALLOWED_RETURN_URLS is not configured',
+      HttpStatus.SERVICE_UNAVAILABLE,
+    )
+  }
+  if (typeof successUrl !== 'string' || !allowed.includes(successUrl)) {
+    throw fail(
+      'INVALID_RETURN_URL',
+      'successUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',
+      HttpStatus.BAD_REQUEST,
+    )
+  }
+  if (cancelUrl !== undefined && (typeof cancelUrl !== 'string' || !allowed.includes(cancelUrl))) {
+    throw fail(
+      'INVALID_RETURN_URL',
+      'cancelUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',
+      HttpStatus.BAD_REQUEST,
+    )
+  }
+}
+
+async function openBrandTokenWallet(
+  brandId: string,
+  userId: string,
+  tokenWallets: TokenWalletService,
+) {
+  const wallet = await tokenWallets.getOrCreate(brandId, userId)
+  if (wallet.status === WalletStatus.CLOSED) {
+    throw fail('WALLET_CLOSED', 'The brand token wallet is closed', HttpStatus.UNPROCESSABLE_ENTITY)
+  }
+  return wallet
+}
+
+async function chargeFor(priceUsd: number, country: string, deps: TokenPackageDeps) {
   if (country !== 'CO') {
-    return { amount: tokenPackage.priceUsd, currency: 'USD' as const }
+    return { amount: priceUsd, currency: 'USD' as const }
   }
   const rate = await deps.quoteUsdCopRate()
-  const amount = Math.round(tokenPackage.priceUsd * rate.rate * 100) / 100
+  const amount = Math.round(priceUsd * rate.rate * 100) / 100
   return { amount, currency: 'COP' as const, rate }
 }
 
@@ -128,4 +280,28 @@ export async function creditTokenPackage(payment: Payment, tokenWallets?: TokenW
       bonusTokensKey(payment.id),
     )
   }
+}
+
+/**
+ * Credits a completed free-amount token purchase as `purchased` from the snapshot stored on the
+ * payment. Keyed by `purchasedTokensKey(payment.id)`, so repeated completions credit nothing new.
+ */
+export async function creditTokenAmount(payment: Payment, tokenWallets?: TokenWalletService) {
+  const snapshot: TokenAmountSnapshot | undefined = payment.metadata?.tokenAmount
+  if (!tokenWallets || !snapshot || !payment.walletId) {
+    throw new Error(`Payment ${payment.id} cannot credit its token amount`)
+  }
+  await tokenWallets.creditTokens(
+    payment.walletId,
+    Number(snapshot.purchasedTokens),
+    TokenOrigin.PURCHASED,
+    {
+      brandId: payment.brandId,
+      category: 'token_amount',
+      description: `Token purchase (${Number(snapshot.purchasedTokens)} tokens)`,
+      referenceType: 'payment',
+      referenceId: payment.id,
+    },
+    purchasedTokensKey(payment.id),
+  )
 }

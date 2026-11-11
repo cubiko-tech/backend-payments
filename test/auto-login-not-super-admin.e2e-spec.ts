@@ -14,6 +14,7 @@ import { AddressInfo } from 'net'
 import * as request from 'supertest'
 import { DataSource } from 'typeorm'
 
+import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -23,6 +24,7 @@ import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
 import { unknownServiceKeys } from './support/service-credential.double'
 import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
+import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
@@ -79,6 +81,7 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
   const clean = async () => {
     if (!dataSource?.isInitialized) return
     for (const sql of [
+      'DELETE FROM token_gift_notices WHERE "brandId" = $1',
       'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = $1)',
       'DELETE FROM transactions WHERE "brandId" = $1',
       'DELETE FROM wallets WHERE "brandId" = $1',
@@ -101,10 +104,21 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Wallet, Transaction, AuditLog],
+      entities: [Wallet, Transaction, AuditLog, TokenGiftNotice],
       synchronize: false,
     })
     await dataSource.initialize()
+    const hasNotices = await dataSource.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+    )
+    if (!hasNotices.length) {
+      const runner = dataSource.createQueryRunner()
+      try {
+        await new AddTokenGiftNotices1794350000000().up(runner)
+      } finally {
+        await runner.release()
+      }
+    }
 
     const jwtService = new JwtService({ secret: JWT_SECRET })
     const repo = (entity: any, conn: string) => ({
@@ -121,7 +135,10 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
         unknownServiceKeys,
         { provide: JwtService, useValue: jwtService },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
-        ...[Wallet, AuditLog].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
+        ...[Wallet, AuditLog, TokenGiftNotice].flatMap((e) => [
+          repo(e, 'DBWrite'),
+          repo(e, 'DBRead'),
+        ]),
         // R17: membership lives in backend-platform; it answers yes only for this user on this brand.
         {
           provide: ClientPlatformService,

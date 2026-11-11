@@ -9,6 +9,7 @@ import {
   Matches,
   Max,
   MaxLength,
+  ValidateBy,
   ValidateIf,
   ValidateNested,
 } from 'class-validator'
@@ -23,6 +24,7 @@ const PURPOSES: CheckoutRequest['purpose'][] = [
   'wallet_recharge',
   'service_payment',
   'token_package',
+  'token_amount',
 ]
 const PROVIDERS: CheckoutRequest['provider'][] = [
   'wallet',
@@ -94,9 +96,43 @@ export class CheckoutRequestDto {
   @IsUUID()
   walletId?: string
 
-  @IsOptional()
+  @ValidateIf((dto: CheckoutRequestDto) => dto.packageId !== undefined)
   @IsUUID()
+  @ValidateBy({
+    name: 'packageIdOnlyForTokenPackage',
+    validator: {
+      validate: (_value: unknown, args) => {
+        const dto = args?.object as CheckoutRequestDto | undefined
+        return dto?.purpose === 'token_package' && dto?.tokens === undefined
+      },
+      defaultMessage: () =>
+        'packageId is only allowed for token_package and cannot be combined with tokens',
+    },
+  })
   packageId?: string
+
+  // Shape and column ceiling at the border (400); the [10, 1_000_000] business range answers 422 in the service.
+  @ValidateIf(
+    (dto: CheckoutRequestDto) => dto.purpose === 'token_amount' || dto.tokens !== undefined,
+  )
+  @ValidateBy({
+    name: 'isCheckoutTokenNumber',
+    validator: {
+      validate: (value: unknown, args) => {
+        const dto = args?.object as CheckoutRequestDto | undefined
+        if (dto?.purpose !== 'token_amount' || dto?.packageId !== undefined) return false
+        return (
+          typeof value === 'number' &&
+          Number.isFinite(value) &&
+          !/[eE]/.test(String(value)) &&
+          value <= MAX_CHECKOUT_AMOUNT
+        )
+      },
+      defaultMessage: () =>
+        'tokens is required for token_amount, cannot be combined with packageId, and must be a non-exponential number within bounds',
+    },
+  })
+  tokens?: number
 
   @IsOptional()
   @IsString()

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { DataSource } from 'typeorm'
 
+import { AddTokenGiftNotices1794350000000 } from '../../migrations/1794350000000-AddTokenGiftNotices'
 import { AuditService } from '../../src/audit/audit.service'
 import { AuditLog } from '../../src/audit/entities/auditLog.entity'
 import { BillingProfile } from '../../src/billing-profile/entities/billingProfile.entity'
@@ -31,6 +32,7 @@ import { Transaction, TransactionType } from '../../src/transaction/entities/tra
 import { Wallet, WalletStatus } from '../../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../../src/wallet/wallet.service'
+import { TokenGiftNotice } from '../../src/wallet/entities/token-gift-notice.entity'
 import { TokenPackage } from '../../src/wallet/entities/token-package.entity'
 import { TokenPackageService } from '../../src/wallet/token-package.service'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
@@ -57,6 +59,7 @@ const WRITE_ENTITIES = [
   SubscriptionEvent,
   WebhookEvent,
   TokenPackage,
+  TokenGiftNotice,
 ]
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
 const DEFAULT_TAX = { taxName: 'IVA', taxRate: 0.19, isInclusive: true }
@@ -104,6 +107,17 @@ export async function startInstance(
 ): Promise<RaceInstance> {
   const dataSource = new DataSource({ ...raceConnectionOptions(), entities: WRITE_ENTITIES })
   await dataSource.initialize()
+  const hasNotices = await dataSource.query(
+    `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
+  )
+  if (!hasNotices.length) {
+    const runner = dataSource.createQueryRunner()
+    try {
+      await new AddTokenGiftNotices1794350000000().up(runner)
+    } finally {
+      await runner.release()
+    }
+  }
 
   const provideRepo = (entity: any, conn: string) => ({
     provide: getRepositoryToken(entity, conn),
@@ -190,6 +204,7 @@ export async function stopInstance(instance?: RaceInstance): Promise<void> {
 
 export async function cleanBrand(dataSource: DataSource, brandId: string): Promise<void> {
   for (const sql of [
+    'DELETE FROM token_gift_notices WHERE "brandId" = $1',
     'DELETE FROM audit_log WHERE "entityType" = \'payment\' AND "entityId" IN (SELECT id::text FROM payments WHERE "brandId" = $1)',
     'DELETE FROM audit_log WHERE "entityType" = \'wallet\' AND "entityId" IN (SELECT id::text FROM wallets WHERE "brandId" = $1)',
     'DELETE FROM subscription_events WHERE "subscriptionId" IN (SELECT id FROM subscriptions WHERE "brandId" = $1)',

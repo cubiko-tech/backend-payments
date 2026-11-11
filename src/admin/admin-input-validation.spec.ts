@@ -22,8 +22,10 @@ import { Transaction, TransactionType } from '../transaction/entities/transactio
 import { MovementAudit } from '../transaction/movement-audit'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { TokenWalletService } from '../wallet/token-wallet.service'
 import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
+import { MAX_MONEY_AMOUNT } from './dto/money-input'
 
 const VALID_UUID = '11111111-1111-4111-8111-111111111111'
 const BRAND_UUID = '22222222-2222-4222-8222-222222222222'
@@ -93,6 +95,9 @@ describe('AdminController, SubscriptionController & CreditController input valid
     getChecksByBrand: jest.fn().mockResolvedValue([]),
   }
   const platformClient = { canViewBrandCredit: jest.fn().mockResolvedValue(true) }
+  const tokenWallets = {
+    getOrCreate: jest.fn().mockResolvedValue({ id: VALID_UUID, brandId: BRAND_UUID }),
+  }
 
   beforeAll(async () => {
     // R17: Guard double injects a superAdmin principal to reach controller pipes directly.
@@ -126,6 +131,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
         { provide: EnterprisePricingService, useValue: enterprisePricingService },
         { provide: ClientPlatformService, useValue: platformClient },
         { provide: WalletService, useValue: walletService },
+        { provide: TokenWalletService, useValue: tokenWallets },
       ],
     })
       .overrideGuard(ApiAuthGuard)
@@ -149,17 +155,24 @@ describe('AdminController, SubscriptionController & CreditController input valid
     providerReadRepo.findOne.mockResolvedValue(null)
   })
 
-  it('rejects POST /admin/wallets with non-numeric balance "abc" with 400 and writes nothing', async () => {
+  it('rejects POST /admin/wallets with invalid brandId or balance shapes with 400 and writes nothing', async () => {
     // R15 (Mutation): Revert createWallet @Body() to inline type -> returns 500 and calls save.
-    const res = await request(app.getHttpServer()).post('/admin/wallets').send({
-      brandId: BRAND_UUID,
-      provider: 'dropi',
-      currency: 'COP',
-      balance: 'abc',
-    })
+    for (const invalidBody of [
+      { brandId: BRAND_UUID, provider: 'dropi', currency: 'COP', balance: 'abc' },
+      { brandId: BRAND_UUID, provider: 'dropi', currency: 'COP', balance: 1e-7 },
+      { brandId: BRAND_UUID, provider: 'dropi', currency: 'COP', balance: null },
+      { brandId: BRAND_UUID, provider: 'dropi', currency: 'COP', balance: MAX_MONEY_AMOUNT + 1 },
+      { brandId: 'x', provider: 'dropi', currency: 'COP', balance: 0 },
+      { brandId: 1e-7, provider: 'dropi', currency: 'COP', balance: 0 },
+      { brandId: null, provider: 'dropi', currency: 'COP', balance: 0 },
+      { brandId: 'a'.repeat(120), provider: 'dropi', currency: 'COP', balance: 0 },
+    ]) {
+      const res = await request(app.getHttpServer()).post('/admin/wallets').send(invalidBody)
+      expect(res.status).toBe(400)
+      expect(res.body.code).toBe('INVALID_REQUEST')
+    }
 
-    expect(res.status).toBe(400)
-    expect(res.body.code).toBe('INVALID_REQUEST')
+    expect(tokenWallets.getOrCreate).not.toHaveBeenCalled()
     expect(walletWriteRepo.save).not.toHaveBeenCalled()
     expect(auditService.log).not.toHaveBeenCalled()
   })
@@ -202,6 +215,7 @@ describe('AdminController, SubscriptionController & CreditController input valid
     })
 
     expect(res.status).toBe(201)
+    expect(tokenWallets.getOrCreate).toHaveBeenCalledWith(BRAND_UUID, USER_UUID)
     expect(walletWriteRepo.save).toHaveBeenCalledTimes(1)
     expect(auditService.log).toHaveBeenCalledWith(
       USER_UUID,

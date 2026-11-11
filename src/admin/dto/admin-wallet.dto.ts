@@ -6,18 +6,18 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  IsUUID,
   Length,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator'
 import { HasAtMostTwoDecimals, MAX_MONEY_AMOUNT, MONEY_INPUT } from './money-input'
 
 export class AdminCreateWalletDto {
-  @ApiProperty({ description: 'Brand ID', example: 'brand-123' })
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(100)
+  @ApiProperty({ description: 'Brand ID', example: '11111111-1111-4111-8111-111111111111' })
+  @IsUUID()
   brandId: string
 
   @ApiPropertyOptional({ description: 'User ID', example: 'user-123' })
@@ -46,9 +46,11 @@ export class AdminCreateWalletDto {
   label?: string
 
   @ApiPropertyOptional({ description: 'Initial wallet balance', example: 0 })
-  @IsOptional()
-  @IsNumber()
+  @ValidateIf((_, value) => value !== undefined)
+  @IsNumber(MONEY_INPUT)
+  @HasAtMostTwoDecimals()
   @Min(0)
+  @Max(MAX_MONEY_AMOUNT)
   balance?: number
 
   @ApiPropertyOptional({ description: 'Optional caller actor ignored in favor of session' })

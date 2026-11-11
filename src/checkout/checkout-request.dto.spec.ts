@@ -171,4 +171,56 @@ describe('POST /checkout body validation', () => {
     expect(res.body.code).toBe('INVALID_REQUEST')
     expect(processCheckout).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['exponential form 1e-7', { tokens: 1e-7 }],
+    ['a string', { tokens: '250' }],
+    ['null', { tokens: null }],
+    ['the column maximum 9_999_999_999_999.99', { tokens: 9_999_999_999_999.99 }],
+    ['missing tokens', {}],
+    [
+      'both tokens and packageId',
+      { tokens: 250, packageId: '3c1d5e7f-3333-4c2a-9f1a-66a0985a10e6' },
+    ],
+  ])(
+    'rejects a token_amount body with %s with 400 before calling the service',
+    async (_label, extra) => {
+      // R15 (Mutation): dropping isCheckoutTokenNumber lets invalid or combined fields reach the service.
+      const res = await post({
+        brandId: BRAND_ID,
+        purpose: 'token_amount',
+        provider: 'confio',
+        ...extra,
+      })
+
+      expect(res.status).toBe(400)
+      expect(res.body).toMatchObject({ statusCode: 400, code: 'INVALID_REQUEST' })
+      expect(processCheckout).not.toHaveBeenCalled()
+    },
+  )
+
+  it('forwards a valid token_amount body to the service', async () => {
+    // R15 (Mutation): omitting token_amount from PURPOSES rejects a valid token_amount body with 400.
+    const res = await post(
+      {
+        brandId: BRAND_ID,
+        purpose: 'token_amount',
+        provider: 'confio',
+        tokens: 250,
+        successUrl: 'https://ads.roax.ai/tokens/return',
+      },
+      { 'Idempotency-Key': 'idem-token-amount-1' },
+    )
+
+    expect(res.status).toBe(201)
+    expect(processCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brandId: BRAND_ID,
+        purpose: 'token_amount',
+        provider: 'confio',
+        tokens: 250,
+        idempotencyKey: 'idem-token-amount-1',
+      }),
+    )
+  })
 })
