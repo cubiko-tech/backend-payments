@@ -85,8 +85,8 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
     process.env = { ...envSnapshot }
   })
 
-  it('debits 8 of gift 4, purchased 6, Dropi 5 outside Dropi as gift 4 and purchased 4', async () => {
-    // R15: red when Dropi tokens count outside Dropi or purchased goes first: the split differs.
+  it('debits 8 of gift 4, purchased 6, Dropi 5 as gift 4 and purchased 4', async () => {
+    // R15: red when Dropi goes before purchased or purchased before gift: the split differs.
     const wallet = await seed(4, 6, 5)
 
     const res = await postDebit(debits, body(), member)
@@ -112,11 +112,11 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
     expect(movement.metadata).toMatchObject({ serviceClient: 'roax-ads', userId: DEBIT_MEMBER_ID })
   })
 
-  it('inside Dropi spends gift, then purchased, then Dropi tokens', async () => {
-    // R15: red when the route drops inDropi: 3 of gift 1 and Dropi 5 gets 422.
+  it('spends gift, then purchased, then Dropi tokens without inDropi', async () => {
+    // R15: red when Dropi tokens are spent only with inDropi again: 3 of gift 1 and Dropi 5 gets 422.
     const wallet = await seed(1, 0, 5)
 
-    const res = await postDebit(debits, body({ tokens: 3, inDropi: true }), member)
+    const res = await postDebit(debits, body({ tokens: 3 }), member)
 
     expect(res.status).toBe(HttpStatus.CREATED)
     expect(res.body.data.debit.tokenSplit).toEqual({ gift: 1, purchased: 0, dropi: 2 })
@@ -164,9 +164,9 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
     expect(await walletState(a.dataSource, wallet.id)).toMatchObject({ balance: 12 })
   })
 
-  it('refuses 3 of gift 1 and Dropi 5 outside Dropi with 422 and moves nothing', async () => {
-    // R15: red when Dropi tokens become spendable outside Dropi: it gets 201.
-    const wallet = await seed(1, 0, 5)
+  it('refuses 3 of gift 1 and Dropi 1 with 422 and moves nothing', async () => {
+    // R15: red when a shortfall is tolerated: the debit takes the 2 there are and gets 201.
+    const wallet = await seed(1, 0, 1)
 
     const res = await postDebit(debits, body({ tokens: 3 }), member)
 
@@ -174,10 +174,10 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
     expect(res.body.code).toBe('INSUFFICIENT_BALANCE')
     expect(await movementsOf(a.dataSource, wallet.id)).toHaveLength(0)
     expect(await walletState(a.dataSource, wallet.id)).toEqual({
-      balance: 6,
+      balance: 2,
       gift: 1,
       purchased: 0,
-      dropi: 5,
+      dropi: 1,
     })
   })
 

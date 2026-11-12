@@ -53,7 +53,7 @@ export class TokenDebitController {
   @RequireOnBehalfOfUser()
   @UpstreamTimeout(UPSTREAM_TIMEOUT_MS)
   @ApiOperation({ summary: 'ROAX Ads debits the brand token wallet for a user of the brand' })
-  @ApiResponse({ status: 201, description: 'Debited: gift, then purchased, then Dropi if inDropi' })
+  @ApiResponse({ status: 201, description: 'Debited: gift, then purchased, then Dropi' })
   @ApiResponse({ status: 200, description: 'Same key and tokens: the debit already made' })
   @ApiResponse({ status: 401, description: 'No user token' })
   @ApiResponse({
@@ -85,7 +85,7 @@ export class TokenDebitController {
     const movement = await this.tokenWallets.debitTokens(
       walletId,
       body.tokens,
-      { brandId, inDropi: body.inDropi === true },
+      { brandId },
       { referenceType: DEBIT_REFERENCE, metadata: { serviceClient: client, userId } },
       debitKeyOf(client, body.idempotencyKey),
       DEBIT_LIMITS,

@@ -111,7 +111,7 @@ export class DropiRechargeService {
     const quote = await this.trm.getUsdCopRate(RECHARGE_TRM_TIMEOUT_MS)
     const tax = await resolveRechargeTax(this.taxService, country, this.log)
     const rate = storedRate(quote.rate)
-    const amount = rechargePesos(tokens, rate, tax.taxRate)
+    const amount = rechargePesos(tokens, rate)
     const { subtotal, taxAmount } = breakDownTaxInclusiveAmount(amount, tax.taxRate)
 
     const wallet = await this.tokenWallets.getOrCreate(brandId, userId)

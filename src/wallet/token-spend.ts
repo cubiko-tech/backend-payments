@@ -6,18 +6,12 @@ export interface TokenBuckets {
 }
 
 /**
- * Decides how a token debit of `amount` cents is drawn from `buckets`: gift first, then
- * purchased, and Dropi tokens last and only when the debit happens inside Dropi.
- * Returns what to take from each origin, or `null` when the spendable origins do not cover it.
+ * Decides how a token debit of `amount` cents is drawn from `buckets`: gift first, then purchased,
+ * then Dropi tokens. Tokens bought with the Dropi balance are a ROAX purchase and are spent anywhere.
+ * Returns what to take from each origin, or `null` when all origins together do not cover it.
  */
-export function planTokenSpend(
-  buckets: TokenBuckets,
-  amount: number,
-  inDropi: boolean,
-): TokenBuckets | null {
-  const order: (keyof TokenBuckets)[] = inDropi
-    ? ['gift', 'purchased', 'dropi']
-    : ['gift', 'purchased']
+export function planTokenSpend(buckets: TokenBuckets, amount: number): TokenBuckets | null {
+  const order: (keyof TokenBuckets)[] = ['gift', 'purchased', 'dropi']
   const taken: TokenBuckets = { gift: 0, purchased: 0, dropi: 0 }
   let left = amount
   for (const origin of order) {

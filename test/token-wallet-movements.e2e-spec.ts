@@ -116,7 +116,7 @@ describe('Brand token wallet movements and member transaction redaction (Postgre
     await tokens.debitTokens(
       walletId,
       30,
-      { brandId: BRAND_A, inDropi: false },
+      { brandId: BRAND_A },
       {
         category: 'generation',
         description: 'Video generation',
