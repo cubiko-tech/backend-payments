@@ -11,6 +11,9 @@ import { WebhookRetryProcessor } from './webhook.processor'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
 import { PaymentModule } from '../payment/payment.module'
 import { ClientModule } from '../client/client.module'
+import { WalletModule } from '../wallet/wallet.module'
+import { AuditModule } from '../audit/audit.module'
+import { SubscriptionBonusService } from './subscription-bonus.service'
 
 @Module({
   imports: [
@@ -26,9 +29,16 @@ import { ClientModule } from '../client/client.module'
     // igual, declarativo, como ya hace `credit.module.ts:38`: el corte de acceso
     // en roles al primer cobro fallido es una dependencia real de este módulo.
     ClientModule,
+    WalletModule,
+    AuditModule,
   ],
   controllers: [WebhookController],
-  providers: [WebhookService, WebhookRetryProcessor, ConfioSubscriptionWebhookService],
+  providers: [
+    WebhookService,
+    WebhookRetryProcessor,
+    ConfioSubscriptionWebhookService,
+    SubscriptionBonusService,
+  ],
   // `ConfioSubscriptionWebhookService` se exporta porque la confirmación ACTIVA
   // (`SubscriptionService.confirm` y el barrido de repesca) aplica el MISMO efecto
   // que la notificación: la regla vive acá y no se duplica del otro lado. No hay

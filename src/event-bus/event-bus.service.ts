@@ -37,7 +37,10 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
       this.connected = true
       logger.log('info', `EventBus: conectado a Redis ${host}:${port}`)
     } catch (error) {
-      logger.log('warn', `EventBus: no se pudo conectar a Redis (${error.message}), eventos se perderán`)
+      logger.log(
+        'warn',
+        `EventBus: no se pudo conectar a Redis (${error.message}), eventos se perderán`,
+      )
       this.connected = false
     }
   }
@@ -85,11 +88,7 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
     })
   }
 
-  async publishPaymentFailed(data: {
-    brandId: string
-    paymentId: string
-    reason: string
-  }) {
+  async publishPaymentFailed(data: { brandId: string; paymentId: string; reason: string }) {
     return this.publish('events:payments', {
       type: 'payment.failed',
       ...data,
@@ -129,8 +128,8 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
   async publishNotification(data: {
     brandId: string
     userId?: string
-    type: string           // payment_success, payment_failed, subscription_expiring, etc.
-    channel?: string       // email, whatsapp, push, sms (backend-processes decide)
+    type: string // payment_success, payment_failed, subscription_expiring, etc.
+    channel?: string // email, whatsapp, push, sms (backend-processes decide)
     subject?: string
     metadata?: Record<string, string>
   }) {

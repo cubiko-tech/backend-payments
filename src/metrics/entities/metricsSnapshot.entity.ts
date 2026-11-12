@@ -1,10 +1,4 @@
-import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  Index,
-} from 'typeorm'
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 'typeorm'
 
 /**
  * Snapshots diarios de métricas para gráficas históricas.
@@ -20,7 +14,7 @@ export class MetricsSnapshot {
   date: string
 
   @Column({ nullable: false })
-  type: string                // "daily_summary", "mrr", "churn", "subscribers"
+  type: string // "daily_summary", "mrr", "churn", "subscribers"
 
   @Column({ type: 'jsonb', nullable: false })
   data: Record<string, any>

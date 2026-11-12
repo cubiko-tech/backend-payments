@@ -54,10 +54,7 @@ export class CreditRunService {
 
     const { error } = validateWholeMonths(periodStart, periodEnd, Date.now())
     if (error) {
-      throw new RequestException(
-        { error: error.message, code: error.code },
-        HttpStatus.BAD_REQUEST,
-      )
+      throw new RequestException({ error: error.message, code: error.code }, HttpStatus.BAD_REQUEST)
     }
 
     const active = await this.runReadRepo.findOne({
@@ -147,9 +144,9 @@ export class CreditRunService {
 
     // Reanudación: marcas ya puntuadas en este run (no recalcular ni duplicar).
     const done = new Set(
-      (
-        await this.scoreReadRepo.find({ where: { runId }, select: ['brandId'] })
-      ).map((s) => s.brandId),
+      (await this.scoreReadRepo.find({ where: { runId }, select: ['brandId'] })).map(
+        (s) => s.brandId,
+      ),
     )
 
     let page = 1
@@ -213,7 +210,11 @@ export class CreditRunService {
   async markFailed(runId: string): Promise<void> {
     const run = await this.runRepo.findOne({ where: { id: runId } })
     if (!run || run.status === ScoreRunStatus.COMPLETED) return
-    await this.computeAndSave(run, { errors: run.errors, status: ScoreRunStatus.FAILED, finished: true })
+    await this.computeAndSave(run, {
+      errors: run.errors,
+      status: ScoreRunStatus.FAILED,
+      finished: true,
+    })
   }
 
   /**

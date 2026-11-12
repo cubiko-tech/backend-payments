@@ -7,11 +7,7 @@ import { AuditService } from '../../audit/audit.service'
 import { CreditProfile } from '../entities/creditProfile.entity'
 import { BureauCheck } from '../entities/bureauCheck.entity'
 import { BureauBand } from '../domain/scale-config.types'
-import {
-  BUREAU_THRESHOLDS,
-  DEFAULT_BUREAU_VALID_DAYS,
-  mapBand,
-} from './bureau.config'
+import { BUREAU_THRESHOLDS, DEFAULT_BUREAU_VALID_DAYS, mapBand } from './bureau.config'
 
 export interface ActiveBand {
   band: BureauBand
@@ -76,7 +72,10 @@ export class BureauService {
     profile.consentSource = data.source
     const saved = await this.profileRepo.save(profile)
     await this.audit.log(
-      createdBy, 'credit.consent.grant', 'credit_profile', profile.id,
+      createdBy,
+      'credit.consent.grant',
+      'credit_profile',
+      profile.id,
       { brandId, version: data.version, source: data.source },
       'Consentimiento habeas data registrado',
     )
@@ -144,7 +143,10 @@ export class BureauService {
     )
 
     await this.audit.log(
-      createdBy, 'credit.bureau.create', 'credit_bureau_check', check.id,
+      createdBy,
+      'credit.bureau.create',
+      'credit_bureau_check',
+      check.id,
       { brandId, provider, band, rawScore: data.rawScore ?? null },
       `Check de buró ${provider} cargado: banda ${band}`,
     )

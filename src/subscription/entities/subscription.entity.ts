@@ -36,7 +36,13 @@ export enum SubscriptionStatus {
   EXPIRED = 'expired',
   PENDING = 'pending',
 }
-export enum SubscriptionProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago', WALLET = 'wallet', DROPI = 'dropi', CONFIO = 'confio' }
+export enum SubscriptionProvider {
+  STRIPE = 'stripe',
+  MERCADOPAGO = 'mercadopago',
+  WALLET = 'wallet',
+  DROPI = 'dropi',
+  CONFIO = 'confio',
+}
 
 /**
  * Ciclos YA CERRADOS, y el mismo conjunto que `ESTADOS_TERMINALES` en
@@ -61,7 +67,10 @@ export enum SubscriptionProvider { STRIPE = 'stripe', MERCADOPAGO = 'mercadopago
  * lado el caso «el primer cobro exitoso sobre una fila `pending` la activa y le
  * asigna el plan en roles» de `confio-subscription-webhook.service.spec.ts`.
  */
-export const TERMINAL_SUBSCRIPTION_STATUSES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
+export const TERMINAL_SUBSCRIPTION_STATUSES = [
+  SubscriptionStatus.CANCELLED,
+  SubscriptionStatus.EXPIRED,
+]
 
 /**
  * Estados en los que la marca tiene servicio VIGENTE: es el criterio POSITIVO de
@@ -99,7 +108,8 @@ export class Subscription extends Content {
   @Column() brandId: string
   @Column() userId: string
   @Column() planSlug: string
-  @Column({ type: 'enum', enum: SubscriptionStatus, default: SubscriptionStatus.TRIAL }) status: SubscriptionStatus
+  @Column({ type: 'enum', enum: SubscriptionStatus, default: SubscriptionStatus.TRIAL })
+  status: SubscriptionStatus
   @Column({ type: 'uuid', nullable: true }) walletId: string
   @Column({ type: 'enum', enum: SubscriptionProvider }) provider: SubscriptionProvider
   @Column({ nullable: true }) providerSubscriptionId: string

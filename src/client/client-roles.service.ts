@@ -1,3 +1,4 @@
+// R6: one responsibility, the HTTP client of backend-roles (plan catalog and plan moves) and its cache.
 import { Injectable, Logger } from '@nestjs/common'
 
 /**
@@ -46,9 +47,7 @@ const findUsdRow = (rows: PlanPriceRow[]): PlanPriceRow | undefined => {
   return usd.find((row) => row.isDefault) ?? usd[0]
 }
 
-export type PriceResolutionErrorCode =
-  | typeof PLAN_NOT_FOUND
-  | typeof PRICE_NOT_FOUND_FOR_COUNTRY
+export type PriceResolutionErrorCode = typeof PLAN_NOT_FOUND | typeof PRICE_NOT_FOUND_FOR_COUNTRY
 
 /**
  * Resultado discriminado por `ok`. Los `?: never` de la rama contraria están a
@@ -62,7 +61,18 @@ export type PriceResolution =
 
 interface PlanPricesCache {
   prices: Map<string, PlanPriceRow[]> // planSlug → filas de precio
+  tokensPerCycle: Map<string, number>
   fetchedAt: number
+}
+
+/** Oldest catalog the cycle bonus accepts when backend-roles does not answer; older, it throws. */
+export const BONUS_CATALOG_MAX_AGE_MS = 30 * 60 * 1000
+
+/** Tokens a plan gives per paid cycle: a positive safe integer, or 0 for anything else. */
+function tokensPerCycleOf(value: unknown): number {
+  if (typeof value !== 'number' && typeof value !== 'string') return 0
+  const tokens = Number(value)
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 0
 }
 
 @Injectable()
@@ -91,6 +101,10 @@ export class ClientRolesService {
     if (!planPrices) return null
     const price = planPrices.get(currency)
     return price !== undefined ? price : null
+  }
+
+  hasCachedPrices(): boolean {
+    return this.cache !== null
   }
 
   /**
@@ -184,15 +198,13 @@ export class ClientRolesService {
    */
   private async getPlanRows(): Promise<Map<string, PlanPriceRow[]>> {
     // Si hay caché válido, retornar
-    if (this.cache && (Date.now() - this.cache.fetchedAt) < this.CACHE_TTL_MS) {
+    if (this.cache && Date.now() - this.cache.fetchedAt < this.CACHE_TTL_MS) {
       return this.cache.prices
     }
 
     // Intentar refrescar desde backend-roles
     try {
-      const fresh = await this.fetchPlanPricesFromRoles()
-      this.cache = { prices: fresh, fetchedAt: Date.now() }
-      return fresh
+      return (await this.refreshCatalog()).prices
     } catch (error) {
       this.logger.warn(`Error al obtener precios de backend-roles: ${error.message}`)
 
@@ -209,9 +221,35 @@ export class ClientRolesService {
   }
 
   /**
-   * Consultar GET /v1/plan en backend-roles y extraer las filas de precio.
+   * Tokens the plan gives per paid cycle (`tokensPerCycle` in `GET /v1/plan`); 0 when the plan or
+   * the field is missing. Serves a stale catalog only up to `BONUS_CATALOG_MAX_AGE_MS`.
+   * @throws when backend-roles does not answer and no catalog that recent exists.
    */
-  private async fetchPlanPricesFromRoles(): Promise<Map<string, PlanPriceRow[]>> {
+  async getTokensPerCycle(planSlug: string): Promise<number> {
+    let catalog = this.cache
+    if (!catalog || Date.now() - catalog.fetchedAt >= this.CACHE_TTL_MS) {
+      try {
+        catalog = await this.refreshCatalog()
+      } catch (error) {
+        if (!catalog || Date.now() - catalog.fetchedAt >= BONUS_CATALOG_MAX_AGE_MS) {
+          throw new Error(`Plan catalog unavailable for the cycle bonus: ${error.message}`)
+        }
+        this.logger.warn(`Cycle bonus read from a stale plan catalog: ${error.message}`)
+      }
+    }
+    return catalog.tokensPerCycle.get(planSlug) ?? 0
+  }
+
+  private async refreshCatalog(): Promise<PlanPricesCache> {
+    const fresh = await this.fetchCatalogFromRoles()
+    this.cache = { ...fresh, fetchedAt: Date.now() }
+    return this.cache
+  }
+
+  /**
+   * Reads `GET /v1/plan` from backend-roles: the price rows and the tokens per cycle of each plan.
+   */
+  private async fetchCatalogFromRoles(): Promise<Omit<PlanPricesCache, 'fetchedAt'>> {
     if (!this.rolesUrl) {
       throw new Error('SERVICE_ROLES no configurado')
     }
@@ -232,8 +270,10 @@ export class ClientRolesService {
     const plans = body.data || body
 
     const pricesMap = new Map<string, PlanPriceRow[]>()
+    const tokensPerCycle = new Map<string, number>()
 
     for (const plan of Array.isArray(plans) ? plans : []) {
+      tokensPerCycle.set(plan.slug, tokensPerCycleOf(plan.tokensPerCycle))
       const rows: PlanPriceRow[] = []
 
       if (Array.isArray(plan.prices)) {
@@ -241,14 +281,16 @@ export class ClientRolesService {
           // Congelada: la fila se entrega por referencia desde el caché y una
           // mutación de un consumidor corrompería el precio para todos hasta que
           // expire el TTL.
-          rows.push(Object.freeze({
-            id: String(price.id),
-            countryCode: String(price.countryCode ?? ''),
-            // `price` viaja como string: `plan_prices.price` es decimal en backend-roles.
-            currency: String(price.currency),
-            price: Number(price.price),
-            isDefault: !!price.isDefault,
-          }))
+          rows.push(
+            Object.freeze({
+              id: String(price.id),
+              countryCode: String(price.countryCode ?? ''),
+              // `price` arrives as a string because `plan_prices.price` is decimal in backend-roles.
+              currency: String(price.currency),
+              price: Number(price.price),
+              isDefault: !!price.isDefault,
+            }),
+          )
         }
       }
 
@@ -256,7 +298,7 @@ export class ClientRolesService {
     }
 
     this.logger.log(`Precios actualizados desde backend-roles: ${pricesMap.size} planes`)
-    return pricesMap
+    return { prices: pricesMap, tokensPerCycle }
   }
 
   /**

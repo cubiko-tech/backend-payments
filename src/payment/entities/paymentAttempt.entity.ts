@@ -2,7 +2,11 @@ import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, ManyToOne, JoinColumn, Index } from 'typeorm'
 import { Payment } from './payment.entity'
 
-export enum AttemptStatus { SUCCESS = 'success', FAILED = 'failed', TIMEOUT = 'timeout' }
+export enum AttemptStatus {
+  SUCCESS = 'success',
+  FAILED = 'failed',
+  TIMEOUT = 'timeout',
+}
 
 @Entity('payment_attempts')
 @Index(['paymentId', 'attemptNumber'])

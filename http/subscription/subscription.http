@@ -144,16 +144,6 @@ Content-Type: application/json
   "planSlug": "dropi-roax"
 }
 
-### Cambiar plan de suscripción
-PATCH {{HOST}}/subscription/plan HTTP/1.1
-Authorization: Bearer {{ACCESS_TOKEN}}
-Content-Type: application/json
-
-{
-  "brandId": "{{BRAND_ID}}",
-  "newPlanSlug": "enterprise"
-}
-
 ### Cancelar suscripción
 # CAMBIO DE CONTRATO: para una fila de ConfioPagos esto CANCELA DE VERDAD allá
 # (`POST …/subscriptions/{sub}/cancel`) antes de tocar nada local, y `reason` pasó

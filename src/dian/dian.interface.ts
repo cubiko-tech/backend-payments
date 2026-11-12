@@ -67,13 +67,13 @@ export interface DianInvoiceData {
 
 export interface DianResponse {
   success: boolean
-  cufe: string              // Código Único de Factura Electrónica
-  qrCode?: string           // URL del QR code
-  xmlUrl?: string           // URL del XML firmado
-  pdfUrl?: string           // URL del PDF generado por el proveedor
-  trackingId?: string       // ID de seguimiento en la DIAN
+  cufe: string // Electronic invoice unique code (CUFE)
+  qrCode?: string // QR code URL
+  xmlUrl?: string // Signed XML URL
+  pdfUrl?: string // Provider-generated PDF URL
+  trackingId?: string // DIAN tracking ID
   status: 'accepted' | 'rejected' | 'pending'
-  dianMessage?: string      // Mensaje de la DIAN
+  dianMessage?: string // DIAN status message
   errors?: string[]
 }
 

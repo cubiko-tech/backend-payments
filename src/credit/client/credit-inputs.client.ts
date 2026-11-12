@@ -51,7 +51,7 @@ export class CreditInputsClient {
     const response = await fetch(`${this.baseUrl}/v1/metrics/credit-inputs/batch`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.accessServer}`,
+        'Authorization': `Bearer ${this.accessServer}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ brandIds, periodStart, periodEnd }),

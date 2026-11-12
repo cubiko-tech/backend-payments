@@ -217,16 +217,17 @@ export class SiigoProvider implements DianProvider {
         quantity: item.quantity,
         price: item.unitPrice,
         discount: 0,
-        taxes: item.taxRate > 0
-          ? [
-              {
-                id: this.getTaxId(item.taxRate),
-                name: 'IVA',
-                percentage: item.taxRate * 100,
-                value: item.taxAmount,
-              },
-            ]
-          : [],
+        taxes:
+          item.taxRate > 0
+            ? [
+                {
+                  id: this.getTaxId(item.taxRate),
+                  name: 'IVA',
+                  percentage: item.taxRate * 100,
+                  value: item.taxAmount,
+                },
+              ]
+            : [],
       })),
       payments: [
         {
@@ -262,16 +263,17 @@ export class SiigoProvider implements DianProvider {
         quantity: item.quantity,
         price: item.unitPrice,
         discount: 0,
-        taxes: item.taxRate > 0
-          ? [
-              {
-                id: this.getTaxId(item.taxRate),
-                name: 'IVA',
-                percentage: item.taxRate * 100,
-                value: item.taxAmount,
-              },
-            ]
-          : [],
+        taxes:
+          item.taxRate > 0
+            ? [
+                {
+                  id: this.getTaxId(item.taxRate),
+                  name: 'IVA',
+                  percentage: item.taxRate * 100,
+                  value: item.taxAmount,
+                },
+              ]
+            : [],
       })),
       payments: [
         {
@@ -304,9 +306,7 @@ export class SiigoProvider implements DianProvider {
           city_code: '11001',
         },
       },
-      phones: receiver.phone
-        ? [{ number: receiver.phone }]
-        : [],
+      phones: receiver.phone ? [{ number: receiver.phone }] : [],
       contacts: [
         {
           first_name: receiver.legalName,

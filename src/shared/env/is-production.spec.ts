@@ -1,20 +1,15 @@
+import * as fs from 'fs'
+import * as path from 'path'
 import { ConfioProvider } from '../../provider/confio/confio.provider'
 
 /**
- * «Es producción» se decidía en tres lugares con
- * `GO_ENV === 'production' || NODE_ENV === 'production'`, y **ninguna de esas
- * dos variables existe en la configuración de este servicio**: `.env.schema`
- * declara `ENV` como requerida, `.env-template` la fija y `entrypoint.sh`
- * ramifica sobre `$ENV`. O sea que el predicado daba `false` siempre, incluso
- * corriendo en producción.
+ * Production detection in `isProductionEnv` checks `ENV === 'production'`
+ * alongside legacy `GO_ENV` and `NODE_ENV` because `.env.schema`,
+ * `.env-template`, and `entrypoint.sh` only define `ENV`.
  *
- * El de `validateWebhookSignature` es el caro: sin token configurado devolvía
- * `true` —acepta cualquier firma— en el camino del dinero, latente sólo porque
- * el token está puesto.
- *
- * Los tres consumidores se prueban juntos a propósito: son un solo predicado y
- * lo que importa es que ninguno quede atrás, que es exactamente cómo nació el
- * bug (el helper existía, probado, y no lo llamaba nadie).
+ * `validateWebhookSignature` rejects missing `CONFIO_ACCESS_TOKEN` in every
+ * environment without consulting `isProductionEnv`, while `ConfioProvider`
+ * (`baseUrl`) and `logger` (console transport) branch on `isProductionEnv`.
  */
 describe('isProductionEnv — sus tres consumidores', () => {
   let env: NodeJS.ProcessEnv
@@ -35,9 +30,8 @@ describe('isProductionEnv — sus tres consumidores', () => {
   })
 
   describe('la firma del webhook no hace fail-open', () => {
-    // Mutación M1: sacar `env.ENV === 'production'` del predicado, o volver al
-    // `GO_ENV || NODE_ENV` de antes → rojo. Es el caso que la tarea existe para
-    // cerrar: aceptar cualquier firma en producción.
+    // Mutation M1: return true when `!this.accessToken` in validateWebhookSignature
+    // (failing open when no token is configured) turns this block red.
     it('con ENV=production y sin token, rechaza la firma', () => {
       process.env.ENV = 'production'
 
@@ -46,14 +40,12 @@ describe('isProductionEnv — sus tres consumidores', () => {
       expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(false)
     })
 
-    // Fuera de producción el comportamiento no cambia: sin token se sigue
-    // aceptando para no romper el desarrollo local.
-    it('con ENV=development y sin token, la acepta como hasta ahora', () => {
+    it('rejects the webhook signature in development when no token is configured', () => {
       process.env.ENV = 'development'
 
       const provider = new ConfioProvider()
 
-      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(true)
+      expect(provider.validateWebhookSignature(Buffer.from('{}'), 'firma-inventada')).toBe(false)
     })
 
     it.each(['GO_ENV', 'NODE_ENV'])(
@@ -120,6 +112,114 @@ describe('isProductionEnv — sus tres consumidores', () => {
       process.env.ENV = 'development'
 
       expect(tieneConsola(cargarLogger())).toBe(true)
+    })
+  })
+
+  describe('service risk documentation and contract comments (LOC-36)', () => {
+    const repoRoot = path.resolve(__dirname, '../../..')
+
+    it('keeps every docs/RIESGOS.md anchor pointing to existing symbols and no closed entry in the file', () => {
+      const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
+      const sections = risksDoc.split(/^## /m).slice(1)
+
+      for (const section of sections) {
+        const estadoParts = section.split('- **Estado**:')
+        expect(estadoParts.length).toBe(2)
+        const estadoText = estadoParts[1].trim()
+
+        // Mutation: restore a `cerrado` entry to docs/RIESGOS.md and this goes red (R33 deletes it).
+        expect(estadoText).not.toMatch(/^cerrad[oa]\b/i)
+
+        const dondeMatch = section.match(/- \*\*Dónde\*\*:\s*([\s\S]*?)(?=\n- \*\*|$)/)
+        expect(dondeMatch).not.toBeNull()
+        const dondeClauses = dondeMatch![1].split(';')
+
+        for (const clause of dondeClauses) {
+          let currentFile: string | null = null
+          const pendingSymbols: string[] = []
+          const fileSymbols = new Map<string, string[]>()
+          const tokenRegex = /`([^`]+)`/g
+          let tokenMatch: RegExpExecArray | null
+
+          while ((tokenMatch = tokenRegex.exec(clause)) !== null) {
+            const token = tokenMatch[1]
+            const fileAnchorMatch = token.match(/^(src\/[^:]+):(\d+)(?:-(\d+))?$/)
+            if (fileAnchorMatch) {
+              currentFile = fileAnchorMatch[1]
+              if (!fileSymbols.has(currentFile)) {
+                fileSymbols.set(currentFile, [])
+              }
+              if (pendingSymbols.length > 0) {
+                fileSymbols.get(currentFile)!.push(...pendingSymbols.splice(0))
+              }
+              continue
+            }
+            if (/^:\d+(?:-\d+)?$/.test(token)) {
+              continue
+            }
+            if (currentFile) {
+              fileSymbols.get(currentFile)!.push(token)
+            } else {
+              pendingSymbols.push(token)
+            }
+          }
+
+          expect(fileSymbols.size).toBeGreaterThan(0)
+          for (const [relativeFile, symbols] of fileSymbols.entries()) {
+            const filePath = path.join(repoRoot, relativeFile)
+            expect(fs.existsSync(filePath)).toBe(true)
+            const fileContent = fs.readFileSync(filePath, 'utf8')
+            for (const symbol of symbols) {
+              expect(fileContent).toContain(symbol)
+            }
+          }
+        }
+      }
+    })
+
+    const riskSection = (titleStart: string): string => {
+      const risksDoc = fs.readFileSync(path.join(repoRoot, 'docs/RIESGOS.md'), 'utf8')
+      return risksDoc.split(/^## /m).find((section) => section.startsWith(titleStart)) ?? ''
+    }
+
+    it('keeps the session brand claim risk open with its anchor in resolveBrandId', () => {
+      // Mutation: mark this entry `mitigado`, or drop `resolveBrandId` from its anchor, and this case goes red.
+      const section = riskSection('Con el claim `brand` del token')
+
+      expect(section).toMatch(/- \*\*Estado\*\*: abierto\b/)
+      expect(section).toMatch(
+        /- \*\*Dónde\*\*: `src\/subscription\/subscription\.controller\.ts:[^;]*`resolveBrandId`/,
+      )
+    })
+
+    it('keeps comments on isProductionEnv, WalletService.debit, and assertWalletCurrency aligned with the contract in English', () => {
+      const isProductionSource = fs.readFileSync(
+        path.join(repoRoot, 'src/shared/env/is-production.ts'),
+        'utf8',
+      )
+      expect(isProductionSource).not.toContain('confio.provider.ts:511')
+      expect(isProductionSource).not.toContain('NO lo toca')
+      expect(isProductionSource).toContain("configured as `'production'`")
+
+      const walletSource = fs.readFileSync(
+        path.join(repoRoot, 'src/wallet/wallet.service.ts'),
+        'utf8',
+      )
+      expect(walletSource).not.toContain('no tiene guarda propia')
+      expect(walletSource).not.toContain('el cron sigue llamando con 3 argumentos')
+      expect(walletSource).toContain(
+        'Atomically debits `amount` from `walletId` under a `pessimistic_write` row lock',
+      )
+
+      const checkoutSource = fs.readFileSync(
+        path.join(repoRoot, 'src/checkout/checkout.service.ts'),
+        'utf8',
+      )
+      expect(checkoutSource).not.toContain('Acotado a `plan_purchase`')
+      expect(checkoutSource).not.toContain('quedan fuera del alcance de esta tarea')
+      expect(checkoutSource).toContain(
+        'Validates that the wallet referenced by `req` can settle a checkout in `currency`',
+      )
     })
   })
 })

@@ -1,10 +1,12 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
-import { Payment, PaymentStatus } from './entities/payment.entity'
+import { Repository, DataSource, Not } from 'typeorm'
+import { Payment, PaymentProvider, PaymentStatus } from './entities/payment.entity'
 import { PaymentAttempt } from './entities/paymentAttempt.entity'
 import { WalletService } from '../wallet/wallet.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { Transaction } from '../transaction/entities/transaction.entity'
+import { lockPayment } from './payment-lock'
 
 @Injectable()
 export class PaymentService {
@@ -21,25 +23,6 @@ export class PaymentService {
     private readonly dataSource: DataSource,
     private readonly walletService: WalletService,
   ) {}
-
-  /**
-   * Crear un checkout de pago.
-   * Registra el pago en estado PENDING y genera la URL de checkout si aplica.
-   */
-  async createCheckout(data: Partial<Payment>) {
-    try {
-      const payment = this.paymentRepository.create({
-        ...data,
-        status: PaymentStatus.PENDING,
-      })
-      const saved = await this.paymentRepository.save(payment)
-      this.logger.log(`Checkout creado: ${saved.id} para marca ${saved.brandId}`)
-      return { data: saved }
-    } catch (error) {
-      this.logger.error(`Error al crear checkout: ${error.message}`)
-      return { error: error.message }
-    }
-  }
 
   /**
    * Obtener un pago por ID
@@ -64,7 +47,10 @@ export class PaymentService {
   /**
    * Listar pagos de una marca con paginación
    */
-  async getPaymentsByBrand(brandId: string, filters: { page?: number; limit?: number; status?: string } = {}) {
+  async getPaymentsByBrand(
+    brandId: string,
+    filters: { page?: number; limit?: number; status?: string } = {},
+  ) {
     try {
       const { page = 1, limit = 20, status } = filters
       const skip = (page - 1) * limit
@@ -93,8 +79,12 @@ export class PaymentService {
    * Cancelar un pago pendiente
    */
   async cancelPayment(id: string) {
+    const runner = this.dataSource.createQueryRunner()
+    await runner.connect()
+    await runner.startTransaction()
     try {
-      const payment = await this.paymentRepository.findOne({ where: { id } })
+      await lockPayment(runner, id)
+      const payment = await runner.manager.findOne(Payment, { where: { id } })
       if (!payment) {
         throw new RequestException(
           { code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' },
@@ -102,23 +92,37 @@ export class PaymentService {
         )
       }
 
-      if (payment.status !== PaymentStatus.PENDING) {
+      const debit = await runner.manager.findOne(Transaction, {
+        where: { idempotencyKey: `payment:${id}:debit` },
+      })
+      const failureReason = 'Cancelado por el usuario'
+      const cancelled = debit
+        ? null
+        : await runner.manager.update(
+            Payment,
+            // A recharge from Dropi may be charging at Dropi right now: only its result closes it.
+            { id, status: PaymentStatus.PENDING, provider: Not(PaymentProvider.DROPI_WALLET) },
+            { status: PaymentStatus.FAILED, failureReason },
+          )
+      if (!cancelled?.affected) {
         throw new RequestException(
           { code: 'PAYMENT_NOT_CANCELLABLE', message: 'Solo se pueden cancelar pagos pendientes' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
-
-      payment.status = PaymentStatus.FAILED
-      payment.failureReason = 'Cancelado por el usuario'
-      const saved = await this.paymentRepository.save(payment)
+      await runner.commitTransaction()
 
       this.logger.log(`Pago cancelado: ${id}`)
-      return { data: saved }
+      return { data: { ...payment, status: PaymentStatus.FAILED, failureReason } }
     } catch (error) {
+      if (runner.isTransactionActive) {
+        await runner.rollbackTransaction()
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error al cancelar pago ${id}: ${error.message}`)
       return { error: error.message }
+    } finally {
+      await runner.release()
     }
   }
 }

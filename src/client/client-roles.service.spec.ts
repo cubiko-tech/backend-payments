@@ -38,7 +38,18 @@ const mockPlans = (plans: unknown[]) =>
     json: async () => ({ data: plans }),
   })
 
-const dropiRoaxPlan = (prices: unknown[] = [priceRow(), priceRow({ id: 'price-2', countryCode: 'US', currency: 'USD', price: '6.99', isDefault: false })]) => ({
+const dropiRoaxPlan = (
+  prices: unknown[] = [
+    priceRow(),
+    priceRow({
+      id: 'price-2',
+      countryCode: 'US',
+      currency: 'USD',
+      price: '6.99',
+      isDefault: false,
+    }),
+  ],
+) => ({
   slug: 'dropi-roax',
   prices,
 })
@@ -139,7 +150,15 @@ describe('ClientRolesService', () => {
       global.fetch = mockPlans([
         {
           slug: 'dropi-roax',
-          prices: [priceRow({ id: 'p-co', countryCode: 'CO', currency: 'COP', price: '19900.00', isDefault: true })],
+          prices: [
+            priceRow({
+              id: 'p-co',
+              countryCode: 'CO',
+              currency: 'COP',
+              price: '19900.00',
+              isDefault: true,
+            }),
+          ],
         },
       ]) as unknown as typeof fetch
 
@@ -160,8 +179,20 @@ describe('ClientRolesService', () => {
         {
           slug: 'dropi-roax',
           prices: [
-            priceRow({ id: 'p-co', countryCode: 'CO', currency: 'COP', price: '19900.00', isDefault: true }),
-            priceRow({ id: 'p-us', countryCode: 'US', currency: 'USD', price: '6.99', isDefault: false }),
+            priceRow({
+              id: 'p-co',
+              countryCode: 'CO',
+              currency: 'COP',
+              price: '19900.00',
+              isDefault: true,
+            }),
+            priceRow({
+              id: 'p-us',
+              countryCode: 'US',
+              currency: 'USD',
+              price: '6.99',
+              isDefault: false,
+            }),
           ],
         },
       ]) as unknown as typeof fetch
@@ -183,8 +214,20 @@ describe('ClientRolesService', () => {
         {
           slug: 'dropi-roax',
           prices: [
-            priceRow({ id: 'p-usd-otra', countryCode: 'US', currency: 'USD', price: '29.99', isDefault: false }),
-            priceRow({ id: 'p-usd-default', countryCode: 'CO', currency: 'USD', price: '19.99', isDefault: true }),
+            priceRow({
+              id: 'p-usd-otra',
+              countryCode: 'US',
+              currency: 'USD',
+              price: '29.99',
+              isDefault: false,
+            }),
+            priceRow({
+              id: 'p-usd-default',
+              countryCode: 'CO',
+              currency: 'USD',
+              price: '19.99',
+              isDefault: true,
+            }),
           ],
         },
       ]) as unknown as typeof fetch
@@ -211,8 +254,20 @@ describe('ClientRolesService', () => {
      * que backend-roles las devuelva: ambas permutaciones tienen que dar la
      * fila `isDefault`.
      */
-    const noDefault = priceRow({ id: 'p-co-viejo', countryCode: 'CO', currency: 'COP', price: '9900.00', isDefault: false })
-    const withDefault = priceRow({ id: 'p-co-default', countryCode: 'CO', currency: 'COP', price: '19900.00', isDefault: true })
+    const noDefault = priceRow({
+      id: 'p-co-viejo',
+      countryCode: 'CO',
+      currency: 'COP',
+      price: '9900.00',
+      isDefault: false,
+    })
+    const withDefault = priceRow({
+      id: 'p-co-default',
+      countryCode: 'CO',
+      currency: 'COP',
+      price: '19900.00',
+      isDefault: true,
+    })
 
     it.each([
       ['default primero', [withDefault, noDefault]],
@@ -266,7 +321,11 @@ describe('ClientRolesService', () => {
 
       const fetchMock = jest
         .fn()
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [dropiRoaxPlan()] }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [dropiRoaxPlan()] }),
+        })
         .mockRejectedValue(new Error('ECONNREFUSED'))
       global.fetch = fetchMock as unknown as typeof fetch
 
@@ -282,7 +341,9 @@ describe('ClientRolesService', () => {
     })
 
     it('sin caché y con backend-roles caído devuelve mapa vacío y PLAN_NOT_FOUND', async () => {
-      global.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
+      global.fetch = jest
+        .fn()
+        .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
 
       const all = await service.getAllPlanPrices()
       expect(all.size).toBe(0)

@@ -1,9 +1,22 @@
 import { HttpStatus, Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { ConfioTrialService } from './confio-trial.service'
-import { ClientPlatformService, BRAND_LOOKUP_UNAVAILABLE, BRAND_NOT_FOUND, BRAND_WITHOUT_COUNTRY } from '../client/client-platform.service'
-import { ClientRolesService, PLAN_NOT_FOUND, PRICE_NOT_FOUND_FOR_COUNTRY } from '../client/client-roles.service'
-import { ClientAuthService, USER_LOOKUP_UNAVAILABLE, USER_NOT_FOUND } from '../client/client-auth.service'
+import {
+  ClientPlatformService,
+  BRAND_LOOKUP_UNAVAILABLE,
+  BRAND_NOT_FOUND,
+  BRAND_WITHOUT_COUNTRY,
+} from '../client/client-platform.service'
+import {
+  ClientRolesService,
+  PLAN_NOT_FOUND,
+  PRICE_NOT_FOUND_FOR_COUNTRY,
+} from '../client/client-roles.service'
+import {
+  ClientAuthService,
+  USER_LOOKUP_UNAVAILABLE,
+  USER_NOT_FOUND,
+} from '../client/client-auth.service'
 import { ConfioPlanService, CONFIO_PLAN_ARCHIVED } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioCancellationService } from './confio-cancellation.service'
@@ -45,12 +58,21 @@ describe('ConfioTrialService', () => {
   let confioCancellation: { cancel: jest.Mock }
 
   beforeEach(async () => {
-    clientPlatform = { resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }) }
-    clientRoles = { resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: PRICE_CO }) }
+    clientPlatform = {
+      resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
+    }
+    clientRoles = {
+      resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: PRICE_CO }),
+    }
     clientAuth = {
       resolveBuyerContact: jest.fn().mockResolvedValue({
         ok: true,
-        contact: { email: 'manuel@roaxai.com', name: 'Manuel', phone: '3215786325', callingCode: '57' },
+        contact: {
+          email: 'manuel@roaxai.com',
+          name: 'Manuel',
+          phone: '3215786325',
+          callingCode: '57',
+        },
       }),
     }
     confioPlans = { resolveConfioPlanName: jest.fn().mockResolvedValue(CONFIO_PLAN) }
@@ -76,7 +98,13 @@ describe('ConfioTrialService', () => {
   })
 
   const alta = (extra: Record<string, any> = {}) =>
-    service.createForTrial({ brandId: BRAND, userId: USER, planSlug: PLAN, conPrueba: true, ...extra })
+    service.createForTrial({
+      brandId: BRAND,
+      userId: USER,
+      planSlug: PLAN,
+      conPrueba: true,
+      ...extra,
+    })
 
   describe('RXDEV-13 — moneda apagada y rastro del alta', () => {
     /** El mapeo archivado es cómo se apaga una moneda sin borrar su configuración. */
@@ -122,7 +150,10 @@ describe('ConfioTrialService', () => {
      */
     it('un mapeo inexistente no dispara la caída a dólares', async () => {
       confioPlans.resolveConfioPlanName.mockRejectedValue(
-        new RequestException({ code: 'CONFIO_PLAN_NOT_MAPPED', message: 'sin mapeo' }, HttpStatus.UNPROCESSABLE_ENTITY),
+        new RequestException(
+          { code: 'CONFIO_PLAN_NOT_MAPPED', message: 'sin mapeo' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        ),
       )
 
       await expect(alta()).rejects.toMatchObject({ code: 'CONFIO_PLAN_NOT_MAPPED' })
@@ -153,7 +184,9 @@ describe('ConfioTrialService', () => {
 
       await alta()
 
-      const linea = log.mock.calls.map(([msg]) => String(msg)).find((msg) => msg.includes(CONFIO_PLAN_USD))
+      const linea = log.mock.calls
+        .map(([msg]) => String(msg))
+        .find((msg) => msg.includes(CONFIO_PLAN_USD))
       expect(linea).toBeDefined()
       expect(linea).toContain('USD')
     })
@@ -271,7 +304,10 @@ describe('ConfioTrialService', () => {
       // Mutación: seguir igual (try/catch alrededor del cancel) — se crea la nueva
       // dejando viva la vieja, que es EXACTAMENTE el escenario que esto evita.
       confioCancellation.cancel.mockRejectedValue(
-        new RequestException({ code: 'CONFIO_CANCEL_FAILED', message: 'x' }, HttpStatus.SERVICE_UNAVAILABLE),
+        new RequestException(
+          { code: 'CONFIO_CANCEL_FAILED', message: 'x' },
+          HttpStatus.SERVICE_UNAVAILABLE,
+        ),
       )
 
       await expect(alta({ reemplazaA: ANTERIOR })).rejects.toMatchObject({
@@ -303,7 +339,8 @@ describe('ConfioTrialService', () => {
 
     it('manda `redirectUri` con la URL configurada', async () => {
       // Mutación: no pasar el parámetro — el comprador se queda en ConfioPagos.
-      process.env.SUBSCRIPTION_RETURN_URL = 'https://app.dropi.co/dashboard/roax/reports/subscription'
+      process.env.SUBSCRIPTION_RETURN_URL =
+        'https://app.dropi.co/dashboard/roax/reports/subscription'
 
       await alta()
 
@@ -381,7 +418,10 @@ describe('ConfioTrialService', () => {
 
     it(`${PRICE_NOT_FOUND_FOR_COUNTRY} → 422 y SIN el país en el mensaje`, async () => {
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: true, country: 'AR' })
-      clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY })
+      clientRoles.resolvePriceForCountry.mockResolvedValue({
+        ok: false,
+        code: PRICE_NOT_FOUND_FOR_COUNTRY,
+      })
 
       const error = await alta().catch((e) => e)
 
@@ -392,7 +432,10 @@ describe('ConfioTrialService', () => {
 
     it('el rechazo de `ConfioPlanService` se propaga tal cual (CONFIO_PLAN_NOT_MAPPED 422)', async () => {
       confioPlans.resolveConfioPlanName.mockRejectedValue(
-        new RequestException({ code: 'CONFIO_PLAN_NOT_MAPPED', message: 'x' }, HttpStatus.UNPROCESSABLE_ENTITY),
+        new RequestException(
+          { code: 'CONFIO_PLAN_NOT_MAPPED', message: 'x' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        ),
       )
 
       const error = await alta().catch((e) => e)
@@ -463,7 +506,11 @@ describe('ConfioTrialService', () => {
       ['missing_buyer_or_plan', 'buyer'],
     ])('%s → 422 INVALID_BUYER con el `field` (culpa del llamador)', async (code, field) => {
       confio.createSubscription.mockRejectedValue(
-        new ConfioSubscriptionInputError(code as any, field, 'llegó "roto@" y se esperaba otra cosa'),
+        new ConfioSubscriptionInputError(
+          code as any,
+          field,
+          'llegó "roto@" y se esperaba otra cosa',
+        ),
       )
 
       const error = await alta().catch((e) => e)

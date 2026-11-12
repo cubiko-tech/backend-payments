@@ -108,7 +108,13 @@ export class LegalDocumentService {
   /**
    * Listar todos los documentos con filtros y paginación (admin).
    */
-  async findAll(filters: { status?: string; country?: string; documentType?: string; page?: number; perPage?: number }) {
+  async findAll(filters: {
+    status?: string
+    country?: string
+    documentType?: string
+    page?: number
+    perPage?: number
+  }) {
     const p = Math.max(1, filters.page || 1)
     const limit = Math.min(100, Math.max(1, filters.perPage || 20))
     const skip = (p - 1) * limit
@@ -132,7 +138,11 @@ export class LegalDocumentService {
       byStatus[d.status] = (byStatus[d.status] || 0) + 1
     }
 
-    return { data: documents, count: total, meta: { page: p, perPage: limit, total, totalPages: Math.ceil(total / limit), byStatus } }
+    return {
+      data: documents,
+      count: total,
+      meta: { page: p, perPage: limit, total, totalPages: Math.ceil(total / limit), byStatus },
+    }
   }
 
   /**

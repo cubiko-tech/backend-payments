@@ -3,11 +3,27 @@ import helmet from 'helmet'
 
 import { AppModule } from './app.module'
 import { NestFactory } from '@nestjs/core'
-import { ValidationPipe, RequestMethod } from '@nestjs/common'
+import { RequestMethod } from '@nestjs/common'
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger'
+import { isProductionEnv } from './shared/env/is-production'
 import { logger } from './shared/logger/logger'
+import { createGlobalValidationPipe } from './shared/validation/global-validation-pipe'
 
-async function bootstrap() {
+function requireStartupSecret(name: 'JWT_SECRET' | 'ACCESS_SERVER'): string {
+  const value = process.env[name]
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`)
+  }
+  if (value !== value.trim() || value === 'CHANGEME') {
+    throw new Error(`Invalid required environment variable: ${name}`)
+  }
+  return value
+}
+
+export async function bootstrap() {
+  const jwtSecret = requireStartupSecret('JWT_SECRET')
+  requireStartupSecret('ACCESS_SERVER')
+
   const app = await NestFactory.create(AppModule, {
     // NO `cors: true` acá: registraría un CORS por defecto con `origin:'*'` que
     // contesta el preflight OPTIONS antes del `app.enableCors` de abajo. Con
@@ -26,8 +42,8 @@ async function bootstrap() {
   })
 
   app.use(helmet())
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
-  app.use(cookieParser(process.env.JWT_SECRET || 'secret'))
+  app.useGlobalPipes(createGlobalValidationPipe())
+  app.use(cookieParser(jwtSecret))
 
   app.enableCors({
     origin: (origin, callback) => {
@@ -50,14 +66,17 @@ async function bootstrap() {
   })
 
   // Swagger
-  const config = new DocumentBuilder()
-    .setTitle('Backend Payments')
-    .setDescription('API de pagos, wallets y suscripciones')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build()
-  const document = SwaggerModule.createDocument(app, config)
-  SwaggerModule.setup('api', app, document)
+  const runtimeEnv = process.env.NODE_ENV?.trim() || process.env.ENV?.trim()
+  if (!isProductionEnv(process.env) && runtimeEnv === 'development') {
+    const config = new DocumentBuilder()
+      .setTitle('Backend Payments')
+      .setDescription('API de pagos, wallets y suscripciones')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build()
+    const document = SwaggerModule.createDocument(app, config)
+    SwaggerModule.setup('api', app, document)
+  }
 
   app.enableShutdownHooks()
   await app.listen(80)
@@ -65,4 +84,6 @@ async function bootstrap() {
   logger.log('info', 'backend-payments running on port 80')
 }
 
-bootstrap()
+if (require.main === module) {
+  void bootstrap()
+}

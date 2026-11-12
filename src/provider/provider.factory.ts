@@ -41,7 +41,10 @@ export class ProviderFactory implements OnModuleInit {
       this.register(provider)
     }
 
-    logger.log('info', `ProviderRegistry: ${this.registry.size} proveedores registrados: [${Array.from(this.registry.keys()).join(', ')}]`)
+    logger.log(
+      'info',
+      `ProviderRegistry: ${this.registry.size} proveedores registrados: [${Array.from(this.registry.keys()).join(', ')}]`,
+    )
   }
 
   /**
@@ -58,7 +61,9 @@ export class ProviderFactory implements OnModuleInit {
   getProvider(name: string): PaymentProvider {
     const provider = this.registry.get(name)
     if (!provider) {
-      throw new Error(`Payment provider '${name}' no registrado. Disponibles: [${Array.from(this.registry.keys()).join(', ')}]`)
+      throw new Error(
+        `Payment provider '${name}' no registrado. Disponibles: [${Array.from(this.registry.keys()).join(', ')}]`,
+      )
     }
     return provider
   }

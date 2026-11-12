@@ -29,6 +29,8 @@ import { EventBusModule } from './event-bus/event-bus.module'
 import { ClientModule } from './client/client.module'
 import { AuthModule } from './shared/auth/auth.module'
 import { CreditModule } from './credit/credit.module'
+import { RechargeModule } from './recharge/recharge.module'
+import { TrmWeeklyModule } from './trm/trm-weekly.module'
 
 @Module({
   imports: [
@@ -94,6 +96,8 @@ import { CreditModule } from './credit/credit.module'
     AdminModule,
     MetricsModule,
     CreditModule,
+    RechargeModule,
+    TrmWeeklyModule,
   ],
   providers: [
     {

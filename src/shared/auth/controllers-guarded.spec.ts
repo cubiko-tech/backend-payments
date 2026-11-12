@@ -1,7 +1,15 @@
 import { GUARDS_METADATA } from '@nestjs/common/constants'
 
 import { AdminController } from '../../admin/admin.controller'
+import { AdminTokenGiftController } from '../../admin/admin-token-gift.controller'
+import { AdminTokenPackageController } from '../../admin/admin-token-package.controller'
+import { AdminServiceCredentialController } from '../../admin/admin-service-credential.controller'
 import { ApiAuthGuard } from './api-auth.guard'
+import {
+  API_PERMISSION_KEY,
+  API_SESSION_ONLY_KEY,
+  API_SUPER_ADMIN_KEY,
+} from './require-permission.decorator'
 import { BillingProfileController } from '../../billing-profile/billing-profile.controller'
 import { CheckoutController } from '../../checkout/checkout.controller'
 import { DianController } from '../../dian/dian.controller'
@@ -12,6 +20,9 @@ import { PaymentMethodController } from '../../payment-method/payment-method.con
 import { RefundController } from '../../refund/refund.controller'
 import { SubscriptionController } from '../../subscription/subscription.controller'
 import { WalletController } from '../../wallet/wallet.controller'
+import { TokenWalletController } from '../../wallet/token-wallet.controller'
+import { TokenDebitController } from '../../wallet/token-debit.controller'
+import { TokenPackageController } from '../../wallet/token-package.controller'
 import { WebhookController } from '../../webhook/webhook.controller'
 
 /**
@@ -44,6 +55,9 @@ import { WebhookController } from '../../webhook/webhook.controller'
  */
 const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = [
   ['admin', AdminController],
+  ['admin/token-wallets', AdminTokenGiftController],
+  ['admin/token-packages', AdminTokenPackageController],
+  ['admin/service-credentials', AdminServiceCredentialController],
   ['billing-profile', BillingProfileController],
   ['dian', DianController],
   ['invoice', InvoiceController],
@@ -52,6 +66,9 @@ const CONTROLLERS: ReadonlyArray<[string, new (...args: never[]) => unknown]> = 
   ['payment-method', PaymentMethodController],
   ['refund', RefundController],
   ['wallet', WalletController],
+  ['token-wallet', TokenWalletController],
+  ['token-wallet/debits', TokenDebitController],
+  ['token-packages', TokenPackageController],
   // Los dos que ya estaban cerrados: siguen acá para que nadie los reabra.
   ['checkout', CheckoutController],
   ['subscription', SubscriptionController],
@@ -105,4 +122,138 @@ describe('webhook: el guard va por handler, no en la clase', () => {
   it('WebhookController no declara guard a nivel de clase', () => {
     expect(Reflect.getMetadata(GUARDS_METADATA, WebhookController) ?? []).toEqual([])
   })
+})
+
+describe('admin and metrics controllers require superadmin operator', () => {
+  it.each([
+    ['admin', AdminController],
+    ['admin/token-wallets', AdminTokenGiftController],
+    ['admin/token-packages', AdminTokenPackageController],
+    ['metrics', MetricsController],
+  ])('%s declares @RequireSuperAdmin at class level', (_name, controller) => {
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, controller)).toBe(true)
+  })
+
+  it.each(['activationRequests', 'updateActivationRequest'] as const)(
+    'AdminController.%s declares @RequirePermission("credit:runs")',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(AdminController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_PERMISSION_KEY, handler as object)).toBe('credit:runs')
+    },
+  )
+
+  it.each(['getAllDocuments', 'getPendingDocuments', 'verifyDocument', 'rejectDocument'] as const)(
+    'BillingProfileController.%s declares @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(BillingProfileController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it.each([
+    'get',
+    'create',
+    'update',
+    'getRequirements',
+    'getDocuments',
+    'uploadDocument',
+  ] as const)(
+    'BillingProfileController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(BillingProfileController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
+
+  it.each(WEBHOOK_ADMIN)('WebhookController.%s declares @RequireSuperAdmin()', (handlerName) => {
+    const handler: unknown = Reflect.get(WebhookController.prototype, handlerName)
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
+
+  it.each(WEBHOOK_PROVEEDOR)(
+    'WebhookController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(WebhookController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
+
+  it.each([
+    'create',
+    'listEnterprisePricing',
+    'upsertEnterprisePricing',
+    'removeEnterprisePricing',
+  ] as const)('SubscriptionController.%s declares @RequireSuperAdmin()', (handlerName) => {
+    const handler: unknown = Reflect.get(SubscriptionController.prototype, handlerName)
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
+
+  it.each([
+    'getEnterprisePricing',
+    'getCurrent',
+    'getAcceptanceLink',
+    'startTrial',
+    'startPaid',
+    'cancel',
+    'reactivate',
+    'confirm',
+    'getHistory',
+  ] as const)('SubscriptionController.%s does not declare @RequireSuperAdmin()', (handlerName) => {
+    const handler: unknown = Reflect.get(SubscriptionController.prototype, handlerName)
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+  })
+
+  it('RefundController.approve declares @RequireSuperAdmin()', () => {
+    const handler: unknown = Reflect.get(RefundController.prototype, 'approve')
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+  })
+
+  it.each(['request', 'findByBrand', 'findById'] as const)(
+    'RefundController.%s does not declare @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(RefundController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+    },
+  )
+
+  it.each(['sendInvoice', 'checkStatus'] as const)(
+    'DianController.%s declares @RequireSuperAdmin()',
+    (handlerName) => {
+      const handler: unknown = Reflect.get(DianController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it('DianController.isConfigured does not declare @RequireSuperAdmin()', () => {
+    const handler: unknown = Reflect.get(DianController.prototype, 'isConfigured')
+    expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+  })
+
+  it.each(['freeze', 'unfreeze', 'close'] as const)(
+    'WalletController.%s declares @RequireSuperAdmin() and @RequireSessionUser()',
+    (handlerName) => {
+      // R15: red when @RequireSuperAdmin() or @RequireSessionUser() is removed from the handler.
+      const handler: unknown = Reflect.get(WalletController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBe(true)
+      expect(Reflect.getMetadata(API_SESSION_ONLY_KEY, handler as object)).toBe(true)
+    },
+  )
+
+  it.each([
+    'findByBrand',
+    'getGlobalBalance',
+    'findById',
+    'create',
+    'getTransactions',
+    'getBalance',
+    'transfer',
+  ] as const)(
+    'WalletController.%s does not declare @RequireSuperAdmin() or @RequireSessionUser()',
+    (handlerName) => {
+      // R15: red when @RequireSuperAdmin() or @RequireSessionUser() is added to a brand-scoped wallet handler.
+      const handler: unknown = Reflect.get(WalletController.prototype, handlerName)
+      expect(Reflect.getMetadata(API_SUPER_ADMIN_KEY, handler as object)).toBeUndefined()
+      expect(Reflect.getMetadata(API_SESSION_ONLY_KEY, handler as object)).toBeUndefined()
+    },
+  )
 })

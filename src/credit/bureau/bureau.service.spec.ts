@@ -32,9 +32,16 @@ describe('BureauService', () => {
 
   beforeEach(async () => {
     profileRead = { findOne: jest.fn() }
-    profileWrite = { findOne: jest.fn(), create: jest.fn((d) => d), save: jest.fn((d) => Promise.resolve({ id: 'p1', ...d })) }
+    profileWrite = {
+      findOne: jest.fn(),
+      create: jest.fn((d) => d),
+      save: jest.fn((d) => Promise.resolve({ id: 'p1', ...d })),
+    }
     checkRead = { findOne: jest.fn(), find: jest.fn() }
-    checkWrite = { create: jest.fn((d) => d), save: jest.fn((d) => Promise.resolve({ id: 'c1', ...d })) }
+    checkWrite = {
+      create: jest.fn((d) => d),
+      save: jest.fn((d) => Promise.resolve({ id: 'c1', ...d })),
+    }
     audit = { log: jest.fn().mockResolvedValue({}) }
 
     const module: TestingModule = await Test.createTestingModule({
@@ -51,17 +58,26 @@ describe('BureauService', () => {
     service = module.get(BureauService)
   })
 
-  const withConsent = { brandId: 'b1', document: '900', documentType: 'NIT', consentGrantedAt: new Date() }
+  const withConsent = {
+    brandId: 'b1',
+    document: '900',
+    documentType: 'NIT',
+    consentGrantedAt: new Date(),
+  }
 
   describe('createManualCheck', () => {
     it('rechaza si el perfil no tiene documento (400)', async () => {
       profileRead.findOne.mockResolvedValue(null)
-      await expect(service.createManualCheck('b1', { rawScore: 700 }, 'op')).rejects.toMatchObject({ status: 400 })
+      await expect(service.createManualCheck('b1', { rawScore: 700 }, 'op')).rejects.toMatchObject({
+        status: 400,
+      })
     })
 
     it('rechaza sin consentimiento vigente (403)', async () => {
       profileRead.findOne.mockResolvedValue({ ...withConsent, consentGrantedAt: null })
-      await expect(service.createManualCheck('b1', { rawScore: 700 }, 'op')).rejects.toMatchObject({ status: 403 })
+      await expect(service.createManualCheck('b1', { rawScore: 700 }, 'op')).rejects.toMatchObject({
+        status: 403,
+      })
     })
 
     it('mapea rawScore a banda, guarda y audita', async () => {
@@ -71,8 +87,12 @@ describe('BureauService', () => {
       expect(check.document).toBe('900')
       expect(check.validUntil).toBeInstanceOf(Date)
       expect(audit.log).toHaveBeenCalledWith(
-        'op', 'credit.bureau.create', 'credit_bureau_check', 'c1',
-        expect.objectContaining({ band: 'veto' }), expect.any(String),
+        'op',
+        'credit.bureau.create',
+        'credit_bureau_check',
+        'c1',
+        expect.objectContaining({ band: 'veto' }),
+        expect.any(String),
       )
     })
 
@@ -119,7 +139,9 @@ describe('BureauService', () => {
 
     it('rechaza si no hay perfil (400)', async () => {
       profileWrite.findOne.mockResolvedValue(null)
-      await expect(service.grantConsent('b1', { version: 'v1', source: 'admin' }, 'op')).rejects.toMatchObject({ status: 400 })
+      await expect(
+        service.grantConsent('b1', { version: 'v1', source: 'admin' }, 'op'),
+      ).rejects.toMatchObject({ status: 400 })
     })
   })
 })

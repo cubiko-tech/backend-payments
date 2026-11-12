@@ -61,7 +61,8 @@ export class MetricsService {
    * Ingresos por período.
    */
   async getRevenue(days = 30) {
-    const result = await this.readDataSource.query(`
+    const result = await this.readDataSource.query(
+      `
       SELECT
         DATE_TRUNC('day', "paidAt") as date,
         p.provider,
@@ -70,10 +71,12 @@ export class MetricsService {
         SUM(p.amount) as total
       FROM payments p
       WHERE p.status = 'completed'
-        AND p."paidAt" >= NOW() - INTERVAL '${days} days'
+        AND p."paidAt" >= NOW() - make_interval(days => $1)
       GROUP BY date, p.provider, p.purpose
       ORDER BY date DESC
-    `)
+    `,
+      [days],
+    )
 
     const totalRevenue = result.reduce((sum: number, r: any) => sum + Number(r.total || 0), 0)
 
@@ -84,16 +87,19 @@ export class MetricsService {
    * Churn rate — tasa de cancelación/expiración por mes.
    */
   async getChurn(months = 6) {
-    const result = await this.readDataSource.query(`
+    const result = await this.readDataSource.query(
+      `
       SELECT
         DATE_TRUNC('month', se."createdAt") as month,
         COUNT(*) FILTER (WHERE se."eventType" IN ('cancelled', 'expired')) as churned,
         COUNT(*) FILTER (WHERE se."eventType" = 'created') as new_subs
       FROM subscription_events se
-      WHERE se."createdAt" >= NOW() - INTERVAL '${months} months'
+      WHERE se."createdAt" >= NOW() - make_interval(months => $1)
       GROUP BY month
       ORDER BY month DESC
-    `)
+    `,
+      [months],
+    )
 
     return { data: { months, monthly: result } }
   }
@@ -134,7 +140,8 @@ export class MetricsService {
    * ARPU — Average Revenue Per User.
    */
   async getARPU(days = 30) {
-    const result = await this.readDataSource.query(`
+    const result = await this.readDataSource.query(
+      `
       SELECT
         COUNT(DISTINCT p."brandId") as paying_brands,
         SUM(p.amount) as total_revenue,
@@ -145,8 +152,10 @@ export class MetricsService {
         END as arpu
       FROM payments p
       WHERE p.status = 'completed'
-        AND p."paidAt" >= NOW() - INTERVAL '${days} days'
-    `)
+        AND p."paidAt" >= NOW() - make_interval(days => $1)
+    `,
+      [days],
+    )
 
     return { data: { days, ...result[0] } }
   }
@@ -215,13 +224,14 @@ export class MetricsService {
    * Retención por cohorte mensual.
    */
   async getRetention(months = 6) {
-    const result = await this.readDataSource.query(`
+    const result = await this.readDataSource.query(
+      `
       WITH cohorts AS (
         SELECT
           "brandId",
           DATE_TRUNC('month', "createdAt") as cohort_month
         FROM subscriptions
-        WHERE "createdAt" >= NOW() - INTERVAL '${months} months'
+        WHERE "createdAt" >= NOW() - make_interval(months => $1)
       ),
       activity AS (
         SELECT
@@ -230,7 +240,7 @@ export class MetricsService {
         FROM subscription_events se
         JOIN subscriptions s ON s.id = se."subscriptionId"
         WHERE se."eventType" NOT IN ('cancelled', 'expired')
-          AND se."createdAt" >= NOW() - INTERVAL '${months} months'
+          AND se."createdAt" >= NOW() - make_interval(months => $1)
       )
       SELECT
         c.cohort_month,
@@ -240,7 +250,9 @@ export class MetricsService {
       LEFT JOIN activity a ON a."brandId" = c."brandId"
       GROUP BY c.cohort_month, a.activity_month
       ORDER BY c.cohort_month, a.activity_month
-    `)
+    `,
+      [months],
+    )
 
     return { data: { months, cohorts: result } }
   }

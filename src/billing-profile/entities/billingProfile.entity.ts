@@ -1,8 +1,20 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-export enum TaxIdType { NIT = 'NIT', CC = 'CC', CE = 'CE', RFC = 'RFC', RUC = 'RUC', PASSPORT = 'PASSPORT' }
-export enum TaxRegime { RESPONSABLE_IVA = 'responsable_iva', NO_RESPONSABLE = 'no_responsable', GRAN_CONTRIBUYENTE = 'gran_contribuyente', SIMPLIFICADO = 'simplificado' }
+export enum TaxIdType {
+  NIT = 'NIT',
+  CC = 'CC',
+  CE = 'CE',
+  RFC = 'RFC',
+  RUC = 'RUC',
+  PASSPORT = 'PASSPORT',
+}
+export enum TaxRegime {
+  RESPONSABLE_IVA = 'responsable_iva',
+  NO_RESPONSABLE = 'no_responsable',
+  GRAN_CONTRIBUYENTE = 'gran_contribuyente',
+  SIMPLIFICADO = 'simplificado',
+}
 
 @Entity('billing_profiles')
 @Index(['brandId'], { unique: true })

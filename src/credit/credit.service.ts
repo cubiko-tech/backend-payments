@@ -24,11 +24,7 @@ import {
 } from './credit.types'
 import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
 import { UpdateActivationRequestDto } from './dto/update-activation-request.dto'
-import {
-  firstCompleteMonthStart,
-  monthIndexOfYmd,
-  validateWholeMonths,
-} from './period.util'
+import { firstCompleteMonthStart, monthIndexOfYmd, validateWholeMonths } from './period.util'
 
 /**
  * Una marca no puede tener dos solicitudes "abiertas" a la vez: mientras esté en
@@ -187,9 +183,16 @@ export class CreditService {
     })
     if (!score) {
       return {
-        brandId, status: 'no_data', tier: null, amount: null,
-        weeklyQuota: null, commission: null, currency: 'COP', updatedAt: null,
-        score: null, activationRequest: null,
+        brandId,
+        status: 'no_data',
+        tier: null,
+        amount: null,
+        weeklyQuota: null,
+        commission: null,
+        currency: 'COP',
+        updatedAt: null,
+        score: null,
+        activationRequest: null,
       }
     }
 
@@ -405,7 +408,9 @@ export class CreditService {
         { k: 'roas', v: subscores.roas },
         { k: 'sales', v: subscores.sales },
       ] as const
-    ).slice().sort((a, b) => a.v - b.v)[0].k
+    )
+      .slice()
+      .sort((a, b) => a.v - b.v)[0].k
     return {
       tier: next.key,
       tierName: next.name,
@@ -480,12 +485,10 @@ export class CreditService {
         periodAdjusted = true
       }
     }
-    const effectiveMonths =
-      monthIndexOfYmd(ctx.periodEnd) - monthIndexOfYmd(effectiveStart)
+    const effectiveMonths = monthIndexOfYmd(ctx.periodEnd) - monthIndexOfYmd(effectiveStart)
 
     const fxRate = sameCurrency ? 1 : rate
-    const convert = (raw: number): number | null =>
-      fxRate === null ? null : raw * fxRate
+    const convert = (raw: number): number | null => (fxRate === null ? null : raw * fxRate)
     const monetary = (raw: number): MonetaryInput => ({
       raw,
       currency: inputs.currency,

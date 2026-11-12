@@ -4,18 +4,10 @@ import { BureauBand } from './domain/scale-config.types'
  * Estado del cálculo (eje 1). Superconjunto del `ScoreStatus` del motor puro:
  * añade los estados que decide el service (fx, cobertura). Ver §5 del diseño.
  */
-export type SnapshotScoreStatus =
-  | 'scored'
-  | 'vetoed_roas'
-  | 'insufficient_data'
-  | 'fx_unavailable'
+export type SnapshotScoreStatus = 'scored' | 'vetoed_roas' | 'insufficient_data' | 'fx_unavailable'
 
 /** Gate de buró sobre el resultado (eje 2). Ver §5 del diseño. */
-export type EligibilityStatus =
-  | 'eligible'
-  | 'vetoed_bureau'
-  | 'bureau_pending'
-  | 'not_applicable'
+export type EligibilityStatus = 'eligible' | 'vetoed_bureau' | 'bureau_pending' | 'not_applicable'
 
 /** Un insumo monetario con su crudo, moneda, fx y convertido a base. */
 export interface MonetaryInput {

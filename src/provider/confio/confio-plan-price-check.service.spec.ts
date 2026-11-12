@@ -18,7 +18,8 @@ jest.mock('../../shared/logger/logger', () => ({
 const loggerLog = logger.log as unknown as jest.Mock
 
 /** Los mensajes de nivel `error` emitidos, que es por donde se reporta la divergencia. */
-const errores = () => loggerLog.mock.calls.filter(([nivel]) => nivel === 'error').map(([, msg]) => msg)
+const errores = () =>
+  loggerLog.mock.calls.filter(([nivel]) => nivel === 'error').map(([, msg]) => msg)
 
 /**
  * Fila sembrada, con los montos REALES de las migraciones `1787670464952` y
@@ -63,8 +64,10 @@ describe('ConfioPlanPriceCheckService', () => {
     // Toda la salida hacia ConfioPagos del servicio pasa por `fetch`
     // (`confio.provider.ts:114`), así que espiarlo cubre cualquier alta,
     // actualización o borrado que alguien le agregue al chequeo.
-    fetchSpy = jest.spyOn(global, 'fetch' as never).mockImplementation((() =>
-      Promise.reject(new Error('el chequeo de precios no debe salir a la red'))) as never)
+    fetchSpy = jest
+      .spyOn(global, 'fetch' as never)
+      .mockImplementation((() =>
+        Promise.reject(new Error('el chequeo de precios no debe salir a la red'))) as never)
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -150,8 +153,16 @@ describe('ConfioPlanPriceCheckService', () => {
    */
   it('[R15] compara las dos variantes withTrial de una moneda contra el mismo precio', async () => {
     planes.findAllMappings.mockResolvedValue([
-      row({ id: 'cop-con', withTrial: true, confioName: 'stores/01STORE/subscription-plans/01CONPRUEBA' }),
-      row({ id: 'cop-sin', withTrial: false, confioName: 'stores/01STORE/subscription-plans/01SINPRUEBA' }),
+      row({
+        id: 'cop-con',
+        withTrial: true,
+        confioName: 'stores/01STORE/subscription-plans/01CONPRUEBA',
+      }),
+      row({
+        id: 'cop-sin',
+        withTrial: false,
+        confioName: 'stores/01STORE/subscription-plans/01SINPRUEBA',
+      }),
     ])
     clientRoles.getPlanPrice.mockResolvedValue(24900)
 
@@ -258,7 +269,10 @@ describe('ConfioPlanPriceCheckService', () => {
 
   /** [agregado] El cierre deja el conteo de la pasada, aunque no haya divergencias. */
   it('[agregado] cierra la pasada con el conteo en nivel info', async () => {
-    planes.findAllMappings.mockResolvedValue([row(), row({ id: 'x', status: 'pending', confioName: null })])
+    planes.findAllMappings.mockResolvedValue([
+      row(),
+      row({ id: 'x', status: 'pending', confioName: null }),
+    ])
     clientRoles.getPlanPrice.mockResolvedValue(19900)
 
     await service.verificarPreciosContraElCatalogo()
@@ -358,7 +372,8 @@ describe('el chequeo no altera el alta: nadie del camino de alta lo recibe', () 
    * en el alta; mientras no esté, no hay forma de pedirlo desde allá.
    */
   it('[R15] PaymentModule no lo exporta: fuera del módulo nadie lo puede inyectar', () => {
-    const exportados = (Reflect.getMetadata(MODULE_METADATA.EXPORTS, PaymentModule) ?? []) as unknown[]
+    const exportados = (Reflect.getMetadata(MODULE_METADATA.EXPORTS, PaymentModule) ??
+      []) as unknown[]
 
     expect(exportados).not.toContain(ConfioPlanPriceCheckService)
     // Y sigue siendo provider, para que este caso no pase por la razón equivocada

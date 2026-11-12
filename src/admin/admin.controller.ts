@@ -1,3 +1,4 @@
+// R6: One responsibility, the single /admin HTTP surface; splitting it by domain is its own task.
 import {
   Controller,
   Get,
@@ -10,46 +11,49 @@ import {
   UseGuards,
   ParseUUIDPipe,
   BadRequestException,
+  HttpStatus,
+  Optional,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository, MoreThan, In, Between } from 'typeorm'
 import { Subscription, SubscriptionStatus } from '../subscription/entities/subscription.entity'
-import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider, PaymentStatus } from '../payment/entities/payment.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
 import { ProviderConfig } from '../provider/entities/providerConfig.entity'
-import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
+import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
+import { MovementAudit } from '../transaction/movement-audit'
 import { AuditService } from '../audit/audit.service'
+import {
+  claimFailedPaymentForRetry,
+  WalletCheckoutLostError,
+} from '../checkout/wallet-payment-close'
 import { CreditService } from '../credit/credit.service'
 import {
   CREDIT_ACTIVATION_REQUEST_STATUSES,
   CreditActivationRequestStatus,
 } from '../credit/credit.types'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequirePermission } from '../shared/auth/require-permission.decorator'
+import {
+  RequirePermission,
+  RequireSessionUser,
+  RequireSuperAdmin,
+} from '../shared/auth/require-permission.decorator'
+import { RequestException } from '../shared/exception/request.exception'
+import { assertNotTokenCurrency, isTokenCurrency } from '../wallet/token-origin'
+import { TokenWalletService } from '../wallet/token-wallet.service'
+import { WalletService } from '../wallet/wallet.service'
 import { UpdateActivationRequestDto } from '../credit/dto/update-activation-request.dto'
+import { adminIdempotencyKey } from './admin-idempotency-key'
+import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
+import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
+import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
 
-/**
- * Controller admin centralizado para backend-payments.
- *
- * Agrupa endpoints de gestión para el panel administrativo:
- * - Dashboard de suscripciones (expiring, past-due, summary)
- * - Gestión de cobros (pending, failed, retry)
- * - Resumen de wallets (totales, inconsistencias)
- * - Audit log
- */
 @ApiTags('Admin')
 @Controller('admin')
-/**
- * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
- * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
- * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
- * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
- * `@RequirePermission` por handler, así que esto no le agrega requisitos a
- * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
- */
 @UseGuards(ApiAuthGuard)
+@RequireSuperAdmin()
 export class AdminController {
   constructor(
     @InjectRepository(Subscription, 'DBRead')
@@ -74,11 +78,9 @@ export class AdminController {
     private readonly transactionWriteRepo: Repository<Transaction>,
     private readonly auditService: AuditService,
     private readonly creditService: CreditService,
+    private readonly walletService: WalletService,
+    @Optional() private readonly tokenWallets?: TokenWalletService,
   ) {}
-
-  // ============================================
-  // Suscripciones
-  // ============================================
 
   @Get('subscriptions')
   @ApiOperation({ summary: 'Listado paginado de suscripciones con filtros' })
@@ -106,8 +108,15 @@ export class AdminController {
       qb.andWhere('(s.brandId::text ILIKE :q OR s.planSlug ILIKE :q)', { q: `%${search}%` })
     }
 
-    const sortField = ['createdAt', 'currentPeriodEnd', 'status', 'planSlug', 'retryCount'].includes(orderBy || '')
-      ? `s.${orderBy}` : 's.createdAt'
+    const sortField = [
+      'createdAt',
+      'currentPeriodEnd',
+      'status',
+      'planSlug',
+      'retryCount',
+    ].includes(orderBy || '')
+      ? `s.${orderBy}`
+      : 's.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -126,16 +135,13 @@ export class AdminController {
   async subscriptionsSummary() {
     const all = await this.subscriptionReadRepo.find()
 
-    // Agrupar por plan y estado
     const byPlan: Record<string, Record<string, number>> = {}
     const byStatus: Record<string, number> = {}
 
     for (const sub of all) {
-      // Por plan
       if (!byPlan[sub.planSlug]) byPlan[sub.planSlug] = {}
       byPlan[sub.planSlug][sub.status] = (byPlan[sub.planSlug][sub.status] || 0) + 1
 
-      // Por estado
       byStatus[sub.status] = (byStatus[sub.status] || 0) + 1
     }
 
@@ -185,7 +191,8 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Suscripción extendida' })
   async extendSubscription(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { days: number; reason?: string; adminUserId?: string },
+    @Body() body: ExtendSubscriptionDto,
+    @Req() req?: any,
   ) {
     const sub = await this.subscriptionWriteRepo.findOne({ where: { id } })
     if (!sub) {
@@ -197,11 +204,8 @@ export class AdminController {
 
     sub.currentPeriodEnd = newEnd
     sub.nextBillingDate = newEnd
-    // Con una baja PENDIENTE el acceso lo gobierna `accessEndsAt`, no el período
-    // (ver la invariante en `subscription.entity.ts`): mover sólo `currentPeriodEnd`
-    // no le daría a la marca ni un día más de servicio. Se corre lo MISMO que el
-    // período, y sólo si la columna ya tenía fecha: escribirla acá afirmaría una
-    // baja que nadie pidió y dejaría la fila lista para el cron de retiro.
+    // Pending cancellations gate access on `accessEndsAt` (`subscription.entity.ts`);
+    // shift it only when already set so active rows are not marked for cancellation.
     if (sub.accessEndsAt) {
       const nuevoFinDeAcceso = new Date(sub.accessEndsAt)
       nuevoFinDeAcceso.setDate(nuevoFinDeAcceso.getDate() + body.days)
@@ -215,7 +219,7 @@ export class AdminController {
     await this.subscriptionWriteRepo.save(sub)
 
     await this.auditService.log(
-      body.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'subscription_extended',
       'subscription',
       id,
@@ -225,10 +229,6 @@ export class AdminController {
 
     return { data: sub }
   }
-
-  // ============================================
-  // Pagos / Cobros
-  // ============================================
 
   @Get('payments')
   @ApiOperation({ summary: 'Listado paginado de pagos con filtros' })
@@ -253,11 +253,16 @@ export class AdminController {
     if (provider) qb.andWhere('p.provider = :provider', { provider })
     if (purpose) qb.andWhere('p.purpose = :purpose', { purpose })
     if (search) {
-      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', { q: `%${search}%` })
+      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', {
+        q: `%${search}%`,
+      })
     }
 
-    const sortField = ['createdAt', 'amount', 'status', 'provider', 'paidAt'].includes(orderBy || '')
-      ? `p.${orderBy}` : 'p.createdAt'
+    const sortField = ['createdAt', 'amount', 'status', 'provider', 'paidAt'].includes(
+      orderBy || '',
+    )
+      ? `p.${orderBy}`
+      : 'p.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -344,10 +349,8 @@ export class AdminController {
   @Post('payments/:id/retry')
   @ApiOperation({ summary: 'Reintentar cobro de pago fallido manualmente (Admin)' })
   @ApiResponse({ status: 200, description: 'Pago marcado para reintento' })
-  async retryPayment(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body?: { adminUserId?: string },
-  ) {
+  @ApiResponse({ status: 409, description: 'El pago tiene débito o crédito, o cambió de estado' })
+  async retryPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const payment = await this.paymentWriteRepo.findOne({ where: { id } })
     if (!payment) {
       return { error: 'Pago no encontrado' }
@@ -355,12 +358,24 @@ export class AdminController {
     if (payment.status !== PaymentStatus.FAILED) {
       return { error: `Pago no está en estado failed (actual: ${payment.status})` }
     }
+    // Only the result Dropi reports may reopen a recharge paid with its balance.
+    if (payment.provider === PaymentProvider.DROPI_WALLET) {
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_RETRYABLE', message: 'Una recarga desde Dropi no se reintenta' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
-    payment.status = PaymentStatus.PENDING
-    await this.paymentWriteRepo.save(payment)
+    const claimed = await this.claimForAdminRetry(payment)
+    if (!claimed.affected) {
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_FAILED', message: 'El pago cambió de estado durante el reintento' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
     await this.auditService.log(
-      body?.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'payment_retry',
       'payment',
       id,
@@ -369,6 +384,30 @@ export class AdminController {
     )
 
     return { data: { message: 'Pago marcado para reintento', paymentId: id } }
+  }
+
+  /**
+   * Moves a failed payment without a debit back to `pending` through the checkout's claim, keeping
+   * its `createdAt`. Throws 409 when its money was credited back or it still holds a debit.
+   */
+  private async claimForAdminRetry(payment: Payment) {
+    try {
+      return await claimFailedPaymentForRetry(
+        payment.id,
+        { status: PaymentStatus.PENDING },
+        payment.createdAt,
+        this.paymentWriteRepo.manager.connection,
+        { refuseDebited: true },
+      )
+    } catch (error) {
+      if (error instanceof WalletCheckoutLostError) {
+        throw new RequestException(
+          { code: 'PAYMENT_CREDITED_BACK', message: 'El dinero del pago ya se devolvió' },
+          HttpStatus.CONFLICT,
+        )
+      }
+      throw error
+    }
   }
 
   @Get('credit/activation-requests')
@@ -384,7 +423,10 @@ export class AdminController {
   ) {
     const p = Math.max(1, Number(page) || 1)
     const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
-    if (status && !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)) {
+    if (
+      status &&
+      !CREDIT_ACTIVATION_REQUEST_STATUSES.includes(status as CreditActivationRequestStatus)
+    ) {
       throw new BadRequestException('status inválido')
     }
     const { data, total } = await this.creditService.listActivationRequests({
@@ -430,7 +472,6 @@ export class AdminController {
   @ApiOperation({ summary: 'Estado del último batch de cobros Dropi' })
   @ApiResponse({ status: 200, description: 'Estado del batch' })
   async dropiBatchStatus() {
-    // Buscar los pagos más recientes con provider=dropi
     const recentDropiPayments = await this.paymentReadRepo.find({
       where: { provider: 'dropi' as any },
       order: { createdAt: 'DESC' },
@@ -450,10 +491,6 @@ export class AdminController {
       },
     }
   }
-
-  // ============================================
-  // Wallets
-  // ============================================
 
   @Get('wallets')
   @ApiOperation({ summary: 'Listado paginado de wallets con filtros' })
@@ -481,8 +518,11 @@ export class AdminController {
       qb.andWhere('(w.brandId::text ILIKE :q OR w.label ILIKE :q)', { q: `%${search}%` })
     }
 
-    const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(orderBy || '')
-      ? `w.${orderBy}` : 'w.createdAt'
+    const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(
+      orderBy || '',
+    )
+      ? `w.${orderBy}`
+      : 'w.createdAt'
     const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
     qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
 
@@ -498,28 +538,30 @@ export class AdminController {
   @Post('wallets')
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
-  async createWallet(
-    @Body() body: {
-      brandId: string
-      userId?: string
-      provider: string
-      currency: string
-      label?: string
-      balance?: number
-      adminUserId?: string
-    },
-  ) {
-    // Verificar que no exista una wallet con mismo brandId+provider+currency
+  async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
+    // The brand token wallet comes only from TokenWalletService: one per brand, balance by origin.
+    assertNotTokenCurrency(body.currency)
+    if (req?.user?.isServer && (body.balance ?? 0) !== 0) {
+      throw new RequestException(
+        {
+          code: 'SERVER_INITIAL_BALANCE_FORBIDDEN',
+          message: 'Server token cannot open a wallet with a non-zero initial balance',
+        },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+    const userId = body.userId || body.brandId
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
     })
     if (existing) {
+      await this.tokenWallets!.getOrCreate(body.brandId, userId)
       return { error: `Ya existe una wallet ${body.provider}/${body.currency} para esta marca` }
     }
 
     const wallet = this.walletWriteRepo.create({
       brandId: body.brandId,
-      userId: body.userId || body.brandId,
+      userId,
       provider: body.provider as any,
       currency: body.currency.toUpperCase(),
       label: body.label || null,
@@ -528,13 +570,20 @@ export class AdminController {
     })
 
     const saved = await this.walletWriteRepo.save(wallet)
+    await this.tokenWallets!.getOrCreate(body.brandId, userId)
 
     await this.auditService.log(
-      body.adminUserId || 'admin',
+      req?.user?.id || 'admin',
       'wallet_created',
       'wallet',
       saved.id,
-      { brandId: body.brandId, provider: body.provider, currency: body.currency, balance: body.balance || 0, label: body.label },
+      {
+        brandId: body.brandId,
+        provider: body.provider,
+        currency: body.currency,
+        balance: body.balance || 0,
+        label: body.label,
+      },
       `Wallet ${body.provider}/${body.currency} creada manualmente para marca ${body.brandId}`,
     )
 
@@ -544,93 +593,115 @@ export class AdminController {
   @Post('wallets/:id/toggle-freeze')
   @ApiOperation({ summary: 'Congelar o descongelar wallet (Admin)' })
   @ApiResponse({ status: 200, description: 'Estado de wallet actualizado' })
-  async toggleFreezeWallet(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body?: { adminUserId?: string },
-  ) {
+  async toggleFreezeWallet(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
     if (!wallet) return { error: 'Wallet no encontrada' }
-    if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada, no se puede modificar' }
+    if (wallet.status === WalletStatus.CLOSED)
+      return { error: 'Wallet cerrada, no se puede modificar' }
 
     const previousStatus = wallet.status
-    wallet.status = wallet.status === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
+    const newStatus =
+      previousStatus === WalletStatus.FROZEN ? WalletStatus.ACTIVE : WalletStatus.FROZEN
 
-    await this.walletWriteRepo.save(wallet)
+    // Writes only the status, and only over the status read: never a stale balance or a closed row.
+    const toggled = await this.walletWriteRepo.update(
+      { id, status: previousStatus },
+      { status: newStatus },
+    )
+    if (!toggled.affected) return { error: 'La wallet cambió de estado, vuelva a intentar' }
 
     await this.auditService.log(
-      body?.adminUserId || 'admin',
-      wallet.status === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
+      req?.user?.id || 'admin',
+      newStatus === WalletStatus.FROZEN ? 'wallet_frozen' : 'wallet_unfrozen',
       'wallet',
       id,
-      { previousStatus, newStatus: wallet.status },
-      `Wallet ${wallet.status === WalletStatus.FROZEN ? 'congelada' : 'descongelada'} manualmente`,
+      { previousStatus, newStatus },
+      `Wallet ${newStatus === WalletStatus.FROZEN ? 'congelada' : 'descongelada'} manualmente`,
     )
 
-    return { data: wallet }
+    return { data: await this.walletWriteRepo.findOne({ where: { id } }) }
   }
 
   @Post('wallets/:id/adjust')
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Acreditar o debitar fondos de una wallet (Admin)' })
-  @ApiResponse({ status: 200, description: 'Ajuste realizado' })
+  @ApiResponse({ status: 201, description: 'Ajuste realizado, o el primero bajo esta llave' })
+  @ApiResponse({ status: 400, description: 'Falta la llave, o el monto o el tipo no son válidos' })
+  @ApiResponse({ status: 403, description: 'No es una sesión de super admin (token de servidor)' })
+  @ApiResponse({ status: 404, description: 'WALLET_NOT_FOUND' })
+  @ApiResponse({
+    status: 409,
+    description: 'IDEMPOTENCY_KEY_CONFLICT: la llave es de otro movimiento',
+  })
+  @ApiResponse({
+    status: 422,
+    description:
+      'WALLET_CURRENCY_MISMATCH (TKN), WALLET_CLOSED, WALLET_FROZEN, INSUFFICIENT_BALANCE',
+  })
   async adjustWallet(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: {
-      type: 'credit' | 'debit'
-      amount: number
-      description?: string
-      category?: string
-      adminUserId?: string
-    },
+    @Body() body: AdjustWalletDto,
+    @Req() req?: any,
   ) {
+    const actor = req?.user?.id || 'admin'
+    const amount = Number(body.amount)
+    // Write connection: the replica may not have a wallet created a moment ago.
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
-    if (!wallet) return { error: 'Wallet no encontrada' }
-    if (wallet.status === WalletStatus.CLOSED) return { error: 'Wallet cerrada' }
-    if (wallet.status === WalletStatus.FROZEN && body.type === 'debit') {
-      return { error: 'Wallet congelada — no se permiten débitos' }
+    if (!wallet) {
+      throw new RequestException(
+        { code: 'WALLET_NOT_FOUND', message: 'Wallet not found' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+    if (isTokenCurrency(wallet.currency)) {
+      throw new RequestException(
+        { code: 'WALLET_CURRENCY_MISMATCH', message: 'Token wallets are not adjusted here' },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      )
     }
 
-    const amount = Math.abs(Number(body.amount))
-    if (!amount || amount <= 0) return { error: 'Monto inválido' }
-
-    const balanceBefore = Number(wallet.balance)
-    const balanceAfter = body.type === 'credit'
-      ? balanceBefore + amount
-      : balanceBefore - amount
-
-    if (body.type === 'debit' && balanceAfter < 0) {
-      return { error: `Fondos insuficientes. Balance actual: ${balanceBefore}` }
+    const key = adminIdempotencyKey(body.idempotencyKey)
+    const previous = await this.transactionWriteRepo.findOne({ where: { idempotencyKey: key } })
+    if (previous) {
+      return { data: { wallet, transaction: sameAdjustment(previous, id, body.type, amount) } }
     }
 
-    // Crear transacción
-    const transaction = this.transactionWriteRepo.create({
-      walletId: id,
+    const data = {
       brandId: wallet.brandId,
-      type: body.type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT,
-      amount,
-      balanceBefore,
-      balanceAfter,
-      status: TransactionStatus.COMPLETED,
       category: body.category || 'admin_adjustment',
       description: body.description || `Ajuste manual (${body.type})`,
       referenceType: 'admin',
-      referenceId: body.adminUserId || 'admin',
-    })
-    await this.transactionWriteRepo.save(transaction)
+      referenceId: actor,
+    }
+    const audit: MovementAudit = (manager, transaction) =>
+      this.auditService.record(manager, {
+        userId: actor,
+        action: body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
+        entityType: 'wallet',
+        entityId: id,
+        changes: {
+          amount,
+          balanceBefore: Number(transaction.balanceBefore),
+          balanceAfter: Number(transaction.balanceAfter),
+          category: body.category,
+          transactionId: transaction.id,
+        },
+        description: `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
+      })
+    const result =
+      body.type === 'credit'
+        ? await this.walletService.credit(id, amount, data, key, undefined, audit)
+        : await this.walletService.debit(id, amount, data, undefined, key, audit)
+    if ('error' in result) {
+      throw new RequestException(
+        { code: 'WALLET_ADJUST_FAILED', message: String(result.error) },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      )
+    }
+    // A concurrent request under the same key comes back as its movement, not as an error.
+    sameAdjustment(result.data.transaction, id, body.type, amount)
 
-    // Actualizar balance de la wallet
-    wallet.balance = balanceAfter as any
-    await this.walletWriteRepo.save(wallet)
-
-    await this.auditService.log(
-      body.adminUserId || 'admin',
-      body.type === 'credit' ? 'wallet_credit' : 'wallet_debit',
-      'wallet',
-      id,
-      { amount, balanceBefore, balanceAfter, category: body.category, transactionId: transaction.id },
-      `${body.type === 'credit' ? 'Crédito' : 'Débito'} manual de ${amount} ${wallet.currency}`,
-    )
-
-    return { data: { wallet, transaction } }
+    return { data: result.data }
   }
 
   @Get('wallets/summary')
@@ -641,8 +712,10 @@ export class AdminController {
       where: { status: In([WalletStatus.ACTIVE, WalletStatus.FROZEN]) },
     })
 
-    // Agrupar por provider + currency
-    const groups: Record<string, { count: number; total: number; currency: string; provider: string }> = {}
+    const groups: Record<
+      string,
+      { count: number; total: number; currency: string; provider: string }
+    > = {}
 
     for (const w of wallets) {
       const key = `${w.provider}:${w.currency}`
@@ -679,10 +752,6 @@ export class AdminController {
     return { data: inconsistent, meta: { count: inconsistent.length } }
   }
 
-  // ============================================
-  // Audit Log
-  // ============================================
-
   @Get('audit-log')
   @ApiOperation({ summary: 'Log de auditoría paginado con filtros' })
   @ApiResponse({ status: 200, description: 'Entradas de auditoría' })
@@ -702,10 +771,6 @@ export class AdminController {
     })
   }
 
-  // ============================================
-  // Proveedores
-  // ============================================
-
   @Get('providers')
   @ApiOperation({ summary: 'Listar todos los proveedores configurados' })
   @ApiResponse({ status: 200, description: 'Lista de proveedores' })
@@ -719,15 +784,7 @@ export class AdminController {
   @Post('providers')
   @ApiOperation({ summary: 'Crear configuración de proveedor' })
   @ApiResponse({ status: 201, description: 'Proveedor creado' })
-  async createProvider(
-    @Body() body: {
-      country: string
-      provider: string
-      isActive?: boolean
-      priority?: number
-      metadata?: Record<string, any>
-    },
-  ) {
+  async createProvider(@Body() body: CreateProviderConfigDto) {
     const existing = await this.providerReadRepo.findOne({
       where: { country: body.country.toUpperCase(), provider: body.provider.toLowerCase() },
     })
@@ -752,7 +809,7 @@ export class AdminController {
   @ApiResponse({ status: 200, description: 'Proveedor actualizado' })
   async updateProvider(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { isActive?: boolean; priority?: number; metadata?: Record<string, any> },
+    @Body() body: UpdateProviderConfigDto,
   ) {
     const config = await this.providerWriteRepo.findOne({ where: { id } })
     if (!config) return { error: 'Proveedor no encontrado' }
@@ -764,4 +821,25 @@ export class AdminController {
     await this.providerWriteRepo.save(config)
     return { data: config }
   }
+}
+
+/** The movement recorded under the key when it is this adjustment; a 409 when it is another one. */
+function sameAdjustment(
+  movement: Transaction,
+  walletId: string,
+  type: 'credit' | 'debit',
+  amount: number,
+): Transaction {
+  const expectedType = type === 'credit' ? TransactionType.CREDIT : TransactionType.DEBIT
+  const same =
+    movement.walletId === walletId &&
+    movement.type === expectedType &&
+    Math.round(Number(movement.amount) * 100) === Math.round(amount * 100)
+  if (!same) {
+    throw new RequestException(
+      { code: 'IDEMPOTENCY_KEY_CONFLICT', message: 'Key already used by another movement' },
+      HttpStatus.CONFLICT,
+    )
+  }
+  return movement
 }

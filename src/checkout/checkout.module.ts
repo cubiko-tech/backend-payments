@@ -15,13 +15,11 @@ import { TaxModule } from '../tax/tax.module'
 import { DianModule } from '../dian/dian.module'
 import { PaymentModule } from '../payment/payment.module'
 import { WebhookModule } from '../webhook/webhook.module'
+import { TrmModule } from '../trm/trm.module'
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature(
-      [Payment, PaymentAttempt, Subscription, SubscriptionEvent],
-      'DBWrite',
-    ),
+    TypeOrmModule.forFeature([Payment, PaymentAttempt, Subscription, SubscriptionEvent], 'DBWrite'),
     TypeOrmModule.forFeature([BillingProfile], 'DBRead'),
     WalletModule,
     InvoiceModule,
@@ -31,6 +29,7 @@ import { WebhookModule } from '../webhook/webhook.module'
     DianModule,
     PaymentModule,
     WebhookModule,
+    TrmModule,
   ],
   controllers: [CheckoutController],
   providers: [CheckoutService],

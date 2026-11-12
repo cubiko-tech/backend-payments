@@ -1,3 +1,4 @@
+// R6: Single-responsibility unit suite for WebhookController Confio authentication (signed vs one-shot branches).
 import { Test, TestingModule } from '@nestjs/testing'
 import { HttpException, Logger, RawBodyRequest } from '@nestjs/common'
 import { Request } from 'express'
@@ -156,6 +157,8 @@ describe('WebhookController (confio)', () => {
 
   beforeEach(() => {
     for (const clave of CLAVES_DE_ENTORNO) original[clave] = process.env[clave]
+    // R17: Freeze wall-clock time to the signed fixture timestamp so the 24h window check is deterministic.
+    jest.spyOn(Date, 'now').mockReturnValue(TIMESTAMP * 1000)
   })
 
   afterEach(() => {
@@ -253,13 +256,107 @@ describe('WebhookController (confio)', () => {
         CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
       })
 
-      const estado = await estadoHttp(() => controller.confio('Bearer basura', reqCon(pagoOneShot())))
+      const estado = await estadoHttp(() =>
+        controller.confio('Bearer basura', reqCon(pagoOneShot())),
+      )
 
       expect(estado).toBe(401)
       expect(receive).not.toHaveBeenCalled()
       const linea = lineas(warn)
       expect(linea).toContain('bearer_mismatch')
       expect(linea).toContain('no aplica')
+    })
+
+    describe('with real ConfioProvider token configuration', () => {
+      let savedStoreId: string | undefined
+      let savedAccessToken: string | undefined
+
+      beforeEach(() => {
+        savedStoreId = process.env.CONFIO_STORE_ID
+        savedAccessToken = process.env.CONFIO_ACCESS_TOKEN
+      })
+
+      afterEach(() => {
+        if (savedStoreId === undefined) delete process.env.CONFIO_STORE_ID
+        else process.env.CONFIO_STORE_ID = savedStoreId
+
+        if (savedAccessToken === undefined) delete process.env.CONFIO_ACCESS_TOKEN
+        else process.env.CONFIO_ACCESS_TOKEN = savedAccessToken
+      })
+
+      async function buildControllerWithRealConfio(
+        envOverrides: Record<string, string | undefined>,
+      ): Promise<Armado> {
+        for (const clave of CLAVES_DE_ENTORNO) delete process.env[clave]
+        delete process.env.CONFIO_STORE_ID
+        delete process.env.CONFIO_ACCESS_TOKEN
+        for (const [key, value] of Object.entries(envOverrides)) {
+          if (value !== undefined) process.env[key] = value
+        }
+
+        const receive = jest.fn().mockResolvedValue({ data: {} })
+        const module: TestingModule = await Test.createTestingModule({
+          controllers: [WebhookController],
+          providers: [
+            { provide: WebhookService, useValue: { receive } },
+            { provide: StripeProvider, useValue: {} },
+            { provide: MercadoPagoProvider, useValue: {} },
+            { provide: DropiProvider, useValue: {} },
+            ConfioProvider,
+          ],
+        })
+          .overrideGuard(ApiAuthGuard)
+          .useValue({ canActivate: () => true })
+          .compile()
+
+        return {
+          controller: module.get<WebhookController>(WebhookController),
+          receive,
+          warn: jest.spyOn(Logger.prototype, 'warn').mockImplementation(),
+          error: jest.spyOn(Logger.prototype, 'error').mockImplementation(),
+        }
+      }
+
+      it('responds with 401 when no token is configured and NODE_ENV is development', async () => {
+        const { controller, receive } = await buildControllerWithRealConfio({
+          NODE_ENV: 'development',
+        })
+
+        const status = await estadoHttp(() =>
+          controller.confio(`Bearer ${ACCESS_TOKEN}`, reqCon(pagoOneShot())),
+        )
+
+        expect(status).toBe(401)
+        expect(receive).not.toHaveBeenCalled()
+      })
+
+      it('responds with 401 when no token is configured and NODE_ENV is production', async () => {
+        const { controller, receive } = await buildControllerWithRealConfio({
+          NODE_ENV: 'production',
+        })
+
+        const status = await estadoHttp(() =>
+          controller.confio(`Bearer ${ACCESS_TOKEN}`, reqCon(pagoOneShot())),
+        )
+
+        expect(status).toBe(401)
+        expect(receive).not.toHaveBeenCalled()
+      })
+
+      it('accepts the webhook with 200 when a valid token is configured', async () => {
+        const { controller, receive } = await buildControllerWithRealConfio({
+          NODE_ENV: 'development',
+          CONFIO_STORE_ID: '01TESTSTORE',
+          CONFIO_ACCESS_TOKEN: ACCESS_TOKEN,
+        })
+
+        const status = await estadoHttp(() =>
+          controller.confio(`Bearer ${ACCESS_TOKEN}`, reqCon(pagoOneShot())),
+        )
+
+        expect(status).toBe(200)
+        expect(receive).toHaveBeenCalledTimes(1)
+      })
     })
   })
 
@@ -326,20 +423,23 @@ describe('WebhookController (confio)', () => {
   })
 
   describe('cuerpos que no son un objeto JSON', () => {
-    it.each([['null'], ['[]'], ['"x"'], ['{']])('rechaza %s con 401 y nunca con 500', async (body) => {
-      const { controller, receive, warn } = await construirController({
-        ENV: 'production',
-        CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
-      })
+    it.each([['null'], ['[]'], ['"x"'], ['{']])(
+      'rechaza %s con 401 y nunca con 500',
+      async (body) => {
+        const { controller, receive, warn } = await construirController({
+          ENV: 'production',
+          CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
+        })
 
-      const estado = await estadoHttp(() =>
-        controller.confio(`Bearer ${WEBHOOK_KEY}`, reqCrudo(body)),
-      )
+        const estado = await estadoHttp(() =>
+          controller.confio(`Bearer ${WEBHOOK_KEY}`, reqCrudo(body)),
+        )
 
-      expect(estado).toBe(401)
-      expect(receive).not.toHaveBeenCalled()
-      expect(lineas(warn)).toContain('invalid_json')
-    })
+        expect(estado).toBe(401)
+        expect(receive).not.toHaveBeenCalled()
+        expect(lineas(warn)).toContain('invalid_json')
+      },
+    )
   })
 
   describe('eventos fuera del contrato', () => {
