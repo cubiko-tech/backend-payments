@@ -188,6 +188,29 @@ export function parseAllowedReturnUrls(raw?: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
+/**
+ * A return URL is allowed when it equals an entry, or when the entry is a bare origin
+ * (`https://host[:port]`, nothing after it) and the URL is an http(s) page of that origin with no
+ * user info, query or fragment. A bare origin lets the front return to whatever page it is on.
+ */
+export function isAllowedReturnUrl(candidate: unknown, allowed: string[]): boolean {
+  if (typeof candidate !== 'string') return false
+  if (allowed.includes(candidate)) return true
+  const url = parseUrl(candidate)
+  if (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password)
+    return false
+  if (url.search || url.hash || candidate.includes('?') || candidate.includes('#')) return false
+  return allowed.some((entry) => parseUrl(entry)?.origin === entry && entry === url.origin)
+}
+
+function parseUrl(raw: string): URL | null {
+  try {
+    return new URL(raw)
+  } catch {
+    return null
+  }
+}
+
 export function assertAllowedReturnUrls(
   successUrl: string | undefined,
   cancelUrl: string | undefined,
@@ -201,14 +224,14 @@ export function assertAllowedReturnUrls(
       HttpStatus.SERVICE_UNAVAILABLE,
     )
   }
-  if (typeof successUrl !== 'string' || !allowed.includes(successUrl)) {
+  if (!isAllowedReturnUrl(successUrl, allowed)) {
     throw fail(
       'INVALID_RETURN_URL',
       'successUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',
       HttpStatus.BAD_REQUEST,
     )
   }
-  if (cancelUrl !== undefined && (typeof cancelUrl !== 'string' || !allowed.includes(cancelUrl))) {
+  if (cancelUrl !== undefined && !isAllowedReturnUrl(cancelUrl, allowed)) {
     throw fail(
       'INVALID_RETURN_URL',
       'cancelUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',

@@ -11,6 +11,7 @@ import { CheckoutRequest } from './checkout.service'
 import {
   creditTokenAmount,
   creditTokenPackage,
+  isAllowedReturnUrl,
   prepareTokenAmount,
   prepareTokenPackage,
 } from './token-package-checkout'
@@ -168,5 +169,42 @@ describe('token package checkout', () => {
         fp300,
       ),
     ).toThrow(expect.objectContaining({ code: 'IDEMPOTENCY_KEY_CONFLICT' }))
+  })
+
+  it('a bare origin entry allows any page of that origin and nothing else', () => {
+    // R15: red when isAllowedReturnUrl skips the origin, query, fragment or user checks for a bare origin.
+    const allowed = ['https://app.dropi.co', 'https://launch.roaxai.com/tokens']
+    const verdicts = Object.fromEntries(
+      [
+        'https://app.dropi.co/dashboard/roax-ads',
+        'https://app.dropi.co',
+        'https://launch.roaxai.com/tokens',
+        'https://launch.roaxai.com/other',
+        'https://app.dropi.co.evil.example/x',
+        'http://app.dropi.co/x',
+        'https://app.dropi.co:8443/x',
+        'https://user@app.dropi.co/x',
+        'https://app.dropi.co/x?next=https://evil.example',
+        'https://app.dropi.co/x?',
+        'https://app.dropi.co/x#y',
+        'javascript:alert(1)',
+      ].map((url) => [url, isAllowedReturnUrl(url, allowed)]),
+    )
+
+    expect(verdicts).toEqual({
+      'https://app.dropi.co/dashboard/roax-ads': true,
+      'https://app.dropi.co': true,
+      'https://launch.roaxai.com/tokens': true,
+      'https://launch.roaxai.com/other': false,
+      'https://app.dropi.co.evil.example/x': false,
+      'http://app.dropi.co/x': false,
+      'https://app.dropi.co:8443/x': false,
+      'https://user@app.dropi.co/x': false,
+      'https://app.dropi.co/x?next=https://evil.example': false,
+      'https://app.dropi.co/x?': false,
+      'https://app.dropi.co/x#y': false,
+      'javascript:alert(1)': false,
+    })
+    expect(isAllowedReturnUrl(42, allowed)).toBe(false)
   })
 })
