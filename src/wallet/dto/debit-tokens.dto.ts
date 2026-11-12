@@ -38,7 +38,14 @@ export class DebitTokensDto {
   @Matches(SERVICE_KEY_PATTERN)
   idempotencyKey: string
 
-  @ApiPropertyOptional({ description: 'True only inside Dropi: Dropi tokens may then be spent' })
+  /**
+   * @deprecated Ignored: Dropi tokens are spent inside and outside Dropi. Kept so a backend-ads that still
+   * sends it is not refused by the whitelist; remove once no deployed backend-ads sends it.
+   */
+  @ApiPropertyOptional({
+    description: 'Deprecated and ignored: Dropi tokens are spent everywhere',
+    deprecated: true,
+  })
   @IsOptional()
   @IsBoolean()
   inDropi?: boolean

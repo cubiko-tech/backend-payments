@@ -23,6 +23,7 @@ import { Subscription, SubscriptionStatus } from '../subscription/entities/subsc
 import { Transaction, TransactionType } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.entity'
+import { TokenWalletService } from '../wallet/token-wallet.service'
 import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
 
@@ -154,6 +155,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
   let metricsService: Record<string, jest.Mock>
   let rolesService: { checkPermission: jest.Mock }
   let walletService: { credit: jest.Mock; debit: jest.Mock }
+  let tokenWallets: { getOrCreate: jest.Mock }
 
   beforeAll(async () => {
     prevJwtSecret = process.env.JWT_SECRET
@@ -174,6 +176,9 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     walletWriteRepo = mockRepo()
     // R17: These specs check routes and audit; test/wallet-adjust-race measures the ledger write.
     walletService = { credit: jest.fn(), debit: jest.fn() }
+    tokenWallets = {
+      getOrCreate: jest.fn().mockResolvedValue({ id: TEST_UUID, brandId: TEST_UUID }),
+    }
     snapshotReadRepo = mockRepo()
     providerReadRepo = mockRepo()
     providerWriteRepo = mockRepo()
@@ -226,6 +231,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         { provide: CreditService, useValue: creditService },
         { provide: MetricsService, useValue: metricsService },
         { provide: WalletService, useValue: walletService },
+        { provide: TokenWalletService, useValue: tokenWallets },
       ],
     }).compile()
 
@@ -359,7 +365,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       'wallets create',
       'post',
       '/admin/wallets',
-      { brandId: 'brand-1', provider: 'internal', currency: 'COP' },
+      { brandId: TEST_UUID, provider: 'internal', currency: 'COP' },
     ],
     ['wallets toggle-freeze', 'post', `/admin/wallets/${TEST_UUID}/toggle-freeze`, {}],
     ['wallets summary', 'get', '/admin/wallets/summary', undefined],
@@ -438,17 +444,18 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       .post('/admin/wallets')
       .set('Authorization', `Bearer ${SERVER_SECRET}`)
       .send({
-        brandId: 'brand-loc49',
+        brandId: TEST_UUID,
         provider: 'internal',
         currency: 'cop',
         label: 'Brand wallet',
       })
 
     expect(createWalletRes.status).toBe(201)
+    expect(tokenWallets.getOrCreate).toHaveBeenCalledWith(TEST_UUID, TEST_UUID)
     expect(walletWriteRepo.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        brandId: 'brand-loc49',
-        userId: 'brand-loc49',
+        brandId: TEST_UUID,
+        userId: TEST_UUID,
         provider: 'internal',
         currency: 'COP',
         label: 'Brand wallet',
@@ -460,12 +467,24 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     expect(createWalletRes.body).toEqual({
       data: expect.objectContaining({
         id: TEST_UUID,
-        brandId: 'brand-loc49',
+        brandId: TEST_UUID,
         provider: 'internal',
         currency: 'COP',
         status: WalletStatus.ACTIVE,
       }),
     })
+
+    const serverBalanceRes = await request(app.getHttpServer())
+      .post('/admin/wallets')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send({
+        brandId: TEST_UUID,
+        provider: 'internal',
+        currency: 'COP',
+        balance: 1000,
+      })
+    expect(serverBalanceRes.status).toBe(400)
+    expect(serverBalanceRes.body.code).toBe('SERVER_INITIAL_BALANCE_FORBIDDEN')
   })
 
   it('preserves credit:runs permission check and operator access on credit/activation-requests routes', async () => {
@@ -524,7 +543,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     [
       'wallets',
       '/admin/wallets',
-      { brandId: 'brand-1', provider: 'internal', currency: 'COP', adminUserId: 'otro' },
+      { brandId: TEST_UUID, provider: 'internal', currency: 'COP', adminUserId: 'otro' },
       'wallet_created',
       'wallet',
     ],

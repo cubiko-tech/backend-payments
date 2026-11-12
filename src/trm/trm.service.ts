@@ -82,8 +82,18 @@ export class TrmService {
     })
   }
 
+  /** The rate in force on `day` (`YYYY-MM-DD` in Bogota), straight from the source and never cached. */
+  async rateOn(day: string): Promise<UsdCopRate> {
+    return (await this.queryInForce(day)).value
+  }
+
   private async fetchRate(): Promise<{ value: UsdCopRate; until: string }> {
-    const today = bogotaDay(Date.now())
+    const quote = await this.queryInForce(bogotaDay(Date.now()))
+    this.cached = { ...quote, expiresAt: Date.now() + CACHE_TTL_MS }
+    return quote
+  }
+
+  private async queryInForce(today: string): Promise<{ value: UsdCopRate; until: string }> {
     const inForce = `vigenciadesde <= '${today}T00:00:00' AND vigenciahasta >= '${today}T00:00:00'`
     const url =
       `${this.sourceUrl}?$where=${encodeURIComponent(inForce)}` +
@@ -110,7 +120,6 @@ export class TrmService {
     }
     const value = { rate, date: dayOf(row.vigenciadesde) }
     const until = dayOf(row.vigenciahasta)
-    this.cached = { value, until, expiresAt: Date.now() + CACHE_TTL_MS }
     return { value, until }
   }
 }

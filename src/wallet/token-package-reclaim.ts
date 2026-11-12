@@ -21,7 +21,8 @@ export interface PackageTokens {
 export const refundTokensKey = (refundId: string) => `refund:${refundId}:tokens`
 
 export const isTokenPackage = (payment: Pick<Payment, 'purpose'>) =>
-  payment.purpose === PaymentPurpose.TOKEN_PACKAGE
+  payment.purpose === PaymentPurpose.TOKEN_PACKAGE ||
+  payment.purpose === PaymentPurpose.TOKEN_AMOUNT
 
 export const tokensSpent = () =>
   fail(
@@ -30,9 +31,9 @@ export const tokensSpent = () =>
     HttpStatus.UNPROCESSABLE_ENTITY,
   )
 
-/** What the payment's package snapshot credited, or `null` when the payment has none. */
+/** What the payment's package or token-amount snapshot credited, or `null` when it has none. */
 export function packageTokensOf(payment: Payment): PackageTokens | null {
-  const snapshot = payment.metadata?.tokenPackage
+  const snapshot = payment.metadata?.tokenPackage ?? payment.metadata?.tokenAmount
   if (!snapshot || !payment.walletId) return null
   return {
     purchased: toCents(snapshot.purchasedTokens),

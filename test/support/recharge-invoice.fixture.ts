@@ -21,8 +21,8 @@ import { TokenOrigin } from '../../src/wallet/token-origin'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
 import { apmDouble, ApmDouble, dianDouble, DianDouble } from './dropi-recharge.fixture'
 
-/** 10 tokens at TRM 4,000 plus 19 % VAT, the shape `DropiRechargeService.create` stores. */
-const TEN_TOKENS = { amount: 47600, subtotal: 40000, taxAmount: 7600 }
+/** 10 tokens at TRM 4,000 with the 19 % VAT inside, the shape `DropiRechargeService.create` stores. */
+const TEN_TOKENS = { amount: 40000, subtotal: 33613.45, taxAmount: 6386.55 }
 
 /** Instants in Bogota (UTC-5) around the close of October 2026. */
 export const BOGOTA = {

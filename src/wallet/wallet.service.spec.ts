@@ -1,6 +1,7 @@
 // R6: one WalletService whose movements share this setup; splitting it is a task of its own.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
+import { Not } from 'typeorm'
 import { WalletService } from './wallet.service'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
 import {
@@ -76,18 +77,20 @@ describe('WalletService', () => {
   })
 
   describe('findByBrand', () => {
-    it('retorna las wallets de una marca', async () => {
+    it('returns the brand money wallets and excludes token wallets', async () => {
+      // R15: red when findByBrand stops filtering out TKN wallets in the query or response list.
       const wallets = [
-        { id: 'w1', brandId: 'brand-1', balance: 100 },
-        { id: 'w2', brandId: 'brand-1', balance: 50 },
+        { id: 'w1', brandId: 'brand-1', currency: 'COP', balance: 100 },
+        { id: 'w2', brandId: 'brand-1', currency: 'USD', balance: 50 },
+        { id: 'w3', brandId: 'brand-1', currency: 'TKN', balance: 0 },
       ]
       walletReadRepo.find.mockResolvedValue(wallets)
 
       const result = await service.findByBrand('brand-1')
 
-      expect(result.data).toEqual(wallets)
+      expect(result.data).toEqual([wallets[0], wallets[1]])
       expect(walletReadRepo.find).toHaveBeenCalledWith({
-        where: { brandId: 'brand-1' },
+        where: { brandId: 'brand-1', currency: Not('TKN') },
         order: { createdAt: 'DESC' },
       })
     })
@@ -719,6 +722,68 @@ describe('WalletService', () => {
         skip: 0,
         take: 20,
       })
+    })
+
+    it('omits description, metadata, and admin referenceId when redactForMember is true', async () => {
+      // R15: red when redactMemberTransaction leaves description, metadata, or admin referenceId in the row.
+      const transactions = [
+        {
+          id: 'tx-gift',
+          walletId: 'w1',
+          amount: 20,
+          type: TransactionType.CREDIT,
+          category: 'gift',
+          description: 'prueba',
+          referenceType: 'admin',
+          referenceId: 'superadmin-1',
+          metadata: { authorId: 'superadmin-1', reason: 'prueba' },
+        },
+        {
+          id: 'tx-purchase',
+          walletId: 'w1',
+          amount: 100,
+          type: TransactionType.CREDIT,
+          category: 'token_package',
+          description: 'Package purchase',
+          referenceType: 'payment',
+          referenceId: 'payment-1',
+          metadata: { packageId: 'pkg-1' },
+        },
+      ]
+      transactionReadRepo.findAndCount.mockResolvedValue([transactions, 2])
+
+      const memberResult = await service.getTransactions(
+        'w1',
+        { page: 1, limit: 20 },
+        { redactForMember: true },
+      )
+      const adminResult = await service.getTransactions('w1', { page: 1, limit: 20 })
+
+      expect(memberResult.data).toEqual([
+        {
+          id: 'tx-gift',
+          walletId: 'w1',
+          amount: 20,
+          type: TransactionType.CREDIT,
+          category: 'gift',
+          referenceType: 'admin',
+        },
+        {
+          id: 'tx-purchase',
+          walletId: 'w1',
+          amount: 100,
+          type: TransactionType.CREDIT,
+          category: 'token_package',
+          referenceType: 'payment',
+          referenceId: 'payment-1',
+        },
+      ])
+      expect(memberResult.data?.[0]).not.toHaveProperty('description')
+      expect(memberResult.data?.[0]).not.toHaveProperty('metadata')
+      expect(memberResult.data?.[0]).not.toHaveProperty('referenceId')
+      expect(memberResult.data?.[1]).not.toHaveProperty('description')
+      expect(memberResult.data?.[1]).not.toHaveProperty('metadata')
+      expect(adminResult.data).toEqual(transactions)
     })
   })
 })

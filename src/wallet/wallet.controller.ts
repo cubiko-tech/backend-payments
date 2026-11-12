@@ -16,6 +16,7 @@ import { CreateWalletDto } from './dto/create-wallet.dto'
 import { TransferWalletDto } from './dto/transfer-wallet.dto'
 import { ListWalletTransactionsQueryDto } from './dto/list-wallet-transactions-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
 import {
   assertBrandAccess,
@@ -26,14 +27,7 @@ import {
 
 @ApiTags('Wallet')
 @Controller('wallet')
-/**
- * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
- * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
- * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
- * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
- * `@RequirePermission` por handler, así que esto no le agrega requisitos a
- * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
- */
+/** Authenticates at the class boundary; brand ownership or super-admin checks stay per handler. */
 @UseGuards(ApiAuthGuard)
 export class WalletController {
   private readonly logger = new Logger(WalletController.name)
@@ -116,7 +110,8 @@ export class WalletController {
     @Query() filters: ListWalletTransactionsQueryDto,
     @Req() req?: any,
   ) {
-    if (!isPrivilegedCaller(req)) {
+    const privileged = isPrivilegedCaller(req)
+    if (!privileged) {
       const wallet = await this.walletService.findById(id)
       await assertResourceBrandAccess(
         this.platformClient,
@@ -125,6 +120,7 @@ export class WalletController {
         wallet?.data?.brandId,
         'GET /wallet/:id/transactions',
       )
+      return this.walletService.getTransactions(id, filters, { redactForMember: true })
     }
     return this.walletService.getTransactions(id, filters)
   }
@@ -147,10 +143,6 @@ export class WalletController {
     return result
   }
 
-  // ============================================
-  // Transferencias
-  // ============================================
-
   @Post('transfer')
   @ApiOperation({ summary: 'Transferir fondos entre wallets (misma marca y moneda)' })
   @ApiResponse({ status: 200, description: 'Transferencia realizada' })
@@ -168,58 +160,30 @@ export class WalletController {
     return this.walletService.transfer(data)
   }
 
-  // ============================================
-  // Freeze / Close (Admin)
-  // ============================================
-
   @Post(':id/freeze')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Congelar wallet (bloquea débitos)' })
   @ApiResponse({ status: 200, description: 'Wallet congelada' })
-  async freeze(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/freeze',
-      )
-    }
+  async freeze(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.freeze(id)
   }
 
   @Post(':id/unfreeze')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Descongelar wallet' })
   @ApiResponse({ status: 200, description: 'Wallet descongelada' })
-  async unfreeze(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/unfreeze',
-      )
-    }
+  async unfreeze(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.unfreeze(id)
   }
 
   @Post(':id/close')
+  @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Cerrar wallet (requiere balance 0)' })
   @ApiResponse({ status: 200, description: 'Wallet cerrada' })
-  async close(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
-    if (!isPrivilegedCaller(req)) {
-      const wallet = await this.walletService.findById(id)
-      await assertResourceBrandAccess(
-        this.platformClient,
-        this.logger,
-        req,
-        wallet?.data?.brandId,
-        'POST /wallet/:id/close',
-      )
-    }
+  async close(@Param('id', ParseUUIDPipe) id: string) {
     return this.walletService.close(id)
   }
 }

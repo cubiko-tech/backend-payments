@@ -69,9 +69,9 @@ describe('The monthly close of automatic recharges from Dropi (PostgreSQL, LOC-2
     const recharges = [
       await completedRecharge(a.dataSource, BRAND, BOGOTA.oct15),
       await completedRecharge(a.dataSource, BRAND, BOGOTA.oct15, 'automatic', {
-        amount: 23800,
-        subtotal: 20000,
-        taxAmount: 3800,
+        amount: 20000,
+        subtotal: 16806.72,
+        taxAmount: 3193.28,
       }),
       await completedRecharge(a.dataSource, BRAND, BOGOTA.oct31LastSecond),
     ]
@@ -85,9 +85,9 @@ describe('The monthly close of automatic recharges from Dropi (PostgreSQL, LOC-2
     expect(closes.find((close) => close.brandId === BRAND)?.invoice?.id).toBe(invoice.id)
     expect(invoice.period).toBe('2026-10')
     expect(invoice.paymentId).toBeNull()
-    expect(Number(invoice.total)).toBe(47600 + 23800 + 47600)
-    expect(Number(invoice.subtotal)).toBe(40000 + 20000 + 40000)
-    expect(Number(invoice.taxTotal)).toBe(7600 + 3800 + 7600)
+    expect(Number(invoice.total)).toBe(40000 + 20000 + 40000)
+    expect(Number(invoice.subtotal)).toBe(84033.62)
+    expect(Number(invoice.taxTotal)).toBe(15966.38)
     expect(invoice.items.map((item) => item.referenceId).sort()).toEqual(
       recharges.map((recharge) => recharge.id).sort(),
     )

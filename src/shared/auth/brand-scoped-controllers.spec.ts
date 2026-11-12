@@ -69,9 +69,6 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
         create: jest.fn().mockResolvedValue({ data: { id: RESOURCE_ID, brandId: OWN_BRAND_ID } }),
         getTransactions: jest.fn().mockResolvedValue({ data: [], total: 0 }),
         transfer: jest.fn().mockResolvedValue({ data: { success: true } }),
-        freeze: jest.fn().mockResolvedValue({ data: { id: RESOURCE_ID } }),
-        unfreeze: jest.fn().mockResolvedValue({ data: { id: RESOURCE_ID } }),
-        close: jest.fn().mockResolvedValue({ data: { id: RESOURCE_ID } }),
       }
       const platformClient = {
         canViewBrandCredit: jest.fn().mockResolvedValue(allowed),
@@ -139,7 +136,8 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
       expect(res).toEqual({ data: { balances: { COP: 1000 } } })
     })
 
-    it('enforces brand ownership on wallet :id routes (findById, getTransactions, getBalance, freeze, unfreeze, close, transfer)', async () => {
+    it('enforces brand ownership on wallet :id routes (findById, getTransactions, getBalance, transfer)', async () => {
+      // R15: red when assertResourceBrandAccess is removed from findById, getTransactions, getBalance or transfer.
       const { controller, walletService } = buildSubject(false)
 
       await expect(controller.findById(RESOURCE_ID, userReq)).rejects.toMatchObject({
@@ -165,16 +163,6 @@ describe('Brand-scoped user controllers (LOC-43)', () => {
         status: HttpStatus.FORBIDDEN,
       })
       expect(walletService.transfer).not.toHaveBeenCalled()
-
-      await expect(controller.freeze(RESOURCE_ID, userReq)).rejects.toMatchObject({
-        status: HttpStatus.FORBIDDEN,
-      })
-      await expect(controller.unfreeze(RESOURCE_ID, userReq)).rejects.toMatchObject({
-        status: HttpStatus.FORBIDDEN,
-      })
-      await expect(controller.close(RESOURCE_ID, userReq)).rejects.toMatchObject({
-        status: HttpStatus.FORBIDDEN,
-      })
     })
 
     it('allows superadmin and server callers without calling canViewBrandCredit', async () => {

@@ -9,17 +9,9 @@ import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
- * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
- * decorador vacío, o sea ningún guard—, así que todo endpoint de acá era
- * alcanzable sin credencial por el gateway público: cualquiera podía originar
- * cobros y links de pago. Verificado en vivo el 2026-08-25 con 20+ POST sin
- * credencial, que dejaron filas en `payments` y `payment_attempts`.
- *
- * `ApiAuthGuard` resuelve quién llama con el MISMO JWT del resto del sistema
- * (cookie de sesión o Bearer, verificado local con `JWT_SECRET`, más el
- * `ACCESS_SERVER` para server-to-server y el fallback a
- * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
- * firmados con un `clientSecret` que rota y que payments no puede guardar).
+ * `ApiAuthGuard` verifies session cookies, Bearer JWTs (`JWT_SECRET`), and `ACCESS_SERVER`
+ * tokens locally, falling back to `backend-auth` for auto-login tokens signed with a
+ * rotating `clientSecret` that this service does not hold.
  */
 @ApiTags('Checkout')
 @Controller('checkout')
@@ -132,7 +124,7 @@ export class CheckoutController {
     description: 'BRAND_LOOKUP_UNAVAILABLE: backend-platform did not respond',
   })
   async paymentReturn(@Query() query: CheckoutReturnQueryDto, @Req() req?: any) {
-    // ConfioPagos redirige con correlation_id = nuestro paymentId.
+    // ConfioPagos redirects back with our paymentId in correlation_id.
     const paymentId = query.paymentId || query.correlation_id
     const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : ''
     return {
