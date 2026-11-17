@@ -60,26 +60,14 @@ export class InvoicePdfService {
       // =============================================
       // Encabezado
       // =============================================
-      doc
-        .fontSize(20)
-        .font('Helvetica-Bold')
-        .text('CUBIKO', 50, 50)
+      doc.fontSize(20).font('Helvetica-Bold').text('CUBIKO', 50, 50)
 
-      doc
-        .fontSize(10)
-        .font('Helvetica')
-        .text('cubiko.co', 50, 75)
-        .text('admin@cubiko.co', 50, 88)
+      doc.fontSize(10).font('Helvetica').text('cubiko.co', 50, 75).text('admin@cubiko.co', 50, 88)
 
       // Tipo de documento
-      const docTitle = invoice.type === 'credit_note'
-        ? 'NOTA CRÉDITO'
-        : 'FACTURA DE VENTA'
+      const docTitle = invoice.type === 'credit_note' ? 'NOTA CRÉDITO' : 'FACTURA DE VENTA'
 
-      doc
-        .fontSize(16)
-        .font('Helvetica-Bold')
-        .text(docTitle, 350, 50, { align: 'right' })
+      doc.fontSize(16).font('Helvetica-Bold').text(docTitle, 350, 50, { align: 'right' })
 
       doc
         .fontSize(10)
@@ -87,34 +75,32 @@ export class InvoicePdfService {
         .text(`No. ${invoice.invoiceNumber}`, 350, 75, { align: 'right' })
 
       // Fechas
-      doc
-        .text(`Fecha emisión: ${this.formatDate(invoice.issuedAt || invoice.createdAt)}`, 350, 90, { align: 'right' })
+      doc.text(
+        `Fecha emisión: ${this.formatDate(invoice.issuedAt || invoice.createdAt)}`,
+        350,
+        90,
+        { align: 'right' },
+      )
 
       if (invoice.dueAt) {
-        doc.text(`Fecha vencimiento: ${this.formatDate(invoice.dueAt)}`, 350, 103, { align: 'right' })
+        doc.text(`Fecha vencimiento: ${this.formatDate(invoice.dueAt)}`, 350, 103, {
+          align: 'right',
+        })
       }
 
       if (invoice.dianCufe) {
-        doc
-          .fontSize(7)
-          .text(`CUFE: ${invoice.dianCufe}`, 350, 118, { align: 'right' })
+        doc.fontSize(7).text(`CUFE: ${invoice.dianCufe}`, 350, 118, { align: 'right' })
       }
 
       // Línea separadora
-      doc
-        .moveTo(50, 140)
-        .lineTo(562, 140)
-        .stroke()
+      doc.moveTo(50, 140).lineTo(562, 140).stroke()
 
       // =============================================
       // Datos del cliente
       // =============================================
       let yPos = 155
 
-      doc
-        .fontSize(10)
-        .font('Helvetica-Bold')
-        .text('DATOS DEL CLIENTE', 50, yPos)
+      doc.fontSize(10).font('Helvetica-Bold').text('DATOS DEL CLIENTE', 50, yPos)
 
       yPos += 18
 
@@ -125,7 +111,11 @@ export class InvoicePdfService {
         doc.text(`${profile.taxIdType}: ${profile.taxId}`, 50, yPos)
         yPos += 14
         if (profile.address) {
-          doc.text(`Dirección: ${profile.address}${profile.city ? `, ${profile.city}` : ''}${profile.state ? `, ${profile.state}` : ''}`, 50, yPos)
+          doc.text(
+            `Dirección: ${profile.address}${profile.city ? `, ${profile.city}` : ''}${profile.state ? `, ${profile.state}` : ''}`,
+            50,
+            yPos,
+          )
           yPos += 14
         }
         if (profile.email) {
@@ -175,10 +165,7 @@ export class InvoicePdfService {
       }
 
       // Header de tabla
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(9)
-        .fillColor('#333333')
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#333333')
 
       doc.rect(50, tableTop, 512, 20).fill('#f0f0f0')
       doc.fillColor('#333333')
@@ -210,7 +197,11 @@ export class InvoicePdfService {
         yPos += 18
 
         // Línea sutil
-        doc.moveTo(50, yPos - 3).lineTo(562, yPos - 3).strokeColor('#eeeeee').stroke()
+        doc
+          .moveTo(50, yPos - 3)
+          .lineTo(562, yPos - 3)
+          .strokeColor('#eeeeee')
+          .stroke()
       }
 
       // =============================================
@@ -224,18 +215,27 @@ export class InvoicePdfService {
 
       doc.font('Helvetica').fontSize(10)
       doc.text('Subtotal:', 350, yPos)
-      doc.text(this.formatMoney(invoice.subtotal, invoice.currency), 490, yPos, { align: 'right', width: 72 })
+      doc.text(this.formatMoney(invoice.subtotal, invoice.currency), 490, yPos, {
+        align: 'right',
+        width: 72,
+      })
       yPos += 18
 
       if (invoice.taxTotal > 0) {
         doc.text('Impuestos:', 350, yPos)
-        doc.text(this.formatMoney(invoice.taxTotal, invoice.currency), 490, yPos, { align: 'right', width: 72 })
+        doc.text(this.formatMoney(invoice.taxTotal, invoice.currency), 490, yPos, {
+          align: 'right',
+          width: 72,
+        })
         yPos += 18
       }
 
       doc.font('Helvetica-Bold').fontSize(12)
       doc.text('TOTAL:', 350, yPos)
-      doc.text(this.formatMoney(invoice.total, invoice.currency), 490, yPos, { align: 'right', width: 72 })
+      doc.text(this.formatMoney(invoice.total, invoice.currency), 490, yPos, {
+        align: 'right',
+        width: 72,
+      })
       yPos += 25
 
       // Estado
@@ -257,7 +257,9 @@ export class InvoicePdfService {
         .font('Helvetica-Bold')
         .fontSize(14)
         .fillColor(statusColors[invoice.status] || '#333333')
-        .text(statusLabels[invoice.status] || invoice.status.toUpperCase(), 350, yPos, { align: 'right' })
+        .text(statusLabels[invoice.status] || invoice.status.toUpperCase(), 350, yPos, {
+          align: 'right',
+        })
 
       // =============================================
       // Footer

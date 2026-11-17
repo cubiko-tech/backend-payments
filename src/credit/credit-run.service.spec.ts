@@ -96,9 +96,9 @@ describe('CreditRunService', () => {
 
     it('rechaza si ya hay un run activo para el período (409)', async () => {
       runReadRepo.findOne.mockResolvedValue({ id: 'otro', status: ScoreRunStatus.RUNNING })
-      await expect(
-        service.createRun({ ...PERIOD, triggeredBy: 't' }),
-      ).rejects.toMatchObject({ status: 409 })
+      await expect(service.createRun({ ...PERIOD, triggeredBy: 't' })).rejects.toMatchObject({
+        status: 409,
+      })
       expect(queue.add).not.toHaveBeenCalled()
     })
 
@@ -122,8 +122,17 @@ describe('CreditRunService', () => {
     })
 
     it('puntúa todas las marcas de la página y completa el run', async () => {
-      runWriteRepo.findOne.mockResolvedValue({ ...PERIOD, id: 'run-1', status: ScoreRunStatus.PENDING })
-      client.discoverBrands.mockResolvedValue({ data: ['b1', 'b2'], page: 1, pageSize: 100, total: 2 })
+      runWriteRepo.findOne.mockResolvedValue({
+        ...PERIOD,
+        id: 'run-1',
+        status: ScoreRunStatus.PENDING,
+      })
+      client.discoverBrands.mockResolvedValue({
+        data: ['b1', 'b2'],
+        page: 1,
+        pageSize: 100,
+        total: 2,
+      })
       client.getBatch.mockResolvedValue([ins('b1'), ins('b2')])
 
       await service.executeRun('run-1')
@@ -139,9 +148,18 @@ describe('CreditRunService', () => {
     })
 
     it('reanuda: salta marcas ya puntuadas para el run', async () => {
-      runWriteRepo.findOne.mockResolvedValue({ ...PERIOD, id: 'run-1', status: ScoreRunStatus.RUNNING })
+      runWriteRepo.findOne.mockResolvedValue({
+        ...PERIOD,
+        id: 'run-1',
+        status: ScoreRunStatus.RUNNING,
+      })
       scoreReadRepo.find.mockResolvedValue([{ brandId: 'b1' }]) // b1 ya hecha
-      client.discoverBrands.mockResolvedValue({ data: ['b1', 'b2'], page: 1, pageSize: 100, total: 2 })
+      client.discoverBrands.mockResolvedValue({
+        data: ['b1', 'b2'],
+        page: 1,
+        pageSize: 100,
+        total: 2,
+      })
       client.getBatch.mockResolvedValue([ins('b2')])
 
       await service.executeRun('run-1')
@@ -151,7 +169,11 @@ describe('CreditRunService', () => {
     })
 
     it('una violación de unicidad por marca no cuenta como error', async () => {
-      runWriteRepo.findOne.mockResolvedValue({ ...PERIOD, id: 'run-1', status: ScoreRunStatus.PENDING })
+      runWriteRepo.findOne.mockResolvedValue({
+        ...PERIOD,
+        id: 'run-1',
+        status: ScoreRunStatus.PENDING,
+      })
       client.discoverBrands.mockResolvedValue({ data: ['b1'], page: 1, pageSize: 100, total: 1 })
       client.getBatch.mockResolvedValue([ins('b1')])
       creditService.scoreInputs.mockRejectedValueOnce({ code: '23505' })
@@ -166,7 +188,11 @@ describe('CreditRunService', () => {
 
   describe('markFailed', () => {
     it('marca el run como failed', async () => {
-      runWriteRepo.findOne.mockResolvedValue({ id: 'run-1', status: ScoreRunStatus.RUNNING, errors: 0 })
+      runWriteRepo.findOne.mockResolvedValue({
+        id: 'run-1',
+        status: ScoreRunStatus.RUNNING,
+        errors: 0,
+      })
       await service.markFailed('run-1')
       const last = runWriteRepo.save.mock.calls.at(-1)![0]
       expect(last.status).toBe(ScoreRunStatus.FAILED)

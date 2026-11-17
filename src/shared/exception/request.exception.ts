@@ -6,10 +6,7 @@ import { HttpException, HttpStatus } from '@nestjs/common'
 export class RequestException extends HttpException {
   public readonly code?: string
 
-  constructor(
-    error: Record<string, any>,
-    status: HttpStatus = HttpStatus.BAD_REQUEST,
-  ) {
+  constructor(error: Record<string, any>, status: HttpStatus = HttpStatus.BAD_REQUEST) {
     super({ ...error, status }, status)
     this.code = error.code
   }

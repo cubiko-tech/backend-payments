@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Param,
+  ParseUUIDPipe,
   Query,
   Headers,
   RawBodyRequest,
@@ -16,18 +17,27 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Request } from 'express'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { WebhookService } from './webhook.service'
+import {
+  ListFailedWebhooksQueryDto,
+  ListWebhookEventsQueryDto,
+} from './dto/webhook-admin-query.dto'
 import { StripeProvider } from '../provider/stripe/stripe.provider'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
-import { buildConfioWebhookEventId, classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
+import {
+  buildConfioWebhookEventId,
+  classifyConfioWebhookEvent,
+} from '../provider/confio/confio-webhook'
 import {
   timingSafeEqualStrings,
   verifyConfioWebhookSignature,
 } from '../provider/confio/confio-webhook-signature'
 import { readConfioWebhookKey } from '../provider/confio/confio-webhook-env'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
+import { escapeLogValue } from '../shared/logger/log-value'
 
 /**
  * Webhook Controller — el ÚNICO controller del servicio sin guard de clase, y
@@ -48,22 +58,6 @@ import { ConfioWebhookPayload } from '../provider/confio/confio.types'
  */
 const SIN_CAMPOS_DE_FIRMA = 'signature.properties=no aplica data=no aplica'
 
-/** Tope de caracteres de cada eco del emisor dentro de una línea de log. */
-const ECO_DE_LOG_MAX = 120
-
-/**
- * Normaliza un valor QUE VIENE DEL EMISOR antes de loguearlo: sin esto un
- * `event` con saltos de línea o secuencias ANSI forja líneas de log, y una lista
- * de `properties` larguísima infla cada rechazo. Espeja a `echoForDetail` de
- * `confio-webhook-signature.ts`, que no se exporta.
- */
-function ecoDeLog(value: unknown): string {
-  const raw = typeof value === 'string' ? value : String(value)
-  const clean = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
-
-  return clean.length > ECO_DE_LOG_MAX ? `${clean.slice(0, ECO_DE_LOG_MAX)}…` : clean
-}
-
 /**
  * Campos del payload que acompañan a un rechazo POSTERIOR a la verificación de
  * firma: el conjunto declarado por el emisor y las claves de `data`. Nunca el
@@ -71,9 +65,10 @@ function ecoDeLog(value: unknown): string {
  */
 function camposDeFirma(payload: ConfioWebhookPayload): string {
   const properties = payload?.signature?.properties
-  const declared = Array.isArray(properties) ? ecoDeLog(properties.join(',')) : 'ausente'
+  const declared = Array.isArray(properties) ? escapeLogValue(properties.join(',')) : 'ausente'
   const data = payload?.data
-  const keys = data && typeof data === 'object' ? ecoDeLog(Object.keys(data).join(',')) : 'ausente'
+  const keys =
+    data && typeof data === 'object' ? escapeLogValue(Object.keys(data).join(',')) : 'ausente'
 
   return `signature.properties=[${declared}] data=[${keys}]`
 }
@@ -145,7 +140,7 @@ export class WebhookController {
     // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.type || payload?.action || 'unknown'
-    const providerEventId = payload?.id?.toString() || `mp_${Date.now()}`
+    const providerEventId = this.mercadoPagoProvider.webhookEventId(rawBody, signature)
 
     return this.webhookService.receive('mercadopago', eventType, providerEventId, payload)
   }
@@ -172,7 +167,7 @@ export class WebhookController {
     // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.event || payload?.type || 'unknown'
-    const providerEventId = payload?.eventId || `dropi_${Date.now()}`
+    const providerEventId = this.dropiProvider.webhookEventId(rawBody, payload)
 
     return this.webhookService.receive('dropi', eventType, providerEventId, payload)
   }
@@ -213,7 +208,7 @@ export class WebhookController {
       this.autenticarRamoOneShot(rawBody, bearer)
 
       this.logger.warn(
-        `Webhook ConfioPagos ignorado: evento fuera del contrato "${ecoDeLog(payload.event)}"`,
+        `Webhook ConfioPagos ignorado: evento fuera del contrato "${escapeLogValue(payload.event)}"`,
       )
 
       return { ignored: true }
@@ -306,8 +301,7 @@ export class WebhookController {
    */
   private autenticarRamoOneShot(rawBody: Buffer, bearer: string): void {
     const conAccessToken = this.confioProvider.validateWebhookSignature(rawBody, bearer)
-    const conClaveDeWebhook =
-      !!this.webhookKey && timingSafeEqualStrings(bearer, this.webhookKey)
+    const conClaveDeWebhook = !!this.webhookKey && timingSafeEqualStrings(bearer, this.webhookKey)
 
     if (!conAccessToken && !conClaveDeWebhook) {
       throw this.rechazarWebhookConfio(
@@ -321,7 +315,7 @@ export class WebhookController {
   /** Rechazo de webhook de ConfioPagos: UNA línea de log y un 401. */
   private rechazarWebhookConfio(reason: string, campos: string, detail: string): HttpException {
     this.logger.warn(
-      `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${ecoDeLog(detail)}"`,
+      `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${escapeLogValue(detail)}"`,
     )
 
     return new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)
@@ -350,29 +344,32 @@ export class WebhookController {
 
   @Get('admin/events')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar todos los webhooks con filtros (Admin)' })
   @ApiResponse({ status: 200, description: 'Webhooks con stats' })
-  async getAllWebhooks(
-    @Query('status') status?: string,
-    @Query('provider') provider?: string,
-    @Query('limit') limit?: number,
-  ) {
-    return this.webhookService.getAllWebhooks({ status, provider, limit: limit || 100 })
+  async getAllWebhooks(@Query() query?: ListWebhookEventsQueryDto) {
+    return this.webhookService.getAllWebhooks({
+      status: query?.status,
+      provider: query?.provider,
+      limit: query?.limit || 100,
+    })
   }
 
   @Get('admin/failed')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar webhooks fallidos (Admin)' })
   @ApiResponse({ status: 200, description: 'Lista de webhooks fallidos' })
-  async getFailedWebhooks(@Query('limit') limit?: number) {
-    return this.webhookService.getFailedWebhooks(limit || 50)
+  async getFailedWebhooks(@Query() query?: ListFailedWebhooksQueryDto) {
+    return this.webhookService.getFailedWebhooks(query?.limit || 50)
   }
 
   @Post('admin/:id/retry')
   @UseGuards(ApiAuthGuard)
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
-  async retryWebhook(@Param('id') id: string) {
+  async retryWebhook(@Param('id', ParseUUIDPipe) id: string) {
     return this.webhookService.retryWebhook(id)
   }
 }

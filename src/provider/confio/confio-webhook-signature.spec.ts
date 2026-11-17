@@ -1,3 +1,4 @@
+// R6: Single-responsibility unit suite for Confio webhook SHA256 signature verification vectors and edge cases.
 import { verifyConfioWebhookSignature } from './confio-webhook-signature'
 import { ConfioWebhookPayload } from './confio.types'
 
@@ -123,6 +124,15 @@ function cambioDeEstado(): ConfioWebhookPayload {
 }
 
 describe('verifyConfioWebhookSignature', () => {
+  beforeEach(() => {
+    // R17: Freeze wall-clock time to the fixed fixture timestamp so 24h window checks are deterministic.
+    jest.spyOn(Date, 'now').mockReturnValue(TIMESTAMP * 1000)
+  })
+
+  afterEach(() => {
+    jest.restoreAllMocks()
+  })
+
   describe('payloads legítimos', () => {
     it('firma el cobro exitoso (6 propiedades con payment)', () => {
       expect(verifyConfioWebhookSignature(cobroExitoso(), KEY)).toEqual({ signed: true })

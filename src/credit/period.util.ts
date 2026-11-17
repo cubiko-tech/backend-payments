@@ -54,17 +54,35 @@ export function validateWholeMonths(
   periodStart: string,
   periodEnd: string,
   nowMs: number,
-): { error: PeriodValidationError | null, months: number } {
+): { error: PeriodValidationError | null; months: number } {
   if (dayOfYmd(periodStart) !== 1 || dayOfYmd(periodEnd) !== 1) {
-    return { error: { code: 'periodNotWholeMonths', message: 'El período debe ser meses completos (día 01)' }, months: 0 }
+    return {
+      error: {
+        code: 'periodNotWholeMonths',
+        message: 'El período debe ser meses completos (día 01)',
+      },
+      months: 0,
+    }
   }
   const startIdx = monthIndexOfYmd(periodStart)
   const endIdx = monthIndexOfYmd(periodEnd)
   if (endIdx <= startIdx) {
-    return { error: { code: 'periodEndBeforeStart', message: 'periodEnd debe ser posterior a periodStart' }, months: 0 }
+    return {
+      error: {
+        code: 'periodEndBeforeStart',
+        message: 'periodEnd debe ser posterior a periodStart',
+      },
+      months: 0,
+    }
   }
   if (endIdx > currentMonthIndexCot(nowMs)) {
-    return { error: { code: 'periodIncludesCurrentMonth', message: 'El período no puede incluir el mes en curso' }, months: 0 }
+    return {
+      error: {
+        code: 'periodIncludesCurrentMonth',
+        message: 'El período no puede incluir el mes en curso',
+      },
+      months: 0,
+    }
   }
   return { error: null, months: endIdx - startIdx }
 }

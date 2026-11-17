@@ -23,7 +23,10 @@ import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { buildConfioBuyer } from '../provider/confio/confio-buyer'
-import { CreateConfioSubscriptionParams, ConfioSubscriptionResult } from '../provider/confio/confio.types'
+import {
+  CreateConfioSubscriptionParams,
+  ConfioSubscriptionResult,
+} from '../provider/confio/confio.types'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
@@ -58,8 +61,7 @@ import { RequestException } from '../shared/exception/request.exception'
  * ConfioPagos exige un motivo y lo persiste de su lado: quien mire esa suscripción
  * allá tiene que poder entender por qué murió sin buscar en nuestros logs.
  */
-const MOTIVO_DE_REEMPLAZO =
-  'Reemplazada por un alta nueva de la misma marca en ROAX'
+const MOTIVO_DE_REEMPLAZO = 'Reemplazada por un alta nueva de la misma marca en ROAX'
 
 @Injectable()
 export class ConfioTrialService {
@@ -272,7 +274,9 @@ export class ConfioTrialService {
       return await fn()
     } catch (error) {
       if (error instanceof ConfioSubscriptionInputError) {
-        this.logger.warn(`Alta de ConfioPagos rechazada localmente [${error.code}] en ${error.field}`)
+        this.logger.warn(
+          `Alta de ConfioPagos rechazada localmente [${error.code}] en ${error.field}`,
+        )
         throw this.inputErrorException(error)
       }
 
@@ -313,7 +317,8 @@ export class ConfioTrialService {
         return new RequestException(
           {
             code: 'CONFIO_PLAN_STORE_MISMATCH',
-            message: 'La integración con ConfioPagos está mal configurada, reintentá en unos minutos',
+            message:
+              'La integración con ConfioPagos está mal configurada, reintentá en unos minutos',
           },
           HttpStatus.SERVICE_UNAVAILABLE,
         )
@@ -321,7 +326,8 @@ export class ConfioTrialService {
         return new RequestException(
           {
             code: 'CONFIO_SUBSCRIPTION_NAME_INVALID',
-            message: 'La suscripción guardada no es consultable en ConfioPagos, reintentá en unos minutos',
+            message:
+              'La suscripción guardada no es consultable en ConfioPagos, reintentá en unos minutos',
           },
           HttpStatus.SERVICE_UNAVAILABLE,
         )

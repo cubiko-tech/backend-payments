@@ -5,12 +5,27 @@ import {
   Body,
   Param,
   Query,
+  Req,
   UseGuards,
   ParseUUIDPipe,
+  Logger,
+  HttpStatus,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { RefundService } from './refund.service'
+import { RequestRefundDto } from './dto/request-refund.dto'
+import { ApproveRefundDto } from './dto/approve-refund.dto'
+import { ListRefundsQueryDto } from './dto/list-refunds-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { RequestException } from '../shared/exception/request.exception'
+import {
+  assertBrandAccess,
+  assertResourceBrandAccess,
+  isPrivilegedCaller,
+  resolveRequestBrandId,
+} from '../shared/auth/brand-scope.util'
 
 @ApiTags('Refund')
 @Controller('refund')
@@ -24,13 +39,33 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  */
 @UseGuards(ApiAuthGuard)
 export class RefundController {
-  constructor(private readonly refundService: RefundService) {}
+  private readonly logger = new Logger(RefundController.name)
+
+  constructor(
+    private readonly refundService: RefundService,
+    private readonly platformClient: ClientPlatformService,
+  ) {}
 
   @Post()
   @ApiOperation({ summary: 'Solicitar un reembolso' })
   @ApiResponse({ status: 201, description: 'Reembolso solicitado correctamente' })
-  async request(@Body() data: any) {
-    return this.refundService.request(data)
+  async request(
+    @Body() data: RequestRefundDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      resolveRequestBrandId(req, brandId),
+      'POST /refund',
+    )
+    return this.refundService.request({
+      ...data,
+      brandId: validBrandId,
+      requestedBy: req?.user?.id,
+    })
   }
 
   @Get()
@@ -38,25 +73,46 @@ export class RefundController {
   @ApiResponse({ status: 200, description: 'Reembolsos obtenidos correctamente' })
   async findByBrand(
     @Query('brandId') brandId: string,
-    @Query() filters: { page?: number; limit?: number; status?: string },
+    @Query() filters: ListRefundsQueryDto,
+    @Req() req?: any,
   ) {
-    return this.refundService.findByBrand(brandId, filters)
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /refund',
+    )
+    return this.refundService.findByBrand(validBrandId, filters)
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener detalle de un reembolso' })
   @ApiResponse({ status: 200, description: 'Reembolso obtenido correctamente' })
-  async findById(@Param('id', ParseUUIDPipe) id: string) {
-    return this.refundService.findById(id)
+  async findById(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
+    const result = await this.refundService.findById(id)
+    await assertResourceBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      result?.data?.brandId,
+      'GET /refund/:id',
+    )
+    return result
   }
 
   @Post(':id/approve')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
   async approve(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() data: { approvedBy: string },
+    @Body() _data?: ApproveRefundDto,
+    @Req() req?: any,
   ) {
-    return this.refundService.approve(id, data.approvedBy)
+    if (!isPrivilegedCaller(req)) {
+      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    }
+    return this.refundService.approve(id, req.user.id)
   }
 }

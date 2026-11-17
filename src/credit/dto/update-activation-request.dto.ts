@@ -1,9 +1,6 @@
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator'
 
-import {
-  CREDIT_ACTIVATION_REQUEST_STATUSES,
-  CreditActivationRequestStatus,
-} from '../credit.types'
+import { CREDIT_ACTIVATION_REQUEST_STATUSES, CreditActivationRequestStatus } from '../credit.types'
 
 export class UpdateActivationRequestDto {
   @IsOptional()

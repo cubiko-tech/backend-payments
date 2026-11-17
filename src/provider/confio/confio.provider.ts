@@ -1,7 +1,9 @@
+// R6: one adapter of one provider API: payments, plans, subscriptions and webhooks share its client.
 import { Injectable } from '@nestjs/common'
 import { timingSafeEqual } from 'crypto'
 import {
   PaymentProvider,
+  ProviderPaymentNotFoundError,
   CreateCheckoutParams,
   CheckoutResult,
   PaymentStatusResult,
@@ -11,6 +13,7 @@ import {
 } from '../provider.interface'
 import { isProductionEnv } from '../../shared/env/is-production'
 import { logger } from '../../shared/logger/logger'
+import { ConfioApiError } from './confio-api-error'
 import { ConfioSubscriptionInputError } from './confio-subscription-error'
 import { assertConfioBuyer } from './confio-buyer'
 import {
@@ -87,9 +90,7 @@ export class ConfioProvider implements PaymentProvider {
   constructor() {
     this.baseUrl =
       process.env.CONFIO_API_BASE_URL ||
-      (isProductionEnv()
-        ? 'https://api.confiopagos.com/v1'
-        : 'https://api.dev.confiopagos.com/v1')
+      (isProductionEnv() ? 'https://api.confiopagos.com/v1' : 'https://api.dev.confiopagos.com/v1')
 
     const storeId = process.env.CONFIO_STORE_ID
     const token = process.env.CONFIO_ACCESS_TOKEN
@@ -106,7 +107,9 @@ export class ConfioProvider implements PaymentProvider {
 
   private ensureConfigured() {
     if (!this.storeId || !this.accessToken) {
-      throw new Error('ConfioPagos no configurado. Configure CONFIO_STORE_ID y CONFIO_ACCESS_TOKEN en .env')
+      throw new Error(
+        'ConfioPagos no configurado. Configure CONFIO_STORE_ID y CONFIO_ACCESS_TOKEN en .env',
+      )
     }
   }
 
@@ -114,9 +117,9 @@ export class ConfioProvider implements PaymentProvider {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...options,
       headers: {
-        Authorization: `Bearer ${this.accessToken}`,
+        'Authorization': `Bearer ${this.accessToken}`,
         'Content-Type': 'application/json',
-        Accept: 'application/json',
+        'Accept': 'application/json',
         ...options.headers,
       },
       signal: AbortSignal.timeout(30000),
@@ -124,26 +127,27 @@ export class ConfioProvider implements PaymentProvider {
 
     const text = await response.text()
 
-    // ConfioPagos NO siempre responde JSON: algunos errores llegan como texto
-    // plano. Parsear a ciegas ANTES de mirar `response.ok` convertía eso en un
-    // `Unexpected token 'S'…` que se comía lo único que sirve —el status y lo que
-    // ellos dijeron—, y dejaba el fallo sin diagnóstico posible desde los logs.
-    // Costó tres altas de prueba contra dev el 2026-09-04 para ni siquiera saber
-    // qué estaba rechazando.
+    // Error messages carry the HTTP status only: callers log them, and the body can hold buyer data.
+    if (response.status === 404) {
+      throw new ProviderPaymentNotFoundError('ConfioPagos error 404')
+    }
+
     // `any` y no `unknown`: es lo que `JSON.parse` ya devolvía acá, y los
     // llamadores leen campos del cuerpo. Estrechar el tipo es otra tarea.
     let body: any
     try {
       body = text ? JSON.parse(text) : {}
     } catch {
-      throw new Error(
-        `ConfioPagos respondió ${response.status} con un cuerpo que no es JSON: ` +
-          `${text.slice(0, 300)}`,
+      // Some ConfioPagos errors are plain text: report their status, not a SyntaxError.
+      throw new ConfioApiError(
+        `ConfioPagos respondió ${response.status} con un cuerpo que no es JSON`,
+        response.status,
       )
     }
 
     if (!response.ok) {
-      throw new Error(`ConfioPagos error ${response.status}: ${JSON.stringify(body)}`)
+      const code = body?.code == null ? undefined : String(body.code)
+      throw new ConfioApiError(`ConfioPagos error ${response.status}`, response.status, code)
     }
     return body
   }
@@ -181,7 +185,7 @@ export class ConfioProvider implements PaymentProvider {
       body: JSON.stringify(body),
     })
 
-    logger.log('info', `ConfioProvider: pago creado ${resp.name} (${resp.url})`)
+    logger.log('info', `ConfioProvider: pago creado ${resp.name}`)
 
     return {
       providerPaymentId: resp.name,
@@ -203,7 +207,11 @@ export class ConfioProvider implements PaymentProvider {
     return {
       status: ConfioProvider.mapStatus(resp.status),
       paidAt: resp.completedAt ? new Date(resp.completedAt) : undefined,
-      metadata: { confioStatus: resp.status, paymentMethod: resp.paymentMethod },
+      metadata: {
+        confioStatus: resp.status,
+        paymentMethod: resp.paymentMethod,
+        amountCents: resp.amountCents,
+      },
     }
   }
 
@@ -549,14 +557,8 @@ export class ConfioProvider implements PaymentProvider {
    */
   validateWebhookSignature(_payload: Buffer, signature: string): boolean {
     if (!this.accessToken) {
-      // Sin token configurado: solo permitir fuera de producción.
-      const isProd = isProductionEnv()
-      if (isProd) {
-        logger.log('error', 'ConfioProvider: access token no configurado en producción — webhook rechazado')
-        return false
-      }
-      logger.log('warn', 'ConfioProvider: access token no configurado, validación de webhook omitida (solo dev)')
-      return true
+      logger.log('error', 'ConfioProvider: access token not configured — webhook rejected')
+      return false
     }
 
     const received = Buffer.from(signature || '')

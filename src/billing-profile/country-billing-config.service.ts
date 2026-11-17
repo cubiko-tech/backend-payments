@@ -84,14 +84,18 @@ export class CountryBillingConfigService {
     // Validar tipo de documento fiscal
     if (config.taxIdRequired && profile.taxIdType) {
       if (!config.taxIdTypes.includes(profile.taxIdType)) {
-        errors.push(`Tipo de documento '${profile.taxIdType}' no válido para ${config.countryName}. Válidos: ${config.taxIdTypes.join(', ')}`)
+        errors.push(
+          `Tipo de documento '${profile.taxIdType}' no válido para ${config.countryName}. Válidos: ${config.taxIdTypes.join(', ')}`,
+        )
       }
     }
 
     // Validar régimen fiscal
     if (config.taxRegimeRequired && profile.taxRegime) {
       if (!config.taxRegimes.includes(profile.taxRegime)) {
-        errors.push(`Régimen fiscal '${profile.taxRegime}' no válido para ${config.countryName}. Válidos: ${config.taxRegimes.join(', ')}`)
+        errors.push(
+          `Régimen fiscal '${profile.taxRegime}' no válido para ${config.countryName}. Válidos: ${config.taxRegimes.join(', ')}`,
+        )
       }
     }
 

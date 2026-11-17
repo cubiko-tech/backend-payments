@@ -14,11 +14,23 @@ import { AuditModule } from '../audit/audit.module'
 import { PaymentModule } from '../payment/payment.module'
 import { CheckoutModule } from '../checkout/checkout.module'
 import { WebhookModule } from '../webhook/webhook.module'
+import { RechargeModule } from '../recharge/recharge.module'
+import { DropiRechargeBacklogTask } from './dropi-recharge-backlog'
+import { AutomaticRechargeInvoiceCloseTask } from './automatic-recharge-invoice-close'
 
 @Module({
   imports: [
     TypeOrmModule.forFeature(
-      [Wallet, WalletBalanceSnapshot, Transaction, Payment, PaymentAttempt, Subscription, SubscriptionEvent, WebhookEvent],
+      [
+        Wallet,
+        WalletBalanceSnapshot,
+        Transaction,
+        Payment,
+        PaymentAttempt,
+        Subscription,
+        SubscriptionEvent,
+        WebhookEvent,
+      ],
       'DBWrite',
     ),
     TypeOrmModule.forFeature(
@@ -32,7 +44,8 @@ import { WebhookModule } from '../webhook/webhook.module'
     // La repesca de altas sin confirmar reusa `ConfioSubscriptionWebhookService`: la
     // regla de qué se otorga vive allá y no se duplica acá.
     WebhookModule,
+    RechargeModule,
   ],
-  providers: [TasksService],
+  providers: [TasksService, DropiRechargeBacklogTask, AutomaticRechargeInvoiceCloseTask],
 })
 export class TasksModule {}

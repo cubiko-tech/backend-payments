@@ -41,13 +41,16 @@ export class EnterprisePricingService {
   /**
    * Crear o actualizar precio enterprise para una marca.
    */
-  async upsert(brandId: string, data: {
-    monthlyPrice: number
-    currency?: string
-    negotiatedBy?: string
-    validUntil?: Date
-    notes?: string
-  }) {
+  async upsert(
+    brandId: string,
+    data: {
+      monthlyPrice: number
+      currency?: string
+      negotiatedBy?: string
+      validUntil?: Date
+      notes?: string
+    },
+  ) {
     let pricing = await this.pricingRepo.findOne({ where: { brandId } })
 
     if (pricing) {
@@ -68,7 +71,9 @@ export class EnterprisePricingService {
     }
 
     const saved = await this.pricingRepo.save(pricing)
-    this.logger.log(`Precio enterprise actualizado para marca ${brandId}: ${data.monthlyPrice} ${data.currency || 'COP'}`)
+    this.logger.log(
+      `Precio enterprise actualizado para marca ${brandId}: ${data.monthlyPrice} ${data.currency || 'COP'}`,
+    )
     return { data: saved }
   }
 

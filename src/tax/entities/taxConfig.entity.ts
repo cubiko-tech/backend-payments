@@ -7,6 +7,10 @@ export class TaxConfig extends Content {
   @Column({ length: 2 }) country: string
   @Column() taxName: string
   @Column({ type: 'decimal', precision: 5, scale: 4 }) taxRate: number
+  /**
+   * Retained for schema compatibility; ignored by CheckoutService because all
+   * published prices are final tax-inclusive amounts.
+   */
   @Column({ default: false }) isInclusive: boolean
   @Column({ default: true }) isActive: boolean
 }

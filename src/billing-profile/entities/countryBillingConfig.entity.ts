@@ -30,13 +30,13 @@ export class CountryBillingConfig {
   taxIdRequired: boolean
 
   @Column({ type: 'jsonb', default: '[]' })
-  taxIdTypes: string[]                     // ["NIT","CC","CE"] para CO, ["RFC"] para MX
+  taxIdTypes: string[] // ["NIT","CC","CE"] for CO, ["RFC"] for MX
 
   @Column({ default: false })
   taxRegimeRequired: boolean
 
   @Column({ type: 'jsonb', default: '[]' })
-  taxRegimes: string[]                     // ["responsable_iva","no_responsable","gran_contribuyente"]
+  taxRegimes: string[] // ["responsable_iva","no_responsable","gran_contribuyente"]
 
   // --- Facturación electrónica ---
 
@@ -44,17 +44,17 @@ export class CountryBillingConfig {
   electronicInvoiceRequired: boolean
 
   @Column({ nullable: true })
-  electronicInvoiceProvider: string        // "siigo" | "alegra" | "sat" | null
+  electronicInvoiceProvider: string // "siigo" | "alegra" | "sat" | null
 
   // --- Campos obligatorios del billing profile ---
 
   @Column({ type: 'jsonb', default: '[]' })
-  requiredFields: string[]                 // ["legalName","taxId","address","city","email"]
+  requiredFields: string[] // ["legalName","taxId","address","city","email"]
 
   // --- Documentos legales requeridos ---
 
   @Column({ type: 'jsonb', default: '[]' })
-  legalDocuments: string[]                 // ["rut","camara_comercio"] para CO
+  legalDocuments: string[] // ["rut","camara_comercio"] for CO
 
   // --- Formato de factura ---
 
@@ -62,7 +62,7 @@ export class CountryBillingConfig {
   invoicePrefix: string
 
   @Column({ nullable: true })
-  invoiceFormat: string                    // "PREFIX-YYYY-NNNNNN"
+  invoiceFormat: string // "PREFIX-YYYY-NNNNNN"
 
   @Column({ default: true })
   isActive: boolean

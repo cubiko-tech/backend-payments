@@ -1,5 +1,19 @@
+// R6: Keeps the Confio webhook signature contract, serializers, and bounds together in one pure verifier.
 import { createHash, timingSafeEqual } from 'crypto'
 import { ConfioWebhookPayload } from './confio.types'
+
+/** 24-hour validity window for signed Confio subscription webhooks. */
+export const CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS = 24 * 60 * 60 * 1000
+/** Maximum length for Confio resource identifiers and string fields. */
+export const MAX_CONFIO_STRING_LENGTH = 256
+/** Maximum length for Confio failure reason strings. */
+export const MAX_CONFIO_REASON_LENGTH = 512
+const MAX_CONFIO_BUYER_KEYS = 16
+const OPTIONAL_DATA_STRING_CAPS: Record<string, number> = {
+  correlationId: 128,
+  createTime: 64,
+  updateTime: 64,
+}
 
 /**
  * Motivo por el que un payload de webhook de ConfioPagos NO quedó firmado.
@@ -18,6 +32,7 @@ export type ConfioWebhookSignatureReason =
   | 'missing_data_property'
   | 'invalid_data_type'
   | 'missing_timestamp'
+  | 'timestamp_out_of_window'
   | 'checksum_mismatch'
 
 /**
@@ -115,9 +130,19 @@ const EXPECTED_PROPERTY_SETS: { event: string; properties: string[] }[] = [
 function esObjetoDeStrings(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
 
-  const valores = Object.values(value as Record<string, unknown>)
+  const entries = Object.entries(value as Record<string, unknown>)
 
-  return valores.length > 0 && valores.every((v) => typeof v === 'string')
+  return (
+    entries.length > 0 &&
+    entries.length <= MAX_CONFIO_BUYER_KEYS &&
+    entries.every(
+      ([k, v]) =>
+        k.length > 0 &&
+        k.length <= 64 &&
+        typeof v === 'string' &&
+        v.length <= MAX_CONFIO_STRING_LENGTH,
+    )
+  )
 }
 
 /**
@@ -172,14 +197,17 @@ function formatearValor(value: unknown): string {
  * estado nuevo de Confío haría 401 en bucle, que es peor.
  */
 const DATA_PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
-  name: (value) => typeof value === 'string',
-  payment: (value) => typeof value === 'string',
-  status: (value) => typeof value === 'string',
+  name: (value) =>
+    typeof value === 'string' && value.length > 0 && value.length <= MAX_CONFIO_STRING_LENGTH,
+  payment: (value) =>
+    typeof value === 'string' && value.length > 0 && value.length <= MAX_CONFIO_STRING_LENGTH,
+  status: (value) => typeof value === 'string' && value.length > 0 && value.length <= 64,
   currencyCode: (value) => typeof value === 'string' && /^[A-Z]{3}$/.test(value),
   cycleNumber: (value) => typeof value === 'number' && Number.isFinite(value),
   amountCents: (value) => typeof value === 'number' && Number.isFinite(value),
   failedCount: (value) => typeof value === 'number' && Number.isFinite(value),
-  reason: (value) => value === null || typeof value === 'string',
+  reason: (value) =>
+    value === null || (typeof value === 'string' && value.length <= MAX_CONFIO_REASON_LENGTH),
   // Exige que TODOS los valores sean strings, y no es cosmético: `formatearValor`
   // serializa el objeto pegando sus valores, así que un valor anidado se
   // convertiría a `[object Object]` y firmaría algo que no describe el payload.
@@ -254,6 +282,7 @@ export function timingSafeEqualStrings(a: unknown, b: unknown): boolean {
 export function verifyConfioWebhookSignature(
   payload: ConfioWebhookPayload,
   webhookKey: string,
+  nowMs: number = Date.now(),
 ): ConfioWebhookSignatureVerdict {
   if (typeof webhookKey !== 'string' || webhookKey.length === 0) {
     return { signed: false, reason: 'missing_key', detail: 'WEBHOOK_KEY vacía o no configurada' }
@@ -355,6 +384,21 @@ export function verifyConfioWebhookSignature(
     }
   }
 
+  for (const [optKey, maxLen] of Object.entries(OPTIONAL_DATA_STRING_CAPS)) {
+    if (Object.prototype.hasOwnProperty.call(data, optKey)) {
+      const optVal = data[optKey]
+      if (optVal !== undefined && optVal !== null) {
+        if (typeof optVal !== 'string' || optVal.length > maxLen) {
+          return {
+            signed: false,
+            reason: 'invalid_data_type',
+            detail: `data.${optKey} no tiene el tipo del contrato`,
+          }
+        }
+      }
+    }
+  }
+
   // Misma regla que el bucle de arriba, ahora sobre el envelope: un `timestamp`
   // ausente firmaría el literal 'undefined' y saldría como `checksum_mismatch`,
   // un motivo que MIENTE en el triage si Confío cambiara el envelope. Va acá y
@@ -362,8 +406,17 @@ export function verifyConfioWebhookSignature(
   const timestamp = payload.timestamp
   const timestampIsScalar =
     (typeof timestamp === 'number' && Number.isFinite(timestamp)) ||
-    (typeof timestamp === 'string' && timestamp.length > 0)
+    (typeof timestamp === 'string' && timestamp.length > 0 && timestamp.length <= 32)
   if (!timestampIsScalar) {
+    return {
+      signed: false,
+      reason: 'missing_timestamp',
+      detail: 'timestamp ausente o no es un escalar del envelope',
+    }
+  }
+
+  const numericTimestamp = typeof timestamp === 'number' ? timestamp : Number(timestamp)
+  if (!Number.isFinite(numericTimestamp) || numericTimestamp <= 0) {
     return {
       signed: false,
       reason: 'missing_timestamp',
@@ -396,6 +449,15 @@ export function verifyConfioWebhookSignature(
       signed: false,
       reason: 'checksum_mismatch',
       detail: `checksum inválido para event "${echoForDetail(payload.event)}" sobre [${declared}]`,
+    }
+  }
+
+  const timestampMs = numericTimestamp >= 1e12 ? numericTimestamp : numericTimestamp * 1000
+  if (Math.abs(nowMs - timestampMs) > CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS) {
+    return {
+      signed: false,
+      reason: 'timestamp_out_of_window',
+      detail: `timestamp "${echoForDetail(timestamp)}" outside 24h validity window`,
     }
   }
 

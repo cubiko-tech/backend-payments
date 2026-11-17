@@ -1,15 +1,20 @@
+// R6: Keeps webhook reception, retry scheduling, provider dispatch, and admin inspection together.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectQueue } from '@nestjs/bullmq'
 import { Repository, In } from 'typeorm'
 import { Queue } from 'bullmq'
 import { WebhookEvent, WebhookStatus } from './entities/webhookEvent.entity'
-import { Payment } from '../payment/entities/payment.entity'
+import { Payment, PaymentProvider } from '../payment/entities/payment.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
+import { MAX_CONFIO_STRING_LENGTH } from '../provider/confio/confio-webhook-signature'
 import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
+import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
 
 const MAX_WEBHOOK_RETRIES = 3
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** Violación de índice único en Postgres (verificado contra dev: `code=23505`). */
 function isUniqueViolation(e: unknown): boolean {
@@ -33,6 +38,7 @@ export class WebhookService {
     @InjectQueue('webhook-retry')
     private readonly retryQueue: Queue,
     private readonly confioSubscriptions: ConfioSubscriptionWebhookService,
+    private readonly mercadoPagoProvider: MercadoPagoProvider,
   ) {}
 
   /**
@@ -45,21 +51,12 @@ export class WebhookService {
   /**
    * Recibir y registrar un evento de webhook.
    */
-  async receive(
-    provider: string,
-    eventType: string,
-    providerEventId: string,
-    payload: any,
-  ) {
+  async receive(provider: string, eventType: string, providerEventId: string, payload: any) {
     try {
-      // Idempotencia. El chequeo previo existe para evitar un INSERT condenado,
-      // no para garantizar unicidad: entre el SELECT y el INSERT entra otra
-      // entrega. Quien garantiza es el índice único `UQ_webhook_events_provider_id`
-      // (`migrations/1742600000000-InitialSchema.ts:233`), así que el contrato de
-      // idempotencia es la rama del 23505 de abajo, no este SELECT. Va contra la
-      // escritura —no contra la réplica— para que el lag no entre en el argumento.
+      // Pre-check against DBWrite; concurrent uniqueness is enforced by
+      // `UQ_webhook_events_provider_event` on `(provider, providerEventId)` and the 23505 branch.
       const existing = await this.webhookEventRepository.findOne({
-        where: { providerEventId },
+        where: { provider, providerEventId },
       })
 
       if (existing) {
@@ -86,9 +83,11 @@ export class WebhookService {
         // La idempotencia en recepción alcanza porque el efecto aguas abajo también
         // lo es (`checkout.service.ts:411` corta si el pago ya está COMPLETED).
         const winner = await this.webhookEventRepository.findOne({
-          where: { providerEventId },
+          where: { provider, providerEventId },
         })
-        this.logger.warn(`Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`)
+        this.logger.warn(
+          `Evento duplicado ignorado (índice único): ${providerEventId} (${provider})`,
+        )
         return { data: winner, duplicate: true }
       }
 
@@ -126,19 +125,27 @@ export class WebhookService {
       if (event.retryCount >= MAX_WEBHOOK_RETRIES) {
         // Máximo de reintentos alcanzado → dead letter
         event.status = WebhookStatus.FAILED
-        this.logger.error(`Webhook ${event.id} fallido definitivamente después de ${MAX_WEBHOOK_RETRIES} intentos`)
+        this.logger.error(
+          `Webhook ${event.id} fallido definitivamente después de ${MAX_WEBHOOK_RETRIES} intentos`,
+        )
       } else {
         // Encolar para reintento con backoff exponencial
         event.status = WebhookStatus.FAILED
         const delays = [60000, 300000, 1800000] // 1min, 5min, 30min
         const delay = delays[event.retryCount - 1] || 1800000
 
-        await this.retryQueue.add('retry', { eventId: event.id }, {
-          delay,
-          attempts: 1,
-          removeOnComplete: true,
-        })
-        this.logger.warn(`Webhook ${event.id} fallido, reintento #${event.retryCount} en ${delay / 1000}s`)
+        await this.retryQueue.add(
+          'retry',
+          { eventId: event.id },
+          {
+            delay,
+            attempts: 1,
+            removeOnComplete: true,
+          },
+        )
+        this.logger.warn(
+          `Webhook ${event.id} fallido, reintento #${event.retryCount} en ${delay / 1000}s`,
+        )
       }
 
       await this.webhookEventRepository.save(event)
@@ -157,15 +164,18 @@ export class WebhookService {
     // =============================================
     if (provider === 'stripe') {
       // Pago completado (checkout session o payment intent)
-      if (
-        eventType === 'checkout.session.completed' ||
-        eventType === 'payment_intent.succeeded'
-      ) {
-        const paymentId = payload.data?.object?.metadata?.paymentId
-          || await this.findPaymentByProviderIds(payload.data?.object?.id)
+      if (eventType === 'checkout.session.completed' || eventType === 'payment_intent.succeeded') {
+        const stripeObject = payload.data?.object
+        if (eventType === 'checkout.session.completed' && stripeObject?.payment_status !== 'paid') {
+          return
+        }
+        const paymentId = await this.findPaymentByProviderIds(
+          stripeObject?.id,
+          PaymentProvider.STRIPE,
+        )
 
         if (paymentId) {
-          await this.completePayment(paymentId, payload.data?.object)
+          await this.completePayment(paymentId, stripeObject, PaymentProvider.STRIPE)
         }
         return
       }
@@ -189,7 +199,9 @@ export class WebhookService {
 
       // Pago de suscripción fallido
       if (eventType === 'invoice.payment_failed') {
-        this.logger.warn(`Stripe subscription payment failed: ${payload.data?.object?.subscription}`)
+        this.logger.warn(
+          `Stripe subscription payment failed: ${payload.data?.object?.subscription}`,
+        )
         return
       }
     }
@@ -199,13 +211,19 @@ export class WebhookService {
     // =============================================
     if (provider === 'mercadopago') {
       if (eventType === 'payment' && payload.action === 'payment.created') {
-        // Consultar estado del pago en MP
         const mpPaymentId = payload.data?.id
-        if (mpPaymentId) {
-          // Buscar nuestro payment por el external_reference o metadata
-          const paymentId = await this.findPaymentByProviderIds(String(mpPaymentId))
-          if (paymentId) {
-            await this.completePayment(paymentId, { mpPaymentId })
+        if (mpPaymentId !== undefined && mpPaymentId !== null && String(mpPaymentId) !== '') {
+          const resolved = await resolveMercadoPagoNotice(
+            this.mercadoPagoProvider,
+            this.paymentReadRepo,
+            String(mpPaymentId),
+          )
+          if (resolved) {
+            await this.completePayment(
+              resolved.paymentId,
+              resolved.providerData,
+              PaymentProvider.MERCADOPAGO,
+            )
           }
         }
         return
@@ -219,9 +237,9 @@ export class WebhookService {
       if (eventType === 'charge.completed' || eventType === 'payment.completed') {
         const chargeId = payload.chargeId || payload.data?.chargeId
         if (chargeId) {
-          const paymentId = await this.findPaymentByProviderIds(chargeId)
+          const paymentId = await this.findPaymentByProviderIds(chargeId, PaymentProvider.DROPI)
           if (paymentId) {
-            await this.completePayment(paymentId, payload)
+            await this.completePayment(paymentId, payload, PaymentProvider.DROPI)
           }
         }
         return
@@ -253,12 +271,19 @@ export class WebhookService {
       const status: string = data.status || ''
 
       if (ConfioProvider.isCompleted(status)) {
-        // correlationId = nuestro paymentId; fallback por providerPaymentId (name).
-        const paymentId = data.correlationId || (await this.findPaymentByProviderIds(data.name))
+        const paymentId =
+          (await this.findPaymentByProviderIds(data.name, PaymentProvider.CONFIO)) ||
+          (await this.findPaymentByCorrelationId(
+            data.correlationId,
+            PaymentProvider.CONFIO,
+            data.name,
+          ))
         if (paymentId) {
-          await this.completePayment(paymentId, payload)
+          await this.completePayment(paymentId, payload, PaymentProvider.CONFIO)
         } else {
-          this.logger.warn(`Confio: pago no encontrado para name=${data.name} correlationId=${data.correlationId}`)
+          this.logger.warn(
+            `Confio: pago no encontrado para name=${data.name} correlationId=${data.correlationId}`,
+          )
         }
         return
       }
@@ -278,9 +303,13 @@ export class WebhookService {
   /**
    * Completar un pago — delega al CheckoutService.
    */
-  private async completePayment(paymentId: string, providerData: any) {
+  private async completePayment(
+    paymentId: string,
+    providerData: any,
+    expectedProvider: PaymentProvider,
+  ) {
     if (this.checkoutService) {
-      await this.checkoutService.completeExternalPayment(paymentId, providerData)
+      await this.checkoutService.completeExternalPayment(paymentId, providerData, expectedProvider)
     } else {
       this.logger.warn(`CheckoutService no disponible, pago ${paymentId} pendiente de completar`)
     }
@@ -298,7 +327,17 @@ export class WebhookService {
       where,
       order: { createdAt: 'DESC' },
       take: filters.limit || 100,
-      select: ['id', 'provider', 'eventType', 'providerEventId', 'status', 'error', 'retryCount', 'processedAt', 'createdAt'],
+      select: [
+        'id',
+        'provider',
+        'eventType',
+        'providerEventId',
+        'status',
+        'error',
+        'retryCount',
+        'processedAt',
+        'createdAt',
+      ],
     })
 
     // Stats globales
@@ -350,15 +389,59 @@ export class WebhookService {
   }
 
   /**
-   * Buscar payment interno por providerPaymentId.
+   * Look up internal payment by providerPaymentId and expected provider.
    */
-  private async findPaymentByProviderIds(providerId: string): Promise<string | null> {
-    if (!providerId) return null
+  private async findPaymentByProviderIds(
+    providerId: unknown,
+    provider: PaymentProvider,
+  ): Promise<string | null> {
+    if (
+      typeof providerId !== 'string' ||
+      providerId.length === 0 ||
+      providerId.length > MAX_CONFIO_STRING_LENGTH
+    ) {
+      return null
+    }
 
     const payment = await this.paymentReadRepo.findOne({
-      where: { providerPaymentId: providerId },
+      where: { providerPaymentId: providerId, provider },
     })
 
-    return payment?.id || null
+    return payment && payment.provider === provider && payment.providerPaymentId === providerId
+      ? payment.id
+      : null
+  }
+
+  /**
+   * Look up internal payment by UUID correlationId and expected provider.
+   */
+  private async findPaymentByCorrelationId(
+    correlationId: unknown,
+    provider: PaymentProvider,
+    providerPaymentId?: unknown,
+  ): Promise<string | null> {
+    if (typeof correlationId !== 'string' || !UUID_RE.test(correlationId)) return null
+    if (
+      providerPaymentId !== undefined &&
+      providerPaymentId !== null &&
+      (typeof providerPaymentId !== 'string' || providerPaymentId.length > MAX_CONFIO_STRING_LENGTH)
+    ) {
+      return null
+    }
+
+    const payment = await this.paymentReadRepo.findOne({
+      where: { id: correlationId, provider },
+    })
+
+    if (!payment || payment.provider !== provider) return null
+    if (
+      payment.providerPaymentId &&
+      providerPaymentId &&
+      payment.providerPaymentId !== providerPaymentId
+    ) {
+      return null
+    }
+
+    return payment.id
   }
 }

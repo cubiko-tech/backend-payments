@@ -5,13 +5,27 @@ import {
   Patch,
   Body,
   Param,
+  ParseUUIDPipe,
   Query,
+  Req,
   UseGuards,
+  Logger,
 } from '@nestjs/common'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
+import { CreateBillingProfileDto } from './dto/create-billing-profile.dto'
+import { UpdateBillingProfileDto } from './dto/update-billing-profile.dto'
+import {
+  ListPendingDocumentsQueryDto,
+  RejectLegalDocumentDto,
+  UploadLegalDocumentDto,
+  VerifyLegalDocumentDto,
+} from './dto/legal-document.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
+import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { assertBrandAccess, resolveRequestBrandId } from '../shared/auth/brand-scope.util'
 
 @ApiTags('Billing Profile')
 @Controller('billing-profile')
@@ -25,30 +39,62 @@ import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
  */
 @UseGuards(ApiAuthGuard)
 export class BillingProfileController {
+  private readonly logger = new Logger(BillingProfileController.name)
+
   constructor(
     private readonly billingProfileService: BillingProfileService,
     private readonly legalDocumentService: LegalDocumentService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Get()
   @ApiOperation({ summary: 'Obtener perfil de facturación de una marca' })
   @ApiResponse({ status: 200, description: 'Perfil de facturación obtenido correctamente' })
-  async get(@Query('brandId') brandId: string) {
-    return this.billingProfileService.get(brandId)
+  async get(@Query('brandId') brandId: string, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /billing-profile',
+    )
+    return this.billingProfileService.get(validBrandId)
   }
 
   @Post()
   @ApiOperation({ summary: 'Crear perfil de facturación (valida según país)' })
   @ApiResponse({ status: 201, description: 'Perfil de facturación creado correctamente' })
-  async create(@Body() data: any) {
-    return this.billingProfileService.create(data)
+  async create(
+    @Body() data: CreateBillingProfileDto,
+    @Req() req?: any,
+    @Query('brandId') brandId?: string,
+  ) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      resolveRequestBrandId(req, brandId),
+      'POST /billing-profile',
+    )
+    return this.billingProfileService.create({ ...data, brandId: validBrandId })
   }
 
   @Patch()
   @ApiOperation({ summary: 'Actualizar perfil de facturación (valida según país)' })
   @ApiResponse({ status: 200, description: 'Perfil de facturación actualizado correctamente' })
-  async update(@Query('brandId') brandId: string, @Body() data: any) {
-    return this.billingProfileService.update(brandId, data)
+  async update(
+    @Query('brandId') brandId: string,
+    @Body() data: UpdateBillingProfileDto,
+    @Req() req?: any,
+  ) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'PATCH /billing-profile',
+    )
+    return this.billingProfileService.update(validBrandId, data)
   }
 
   @Get('requirements')
@@ -62,26 +108,10 @@ export class BillingProfileController {
   // Documentos legales
   // ============================================
 
-  @Get(':brandId/documents')
-  @ApiOperation({ summary: 'Listar documentos legales de una marca' })
-  @ApiResponse({ status: 200, description: 'Documentos obtenidos' })
-  async getDocuments(@Param('brandId') brandId: string) {
-    return this.legalDocumentService.findByBrand(brandId)
-  }
-
-  @Post(':brandId/documents')
-  @ApiOperation({ summary: 'Subir documento legal de una marca' })
-  @ApiResponse({ status: 201, description: 'Documento subido' })
-  async uploadDocument(
-    @Param('brandId') brandId: string,
-    @Body() data: { country: string; documentType: string; documentUrl: string },
-  ) {
-    return this.legalDocumentService.upsert({ brandId, ...data })
-  }
-
-  // Admin: verificar/rechazar documentos
-
+  // Static admin routes must be declared before `:brandId/documents` so Express
+  // does not capture `admin` as `:brandId`.
   @Get('admin/documents')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar todos los documentos legales paginados con filtros (Admin)' })
   @ApiResponse({ status: 200, description: 'Documentos legales' })
   async getAllDocuments(
@@ -92,36 +122,75 @@ export class BillingProfileController {
     @Query('perPage') perPage?: number,
   ) {
     return this.legalDocumentService.findAll({
-      status, country, documentType,
+      status,
+      country,
+      documentType,
       page: Number(page) || 1,
       perPage: Number(perPage) || 20,
     })
   }
 
   @Get('admin/documents/pending')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Listar documentos pendientes de verificación (Admin)' })
   @ApiResponse({ status: 200, description: 'Documentos pendientes' })
-  async getPendingDocuments(@Query('limit') limit?: number) {
-    return this.legalDocumentService.findPending(limit || 50)
+  async getPendingDocuments(@Query() query?: ListPendingDocumentsQueryDto) {
+    return this.legalDocumentService.findPending(query?.limit || 50)
   }
 
   @Post('admin/documents/:id/verify')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Verificar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento verificado' })
   async verifyDocument(
-    @Param('id') id: string,
-    @Body() data: { verifiedBy: string },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() _data?: VerifyLegalDocumentDto,
+    @Req() req?: any,
   ) {
-    return this.legalDocumentService.verify(id, data.verifiedBy)
+    return this.legalDocumentService.verify(id, req?.user?.id)
   }
 
   @Post('admin/documents/:id/reject')
+  @RequireSuperAdmin()
   @ApiOperation({ summary: 'Rechazar documento legal (Admin)' })
   @ApiResponse({ status: 200, description: 'Documento rechazado' })
   async rejectDocument(
-    @Param('id') id: string,
-    @Body() data: { verifiedBy: string; reason: string },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() data: RejectLegalDocumentDto,
+    @Req() req?: any,
   ) {
-    return this.legalDocumentService.reject(id, data.verifiedBy, data.reason)
+    return this.legalDocumentService.reject(id, req?.user?.id, data?.reason)
+  }
+
+  @Get(':brandId/documents')
+  @ApiOperation({ summary: 'Listar documentos legales de una marca' })
+  @ApiResponse({ status: 200, description: 'Documentos obtenidos' })
+  async getDocuments(@Param('brandId', ParseUUIDPipe) brandId: string, @Req() req?: any) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'GET /billing-profile/:brandId/documents',
+    )
+    return this.legalDocumentService.findByBrand(validBrandId)
+  }
+
+  @Post(':brandId/documents')
+  @ApiOperation({ summary: 'Subir documento legal de una marca' })
+  @ApiResponse({ status: 201, description: 'Documento subido' })
+  async uploadDocument(
+    @Param('brandId', ParseUUIDPipe) brandId: string,
+    @Body() data: UploadLegalDocumentDto,
+    @Req() req?: any,
+  ) {
+    const validBrandId = await assertBrandAccess(
+      this.platformClient,
+      this.logger,
+      req,
+      brandId,
+      'POST /billing-profile/:brandId/documents',
+    )
+    return this.legalDocumentService.upsert({ ...data, brandId: validBrandId })
   }
 }

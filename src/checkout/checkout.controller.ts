@@ -1,26 +1,17 @@
-import { Controller, Get, Post, Body, Query, UseGuards } from '@nestjs/common'
+import { Controller, Get, Post, Body, Query, Req, UseGuards, HttpStatus } from '@nestjs/common'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
-import { CheckoutService, CheckoutRequest } from './checkout.service'
+import { CheckoutService } from './checkout.service'
+import { CheckoutRequestDto } from './dto/checkout-request.dto'
+import { CheckoutReturnQueryDto } from './dto/checkout-return-query.dto'
 import { ProviderConfigService } from '../provider/provider-config.service'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { RequestException } from '../shared/exception/request.exception'
 
 /**
- * ⚠️ AUTENTICADO. Antes este controller declaraba `@UseGuards()` SIN argumento —un
- * decorador vacío, o sea ningún guard—, así que todo endpoint de acá era
- * alcanzable sin credencial por el gateway público: cualquiera podía originar
- * cobros y links de pago. Verificado en vivo el 2026-08-25 con 20+ POST sin
- * credencial, que dejaron filas en `payments` y `payment_attempts`.
- *
- * `ApiAuthGuard` resuelve quién llama con el MISMO JWT del resto del sistema
- * (cookie de sesión o Bearer, verificado local con `JWT_SECRET`, más el
- * `ACCESS_SERVER` para server-to-server y el fallback a
- * `POST /client/validate-token` de backend-auth para los tokens de auto-login,
- * firmados con un `clientSecret` que rota y que payments no puede guardar).
- *
- * Es autenticación SOLA: ningún handler de acá declara `@RequirePermission`, así
- * que no se agrega ninguna exigencia de permiso nueva. Deliberado — cerrar el
- * agujero no debe romperle el acceso a un cliente que hoy funciona; los permisos,
- * si hacen falta, son una decisión aparte.
+ * `ApiAuthGuard` verifies session cookies, Bearer JWTs (`JWT_SECRET`), and `ACCESS_SERVER`
+ * tokens locally, falling back to `backend-auth` for auto-login tokens signed with a
+ * rotating `clientSecret` that this service does not hold.
  */
 @ApiTags('Checkout')
 @Controller('checkout')
@@ -29,38 +20,82 @@ export class CheckoutController {
   constructor(
     private readonly checkoutService: CheckoutService,
     private readonly providerConfigService: ProviderConfigService,
+    private readonly platformClient: ClientPlatformService,
   ) {}
 
   @Post()
-  @ApiOperation({ summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)' })
+  @ApiOperation({
+    summary: 'Procesar checkout completo (pago → suscripción → factura → DIAN → roles)',
+  })
   @ApiResponse({ status: 201, description: 'Checkout procesado' })
   @ApiResponse({
     status: 400,
-    description: 'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG '
-      + '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID '
-      + '(pago con wallet sin walletId)',
+    description:
+      'INVALID_BRAND_ID (brandId ausente o que no es un UUID), INVALID_PLAN_SLUG ' +
+      '(planSlug ausente o inválido en la compra de plan) o MISSING_WALLET_ID ' +
+      '(pago con wallet o recarga sin walletId)',
+  })
+  @ApiResponse({
+    status: 403,
+    description: 'forbidden: caller user session is not a member of the brand with a paying role',
   })
   @ApiResponse({
     status: 404,
-    description: 'BRAND_NOT_FOUND (platform no conoce la marca) o WALLET_NOT_FOUND '
-      + '(la wallet no existe o no es de esa marca)',
+    description:
+      'BRAND_NOT_FOUND (platform no conoce la marca) o WALLET_NOT_FOUND ' +
+      '(la wallet no existe o no es de esa marca)',
+  })
+  @ApiResponse({
+    status: 409,
+    description:
+      'IDEMPOTENCY_KEY_CONFLICT: Idempotency-Key reused with a different request body. ' +
+      'IDEMPOTENT_RETRY_EXPIRED: the payment is past its retry window; nothing was charged, ' +
+      'place a new order with another Idempotency-Key',
   })
   @ApiResponse({
     status: 422,
-    description: 'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o '
-      + 'WALLET_CURRENCY_MISMATCH: no se puede determinar o cobrar el precio',
+    description:
+      'BRAND_WITHOUT_COUNTRY, PRICE_NOT_FOUND_FOR_COUNTRY o ' +
+      'WALLET_CURRENCY_MISMATCH: no se puede determinar o cobrar el precio',
   })
   @ApiResponse({
     status: 503,
     description: 'BRAND_LOOKUP_UNAVAILABLE o PLAN_NOT_FOUND: platform o backend-roles no responden',
   })
-  async processCheckout(@Body() body: CheckoutRequest) {
-    // `renewal` es service-to-service (sólo el cron). `CheckoutRequest` es una
-    // interfaz, así que el `ValidationPipe({ whitelist, forbidNonWhitelisted })`
-    // global no tiene metatype contra el cual recortar y NO descarta claves
-    // desconocidas: sin este borrado un llamador HTTP podría pedir el camino de
-    // precios legacy y cobrarse en la moneda que él mande.
-    return { data: await this.checkoutService.processCheckout({ ...body, renewal: undefined }) }
+  async processCheckout(@Body() body: CheckoutRequestDto, @Req() req?: any) {
+    if (req?.user?.isServer !== true) {
+      const allowed = await this.platformClient.canViewBrandCredit(req?.user?.id, body?.brandId)
+      if (!allowed) {
+        throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+      }
+    }
+    const idempotencyKey = this.extractIdempotencyKey(req)
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : body?.userId
+    // The DTO accepts `renewal` only to discard it here: legacy renewal pricing belongs to the cron.
+    return {
+      data: await this.checkoutService.processCheckout({
+        ...body,
+        userId,
+        idempotencyKey,
+        renewal: undefined,
+      }),
+    }
+  }
+
+  private extractIdempotencyKey(req?: any): string | undefined {
+    const headers = req?.headers
+    if (!headers || typeof headers !== 'object') {
+      return undefined
+    }
+    const raw =
+      headers['idempotency-key'] ??
+      headers['Idempotency-Key'] ??
+      Object.entries(headers).find(([key]) => key.toLowerCase() === 'idempotency-key')?.[1]
+    if (typeof raw !== 'string') {
+      return undefined
+    }
+    const trimmed = raw.trim()
+    return trimmed.length > 0 ? trimmed : undefined
   }
 
   @Get('providers')
@@ -72,13 +107,30 @@ export class CheckoutController {
   }
 
   @Get('return')
-  @ApiOperation({ summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)' })
+  @ApiOperation({
+    summary: 'Reconciliar un pago al volver del checkout (consulta estado real del proveedor)',
+  })
   @ApiResponse({ status: 200, description: 'Estado reconciliado del pago' })
-  async paymentReturn(
-    @Query('paymentId') paymentId?: string,
-    @Query('correlation_id') correlationId?: string,
-  ) {
-    // ConfioPagos redirige con correlation_id = nuestro paymentId.
-    return { data: await this.checkoutService.reconcilePayment(paymentId || correlationId) }
+  @ApiResponse({
+    status: 400,
+    description: 'INVALID_REQUEST: paymentId (or correlation_id) is missing or not a valid UUID',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'PAYMENT_NOT_FOUND: payment does not exist or belongs to another brand',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'BRAND_LOOKUP_UNAVAILABLE: backend-platform did not respond',
+  })
+  async paymentReturn(@Query() query: CheckoutReturnQueryDto, @Req() req?: any) {
+    // ConfioPagos redirects back with our paymentId in correlation_id.
+    const paymentId = query.paymentId || query.correlation_id
+    const userId = req?.user?.id && req.user.isServer !== true ? req.user.id : ''
+    return {
+      data: await this.checkoutService.reconcilePayment(paymentId, (brandId) =>
+        this.platformClient.canViewBrandCredit(userId, brandId),
+      ),
+    }
   }
 }

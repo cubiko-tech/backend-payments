@@ -33,12 +33,36 @@ export class PaymentMethodService {
     }
   }
 
+  async findById(id: string) {
+    const method = await this.paymentMethodReadRepository.findOne({ where: { id } })
+    if (!method) {
+      throw new RequestException(
+        { code: 'PAYMENT_METHOD_NOT_FOUND', message: 'Payment method not found' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+    return { data: method }
+  }
+
   /**
    * Crear un método de pago
    */
   async create(data: Partial<PaymentMethod>) {
     try {
-      const method = this.paymentMethodRepository.create(data)
+      const method = this.paymentMethodRepository.create({
+        brandId: data.brandId,
+        userId: data.userId,
+        provider: data.provider,
+        providerMethodId: data.providerMethodId,
+        type: data.type,
+        last4: data.last4,
+        brand: data.brand,
+        expiryMonth: data.expiryMonth,
+        expiryYear: data.expiryYear,
+        isDefault: data.isDefault ?? false,
+        metadata: data.metadata,
+        status: PaymentMethodStatus.ACTIVE,
+      })
       const saved = await this.paymentMethodRepository.save(method)
       this.logger.log(`Método de pago creado: ${saved.id} para marca ${saved.brandId}`)
       return { data: saved }
@@ -63,7 +87,10 @@ export class PaymentMethodService {
 
       if (method.isDefault) {
         throw new RequestException(
-          { code: 'CANNOT_REMOVE_DEFAULT', message: 'No se puede eliminar el método de pago por defecto' },
+          {
+            code: 'CANNOT_REMOVE_DEFAULT',
+            message: 'No se puede eliminar el método de pago por defecto',
+          },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
@@ -99,7 +126,11 @@ export class PaymentMethodService {
       }
 
       // Quitar default de todos los métodos de la marca
-      await queryRunner.manager.update(PaymentMethod, { brandId: method.brandId }, { isDefault: false })
+      await queryRunner.manager.update(
+        PaymentMethod,
+        { brandId: method.brandId },
+        { isDefault: false },
+      )
 
       // Establecer este como default
       method.isDefault = true
@@ -107,12 +138,16 @@ export class PaymentMethodService {
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Método de pago ${id} establecido como predeterminado para marca ${method.brandId}`)
+      this.logger.log(
+        `Método de pago ${id} establecido como predeterminado para marca ${method.brandId}`,
+      )
       return { data: method }
     } catch (error) {
       await queryRunner.rollbackTransaction()
       if (error instanceof RequestException) throw error
-      this.logger.error(`Error al establecer método de pago como predeterminado ${id}: ${error.message}`)
+      this.logger.error(
+        `Error al establecer método de pago como predeterminado ${id}: ${error.message}`,
+      )
       return { error: error.message }
     } finally {
       await queryRunner.release()

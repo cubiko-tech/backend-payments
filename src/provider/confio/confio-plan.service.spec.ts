@@ -164,10 +164,7 @@ describe('ConfioPlanService', () => {
      * pasadas no se puede comparar con el de ayer.
      */
     it('devuelve todas las filas y las pide con un orden total', async () => {
-      const filas = [
-        row(),
-        row({ id: 'row-2', currencyCode: 'USD', amountCents: 699 }),
-      ]
+      const filas = [row(), row({ id: 'row-2', currencyCode: 'USD', amountCents: 699 })]
       repo.find.mockResolvedValue(filas)
 
       await expect(service.findAllMappings()).resolves.toBe(filas)

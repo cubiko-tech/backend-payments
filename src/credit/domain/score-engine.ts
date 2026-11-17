@@ -30,9 +30,7 @@ export function computeScore(
   const sVent = lookupBracket(config.scales.sales, input.monthlySales)
 
   const total = Math.round(
-    sInv * config.weights.investment +
-      sRoas * config.weights.roas +
-      sVent * config.weights.sales,
+    sInv * config.weights.investment + sRoas * config.weights.roas + sVent * config.weights.sales,
   )
 
   const roasVeto = input.roasValue < config.vetoes.minRoas

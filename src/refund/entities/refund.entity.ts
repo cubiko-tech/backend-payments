@@ -1,8 +1,19 @@
 import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
-export enum RefundReason { CUSTOMER_REQUEST = 'customer_request', DUPLICATE = 'duplicate', DISPUTE = 'dispute', SERVICE_ISSUE = 'service_issue', PLAN_DOWNGRADE = 'plan_downgrade' }
-export enum RefundStatus { PENDING = 'pending', PROCESSING = 'processing', COMPLETED = 'completed', FAILED = 'failed' }
+export enum RefundReason {
+  CUSTOMER_REQUEST = 'customer_request',
+  DUPLICATE = 'duplicate',
+  DISPUTE = 'dispute',
+  SERVICE_ISSUE = 'service_issue',
+  PLAN_DOWNGRADE = 'plan_downgrade',
+}
+export enum RefundStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+}
 
 @Entity('refunds')
 @Index(['paymentId'])

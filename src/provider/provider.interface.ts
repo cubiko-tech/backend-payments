@@ -27,6 +27,9 @@ export interface PaymentStatusResult {
   metadata?: Record<string, any>
 }
 
+/** The provider answered that the payment does not exist: an answer, unlike an outage. */
+export class ProviderPaymentNotFoundError extends Error {}
+
 export interface RefundResult {
   providerRefundId: string
   status: 'pending' | 'completed' | 'failed'
@@ -72,7 +75,12 @@ export interface PaymentProvider {
 
   // Pagos
   createCheckout(params: CreateCheckoutParams): Promise<CheckoutResult>
-  getPaymentStatus(providerPaymentId: string): Promise<PaymentStatusResult>
+  /**
+   * @param paymentId our id, for providers that find the payment by the reference we gave them.
+   * @throws ProviderPaymentNotFoundError if the provider says the payment does not exist; any
+   * other error means it gave no answer, so nothing can be concluded about the payment.
+   */
+  getPaymentStatus(providerPaymentId: string, paymentId: string): Promise<PaymentStatusResult>
   refundPayment(providerPaymentId: string, amount?: number): Promise<RefundResult>
 
   // Suscripciones

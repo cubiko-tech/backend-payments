@@ -75,7 +75,11 @@ export class ConfioPlanPriceCheckService {
         // cobrando el monto viejo. Hoy éste es el estado de las cuatro filas de
         // producción, así que sin este filtro la primera pasada las reporta
         // todas y el aviso deja de significar algo.
-        if (fila.status !== 'active' || !fila.confioName || fila.planSlug === SLUG_CON_PRECIO_FABRICADO) {
+        if (
+          fila.status !== 'active' ||
+          !fila.confioName ||
+          fila.planSlug === SLUG_CON_PRECIO_FABRICADO
+        ) {
           omitidas++
           continue
         }

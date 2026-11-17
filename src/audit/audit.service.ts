@@ -1,7 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository } from 'typeorm'
+import { EntityManager, Repository } from 'typeorm'
 import { AuditLog } from './entities/auditLog.entity'
+
+/** One `audit_log` row: who did what to which entity, with the change it made. */
+export interface AuditEntry {
+  userId: string
+  action: string
+  entityType: string
+  entityId: string
+  changes?: Record<string, unknown>
+  description?: string
+}
 
 @Injectable()
 export class AuditService {
@@ -41,9 +51,19 @@ export class AuditService {
       return { data: saved }
     } catch (error) {
       // No lanzar excepción para no interrumpir el flujo principal
-      this.logger.error(`Error al registrar auditoría [${action}/${entityType}/${entityId}]: ${error.message}`)
+      this.logger.error(
+        `Error al registrar auditoría [${action}/${entityType}/${entityId}]: ${error.message}`,
+      )
       return { error: error.message }
     }
+  }
+
+  /**
+   * Writes the entry with the `manager` of the caller's transaction, so it commits or rolls back with
+   * it. Unlike `log`, a failed write throws: the caller's transaction must not commit without it.
+   */
+  record(manager: EntityManager, entry: AuditEntry): Promise<AuditLog> {
+    return manager.save(AuditLog, manager.create(AuditLog, entry))
   }
 
   /**

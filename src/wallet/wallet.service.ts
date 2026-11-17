@@ -1,10 +1,20 @@
+// R6: One responsibility, the wallet ledger: every balance movement shares its locks and checks.
 import { Injectable, Logger } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { Repository, DataSource } from 'typeorm'
+import { Repository, DataSource, Not } from 'typeorm'
 import { Wallet, WalletStatus } from './entities/wallet.entity'
-import { Transaction, TransactionType, TransactionStatus } from '../transaction/entities/transaction.entity'
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from '../transaction/entities/transaction.entity'
 import { RequestException } from '../shared/exception/request.exception'
 import { HttpStatus } from '@nestjs/common'
+import { Payment, PaymentStatus } from '../payment/entities/payment.entity'
+import { lockPayment } from '../payment/payment-lock'
+import { AuditLog } from '../audit/entities/auditLog.entity'
+import { MovementAudit } from '../transaction/movement-audit'
+import { assertNotTokenCurrency, isTokenCurrency, TOKEN_CURRENCY } from './token-origin'
 
 @Injectable()
 export class WalletService {
@@ -23,25 +33,19 @@ export class WalletService {
     private readonly dataSource: DataSource,
   ) {}
 
-  /**
-   * Listar todas las wallets de una marca
-   */
   async findByBrand(brandId: string) {
     try {
       const wallets = await this.walletReadRepository.find({
-        where: { brandId },
+        where: { brandId, currency: Not(TOKEN_CURRENCY) },
         order: { createdAt: 'DESC' },
       })
-      return { data: wallets }
+      return { data: wallets.filter((wallet) => !isTokenCurrency(wallet.currency)) }
     } catch (error) {
       this.logger.error(`Error al obtener wallets de marca ${brandId}: ${error.message}`)
       return { error: error.message }
     }
   }
 
-  /**
-   * Obtener detalle de una wallet por ID
-   */
   async findById(id: string) {
     try {
       const wallet = await this.walletReadRepository.findOne({ where: { id } })
@@ -59,13 +63,10 @@ export class WalletService {
     }
   }
 
-  /**
-   * Crear una wallet nueva.
-   * Máximo 10 wallets por marca.
-   */
   async create(data: Partial<Wallet>) {
     try {
-      // Validar límite de 10 wallets por marca
+      // The brand token wallet is created only by TokenWalletService, one per brand.
+      assertNotTokenCurrency(data.currency)
       const count = await this.walletReadRepository.count({
         where: { brandId: data.brandId },
       })
@@ -76,7 +77,7 @@ export class WalletService {
         )
       }
 
-      const wallet = this.walletRepository.create(data)
+      const wallet = this.walletRepository.create(this.sanitizeNewWallet(data))
       const saved = await this.walletRepository.save(wallet)
       this.logger.log(`Wallet creada: ${saved.id} para marca ${saved.brandId}`)
       return { data: saved }
@@ -88,16 +89,32 @@ export class WalletService {
   }
 
   /**
-   * Acreditar fondos a una wallet con bloqueo pesimista.
-   * Operación atómica: actualiza balance y crea transacción.
+   * With `reopenClosed`, a closed wallet goes back to `active` and takes the credit instead of
+   * refusing it. Reopening, its `wallet_reopened` audit row and the credit commit together, so a
+   * failed or duplicate credit leaves the wallet closed.
+   *
+   * `audit` commits with the credit; a credit that comes back as an earlier one does not run it.
    */
-  async credit(walletId: string, amount: number, data: Partial<Transaction> = {}) {
+  async credit(
+    walletId: string,
+    amount: number,
+    data: Partial<Transaction> | string = {},
+    idempotencyKey?: string,
+    reopenClosed?: { userId: string; reason: string },
+    audit?: MovementAudit,
+  ) {
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+    const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
 
     try {
-      // Bloqueo pesimista para evitar condiciones de carrera
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
         lock: { mode: 'pessimistic_write' },
@@ -110,40 +127,62 @@ export class WalletService {
         )
       }
 
-      // Wallet cerrada no acepta ninguna operación
-      if (wallet.status === WalletStatus.CLOSED) {
+      const reopening = wallet.status === WalletStatus.CLOSED
+      if (reopening && !reopenClosed) {
         throw new RequestException(
           { code: 'WALLET_CLOSED', message: 'Wallet cerrada, no acepta operaciones' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
+      if (reopening) {
+        wallet.status = WalletStatus.ACTIVE
+        await queryRunner.manager.save(
+          AuditLog,
+          queryRunner.manager.create(AuditLog, {
+            userId: reopenClosed.userId,
+            action: 'wallet_reopened',
+            entityType: 'wallet',
+            entityId: walletId,
+            description: `Wallet reopened to take a credit: ${reopenClosed.reason}`,
+          }),
+        )
+      }
 
+      const numericAmount = Number(amount)
       const balanceBefore = Number(wallet.balance)
-      const balanceAfter = balanceBefore + Number(amount)
+      const balanceAfter = balanceBefore + numericAmount
 
-      // Actualizar balance
       wallet.balance = balanceAfter
       await queryRunner.manager.save(Wallet, wallet)
 
-      // Crear transacción
       const transaction = queryRunner.manager.create(Transaction, {
         walletId,
         brandId: wallet.brandId,
         type: TransactionType.CREDIT,
-        amount,
+        amount: numericAmount,
         balanceBefore,
         balanceAfter,
         status: TransactionStatus.COMPLETED,
-        ...data,
+        ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`)
+      if (reopening) {
+        this.logger.warn(`Wallet ${walletId} reopened to take a credit: ${reopenClosed.reason}`)
+      }
+      this.logger.log(
+        `Crédito de ${amount} a wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
+      )
       return { data: { wallet, transaction: savedTransaction } }
     } catch (error) {
       await queryRunner.rollbackTransaction()
+      if (resolvedKey && this.isUniqueConstraintViolation(error)) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+        if (existing) return { data: existing }
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en crédito a wallet ${walletId}: ${error.message}`)
       return { error: error.message }
@@ -153,31 +192,82 @@ export class WalletService {
   }
 
   /**
-   * Debitar fondos de una wallet con bloqueo pesimista.
-   * Verifica saldo suficiente antes de debitar.
-   * Operación atómica: actualiza balance y crea transacción.
+   * Atomically debits `amount` from `walletId` under a `pessimistic_write` row lock
+   * and records the corresponding `DEBIT` transaction.
    *
-   * @param expectedCurrency moneda en la que se está cobrando. Opcional: si se pasa y no
-   * coincide con la de la wallet, rechaza con `WALLET_CURRENCY_MISMATCH` (422) sin dejar
-   * movimiento. Omitirlo mantiene el comportamiento histórico (lo hace el cron de
-   * renovación, `tasks.service.ts:renewFromWallet`, que sigue sin guarda de moneda).
+   * When `idempotencyKey` (or `data.idempotencyKey`) is provided, looks up an
+   * existing movement by `idempotencyKey` alone (`findExistingMovement`) and, if
+   * found, returns that movement as recorded along with the wallet of that
+   * transaction (`existingTransaction.walletId || walletId`) without charging
+   * again. Rejects `TKN` wallets or charges, a wallet that does not belong to
+   * `data.brandId`, frozen or closed wallets, and currency mismatches when
+   * `expectedCurrency` is provided (used by checkout and wallet subscription
+   * renewals).
+   *
+   * @param walletId Target wallet identifier.
+   * @param amount Positive finite debit amount in the wallet currency.
+   * @param data Transaction metadata; `brandId` is the brand the wallet must belong to.
+   * @param expectedCurrency Expected ISO currency code for the charge; when provided
+   * and different from `wallet.currency`, throws `WALLET_CURRENCY_MISMATCH` (422).
+   * @param idempotencyKey Optional key looked up by key alone to return a repeated
+   * movement as recorded.
+   * @param audit Commits with the debit; a repeated movement does not run it.
    */
   async debit(
     walletId: string,
     amount: number,
-    data: Partial<Transaction> = {},
+    data: Partial<Transaction> & { brandId: string },
     expectedCurrency?: string,
+    idempotencyKey?: string,
+    audit?: MovementAudit,
   ) {
+    if (typeof walletId !== 'string' || !walletId.trim()) {
+      throw new RequestException(
+        { code: 'MISSING_WALLET_ID', message: 'walletId is required' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      throw new RequestException(
+        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
+        HttpStatus.BAD_REQUEST,
+      )
+    }
+
+    const { txData, resolvedKey } = this.normalizeMovementData(data, idempotencyKey)
     const queryRunner = this.dataSource.createQueryRunner()
     await queryRunner.connect()
     await queryRunner.startTransaction()
 
     try {
-      // Bloqueo pesimista para evitar condiciones de carrera
+      const paymentId = txData.referenceType === 'payment' ? txData.referenceId : undefined
+      if (paymentId) {
+        await lockPayment(queryRunner, paymentId)
+      }
+
       const wallet = await queryRunner.manager.findOne(Wallet, {
         where: { id: walletId },
         lock: { mode: 'pessimistic_write' },
       })
+
+      if (resolvedKey) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey, wallet)
+        if (existing) {
+          await queryRunner.rollbackTransaction()
+          return { data: existing }
+        }
+      }
+
+      if (paymentId) {
+        const payment = await queryRunner.manager.findOne(Payment, { where: { id: paymentId } })
+        if (payment?.status !== PaymentStatus.PENDING) {
+          throw new RequestException(
+            { code: 'WALLET_DEBIT_FAILED', message: 'Payment is no longer pending' },
+            HttpStatus.INTERNAL_SERVER_ERROR,
+          )
+        }
+      }
 
       if (!wallet) {
         throw new RequestException(
@@ -186,15 +276,27 @@ export class WalletService {
         )
       }
 
-      // La guarda de moneda va ACÁ y no sólo en checkout: `assertWalletCurrency`
-      // (checkout.service.ts) lee la wallet por la réplica DBRead y FUERA de todo
-      // bloqueo, así que entre esa comprobación y este débito hay una ventana. Este
-      // punto corre sobre la fila ya tomada con `pessimistic_write` dentro de la
-      // transacción abierta, y es el último cuello de botella antes de que se mueva
-      // plata. Comparación estricta, igual que `assertWalletCurrency` y `transfer`.
-      // `credit`, `transfer` y el cron `renewFromWallet` NO llevan esta guarda a
-      // propósito: `transfer` ya compara las monedas de las dos wallets, y sumarla al
-      // cron cambiaría renovaciones que hoy pasan.
+      if (!txData.brandId || wallet.brandId !== txData.brandId) {
+        throw new RequestException(
+          { code: 'WALLET_NOT_FOUND', message: 'Wallet does not belong to the paying brand' },
+          HttpStatus.NOT_FOUND,
+        )
+      }
+
+      const walletCurrency = wallet.currency?.toUpperCase()
+      const requestedCurrency = expectedCurrency?.toUpperCase()
+      if (walletCurrency === 'TKN' || requestedCurrency === 'TKN') {
+        throw new RequestException(
+          {
+            code: 'WALLET_CURRENCY_MISMATCH',
+            message: 'Token wallets cannot be debited for monetary charges',
+          },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
+
+      // Re-check currency under the `pessimistic_write` row lock because checkout
+      // pre-validates on the read replica outside this transaction.
       if (expectedCurrency && wallet.currency !== expectedCurrency) {
         throw new RequestException(
           {
@@ -205,7 +307,6 @@ export class WalletService {
         )
       }
 
-      // Wallet congelada o cerrada no permite débitos
       if (wallet.status === WalletStatus.FROZEN) {
         throw new RequestException(
           { code: 'WALLET_FROZEN', message: 'Wallet congelada, no permite débitos' },
@@ -219,58 +320,145 @@ export class WalletService {
         )
       }
 
+      const numericAmount = Number(amount)
       const balanceBefore = Number(wallet.balance)
-      const balanceAfter = balanceBefore - Number(amount)
+      const balanceAfter = balanceBefore - numericAmount
 
-      // Verificar saldo suficiente
       if (balanceAfter < 0) {
+        if (resolvedKey) {
+          const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+          if (existing) {
+            await queryRunner.rollbackTransaction()
+            return { data: existing }
+          }
+        }
         throw new RequestException(
           { code: 'INSUFFICIENT_BALANCE', message: 'Saldo insuficiente' },
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
 
-      // Actualizar balance
       wallet.balance = balanceAfter
       await queryRunner.manager.save(Wallet, wallet)
 
-      // Crear transacción
       const transaction = queryRunner.manager.create(Transaction, {
         walletId,
         brandId: wallet.brandId,
         type: TransactionType.DEBIT,
-        amount,
+        amount: numericAmount,
         balanceBefore,
         balanceAfter,
         status: TransactionStatus.COMPLETED,
-        ...data,
+        ...txData,
       })
       const savedTransaction = await queryRunner.manager.save(Transaction, transaction)
+      if (audit) await audit(queryRunner.manager, savedTransaction)
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Débito de ${amount} de wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`)
+      this.logger.log(
+        `Débito de ${amount} de wallet ${walletId}. Balance: ${balanceBefore} → ${balanceAfter}`,
+      )
       return { data: { wallet, transaction: savedTransaction } }
     } catch (error) {
       await queryRunner.rollbackTransaction()
+      if (resolvedKey && this.isUniqueConstraintViolation(error)) {
+        const existing = await this.findExistingMovement(queryRunner, walletId, resolvedKey)
+        if (existing) return { data: existing }
+      }
       if (error instanceof RequestException) throw error
       this.logger.error(`Error en débito de wallet ${walletId}: ${error.message}`)
-      return { error: error.message }
+      throw error
     } finally {
       await queryRunner.release()
     }
   }
 
-  /**
-   * Balance global: suma de todas las wallets activas de una marca, agrupado por moneda.
-   */
+  private normalizeMovementData(
+    data: Partial<Transaction> | string = {},
+    idempotencyKey?: string,
+  ): { txData: Partial<Transaction>; resolvedKey?: string } {
+    const txData: Partial<Transaction> =
+      typeof data === 'string' ? { idempotencyKey: data } : { ...data }
+    const resolvedKey = idempotencyKey ?? txData.idempotencyKey
+    if (resolvedKey !== undefined) {
+      txData.idempotencyKey = resolvedKey
+    }
+    return { txData, resolvedKey }
+  }
+
+  private isUniqueConstraintViolation(error: any): boolean {
+    return error?.code === '23505' || error?.driverError?.code === '23505'
+  }
+
+  async findDebitByIdempotencyKey(
+    walletId: string,
+    idempotencyKey: string,
+  ): Promise<Transaction | null> {
+    if (!idempotencyKey) return null
+
+    const readMatch = await this.transactionReadRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (readMatch && readMatch.idempotencyKey === idempotencyKey) {
+      return readMatch
+    }
+
+    const writeMatch = await this.transactionRepository?.findOne({
+      where: { idempotencyKey },
+    })
+    if (writeMatch && writeMatch.idempotencyKey === idempotencyKey) {
+      return writeMatch
+    }
+
+    if (typeof this.dataSource?.createQueryRunner === 'function') {
+      const queryRunner = this.dataSource.createQueryRunner()
+      await queryRunner.connect()
+      try {
+        const existing = await this.findExistingMovement(queryRunner, walletId, idempotencyKey)
+        return existing?.transaction ?? null
+      } finally {
+        await queryRunner.release()
+      }
+    }
+
+    return null
+  }
+
+  private async findExistingMovement(
+    queryRunner: { manager: { findOne: DataSource['manager']['findOne'] } },
+    walletId: string,
+    idempotencyKey: string,
+    fallbackWallet?: Wallet | null,
+  ) {
+    const existingTransaction = await queryRunner.manager.findOne(Transaction, {
+      where: { idempotencyKey },
+    })
+    if (!existingTransaction || existingTransaction.idempotencyKey !== idempotencyKey) return null
+
+    const currentWallet =
+      (await queryRunner.manager.findOne(Wallet, {
+        where: { id: existingTransaction.walletId || walletId },
+      })) ?? fallbackWallet
+    if (currentWallet) {
+      currentWallet.balance = Number(currentWallet.balance)
+    }
+    existingTransaction.amount = Number(existingTransaction.amount)
+    existingTransaction.balanceBefore = Number(existingTransaction.balanceBefore)
+    existingTransaction.balanceAfter = Number(existingTransaction.balanceAfter)
+
+    return {
+      wallet: currentWallet,
+      transaction: existingTransaction,
+    }
+  }
+
   async getGlobalBalance(brandId: string) {
     try {
       const wallets = await this.walletReadRepository.find({
         where: { brandId, status: WalletStatus.ACTIVE },
       })
 
-      // Agrupar por moneda
       const balanceByCurrency = new Map<string, { total: number; wallets: any[] }>()
 
       for (const wallet of wallets) {
@@ -299,12 +487,15 @@ export class WalletService {
     }
   }
 
-  /**
-   * Obtener transacciones de una wallet con paginación
-   */
-  async getTransactions(walletId: string, filters: { page?: number; limit?: number; type?: string } = {}) {
+  async getTransactions(
+    walletId: string,
+    filters: { page?: number; limit?: number; type?: string } = {},
+    options: { redactForMember?: boolean } = {},
+  ) {
     try {
-      const { page = 1, limit = 20, type } = filters
+      const page = filters.page || 1
+      const limit = filters.limit || 20
+      const { type } = filters
       const skip = (page - 1) * limit
 
       const where: any = { walletId }
@@ -317,8 +508,12 @@ export class WalletService {
         take: limit,
       })
 
+      const data = options.redactForMember
+        ? transactions.map((tx) => redactMemberTransaction(tx))
+        : transactions
+
       return {
-        data: transactions,
+        data,
         meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
       }
     } catch (error) {
@@ -327,13 +522,6 @@ export class WalletService {
     }
   }
 
-  // =============================================================
-  // Freeze / Close
-  // =============================================================
-
-  /**
-   * Congelar wallet — bloquea débitos, permite créditos.
-   */
   async freeze(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -342,22 +530,27 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status === WalletStatus.CLOSED) {
-      throw new RequestException(
+    const closed = () =>
+      new RequestException(
         { code: 'WALLET_CLOSED', message: 'No se puede congelar una wallet cerrada' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status === WalletStatus.CLOSED) {
+      throw closed()
     }
 
-    wallet.status = WalletStatus.FROZEN
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const frozen = await this.walletRepository.update(
+      { id: walletId, status: Not(WalletStatus.CLOSED) },
+      { status: WalletStatus.FROZEN },
+    )
+    if (!frozen.affected) {
+      throw closed()
+    }
     this.logger.log(`Wallet ${walletId} congelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
-  /**
-   * Descongelar wallet — volver a estado activo.
-   */
   async unfreeze(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -366,22 +559,27 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (wallet.status !== WalletStatus.FROZEN) {
-      throw new RequestException(
+    const notFrozen = () =>
+      new RequestException(
         { code: 'WALLET_NOT_FROZEN', message: 'Solo se pueden descongelar wallets congeladas' },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (wallet.status !== WalletStatus.FROZEN) {
+      throw notFrozen()
     }
 
-    wallet.status = WalletStatus.ACTIVE
-    await this.walletRepository.save(wallet)
+    // Writes only the status: saving the row read above would overwrite a balance moved since.
+    const unfrozen = await this.walletRepository.update(
+      { id: walletId, status: WalletStatus.FROZEN },
+      { status: WalletStatus.ACTIVE },
+    )
+    if (!unfrozen.affected) {
+      throw notFrozen()
+    }
     this.logger.log(`Wallet ${walletId} descongelada`)
-    return { data: wallet }
+    return { data: await this.walletRepository.findOne({ where: { id: walletId } }) }
   }
 
-  /**
-   * Cerrar wallet — requiere balance 0, bloquea todas las operaciones.
-   */
   async close(walletId: string) {
     const wallet = await this.walletRepository.findOne({ where: { id: walletId } })
     if (!wallet) {
@@ -390,27 +588,32 @@ export class WalletService {
         HttpStatus.NOT_FOUND,
       )
     }
-    if (Number(wallet.balance) !== 0) {
-      throw new RequestException(
-        { code: 'WALLET_HAS_BALANCE', message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.' },
+    assertNotTokenCurrency(wallet.currency)
+    const hasBalance = () =>
+      new RequestException(
+        {
+          code: 'WALLET_HAS_BALANCE',
+          message: 'No se puede cerrar una wallet con saldo. Transfiera el saldo primero.',
+        },
         HttpStatus.UNPROCESSABLE_ENTITY,
       )
+    if (Number(wallet.balance) !== 0) {
+      throw hasBalance()
     }
 
+    // Conditional on the balance: a credit committing after the read above keeps the wallet open.
+    const closed = await this.walletRepository.update(
+      { id: walletId, balance: 0 },
+      { status: WalletStatus.CLOSED },
+    )
+    if (!closed.affected) {
+      throw hasBalance()
+    }
     wallet.status = WalletStatus.CLOSED
-    await this.walletRepository.save(wallet)
     this.logger.log(`Wallet ${walletId} cerrada`)
     return { data: wallet }
   }
 
-  // =============================================================
-  // Transferencias entre wallets
-  // =============================================================
-
-  /**
-   * Transferir fondos entre wallets de la misma marca y moneda.
-   * Operación atómica con doble pessimistic lock.
-   */
   async transfer(data: {
     fromWalletId: string
     toWalletId: string
@@ -439,10 +642,9 @@ export class WalletService {
     await queryRunner.startTransaction()
 
     try {
-      // Lock en orden determinista para evitar deadlocks
-      const [firstId, secondId] = fromWalletId < toWalletId
-        ? [fromWalletId, toWalletId]
-        : [toWalletId, fromWalletId]
+      // Lock in deterministic ID order so concurrent opposite transfers cannot deadlock.
+      const [firstId, secondId] =
+        fromWalletId < toWalletId ? [fromWalletId, toWalletId] : [toWalletId, fromWalletId]
 
       const first = await queryRunner.manager.findOne(Wallet, {
         where: { id: firstId },
@@ -463,7 +665,6 @@ export class WalletService {
         )
       }
 
-      // Validar misma marca y moneda
       if (fromWallet.brandId !== toWallet.brandId) {
         throw new RequestException(
           { code: 'DIFFERENT_BRAND', message: 'Las wallets deben ser de la misma marca' },
@@ -476,8 +677,14 @@ export class WalletService {
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       }
+      // A transfer moves `balance` only; token origins would no longer add up to it.
+      if (isTokenCurrency(fromWallet.currency) || isTokenCurrency(toWallet.currency)) {
+        throw new RequestException(
+          { code: 'WALLET_CURRENCY_MISMATCH', message: 'Token wallets cannot be transferred' },
+          HttpStatus.UNPROCESSABLE_ENTITY,
+        )
+      }
 
-      // Validar estados
       if (fromWallet.status !== WalletStatus.ACTIVE) {
         throw new RequestException(
           { code: 'WALLET_NOT_ACTIVE', message: 'La wallet origen debe estar activa' },
@@ -491,7 +698,6 @@ export class WalletService {
         )
       }
 
-      // Validar saldo
       const fromBalance = Number(fromWallet.balance)
       if (fromBalance < amount) {
         throw new RequestException(
@@ -500,7 +706,6 @@ export class WalletService {
         )
       }
 
-      // Debitar origen
       const fromBalanceAfter = fromBalance - amount
       fromWallet.balance = fromBalanceAfter
       await queryRunner.manager.save(Wallet, fromWallet)
@@ -520,7 +725,6 @@ export class WalletService {
       })
       await queryRunner.manager.save(Transaction, debitTx)
 
-      // Acreditar destino
       const toBalance = Number(toWallet.balance)
       const toBalanceAfter = toBalance + amount
       toWallet.balance = toBalanceAfter
@@ -543,7 +747,9 @@ export class WalletService {
 
       await queryRunner.commitTransaction()
 
-      this.logger.log(`Transferencia de ${amount} ${fromWallet.currency}: wallet ${fromWalletId} → ${toWalletId}`)
+      this.logger.log(
+        `Transferencia de ${amount} ${fromWallet.currency}: wallet ${fromWalletId} → ${toWalletId}`,
+      )
       return {
         data: {
           fromWallet: { id: fromWalletId, balanceAfter: fromBalanceAfter },
@@ -561,4 +767,29 @@ export class WalletService {
       await queryRunner.release()
     }
   }
+
+  private sanitizeNewWallet(data: Partial<Wallet>): Partial<Wallet> {
+    return {
+      brandId: data.brandId,
+      userId: data.userId,
+      provider: data.provider,
+      providerWalletId: data.providerWalletId,
+      currency: data.currency,
+      label: data.label,
+      metadata: data.metadata,
+      balance: 0,
+      status: WalletStatus.ACTIVE,
+    }
+  }
+}
+
+function redactMemberTransaction(tx: Transaction) {
+  const { description: _description, metadata: _metadata, ...rest } = tx
+  const isAdminMovement =
+    tx.referenceType === 'admin' || tx.category === 'gift' || tx.category === 'admin_adjustment'
+  if (isAdminMovement) {
+    const { referenceId: _referenceId, ...withoutReferenceId } = rest
+    return withoutReferenceId
+  }
+  return rest
 }
