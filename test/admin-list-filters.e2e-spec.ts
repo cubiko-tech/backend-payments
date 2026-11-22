@@ -173,7 +173,8 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
       ).join(','),
     ],
   ])('answers 400 to brandIds with %s', async (_label, brandIds) => {
-    // Mutation: drop @IsUUID, @ArrayMinSize(1) or @ArrayMaxSize(100) and the matching list is 200.
+    // Mutation: drop @IsUUID (non-UUID) or @ArrayMaxSize(100) (101 ids) and that list is 200;
+    // drop @ArrayMinSize(1) and the empty lists reach Postgres as `IN ()` and answer 500.
     const res = await get('wallets', { brandIds })
 
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
@@ -194,22 +195,46 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
     expect(brandsOf(lower.body)).toEqual(brandsOf(upper.body))
   })
 
-  it.each([
-    ['perPage', '1e-7'],
-    ['perPage', 'abc'],
-    ['perPage', 'null'],
-    ['perPage', '1.5'],
-    ['perPage', '0'],
-    ['perPage', '101'],
-    ['page', '100001'],
-    ['currency', 'TK'],
-    ['currency', 'TKNN'],
-  ])('answers 400 to %s=%s', async (param, value) => {
-    // Mutation: drop @IsInt, @Min, @Max or @Length on that field and the value is 200.
-    const res = await get('wallets', { [param]: value })
+  const expectInvalid = async (query: Record<string, string>) => {
+    const res = await get('wallets', query)
 
     expect(res.status).toBe(HttpStatus.BAD_REQUEST)
     expect(res.body.code).toBe(INVALID_REQUEST)
+  }
+
+  it('answers 400 to perPage in exponent form', async () => {
+    // Mutation: parseInt instead of Number in toInteger reads 1e-7 as 1 and this is 200.
+    await expectInvalid({ perPage: '1e-7' })
+  })
+
+  it.each(['abc', 'null'])('answers 400 to perPage=%s', async (perPage) => {
+    // Mutation: toInteger reads a non-number as absent (`Number(value) || undefined`) and this is 200.
+    await expectInvalid({ perPage })
+  })
+
+  it('answers 400 to a fractional perPage', async () => {
+    // Mutation: drop @IsInt from perPage and 1.5 is 200.
+    await expectInvalid({ perPage: '1.5' })
+  })
+
+  it('answers 400 to perPage=0', async () => {
+    // Mutation: drop @Min(1) from perPage and 0 is 200.
+    await expectInvalid({ perPage: '0' })
+  })
+
+  it('answers 400 to perPage above 100', async () => {
+    // Mutation: drop @Max(MAX_LIST_PER_PAGE) from perPage and 101 is 200.
+    await expectInvalid({ perPage: '101' })
+  })
+
+  it('answers 400 to a page above its cap', async () => {
+    // Mutation: drop @Max(MAX_LIST_PAGE) from page and 100001 is 200.
+    await expectInvalid({ page: '100001' })
+  })
+
+  it.each(['TK', 'TKNN'])('answers 400 to currency=%s', async (currency) => {
+    // Mutation: drop @Length(3, 3) from currency and the code is 200.
+    await expectInvalid({ currency })
   })
 
   it('keeps answering the processes whitelist with the server token', async () => {
@@ -236,7 +261,8 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
     ['subscriptions', { status: 'trial', provider: 'dropi' }],
     ['payments', { status: 'completed', provider: 'wallet', purpose: 'wallet_recharge' }],
   ])('keeps answering the parameters the admin finance page sends to %s', async (path, filters) => {
-    // Mutation: drop purpose from PaymentsListQueryDto and the payments page answers 400.
+    // Mutation: strip the decorators of `provider` in WalletsListQueryDto (wallets), of `status` in
+    // SubscriptionsListQueryDto (subscriptions) or of `purpose` in PaymentsListQueryDto (payments): 400.
     const base = { page: '1', perPage: '20', orderBy: 'createdAt', order: 'DESC', search: 'loc311' }
     const res = await get(path, { ...base, ...filters })
 

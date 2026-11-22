@@ -63,15 +63,36 @@ describe('Admin list query DTOs (LOC-311)', () => {
     expect(failed).toEqual([])
   })
 
-  it.each([['1e-7'], ['abc'], ['null'], ['1.5'], ['0'], ['101']])(
-    'rejects perPage=%s',
-    async (perPage) => {
-      // Mutation: drop @IsInt or @Max(100) from perPage and the matching value passes.
-      const { failed } = await check(WalletsListQueryDto, { perPage })
+  const rejectsPerPage = async (perPage: string) => {
+    const { failed } = await check(WalletsListQueryDto, { perPage })
 
-      expect(failed).toEqual(['perPage'])
-    },
-  )
+    expect(failed).toEqual(['perPage'])
+  }
+
+  it('rejects perPage in exponent form', async () => {
+    // Mutation: parseInt instead of Number in toInteger reads 1e-7 as 1 and it passes.
+    await rejectsPerPage('1e-7')
+  })
+
+  it.each(['abc', 'null'])('rejects perPage=%s', async (perPage) => {
+    // Mutation: toInteger reads a non-number as absent (`Number(value) || undefined`) and it passes.
+    await rejectsPerPage(perPage)
+  })
+
+  it('rejects a fractional perPage', async () => {
+    // Mutation: drop @IsInt from perPage and 1.5 passes.
+    await rejectsPerPage('1.5')
+  })
+
+  it('rejects perPage=0', async () => {
+    // Mutation: drop @Min(1) from perPage and 0 passes.
+    await rejectsPerPage('0')
+  })
+
+  it('rejects perPage above 100', async () => {
+    // Mutation: drop @Max(MAX_LIST_PER_PAGE) from perPage and 101 passes.
+    await rejectsPerPage('101')
+  })
 
   it('rejects a page above its cap', async () => {
     // Mutation: drop @Max(MAX_LIST_PAGE) from page and 100001 passes.
