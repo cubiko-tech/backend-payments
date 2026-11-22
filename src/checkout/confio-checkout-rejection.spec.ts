@@ -80,6 +80,7 @@ const packageRequest: CheckoutRequest = {
   purpose: 'token_package',
   provider: 'confio',
   packageId: 'pkg-10',
+  successUrl: 'https://ads.roax.ai/tokens',
   buyer: { email: BUYER_EMAIL, phoneNumber: '3001234567' },
 } as CheckoutRequest
 
@@ -92,6 +93,7 @@ describe('Confio rejection on an external checkout', () => {
       CONFIO_STORE_ID: '01TESTSTORE',
       CONFIO_ACCESS_TOKEN: 'test-token-123',
       CONFIO_API_BASE_URL: 'https://api.dev.confiopagos.com/v1',
+      TOKEN_CHECKOUT_ALLOWED_RETURN_URLS: 'https://ads.roax.ai/tokens',
     }
   })
 

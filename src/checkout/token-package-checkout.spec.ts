@@ -42,8 +42,15 @@ describe('token package checkout', () => {
     billingCountry: jest.fn().mockResolvedValue(country),
     assertProviderAvailable,
     quoteUsdCopRate,
+    allowedReturnUrls: 'https://ads.roax.ai',
   })
-  const req = { brandId: 'brand-1', userId: 'user-1', provider: 'stripe', packageId: PACKAGE.id }
+  const req = {
+    brandId: 'brand-1',
+    userId: 'user-1',
+    provider: 'stripe',
+    packageId: PACKAGE.id,
+    successUrl: 'https://ads.roax.ai/tokens',
+  }
 
   beforeEach(() => jest.clearAllMocks())
 
@@ -72,6 +79,25 @@ describe('token package checkout', () => {
     expect(quoteUsdCopRate).not.toHaveBeenCalled()
     expect(tokenWallets.getOrCreate).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['successUrl', { successUrl: 'https://otro.example/' }],
+    ['cancelUrl', { cancelUrl: 'https://otro.example/' }],
+  ])(
+    'refuses a package whose %s is outside the list with 400, before pricing or the wallet',
+    async (_field, urls) => {
+      // Mutation: drop the assertAllowedReturnUrls call in prepareTokenPackage: it resolves.
+      const packageDeps = deps('CO')
+
+      await expect(prepareTokenPackage({ ...req, ...urls }, packageDeps)).rejects.toMatchObject({
+        status: 400,
+        code: 'INVALID_RETURN_URL',
+      })
+      expect(packageDeps.tokenPackages.findActive).not.toHaveBeenCalled()
+      expect(quoteUsdCopRate).not.toHaveBeenCalled()
+      expect(tokenWallets.getOrCreate).not.toHaveBeenCalled()
+    },
+  )
 
   it('credits only the purchased tokens of a package without bonus', async () => {
     // R15: red when creditTokenPackage drops its bonus > 0 check: a second, gift call of 0 appears.

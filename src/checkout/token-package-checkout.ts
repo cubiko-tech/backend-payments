@@ -61,9 +61,10 @@ export const bonusTokensKey = (paymentId: string) => `payment:${paymentId}:token
 /**
  * Prices a `token_package` checkout from the catalog and opens the brand token wallet, before
  * the payment exists. A Colombian billing country pays in COP at the day's TRM; any other pays
- * the USD price. Rejects, with nothing saved: `provider: 'wallet'` (422), an unknown or
- * inactive package (404), a provider not enabled for the country (400, checked before the TRM),
- * no TRM (503) and a closed token wallet (422).
+ * the USD price. Rejects, with nothing saved: `provider: 'wallet'` (422), a return URL outside
+ * the allowlist (400) or no allowlist (503), both before pricing, an unknown or inactive package
+ * (404), a provider not enabled for the country (400, checked before the TRM), no TRM (503) and a
+ * closed token wallet (422).
  */
 export async function prepareTokenPackage(
   req: {
@@ -72,6 +73,8 @@ export async function prepareTokenPackage(
     provider: string
     packageId?: string
     tokens?: unknown
+    successUrl?: string
+    cancelUrl?: string
   },
   deps: TokenPackageDeps,
 ): Promise<PreparedTokenPackage> {
@@ -99,6 +102,11 @@ export async function prepareTokenPackage(
   if (typeof req.packageId !== 'string' || !req.packageId) {
     throw fail('MISSING_PACKAGE_ID', 'packageId is required', HttpStatus.BAD_REQUEST)
   }
+  assertAllowedReturnUrls(
+    req.successUrl,
+    req.cancelUrl,
+    deps.allowedReturnUrls ?? process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS,
+  )
   const tokenPackage = await deps.tokenPackages.findActive(req.packageId)
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
   await deps.assertProviderAvailable(country)
