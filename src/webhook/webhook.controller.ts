@@ -17,7 +17,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Request } from 'express'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { WebhookService } from './webhook.service'
 import {
   ListFailedWebhooksQueryDto,
@@ -367,6 +367,7 @@ export class WebhookController {
   @Post('admin/:id/retry')
   @UseGuards(ApiAuthGuard)
   @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
   async retryWebhook(@Param('id', ParseUUIDPipe) id: string) {

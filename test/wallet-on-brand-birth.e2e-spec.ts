@@ -272,6 +272,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
 
   it('CA5 opens both the money wallet and the TKN wallet in 0 and active when a brand is born with the server token', async () => {
     // R15: red when createWallet stops calling tokenWallets.getOrCreate: the TKN wallet is missing.
+    // R15: red when createWallet loses @AllowServerToken: platform's server token gets 403.
     const res = await http()
       .post('/admin/wallets')
       .set('Authorization', `Bearer ${ACCESS_SERVER}`)

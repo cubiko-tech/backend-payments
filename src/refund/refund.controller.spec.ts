@@ -214,7 +214,17 @@ describe('RefundController and RefundService brand payment ownership and operato
     expect(refundWriteRepo.save).not.toHaveBeenCalled()
   })
 
-  it('approves a pending refund for superadmin and service token using session user id and ignoring body.approvedBy', async () => {
+  it('refuses the server token with 403 on POST /refund/:id/approve, then approves as the super admin session ignoring body.approvedBy', async () => {
+    // R15: red when approve loses @RequireSessionUser: the server gets 201 and approvedBy is 'server'.
+    const serverRes = await request(app.getHttpServer())
+      .post(`/refund/${PENDING_REFUND_ID}/approve`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send({ approvedBy: 'otro' })
+
+    expect(serverRes.status).toBe(HttpStatus.FORBIDDEN)
+    expect(refundWriteRepo.findOne).not.toHaveBeenCalled()
+    expect(refundWriteRepo.save).not.toHaveBeenCalled()
+
     const superAdminRes = await request(app.getHttpServer())
       .post(`/refund/${PENDING_REFUND_ID}/approve`)
       .set('Authorization', `Bearer ${superAdminToken}`)
@@ -233,22 +243,6 @@ describe('RefundController and RefundService brand payment ownership and operato
         id: PENDING_REFUND_ID,
         status: RefundStatus.PROCESSING,
         approvedBy: SUPERADMIN_ID,
-      }),
-    )
-
-    refundWriteRepo.save.mockClear()
-
-    const serverRes = await request(app.getHttpServer())
-      .post(`/refund/${PENDING_REFUND_ID}/approve`)
-      .set('Authorization', `Bearer ${SERVER_SECRET}`)
-      .send({ approvedBy: 'otro' })
-
-    expect(serverRes.status).toBe(HttpStatus.CREATED)
-    expect(serverRes.body.data).toEqual(
-      expect.objectContaining({
-        id: PENDING_REFUND_ID,
-        status: RefundStatus.PROCESSING,
-        approvedBy: 'server',
       }),
     )
   })

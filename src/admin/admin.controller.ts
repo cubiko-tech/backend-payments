@@ -36,6 +36,7 @@ import {
 } from '../credit/credit.types'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import {
+  AllowServerToken,
   RequirePermission,
   RequireSessionUser,
   RequireSuperAdmin,
@@ -57,6 +58,7 @@ const containsPattern = (search: string) => `%${search.replace(/[\\%_]/g, '\\$&'
 @Controller('admin')
 @UseGuards(ApiAuthGuard)
 @RequireSuperAdmin()
+@RequireSessionUser()
 export class AdminController {
   constructor(
     @InjectRepository(Subscription, 'DBRead')
@@ -86,6 +88,8 @@ export class AdminController {
   ) {}
 
   @Get('subscriptions')
+  // backend-processes lists subscriptions for its panel with ACCESS_SERVER.
+  @AllowServerToken()
   @ApiOperation({ summary: 'Listado paginado de suscripciones con filtros' })
   @ApiResponse({ status: 200, description: 'Suscripciones paginadas' })
   async subscriptionsList(
@@ -539,6 +543,8 @@ export class AdminController {
   }
 
   @Post('wallets')
+  // backend-platform opens the brand's wallet with ACCESS_SERVER when the brand is created.
+  @AllowServerToken()
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
@@ -626,7 +632,6 @@ export class AdminController {
   }
 
   @Post('wallets/:id/adjust')
-  @RequireSessionUser()
   @ApiOperation({ summary: 'Acreditar o debitar fondos de una wallet (Admin)' })
   @ApiResponse({ status: 201, description: 'Ajuste realizado, o el primero bajo esta llave' })
   @ApiResponse({ status: 400, description: 'Falta la llave, o el monto o el tipo no son válidos' })

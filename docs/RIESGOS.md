@@ -656,29 +656,26 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: mitigado para el bono por la regla del checksum y del ciclo creciente; abierto para el efecto del
   cobro — fuera de LOC-235, pendiente de unidad propia.
 
-## El toggle de admin congela y descongela wallets con el token de servidor, sin persona (LOC-262)
+## Un llamador de `admin/*` con el token de servidor que no se relevó recibe 403 (LOC-271)
 
-- **Dónde**: `src/admin/admin.controller.ts:64`, `:622` (`toggleFreezeWallet`);
-  `src/shared/auth/api-auth.guard.ts:128-130` (`isServerToken`)
-- **Qué lo dispara**: `POST /admin/wallets/:id/toggle-freeze` autenticado con `ACCESS_SERVER`, sin sesión de
-  usuario.
-- **Qué rompe**: quien posea `ACCESS_SERVER` congela o descongela cualquier wallet (incluida una `TKN`
-  congelada) y la auditoría queda a nombre de `'server'` (`src/admin/admin.controller.ts:643`), sin persona.
-  `POST /wallet/:id/freeze`, `unfreeze` y `close` ya exigen `@RequireSessionUser()`.
-- **Estado**: abierto — lo cierra exigir sesión de super admin en esa ruta junto con el resto de mutaciones
-  de admin que aún aceptan `ACCESS_SERVER` (INBOX
-  `backend-payments-token-de-servidor-aprueba-reembolsos-y-reintenta-avisos`).
+- **Dónde**: `src/admin/admin.controller.ts:61` (`@RequireSessionUser()` en la clase), `:92` y `:547`
+  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:99`, `:106`, `:119`
+- **Qué lo dispara**: un servicio fuera de platform, processes, roles, auth, mcp-server, alerts-service y
+  backend-ads que llame una ruta de `AdminController` distinta de `POST /admin/wallets` o
+  `GET /admin/subscriptions` con `ACCESS_SERVER`.
+- **Qué rompe**: esa llamada pasa de 2xx a 403 y lo que hacía deja de pasar; en el código leído no hay ninguno.
+- **Estado**: abierto — lo cierra mirar los 403 de `admin/*` en los logs de Pagos de `dev` después del despliegue.
 
 ## `POST /admin/wallets` no verifica que la marca exista y con sesión de super admin abre saldo sin movimiento (LOC-251)
 
-- **Dónde**: `src/admin/admin.controller.ts:569`, `:587`, `:591-599`, `:597` y `:602` (`createWallet`);
+- **Dónde**: `src/admin/admin.controller.ts:550`, `:563`, `:571-578`, `:577` y `:584` (`createWallet`);
   `src/admin/dto/admin-wallet.dto.ts:20`, `:48-54` (`AdminCreateWalletDto`)
 - **Qué lo dispara**: (a) un pedido autenticado a `POST /admin/wallets` con un `brandId` UUID que no
   corresponde a ninguna marca en `backend-platform`; (b) un super admin con sesión que envía `balance > 0`
   desde el diálogo «Crear wallet» del admin (`admin` `src/app/(finance)/finance/wallets/page.tsx:201`).
 - **Qué rompe**: (a) se abren la wallet de dinero y la `internal/TKN` para un UUID sin marca; (b) la wallet
   de dinero nace con `balance: body.balance` y auditoría `wallet_created`, pero sin fila en `transactions`.
-  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:572-580`).
+  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:553-561`).
 - **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
   `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
   registrar la transacción inicial al crear desde sesión.

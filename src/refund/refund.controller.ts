@@ -17,7 +17,7 @@ import { RequestRefundDto } from './dto/request-refund.dto'
 import { ApproveRefundDto } from './dto/approve-refund.dto'
 import { ListRefundsQueryDto } from './dto/list-refunds-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 import {
@@ -103,6 +103,7 @@ export class RefundController {
 
   @Post(':id/approve')
   @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
   async approve(
