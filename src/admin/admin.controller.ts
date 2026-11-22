@@ -50,6 +50,9 @@ import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
 import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
 
+// Backslash is Postgres's default LIKE escape, so `%` and `_` in the search match themselves.
+const containsPattern = (search: string) => `%${search.replace(/[\\%_]/g, '\\$&')}%`
+
 @ApiTags('Admin')
 @Controller('admin')
 @UseGuards(ApiAuthGuard)
@@ -105,7 +108,7 @@ export class AdminController {
     if (planSlug) qb.andWhere('s.planSlug = :planSlug', { planSlug })
     if (provider) qb.andWhere('s.provider = :provider', { provider })
     if (search) {
-      qb.andWhere('(s.brandId::text ILIKE :q OR s.planSlug ILIKE :q)', { q: `%${search}%` })
+      qb.andWhere('("s"."brandId" ILIKE :q OR s.planSlug ILIKE :q)', { q: containsPattern(search) })
     }
 
     const sortField = [
@@ -253,8 +256,8 @@ export class AdminController {
     if (provider) qb.andWhere('p.provider = :provider', { provider })
     if (purpose) qb.andWhere('p.purpose = :purpose', { purpose })
     if (search) {
-      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', {
-        q: `%${search}%`,
+      qb.andWhere('("p"."brandId" ILIKE :q OR p.providerPaymentId ILIKE :q)', {
+        q: containsPattern(search),
       })
     }
 
@@ -515,7 +518,7 @@ export class AdminController {
     if (provider) qb.andWhere('w.provider = :provider', { provider })
     if (currency) qb.andWhere('w.currency = :currency', { currency })
     if (search) {
-      qb.andWhere('(w.brandId::text ILIKE :q OR w.label ILIKE :q)', { q: `%${search}%` })
+      qb.andWhere('("w"."brandId" ILIKE :q OR w.label ILIKE :q)', { q: containsPattern(search) })
     }
 
     const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(
