@@ -36,6 +36,7 @@ import {
   TokenGiftBatchService,
 } from '../src/wallet/token-gift-batch.service'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
+import { BRAND_OWNER_ID, knownBrandOwners } from './support/brand-owner.double'
 import { unknownServiceKeys } from './support/service-credential.double'
 
 dotenvConfig({ path: '.env' })
@@ -47,6 +48,7 @@ const [BRAND_1, BRAND_2, BRAND_3, BRAND_4, BRAND_5] = [
   'a2530000-0000-4000-8000-000000000004',
   'a2530000-0000-4000-8000-000000000005',
 ]
+const UNKNOWN_BRAND = 'a2650000-0000-4000-8000-0000000000ee'
 const [SUPERADMIN_ID, BRAND_ADMIN_ID] = ['superadmin-loc253', 'brand-admin-loc253']
 const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc253-jwt-secret', 'e2e-loc253-server-token']
 
@@ -228,6 +230,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
         ].flatMap((e) => [repo(e, 'DBWrite'), repo(e, 'DBRead')]),
         // R17: these routes use @RequireSuperAdmin, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
+        knownBrandOwners([UNKNOWN_BRAND]),
       ],
     }).compile()
 
@@ -330,8 +333,8 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     ]).toEqual([WalletStatus.CLOSED, 0, 0])
   })
 
-  it('CA6 — chosen brands: 3 brands with TKN and 1 without it (confirmed total 200) finishes with 3 acreditada, 1 omitida sin_wallet, and 150 total credited; also reports cerrada when a chosen brand is closed', async () => {
-    // R15: red when brands mode creates a TKN wallet for BRAND_4 (getOrCreate) or omits the sin_wallet/cerrada reason.
+  it('LOC-265 — chosen brands: a platform brand without TKN gets it opened in the owner name and credited, an id platform does not know is omitted marca_inexistente with no wallet, and a closed one reports cerrada', async () => {
+    // Mutation: processItem omits every item without walletId as SIN_WALLET -> BRAND_4 omitida, fails.
     await Promise.all([
       seedTknWallet(BRAND_1, WalletStatus.ACTIVE),
       seedTknWallet(BRAND_2, WalletStatus.ACTIVE),
@@ -350,9 +353,9 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     )
 
     const createRes = await createBatch({
-      filter: { kind: 'brands', brandIds: [BRAND_1, BRAND_2, BRAND_3, BRAND_4] },
-      amount: 50,
-      confirmedTotalTokens: 200,
+      filter: { kind: 'brands', brandIds: [BRAND_1, BRAND_2, BRAND_3, BRAND_4, UNKNOWN_BRAND] },
+      amount: 5,
+      confirmedTotalTokens: 25,
       reason: 'Selected brands bonus',
       idempotencyKey: 'b-02',
     })
@@ -366,27 +369,26 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     expect(reportRes.body.data).toMatchObject({
       id: batchId,
       status: 'completed',
-      totalBrands: 4,
-      acreditada: 3,
-      repetida: 0,
-      omitida: 1,
-      counts: { acreditada: 3, repetida: 0, omitida: 1, pending: 0 },
-      totalCreditedTokens: 150,
+      totalBrands: 5,
+      counts: { acreditada: 4, repetida: 0, omitida: 1, pending: 0 },
+      totalCreditedTokens: 20,
       omitted: {
-        data: [{ brandId: BRAND_4, walletId: null, reason: 'sin_wallet' }],
+        data: [{ brandId: UNKNOWN_BRAND, walletId: null, reason: 'marca_inexistente' }],
         meta: { total: 1, page: 1, limit: 20, totalPages: 1 },
       },
     })
-    expect(
-      await dataSource.getRepository(Wallet).findOneBy({ brandId: BRAND_4, currency: 'TKN' }),
-    ).toBeNull()
+    const opened = await dataSource
+      .getRepository(Wallet)
+      .findOneByOrFail({ brandId: BRAND_4, currency: 'TKN' })
+    expect([opened.userId, Number(opened.giftTokens)]).toEqual([BRAND_OWNER_ID, 5])
+    expect(await dataSource.getRepository(Wallet).findBy({ brandId: UNKNOWN_BRAND })).toEqual([])
 
     const closedWallet = await seedTknWallet(BRAND_5, WalletStatus.CLOSED)
     const secondRes = await createBatch({
-      filter: { kind: 'brands', brandIds: [BRAND_1, BRAND_4, BRAND_5] },
+      filter: { kind: 'brands', brandIds: [BRAND_1, UNKNOWN_BRAND, BRAND_5] },
       amount: 50,
       confirmedTotalTokens: 150,
-      reason: 'With closed and missing',
+      reason: 'With closed and unknown',
       idempotencyKey: 'b-03',
     })
     expect(secondRes.status).toBe(HttpStatus.ACCEPTED)
@@ -395,7 +397,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     const page1 = await getBatch(secondRes.body.data.id, '?page=1&limit=1')
     const page2 = await getBatch(secondRes.body.data.id, '?page=2&limit=1')
     expect(page1.body.data.omitted).toEqual({
-      data: [{ brandId: BRAND_4, walletId: null, reason: 'sin_wallet' }],
+      data: [{ brandId: UNKNOWN_BRAND, walletId: null, reason: 'marca_inexistente' }],
       meta: { total: 2, page: 1, limit: 1, totalPages: 2 },
     })
     expect(page2.body.data.omitted).toEqual({

@@ -14,8 +14,15 @@ import {
 } from '@nestjs/common'
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger'
 import { AuditService } from '../audit/audit.service'
+import {
+  BRAND_LOOKUP_UNAVAILABLE,
+  BRAND_NOT_FOUND,
+  BrandOwnerErrorCode,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { openBrandTokenWallet } from '../wallet/open-brand-token-wallet'
 import { TokenGiftBatchService } from '../wallet/token-gift-batch.service'
 import { recordTokenGiftNotice } from '../wallet/token-gift-notice'
 import { TokenOrigin } from '../wallet/token-origin'
@@ -27,6 +34,16 @@ import {
   PreviewGiftBatchDto,
 } from './dto/admin-token-gift-batch.dto'
 import { DebitGiftTokensDto, GiftTokensDto } from './dto/admin-token-gift.dto'
+
+const brandLookupFailure = (code: BrandOwnerErrorCode) => {
+  if (code === BRAND_LOOKUP_UNAVAILABLE) {
+    return fail(code, 'Platform did not answer for the brand', HttpStatus.SERVICE_UNAVAILABLE)
+  }
+  if (code === BRAND_NOT_FOUND) {
+    return fail(code, 'Platform does not know this brand', HttpStatus.NOT_FOUND)
+  }
+  return fail(code, 'The brand has no owner in platform', HttpStatus.UNPROCESSABLE_ENTITY)
+}
 
 /**
  * Gift tokens a super admin gives or removes on a brand: origin `gift`, with reason and author, no
@@ -41,6 +58,7 @@ export class AdminTokenGiftController {
   constructor(
     private readonly tokenWallets: TokenWalletService,
     private readonly auditService: AuditService,
+    private readonly platform: ClientPlatformService,
     // Optional so single-brand specs that instantiate this controller with two args keep working.
     @Optional()
     private readonly giftBatches?: TokenGiftBatchService,
@@ -85,7 +103,9 @@ export class AdminTokenGiftController {
   @ApiResponse({ status: 400, description: 'Missing reason or key, or amount not positive' })
   @ApiResponse({ status: 403, description: 'Not a super admin session (server token included)' })
   @ApiResponse({ status: 409, description: 'IDEMPOTENCY_KEY_CONFLICT: key used for another move' })
-  @ApiResponse({ status: 422, description: 'WALLET_CLOSED: the token wallet is closed' })
+  @ApiResponse({ status: 404, description: 'BRAND_NOT_FOUND: platform does not know the brand' })
+  @ApiResponse({ status: 422, description: 'WALLET_CLOSED or BRAND_WITHOUT_OWNER' })
+  @ApiResponse({ status: 503, description: 'BRAND_LOOKUP_UNAVAILABLE: platform did not answer' })
   async gift(
     @Param('brandId', ParseUUIDPipe) brandId: string,
     @Body() body: GiftTokensDto,
@@ -93,9 +113,10 @@ export class AdminTokenGiftController {
   ) {
     const authorId: string = req.user.id
     const reason = body.reason.trim()
-    const wallet = await this.tokenWallets.getOrCreate(brandId, brandId)
+    const opened = await openBrandTokenWallet(this.tokenWallets, this.platform, brandId)
+    if (!opened.ok) throw brandLookupFailure(opened.code)
     const movement = await this.tokenWallets.creditTokens(
-      wallet.id,
+      opened.walletId,
       body.amount,
       TokenOrigin.GIFT,
       {
@@ -112,7 +133,7 @@ export class AdminTokenGiftController {
           userId: authorId,
           action: 'token_gift',
           entityType: 'wallet',
-          entityId: wallet.id,
+          entityId: opened.walletId,
           changes: { brandId, amount: body.amount, reason, transactionId: transaction.id },
           description: `Gift of ${body.amount} tokens: ${reason}`,
         })

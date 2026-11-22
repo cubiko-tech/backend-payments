@@ -15,6 +15,11 @@ import {
   PreviewGiftBatchDto,
 } from '../admin/dto/admin-token-gift-batch.dto'
 import { isUniqueConstraintViolation } from '../checkout/checkout-idempotency'
+import {
+  BRAND_LOOKUP_UNAVAILABLE,
+  BRAND_NOT_FOUND,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { GiftBatchStatus, TokenGiftBatch } from './entities/token-gift-batch.entity'
 import {
@@ -23,6 +28,7 @@ import {
   TokenGiftBatchItem,
 } from './entities/token-gift-batch-item.entity'
 import { WalletProvider, WalletStatus } from './entities/wallet.entity'
+import { openBrandTokenWallet } from './open-brand-token-wallet'
 import { giftBatchBrandKey, tokenGiftLimits } from './token-gift-limits'
 import { runChunk } from './run-chunk'
 import { recordTokenGiftNotice } from './token-gift-notice'
@@ -88,6 +94,7 @@ export class TokenGiftBatchService {
     private readonly queue: Queue,
     private readonly tokenWallets: TokenWalletService,
     private readonly auditService: AuditService,
+    private readonly platform: ClientPlatformService,
   ) {}
 
   /** Counts matching brands in PostgreSQL without loading wallet rows into memory. */
@@ -296,13 +303,24 @@ export class TokenGiftBatchService {
   }
 
   private async processItem(batch: TokenGiftBatch, item: TokenGiftBatchItem): Promise<void> {
-    const walletId = item.walletId ?? (await this.tokenWallets.findTokenWalletId(item.brandId))
+    let walletId = item.walletId
     if (!walletId) {
-      await this.settleItem(item.id, {
-        outcome: GiftBatchItemOutcome.OMITIDA,
-        omitReason: GiftBatchOmitReason.SIN_WALLET,
-      })
-      return
+      const opened = await openBrandTokenWallet(this.tokenWallets, this.platform, item.brandId)
+      // Platform not answering is transient: the item stays pending and the job retries it.
+      if (!opened.ok && opened.code === BRAND_LOOKUP_UNAVAILABLE) {
+        throw new Error(`Brand owner lookup unavailable for ${item.brandId}`)
+      }
+      if (!opened.ok) {
+        await this.settleItem(item.id, {
+          outcome: GiftBatchItemOutcome.OMITIDA,
+          omitReason:
+            opened.code === BRAND_NOT_FOUND
+              ? GiftBatchOmitReason.MARCA_INEXISTENTE
+              : GiftBatchOmitReason.SIN_WALLET,
+        })
+        return
+      }
+      walletId = opened.walletId
     }
 
     const amount = Number(batch.amount)

@@ -38,6 +38,7 @@ import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { brandOwnerLookup } from './support/brand-owner.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -243,6 +244,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
         {
           provide: ClientPlatformService,
           useValue: {
+            resolveBrandOwner: brandOwnerLookup(),
             canViewBrandCredit: jest.fn(async (_userId: string, brandId: string) =>
               ALL_BRANDS.includes(brandId),
             ),

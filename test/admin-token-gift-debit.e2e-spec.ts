@@ -27,6 +27,7 @@ import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { TokenOrigin } from '../src/wallet/token-origin'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { failNextAuditWrite, failNextWriteOf } from './support/audit-failure.fixture'
+import { knownBrandOwners } from './support/brand-owner.double'
 import { unknownServiceKeys } from './support/service-credential.double'
 
 dotenvConfig({ path: '.env' })
@@ -157,6 +158,7 @@ describe('Admin gift token debits over HTTP (PostgreSQL, LOC-252)', () => {
         ]),
         // R17: these routes use @RequireSuperAdmin, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
+        knownBrandOwners(),
       ],
     }).compile()
     app = moduleRef.createNestApplication()

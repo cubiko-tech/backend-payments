@@ -4,6 +4,7 @@ import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { Job } from 'bullmq'
 import { AuditService } from '../audit/audit.service'
+import { BRAND_NOT_FOUND, ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { GiftBatchStatus, TokenGiftBatch } from './entities/token-gift-batch.entity'
 import {
@@ -66,6 +67,9 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
   const auditService = {
     record: jest.fn().mockResolvedValue(undefined),
   }
+  const platform = {
+    resolveBrandOwner: jest.fn().mockResolvedValue({ ok: false, code: BRAND_NOT_FOUND }),
+  }
 
   beforeEach(async () => {
     jest.clearAllMocks()
@@ -81,6 +85,7 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
         { provide: getQueueToken(TOKEN_GIFT_BATCH_QUEUE), useValue: queue },
         { provide: TokenWalletService, useValue: tokenWallets },
         { provide: AuditService, useValue: auditService },
+        { provide: ClientPlatformService, useValue: platform },
       ],
     }).compile()
 
@@ -205,7 +210,7 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
       { id: 'i-1', outcome: GiftBatchItemOutcome.PENDING },
       expect.objectContaining({
         outcome: GiftBatchItemOutcome.OMITIDA,
-        omitReason: GiftBatchOmitReason.SIN_WALLET,
+        omitReason: GiftBatchOmitReason.MARCA_INEXISTENTE,
       }),
     )
     expect(itemRepo.update).toHaveBeenCalledWith(

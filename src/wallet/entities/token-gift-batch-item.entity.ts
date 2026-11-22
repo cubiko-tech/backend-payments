@@ -11,6 +11,7 @@ export enum GiftBatchItemOutcome {
 export enum GiftBatchOmitReason {
   SIN_WALLET = 'sin_wallet',
   CERRADA = 'cerrada',
+  MARCA_INEXISTENTE = 'marca_inexistente',
 }
 
 @Entity('token_gift_batch_items')

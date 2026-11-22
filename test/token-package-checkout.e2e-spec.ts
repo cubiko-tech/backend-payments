@@ -9,6 +9,7 @@ import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controll
 import { AuditService } from '../src/audit/audit.service'
 import { buildIdempotencyFingerprint } from '../src/checkout/checkout-idempotency'
 import { bonusTokensKey, purchasedTokensKey } from '../src/checkout/token-package-checkout'
+import { ClientPlatformService } from '../src/client/client-platform.service'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import {
   Payment,
@@ -20,6 +21,7 @@ import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
+import { brandOwnerLookup } from './support/brand-owner.double'
 import {
   cleanPackageBrand,
   confioNotice,
@@ -190,6 +192,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       const gifts = new AdminTokenGiftController(
         instance.moduleRef.get(TokenWalletService),
         instance.moduleRef.get(AuditService),
+        { resolveBrandOwner: brandOwnerLookup() } as unknown as ClientPlatformService,
       )
       const gift = { amount, reason: 'Bonus', idempotencyKey: keyOf(paymentId) }
       await gifts.gift(BRAND, gift, { user: { id: 'superadmin-loc140' } })

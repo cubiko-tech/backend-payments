@@ -37,6 +37,7 @@ import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { BRAND_OWNER_ID, brandOwnerLookup } from './support/brand-owner.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -170,7 +171,10 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
         // R17: AdminController needs it in its constructor; no wallet route calls it.
         { provide: CreditService, useValue: {} },
         // R17: a super admin never asks platform for membership; this only satisfies WalletController.
-        { provide: ClientPlatformService, useValue: { canViewBrandCredit: jest.fn() } },
+        {
+          provide: ClientPlatformService,
+          useValue: { canViewBrandCredit: jest.fn(), resolveBrandOwner: brandOwnerLookup() },
+        },
         // R17: these routes use @RequireSuperAdmin, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
       ],
@@ -201,6 +205,8 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
     const wallet = (await tokenWallet())!
     expect(Number(wallet.balance)).toBe(20)
     expect(Number(wallet.giftTokens)).toBe(20)
+    // Mutation: back to getOrCreate(brandId, brandId) in gift() -> userId is BRAND_A and this fails.
+    expect(wallet.userId).toBe(BRAND_OWNER_ID)
     const [movement, ...rest] = await movementsOf(wallet.id)
     expect(rest).toHaveLength(0)
     expect(movement).toMatchObject({

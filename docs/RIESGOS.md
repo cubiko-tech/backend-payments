@@ -401,13 +401,6 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
   contar si hay filas así por ambiente.
 
-## Un regalo de tokens a un `brandId` que no es una marca crea su wallet `TKN` (LOC-133)
-
-- **Dónde**: `src/admin/admin-token-gift.controller.ts:40` (`getOrCreate`)
-- **Qué lo dispara**: un super admin que manda un UUID válido que no corresponde a ninguna marca.
-- **Qué rompe**: queda una wallet `TKN` con regalo que nadie ve; los tokens no llegan a la marca buscada.
-- **Estado**: abierto — lo cierra preguntarle a platform si la marca existe antes de acreditar.
-
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
 - **Dónde**: `src/trm/trm.service.ts:54` (`getUsdCopRate`), `src/checkout/token-package-checkout.ts:80` (`chargeFor`),

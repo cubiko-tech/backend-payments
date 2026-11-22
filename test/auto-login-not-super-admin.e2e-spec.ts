@@ -28,6 +28,7 @@ import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity
 import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
+import { brandOwnerLookup } from './support/brand-owner.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -143,6 +144,7 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
         {
           provide: ClientPlatformService,
           useValue: {
+            resolveBrandOwner: brandOwnerLookup(),
             canViewBrandCredit: jest.fn(
               async (u: string, b: string) => u === USER_ID && b === BRAND_A,
             ),
