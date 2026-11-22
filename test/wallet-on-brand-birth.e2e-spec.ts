@@ -29,7 +29,7 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
-import { runBackfillTokenWalletsCli } from '../src/wallet/backfill-token-wallets'
+import { BrandDirectory, runBackfillTokenWalletsCli } from '../src/wallet/backfill-token-wallets'
 import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet, WalletProvider, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
@@ -96,6 +96,12 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
     adminUserId: 'system',
     ...overrides,
   })
+
+  // R17: platform is another service; with a brands file the backfill only asks each brand's owner.
+  const backfillPlatform: BrandDirectory = {
+    listBrandIds: async () => [],
+    resolveBrandOwner: async () => ({ ok: true, owner: USER_OWNER }),
+  }
 
   const seedBackfillScenario = async () => {
     const walletRepo = dataSource.getRepository(Wallet)
@@ -378,6 +384,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile],
       () => dataSource,
       (line) => dryRunLines.push(line),
+      backfillPlatform,
     )
 
     expect(await walletRepo.countBy({ brandId: In(BACKFILL_BRANDS), currency: 'TKN' })).toBe(2)
@@ -399,6 +406,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile, '--apply'],
       () => dataSource,
       () => undefined,
+      backfillPlatform,
     )
     expect(firstApply.apply).toBe(true)
     expect(firstApply.createdBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([
@@ -424,6 +432,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile, '--apply'],
       () => dataSource,
       () => undefined,
+      backfillPlatform,
     )
     expect(secondApply.missingBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([])
     expect(secondApply.createdBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([])
