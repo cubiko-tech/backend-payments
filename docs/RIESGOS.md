@@ -34,7 +34,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El caché tibio de precios sirve precios vencidos sin tope cuando cae `backend-roles` (LOC-16)
 
-- **Dónde**: `src/client/client-roles.service.ts:198`, `:154` (`getPlanRows`, `hasCachedPrices`);
+- **Dónde**: `src/client/client-roles.service.ts:204`, `:160` (`getPlanRows`, `hasCachedPrices`);
   `src/tasks/wallet-renewal.ts:77` (`isPostponementGraceExceeded`)
 - **Qué lo dispara**: `backend-roles` cae después de que el proceso cargó precios una vez.
 - **Qué rompe**: la renovación cobra al último precio cacheado, de cualquier antigüedad, o rechaza con
@@ -69,7 +69,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:377` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
+  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
   (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
@@ -636,7 +636,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
 
-- **Dónde**: `src/client/client-roles.service.ts:235` y `:280` (campo ausente → 0),
+- **Dónde**: `src/client/client-roles.service.ts:241` y `:287` (campo ausente → 0),
   `src/webhook/subscription-bonus.service.ts:97`
 - **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
 - **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a

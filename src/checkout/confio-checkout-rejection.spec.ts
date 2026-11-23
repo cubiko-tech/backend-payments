@@ -139,7 +139,10 @@ describe('Confio rejection on an external checkout', () => {
   ])('rejects a buyer without a %s with the 422 of a subscription', async (_, buyer, field) => {
     // Mutation (phone row): `normalizeColombianPhone` returns '+573215786325' for '' -> red.
     // Mutation (email row): `resolveCheckoutBuyer` sends `contact.email || 'pagos@cubiko.co'` -> red.
+
+    // R17: silences the expected rejection warn; the case asserts on the response, not on the log.
     jest.spyOn(Logger.prototype, 'warn').mockImplementation()
+    // R17: Confio is external and has a cost; the spy is where the case reads what would be sent.
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
       status: 201,

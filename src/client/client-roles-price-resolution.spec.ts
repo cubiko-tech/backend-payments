@@ -103,6 +103,40 @@ describe('ClientRolesService — deterministic plan prices', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('More than one isDefault'))
   })
 
+  it('warns once for two isDefault rows of CO across 5 renewals of one plan, again after a refresh', async () => {
+    // Mutation (once): the service warn drops its warnedThisCatalog check → 5 warns → red.
+    // Mutation (refresh): refreshCatalog drops warnedThisCatalog.clear() → still 1 after refresh → red.
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    global.fetch = mockCatalog([
+      priceRow({ id: '9', price: '30000.00', isDefault: true }),
+      priceRow({ id: '4', price: '25000.00', isDefault: true }),
+    ]) as unknown as typeof fetch
+    const duplicateWarns = () =>
+      warn.mock.calls.filter(([message]) => String(message).includes('More than one isDefault'))
+        .length
+
+    for (let i = 0; i < 5; i++) await service.resolvePriceForCountry('pro', 'CO')
+    expect(duplicateWarns()).toBe(1)
+
+    service.invalidateCache()
+    await service.resolvePriceForCountry('pro', 'CO')
+    expect(duplicateWarns()).toBe(2)
+  })
+
+  it('does not warn when the country has a single isDefault row', async () => {
+    // Mutation: pickPriceRow compares countries.size <= defaults.length → warns on one default → red.
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    global.fetch = mockCatalog([
+      priceRow({ id: '9', price: '30000.00', isDefault: true }),
+      priceRow({ id: '4', price: '25000.00' }),
+    ]) as unknown as typeof fetch
+
+    const result = await service.resolvePriceForCountry('pro', 'CO')
+
+    expect(result.price.id).toBe('9')
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('More than one isDefault'))
+  })
+
   it("does not count isDefault: 'false' as a default row", async () => {
     // Mutation: the ingest reads isDefault back as `!!price.isDefault` → the 'false' row wins → red.
     global.fetch = mockCatalog([

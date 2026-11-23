@@ -109,7 +109,13 @@ function tokensPerCycleOf(value: unknown): number {
 @Injectable()
 export class ClientRolesService {
   private readonly logger = new Logger(ClientRolesService.name)
-  private readonly warn = (message: string) => this.logger.warn(message)
+  // A batch resolves one price per subscription: each broken catalog row set is reported once per catalog.
+  private readonly warnedThisCatalog = new Set<string>()
+  private readonly warn = (message: string) => {
+    if (this.warnedThisCatalog.has(message)) return
+    this.warnedThisCatalog.add(message)
+    this.logger.warn(message)
+  }
 
   private get rolesUrl(): string {
     return process.env.SERVICE_ROLES || ''
@@ -241,6 +247,7 @@ export class ClientRolesService {
       this.inflightRefresh = this.fetchCatalogFromRoles()
         .then((fresh) => {
           this.cache = { ...fresh, fetchedAt: Date.now() }
+          this.warnedThisCatalog.clear()
           return this.cache
         })
         .finally(() => {

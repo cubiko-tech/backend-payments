@@ -230,6 +230,7 @@ describe('Subscription crons close each row at once', () => {
     // case goes red.
     for (const brandId of BRANDS.slice(0, 2)) await seedDueCancellation(brandId)
     removePlan.mockResolvedValue(false)
+    // R17: New Relic is external; the spy is where the case reads the event the cron records.
     const recordCustomEvent = jest.fn()
     Object.assign(a.tasks, { apm: { recordCustomEvent } })
 
@@ -247,12 +248,14 @@ describe('Subscription crons close each row at once', () => {
     // Mutation: takeRun returns taken: true without pg_try_advisory_xact_lock: the second replica
     // reads the mappings too and this case goes red.
     const reading = createGate()
+    // R17: the mapping read is held open by hand so the second replica arrives while the first runs.
     const first = { findAllMappings: jest.fn() }
     first.findAllMappings.mockImplementation(async () => {
       reading.arrive()
       await reading.wait
       return []
     })
+    // R17: the spy tells whether the second replica got past the lock and read the mappings.
     const second = { findAllMappings: jest.fn().mockResolvedValue([]) }
     // R17: the catalog is backend-roles; no mapping reaches it in this case.
     const roles = { getPlanPriceCents: jest.fn() }
