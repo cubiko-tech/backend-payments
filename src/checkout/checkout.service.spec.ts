@@ -31,6 +31,7 @@ import {
   BRAND_WITHOUT_COUNTRY,
 } from '../client/client-platform.service'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
+import { ClientAuthService } from '../client/client-auth.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
@@ -191,6 +192,16 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
           useValue: { isProviderAvailable: jest.fn().mockResolvedValue(true) },
         },
         { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
+        {
+          // Auth is a network service; a usable contact lets Confio cases without a buyer reach the link.
+          provide: ClientAuthService,
+          useValue: {
+            resolveBuyerContact: jest.fn().mockResolvedValue({
+              ok: true,
+              contact: { email: 'ana@andina.co', name: 'Ana Rojas', phone: '+573001112233' },
+            }),
+          },
+        },
       ],
     }).compile()
 

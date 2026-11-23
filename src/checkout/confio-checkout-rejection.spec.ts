@@ -69,6 +69,8 @@ function checkoutWithRealConfio() {
     { getUsdCopRate: stub({ rate: 4000, date: '2026-11-06' }) },
     { getOrCreate: stub({ id: 'tkn-1', status: 'active' }) },
     { findActive: stub(tokenPackage) },
+    // Auth knows a name and nothing else: an incomplete request buyer finds no contact to complete.
+    { resolveBuyerContact: stub({ ok: true, contact: { name: 'Ana Perez' } }) },
   ] as unknown as ConstructorParameters<typeof CheckoutService>
 
   return { service: new CheckoutService(...args), saved }
@@ -136,7 +138,7 @@ describe('Confio rejection on an external checkout', () => {
     ['email', { phoneNumber: '3001234567' }, 'buyer.email'],
   ])('rejects a buyer without a %s with the 422 of a subscription', async (_, buyer, field) => {
     // Mutation (phone row): `normalizeColombianPhone` returns '+573215786325' for '' -> red.
-    // Mutation (email row): `resolveBuyer` sends `b.email || 'pagos@cubiko.co'` -> red.
+    // Mutation (email row): `resolveCheckoutBuyer` sends `contact.email || 'pagos@cubiko.co'` -> red.
     jest.spyOn(Logger.prototype, 'warn').mockImplementation()
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
