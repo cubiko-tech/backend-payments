@@ -1,3 +1,4 @@
+// R6: Mirrors subscription.service.ts, which still keeps the whole lifecycle; it splits with it.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { SubscriptionService } from './subscription.service'

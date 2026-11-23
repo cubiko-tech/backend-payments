@@ -1,3 +1,4 @@
+// R6: Keeps the whole subscription lifecycle in one service; splitting it by domain is a task of its own.
 import { Injectable, Logger, HttpStatus } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
 import { Repository, DataSource } from 'typeorm'
