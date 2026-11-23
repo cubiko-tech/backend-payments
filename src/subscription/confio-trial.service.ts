@@ -31,36 +31,24 @@ import { RequestException } from '../shared/exception/request.exception'
 import { invalidBuyerException } from './invalid-buyer-exception'
 
 /**
- * Preparación del alta de una suscripción de trial contra ConfioPagos.
+ * Prepares a ConfioPagos subscription signup (trial or paid) on behalf of `SubscriptionService`.
  *
- * Adaptador entre el alta (`SubscriptionService.startTrial`) y la pasarela: junta
- * lo que ConfioPagos necesita —el resource name del plan y el comprador
- * completo— y traduce TODO fallo a un `RequestException` con código propio. El
- * corte es el mismo que el de `webhook/confio-subscription-webhook.service.ts`:
- * la conversación con la pasarela vive afuera del servicio de dominio, que se
- * queda con la fila y sus invariantes.
+ * Gathers what the gateway needs (plan resource name and full buyer) and turns EVERY failure into a
+ * `RequestException` with its own code, so the domain service keeps only the row and its invariants.
  *
- * Cadena de resolución, en este orden y sin atajos:
- *   país de la marca (platform) → fila de precio del plan para ese país (roles)
- *   → moneda de la fila → plan de ConfioPagos para (plan, moneda) → comprador
- *   (auth, normalizado por `confio-buyer.ts`) → `POST` del alta.
+ * Resolution order, no shortcuts:
+ *   brand country (platform) -> plan price row for that country (roles) -> row currency
+ *   -> ConfioPagos plan for (plan, currency) -> buyer (auth, normalized by `confio-buyer.ts`) -> `POST`.
  *
- * ⚠️ El alta **no cobra**: devuelve `PENDING_ACCEPTANCE` más el `acceptanceUrl`,
- * el «único link inicial» del criterio 1 de la épica 002. Ese link es PORTADOR
- * (quien lo tenga registra una tarjeta contra la suscripción): se devuelve al
- * llamador y nunca se persiste ni se loguea.
+ * The signup does NOT charge: it returns `PENDING_ACCEPTANCE` plus `acceptanceUrl`. That link is a
+ * bearer token (whoever holds it registers a card on the subscription): it is returned to the caller
+ * and never persisted or logged.
  *
- * DUPLICACIÓN CONSCIENTE: `planPricingException` repite el mapeo de
- * `CheckoutService.planPricingException` (`checkout.service.ts:851`). Se prefiere
- * la duplicación anotada antes que abrir `checkout.service.ts`, que esta tarea no
- * nombra; la extracción —resolución + mapeo juntos, no sólo el `switch`— queda
- * anotada en el INBOX.
+ * `planPricingException` duplicates `CheckoutService.planPricingException`; change both together.
  */
 /**
- * Motivo con el que se cancela la suscripción ANTERIOR al dar de alta una nueva.
- *
- * ConfioPagos exige un motivo y lo persiste de su lado: quien mire esa suscripción
- * allá tiene que poder entender por qué murió sin buscar en nuestros logs.
+ * Reason sent when cancelling the PREVIOUS subscription on a new signup. ConfioPagos requires and
+ * stores it, so whoever inspects that subscription there can tell why it ended without our logs.
  */
 const MOTIVO_DE_REEMPLAZO = 'Reemplazada por un alta nueva de la misma marca en ROAX'
 
@@ -68,7 +56,7 @@ const MOTIVO_DE_REEMPLAZO = 'Reemplazada por un alta nueva de la misma marca en 
 export class ConfioTrialService {
   private readonly logger = new Logger(ConfioTrialService.name)
 
-  /** El aviso de «no hay URL de retorno» se da UNA vez, no en cada alta. */
+  /** The missing return URL warning is logged ONCE, not on every signup. */
   private avisoDeRetornoDado = false
 
   constructor(
@@ -81,17 +69,12 @@ export class ConfioTrialService {
   ) {}
 
   /**
-   * A dónde vuelve el comprador después de registrar su medio de pago.
+   * Where the buyer returns after registering a payment method.
    *
-   * Sale de su propia variable y NUNCA de `DOMAIN`: la pantalla de suscripción de
-   * ROAX vive en el front de DROPI —otro producto, otro dominio, y distinto en cada
-   * ambiente (local, `dev.dropi.co`, `app.dropi.co`)—, así que componerla desde
-   * nuestro dominio mandaría al comprador a un lugar que no existe.
-   *
-   * Sin configurar devuelve `undefined` y la clave NO viaja en el body, que es el
-   * comportamiento de siempre: el comprador se queda en la página de ConfioPagos,
-   * que es peor experiencia pero no es un destino equivocado. Inventar un host sí
-   * lo sería, y sobre un link que se le manda a una persona real.
+   * Comes from its own variable and NEVER from `DOMAIN`: the subscription screen lives in the
+   * Dropi front, a different domain per environment, so deriving it from ours would send the
+   * buyer nowhere. Unset, it returns `undefined` and the key is not sent: the buyer stays on the
+   * ConfioPagos page, a worse experience but never a wrong destination.
    */
   private get redirectUri(): string | undefined {
     const url = (process.env.SUBSCRIPTION_RETURN_URL || '').trim()
@@ -108,22 +91,13 @@ export class ConfioTrialService {
   }
 
   /**
-   * Crea la suscripción en ConfioPagos, para el alta de prueba y para la paga.
+   * Creates the ConfioPagos subscription for both trial and paid signups; `conPrueba` tells them
+   * apart. The gateway request has no trial field: the trial is frozen in the PLAN it is created
+   * against, so only the chosen plan differs.
    *
-   * El nombre quedó del alta de prueba, que fue la primera; hoy sirve a las dos y
-   * `conPrueba` es lo que las distingue. Del lado de ConfioPagos la llamada es
-   * idéntica —su `CreateSubscriptionRequest` no tiene ningún campo de trial—: lo
-   * único que cambia es CONTRA QUÉ PLAN se crea, porque ahí es donde ellos
-   * congelan el período de prueba.
-   *
-   * `correlationId` es OPCIONAL a propósito y sólo lo manda quien tiene un id
-   * estable entre reintentos (el alta lo pasa cuando reusa una fila muerta). Para
-   * una marca sin fila NO se pre-genera un uuid: cada reintento dejaría del lado
-   * de ConfioPagos un huérfano con un correlationId distinto que ya no
-   * correlaciona con nada nuestro. La resolución del webhook no depende de él —
-   * busca primero por `providerSubscriptionId = data.name`
-   * (`webhook/confio-subscription-webhook.service.ts:158`) y el `name` SIEMPRE se
-   * persiste.
+   * `correlationId` is optional on purpose: pass it only when it is stable across retries. A fresh
+   * uuid per attempt would leave ConfioPagos orphans that correlate with nothing of ours. The
+   * webhook resolves by `providerSubscriptionId = data.name`, which is always persisted.
    */
   async createForTrial(input: {
     brandId: string
@@ -131,49 +105,35 @@ export class ConfioTrialService {
     planSlug: string
     correlationId?: string
     /**
-     * Resource name de la suscripción que esta alta REEMPLAZA, cuando se reusa una
-     * fila que ya tenía una en ConfioPagos. Se cancela antes de crear la nueva.
+     * Resource name of the ConfioPagos subscription this signup REPLACES when a row is reused.
+     * It is cancelled before the new one is created.
      */
     reemplazaA?: string
     /**
-     * Si esta alta debe obtener el período de prueba de ConfioPagos.
-     *
-     * Obligatorio, sin default: la prueba se congela en el PLAN de ellos, así que
-     * este booleano no describe el alta —la DECIDE, eligiendo contra qué plan de
-     * la pasarela se crea—. Un default acá le devolvería la prueba a la marca que
-     * ya la gastó, en silencio y por omisión.
+     * Whether this signup gets the ConfioPagos trial. Required, no default: it picks the gateway
+     * plan, so a default would silently give the trial back to a brand that already used it.
      */
     conPrueba: boolean
     /**
-     * Teléfono con el que ConfioPagos va a COBRAR, cuando no es el de la cuenta.
-     *
-     * No es un dato de contacto: allá la cuenta ES un número, el link queda
-     * autorizado para el que mandamos y su formulario pide ese mismo para mandar
-     * el código. Con otro, responde que no está permitido para el cobro — o sea
-     * que un número ajeno no molesta, IMPIDE pagar.
-     *
-     * Ausente = el de la cuenta, que es lo correcto para la mayoría. Se valida
-     * por el mismo camino que el resto del comprador (`toE164` dentro de
-     * `buildConfioBuyer`), así que un formato inválido se rechaza acá y nunca
-     * llega a la red.
+     * Phone ConfioPagos will CHARGE, when it is not the account one. Not contact data: the link is
+     * authorized for this exact number, so a wrong one blocks payment. Absent means the account
+     * phone. Validated by `buildConfioBuyer` (E.164), so a bad format never reaches the network.
      */
     telefonoDeCobro?: string
   }): Promise<ConfioSubscriptionResult & { currency: string }> {
     const { brandId, userId, planSlug, correlationId, reemplazaA, conPrueba, telefonoDeCobro } =
       input
 
-    // Se usa `resolveBrandCountry` y no el envoltorio `getBrandCountry` porque éste
-    // colapsa los tres modos de fallo en `null` y acá cada uno mapea a un HTTP
-    // distinto. Mismo criterio que el checkout.
+    // Not `getBrandCountry`: it collapses the three failure modes into `null`, and each maps to a
+    // different HTTP status here.
     const brand = await this.clientPlatform.resolveBrandCountry(brandId)
     if (!brand.ok) throw this.planPricingException(planSlug, brand.code)
 
     const price = await this.clientRoles.resolvePriceForCountry(planSlug, brand.country)
     if (!price.ok) throw this.planPricingException(planSlug, price.code)
 
-    // La moneda es un dato DERIVADO de la fila de precio, nunca un parámetro del
-    // llamador: el plan de ConfioPagos se elige por (plan, moneda) y con la moneda
-    // equivocada se cobraría 19.900 COP a una marca que paga en dólares.
+    // Currency is DERIVED from the price row, never taken from the caller: the gateway plan is
+    // picked by (plan, currency), and a wrong currency would charge COP to a brand paying in USD.
     const resuelto = await this.resolvePlanConCaidaAUsd(
       planSlug,
       String(price.price.currency || '').toUpperCase(),
@@ -181,9 +141,8 @@ export class ConfioTrialService {
     )
     const { planName, currency } = resuelto
 
-    // `subscriptions` NO guarda la moneda, así que ésta es la única forma de saber
-    // después con cuál se cobró un alta: sin ella, comprobar el cobro por país exige
-    // pedirle a ConfioPagos la suscripción una por una.
+    // `subscriptions` does not store the currency: this log is the only local record of which one
+    // a signup was charged in.
     this.logger.log(
       `Alta de ${brandId} en ${planSlug}: moneda ${currency}, plan de ConfioPagos ${planName}`,
     )
@@ -191,42 +150,25 @@ export class ConfioTrialService {
     const contact = await this.clientAuth.resolveBuyerContact(userId)
     if (!contact.ok) throw this.buyerContactException(contact.code)
 
-    // LA ANTERIOR SE CANCELA ANTES DE CREAR LA NUEVA, y va acá —lo más tarde
-    // posible— para no cancelar nada si el país, el precio, el plan o el comprador
-    // van a fallar igual.
-    //
-    // ConfioPagos permite VARIAS suscripciones simultáneas del mismo comprador sobre
-    // el mismo plan (medido el 2026-09-03: había tres) y no tiene forma de
-    // reactivar, así que la única herramienta es cancelar. Sin esto, la anterior
-    // queda viva: si el comprador llegó a aceptarla, queda en `TRIALING` y COBRA, sin
-    // ninguna fila nuestra que lo explique —el webhook de ese cobro muere en
-    // `resolverSuscripcion` sin encontrar a quién aplicarlo—.
-    //
-    // Si la cancelación falla, el alta NO sigue: su `RequestException` sube tal cual
-    // y deja cero escrituras, que es justo lo que evita quedarse con dos vivas.
-    // Cancelar una que ya estaba cancelada es seguro: su `/cancel` es idempotente
-    // (200 dos veces, medido el 2026-08-27 y otra vez el 2026-09-03).
+    // R27: money risk. ConfioPagos allows several live subscriptions per buyer, so an uncancelled
+    // previous one keeps charging with no row of ours. Cancel last, after every lookup that can fail;
+    // a failed cancel aborts the signup with zero writes. `/cancel` is idempotent.
     if (reemplazaA) {
       await this.confioCancellation.cancel(reemplazaA, MOTIVO_DE_REEMPLAZO)
       this.logger.log(`Suscripción anterior cancelada en ConfioPagos antes del alta de ${brandId}`)
     }
 
     const created = await this.callConfio(() => {
-      // `buildConfioBuyer` rechaza con `ConfioSubscriptionInputError` ANTES de
-      // tocar la red; por eso va DENTRO del mismo envoltorio que la llamada.
-      // El teléfono elegido REEMPLAZA al de la cuenta, y sólo ese campo: el email
-      // y el nombre siguen saliendo del usuario. Va por `buildConfioBuyer` igual
-      // que siempre, así que hereda la normalización a E.164 y el rechazo previo
-      // a la red.
+      // Inside the wrapper because `buildConfioBuyer` throws `ConfioSubscriptionInputError` before
+      // any network call; the charge phone replaces only the account phone.
       const buyer = buildConfioBuyer(
         telefonoDeCobro ? { ...contact.contact, phone: telefonoDeCobro } : contact.contact,
       )
       const params: CreateConfioSubscriptionParams = { planName, buyer }
-      // Se agrega la CLAVE sólo si hay valor: `correlationId: undefined` viajaría
-      // en el body como un campo vacío y el provider lo distingue con `!== undefined`.
+      // Set the KEY only when there is a value: the provider checks `!== undefined`, so an
+      // undefined key would still travel as an empty field.
       if (correlationId !== undefined) params.correlationId = correlationId
-      // Misma regla para el retorno, y por el mismo motivo. Vale para las DOS altas:
-      // la paga (`startPaid`) también entra por acá.
+      // Same rule for the return URL; applies to paid signups (`startPaid`) too.
       const redirectUri = this.redirectUri
       if (redirectUri !== undefined) params.redirectUri = redirectUri
       return this.confio.createSubscription(params)
@@ -235,12 +177,8 @@ export class ConfioTrialService {
   }
 
   /**
-   * Re-pide el link de aceptación por el camino autenticado, a partir del `name`
-   * que quedó guardado en nuestra fila.
-   *
-   * Es el motivo por el que el `acceptanceUrl` no se persiste: el link se vuelve a
-   * pedir cuando hace falta en vez de guardarse en una columna que después hay que
-   * proteger. Sólo viene mientras el estado sea `PENDING_ACCEPTANCE`.
+   * Fetches the acceptance link again from the stored `name`, which is why `acceptanceUrl` is
+   * never persisted. It is only present while the status is `PENDING_ACCEPTANCE`.
    */
   async fetchAcceptance(name: string): Promise<{
     acceptanceUrl?: string
@@ -257,19 +195,14 @@ export class ConfioTrialService {
   }
 
   /**
-   * Único envoltorio de la conversación con la pasarela.
+   * The only wrapper around gateway calls, with exactly two outcomes:
+   * - `ConfioSubscriptionInputError` (LOCAL rejection, nothing sent) -> `inputErrorException`,
+   *   split by `code`, never by message text.
+   * - any other failure (5xx, timeout, network) -> 503 without the gateway body: a channel failure
+   *   is not a fact about the object.
    *
-   * Dos salidas y ninguna tercera:
-   * - `ConfioSubscriptionInputError` (rechazo LOCAL, la petición nunca salió) →
-   *   lo desglosa `inputErrorException` por `code`, nunca por el texto del
-   *   mensaje, que es el contrato declarado en `confio-subscription-error.ts`.
-   * - cualquier otro fallo (5xx, timeout, red) → 503 sin reexponer el cuerpo de
-   *   ConfioPagos: un fallo del canal no es un hecho sobre el objeto.
-   *
-   * ⚠️ El `detail` de `ConfioSubscriptionInputError` incluye el email, el teléfono
-   * o el nombre que llegó, o sea PII: no vuelve al cliente NI va al log. Devolverlo
-   * permitiría enumerar contactos con un token válido — y ojo, el `userId` de este
-   * camino viene del BODY, no de `req.user`.
+   * The error `detail` holds PII (email, phone, name): it never reaches the client or the log.
+   * Returning it would let a valid token enumerate contacts, since `userId` here comes from the BODY.
    */
   private async callConfio<T>(fn: () => Promise<T> | T): Promise<T> {
     try {
@@ -294,24 +227,14 @@ export class ConfioTrialService {
   }
 
   /**
-   * Desglosa los CUATRO códigos de rechazo local en sus dos naturalezas, que no
-   * se colapsan — misma regla de negocio de la épica 002 que aplica
-   * `buyerContactException`: «un fallo del canal nunca se convierte en un hecho
-   * sobre el objeto», y su recíproca, un error NUESTRO no se le factura al
-   * cliente.
+   * Splits the four local rejection codes by whose fault it is; OUR errors are never blamed on
+   * the client.
+   * - `invalid_buyer` / `missing_buyer_or_plan`: caller input -> 422 `INVALID_BUYER` with `field`.
+   * - `plan_store_mismatch` (catalog plan not in the configured `CONFIO_STORE_ID`) and
+   *   `invalid_subscription_name` (a malformed `name` we stored): OUR configuration -> 503 with
+   *   its own code, the one to search for in the deploy log.
    *
-   * - `invalid_buyer` / `missing_buyer_or_plan` hablan de lo que mandó el
-   *   llamador → 422 `INVALID_BUYER` con el `field` para que sepa qué corregir.
-   * - `plan_store_mismatch` (el `planName` del catálogo no es del
-   *   `CONFIO_STORE_ID` configurado, `confio.provider.ts:364`) e
-   *   `invalid_subscription_name` (un `name` malformado que persistimos
-   *   nosotros, alcanzable por `fetchAcceptance`) son CONFIGURACIÓN nuestra:
-   *   el comprador no tiene nada que arreglar y reintentar con otros datos no
-   *   cambia nada → 503 con su propio código, que es el que hay que buscar en
-   *   el log de despliegue.
-   *
-   * El `detail` NO viaja en ninguna de las dos ramas: lleva PII en la primera y
-   * el store esperado en la segunda.
+   * `detail` is never sent: it carries PII in the first branch and the expected store in the second.
    */
   private inputErrorException(error: ConfioSubscriptionInputError): RequestException {
     switch (error.code) {
@@ -341,32 +264,11 @@ export class ConfioTrialService {
   }
 
   /**
-   * Mapea el fallo de resolución de país/precio a su HTTP, con los MISMOS códigos
-   * y status que `CheckoutService.planPricingException`.
+   * The ConfioPagos plan for that currency, falling back to USD when the currency is switched off.
    *
-   * `PLAN_NOT_FOUND` responde 503 y NO 404 por la razón ya documentada allá:
-   * `getPlanRows()` devuelve un Map VACÍO cuando backend-roles no contesta y no
-   * hay caché, así que durante un outage de roles TODOS los planes darían
-   * `PLAN_NOT_FOUND` y contestar "ese plan no existe" disfrazaría una caída de
-   * backend como un error definitivo del cliente.
-   */
-  /**
-   * El plan de ConfioPagos para esa moneda, cayendo a DÓLARES si la moneda quedó
-   * apagada.
-   *
-   * Apagar una moneda es archivar su mapeo (`status = 'archived'`), no borrarlo:
-   * con los pesos apagados todos pagan en dólares y al reactivarlos Colombia
-   * vuelve a pesos, sin haber perdido una fila. La caída la dispara SÓLO ese
-   * código: un mapeo inexistente o un plan todavía sin crear del lado de ellos son
-   * huecos de configuración, y cobrarlos en otra moneda taparía el hueco en vez de
-   * mostrarlo.
-   *
-   * No reintenta cuando la moneda apagada ya era dólares: no hay a dónde caer, y
-   * repetir la misma consulta daría el mismo error una vuelta más tarde.
-   *
-   * Devuelve la moneda REALMENTE usada, que es la que se registra: si el log dijera
-   * la moneda pedida en vez de ésta, mentiría justo en el caso que existe para
-   * comprobar.
+   * Only `CONFIO_PLAN_ARCHIVED` triggers the fallback: archiving a mapping switches a currency off
+   * reversibly. A missing mapping or an uncreated plan is a configuration gap, and charging another
+   * currency would hide it. Returns the currency ACTUALLY used, which is the one to log.
    */
   private async resolvePlanConCaidaAUsd(
     planSlug: string,
@@ -374,8 +276,8 @@ export class ConfioTrialService {
     conPrueba: boolean,
   ): Promise<{ planName: string; currency: string }> {
     try {
-      // Rechaza con su propio código (CONFIO_PLAN_NOT_MAPPED / _NOT_CREATED /
-      // _ARCHIVED): se propaga tal cual, ya viene con status.
+      // Throws with its own code and status (`CONFIO_PLAN_NOT_MAPPED`, `_NOT_CREATED`,
+      // `_ARCHIVED`), propagated as is.
       const planName = await this.confioPlans.resolveConfioPlanName(planSlug, currency, conPrueba)
       return { planName, currency }
     } catch (error) {
@@ -394,6 +296,11 @@ export class ConfioTrialService {
     }
   }
 
+  /**
+   * Maps a country/price resolution failure to the SAME codes and statuses as
+   * `CheckoutService.planPricingException`. `PLAN_NOT_FOUND` is 503, not 404: with roles down and
+   * no cache every plan reads as missing, and a 404 would disguise an outage as a client error.
+   */
   private planPricingException(
     planSlug: string,
     code: BrandCountryErrorCode | PriceResolutionErrorCode,
@@ -421,8 +328,8 @@ export class ConfioTrialService {
           HttpStatus.UNPROCESSABLE_ENTITY,
         )
       case PRICE_NOT_FOUND_FOR_COUNTRY:
-        // El país NO va en el mensaje: devolverlo convertiría al alta en un lector
-        // del país de cualquier marca. Queda en el `logger.warn` del rechazo.
+        // The country is NOT in the message: it would turn signup into a reader of any brand's
+        // country.
         return new RequestException(
           {
             code: PRICE_NOT_FOUND_FOR_COUNTRY,
@@ -440,10 +347,8 @@ export class ConfioTrialService {
   }
 
   /**
-   * Los dos modos de fallo del contacto del comprador NO se colapsan: auth caído
-   * es transitorio (503) y un usuario inexistente es definitivo (422). Regla de
-   * negocio de la épica 002: «un fallo del canal nunca se convierte en un hecho
-   * sobre el objeto».
+   * Keeps the two buyer contact failures apart: auth down is transient (503), a missing user is
+   * final (422). A channel failure never becomes a fact about the object.
    */
   private buyerContactException(code: BuyerContactErrorCode): RequestException {
     if (code === USER_LOOKUP_UNAVAILABLE) {

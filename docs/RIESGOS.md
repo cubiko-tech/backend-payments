@@ -6,7 +6,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un país sin fila de precio propia pasa a cobrarse en dólares en vez de ser rechazado
 
-- **Dónde**: `src/client/client-roles.service.ts:47` (`findUsdRow`)
+- **Dónde**: `src/client/client-roles.service.ts:34` (`findUsdRow`)
 - **Qué lo dispara**: un alta o un checkout de una marca cuyo país no tiene fila en `plan_prices`, para un
   plan con fila en dólares; incluye el checkout general de `starter`, `pro` y `enterprise`.
 - **Qué rompe**: un país donde no se decidió vender cobra en dólares en vez de rechazar con
@@ -34,7 +34,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El caché tibio de precios sirve precios vencidos sin tope cuando cae `backend-roles` (LOC-16)
 
-- **Dónde**: `src/client/client-roles.service.ts:226`, `:170` (`getPlanRows`, `hasCachedPrices`);
+- **Dónde**: `src/client/client-roles.service.ts:198`, `:154` (`getPlanRows`, `hasCachedPrices`);
   `src/tasks/wallet-renewal.ts:77` (`isPostponementGraceExceeded`)
 - **Qué lo dispara**: `backend-roles` cae después de que el proceso cargó precios una vez.
 - **Qué rompe**: la renovación cobra al último precio cacheado, de cualquier antigüedad, o rechaza con
@@ -69,7 +69,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:430` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
+  `src/client/client-roles.service.ts:377` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
   (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
@@ -195,7 +195,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
 
-- **Dónde**: `src/provider/confio/confio.provider.ts:132`; `src/provider/stripe/stripe.provider.ts:86`
+- **Dónde**: `src/provider/confio/confio.provider.ts:103`; `src/provider/stripe/stripe.provider.ts:86`
   (`ProviderPaymentNotFoundError`)
 - **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado: el 404 se lee como «el
   pago no existe».
@@ -256,7 +256,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con el claim `brand` del token se escribe en la suscripción sin consultar a platform y con cualquier rol (LOC-94)
 
-- **Dónde**: `src/subscription/subscription.controller.ts:320`, `:335` (`resolveBrandId`, `sessionBrand`);
+- **Dónde**: `src/subscription/subscription.controller.ts:315`, `:330` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
   `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
@@ -367,7 +367,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:6`, `:456`
-  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:270` (`autenticarRamoFirmado`)
+  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:247` (`autenticarRamoFirmado`)
 - **Qué lo dispara**: un aviso firmado de suscripción que llega o se reintenta a más de 24 h de su `timestamp`.
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
@@ -418,7 +418,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
-  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:184-186` sólo lo loguea).
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:195-197` sólo lo loguea).
 - **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
   `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
 - **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
@@ -448,7 +448,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
 
-- **Dónde**: `src/webhook/webhook.service.ts:94`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+- **Dónde**: `src/webhook/webhook.service.ts:85`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
   (`buildConfioWebhookEventId`)
 - **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -459,8 +459,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:194-196` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:838-849` (`planearCambioDeEstado`) y
-  `:544-553` (`planearCobro`)
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:681-687` (`planearCambioDeEstado`) y
+  `:465-474` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
@@ -616,7 +616,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
 
-- **Dónde**: `src/client/client-roles.service.ts:267` y `:312` (campo ausente → 0),
+- **Dónde**: `src/client/client-roles.service.ts:235` y `:280` (campo ausente → 0),
   `src/webhook/subscription-bonus.service.ts:97`
 - **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
 - **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a
@@ -672,8 +672,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:1119-1130` (`aplicar`, el rechequeo de la marca),
-  y la llamada a roles antes del candado, `:378-388` (`handle`)
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:890-901` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:316-326` (`handle`)
 - **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
   llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
   a roles no está garantizado.
@@ -705,7 +705,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:378` (la traza antes de roles);
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:316` (la traza antes de roles);
   `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
 - **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
   la cola, `processing`, fuera de `GET webhook/admin/failed`.

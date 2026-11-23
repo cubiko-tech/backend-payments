@@ -20,7 +20,7 @@ import { escapeLogValue } from '../shared/logger/log-value'
 const MAX_WEBHOOK_RETRIES = 3
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-/** Violación de índice único en Postgres (verificado contra dev: `code=23505`). */
+/** Postgres unique-index violation (`code=23505`). */
 function isUniqueViolation(e: unknown): boolean {
   return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
 }
@@ -29,7 +29,7 @@ function isUniqueViolation(e: unknown): boolean {
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name)
 
-  // Inyectado después de que CheckoutModule se registre
+  // Set late by CheckoutModule to break a circular dependency; null until then.
   private checkoutService: any = null
 
   constructor(
@@ -45,16 +45,10 @@ export class WebhookService {
     private readonly mercadoPagoProvider: MercadoPagoProvider,
   ) {}
 
-  /**
-   * Inyección tardía del CheckoutService para evitar dependencia circular.
-   */
   setCheckoutService(checkoutService: any) {
     this.checkoutService = checkoutService
   }
 
-  /**
-   * Recibir y registrar un evento de webhook.
-   */
   async receive(provider: string, eventType: string, providerEventId: string, payload: any) {
     try {
       // Pre-check against DBWrite; concurrent uniqueness is enforced by
@@ -82,10 +76,8 @@ export class WebhookService {
       } catch (error) {
         if (!isUniqueViolation(error)) throw error
 
-        // Perdimos la carrera contra otra entrega de la MISMA notificación: es un
-        // duplicado, no un fallo. Se devuelve la fila que ganó y no se despacha.
-        // La idempotencia en recepción alcanza porque el efecto aguas abajo también
-        // lo es (`checkout.service.ts:411` corta si el pago ya está COMPLETED).
+        // Lost the race to another delivery of the same notice: a duplicate, not a failure.
+        // Not dispatched; safe because completing a payment is idempotent downstream too.
         const winner = await this.webhookEventRepository.findOne({
           where: { provider, providerEventId },
         })
@@ -135,9 +127,6 @@ export class WebhookService {
     }
   }
 
-  /**
-   * Procesar evento de webhook — despacha al flujo correcto según provider + eventType.
-   */
   private async processEvent(event: WebhookEvent) {
     try {
       event.status = WebhookStatus.PROCESSING
@@ -154,13 +143,12 @@ export class WebhookService {
       event.retryCount = (event.retryCount || 0) + 1
 
       if (event.retryCount >= MAX_WEBHOOK_RETRIES) {
-        // Máximo de reintentos alcanzado → dead letter
+        // Dead letter: only a manual admin retry brings it back.
         event.status = WebhookStatus.FAILED
         this.logger.error(
           `Webhook ${event.id} fallido definitivamente después de ${MAX_WEBHOOK_RETRIES} intentos`,
         )
       } else {
-        // Encolar para reintento con backoff exponencial
         event.status = WebhookStatus.FAILED
         const delays = [60000, 300000, 1800000] // 1min, 5min, 30min
         const delay = delays[event.retryCount - 1] || 1800000
@@ -184,17 +172,10 @@ export class WebhookService {
     }
   }
 
-  /**
-   * Despachar evento al handler correcto.
-   */
   private async dispatchEvent(event: WebhookEvent): Promise<ConfioNoticeOutcome | void> {
     const { provider, eventType, payload } = event
 
-    // =============================================
-    // STRIPE
-    // =============================================
     if (provider === 'stripe') {
-      // Pago completado (checkout session o payment intent)
       if (eventType === 'checkout.session.completed' || eventType === 'payment_intent.succeeded') {
         const stripeObject = payload.data?.object
         if (eventType === 'checkout.session.completed' && stripeObject?.payment_status !== 'paid') {
@@ -211,24 +192,20 @@ export class WebhookService {
         return
       }
 
-      // Reembolso
       if (eventType === 'charge.refunded') {
         this.logger.log(`Stripe refund recibido: ${payload.data?.object?.id}`)
-        // Los reembolsos se manejan desde RefundService, este es solo confirmación
+        // Log only: RefundService owns refunds, this event is just the provider's confirmation.
         return
       }
 
-      // Suscripción renovada
       if (eventType === 'invoice.paid') {
         const subscriptionId = payload.data?.object?.subscription
         if (subscriptionId) {
           this.logger.log(`Stripe subscription renewed: ${subscriptionId}`)
-          // Para suscripciones manejadas por Stripe directamente
         }
         return
       }
 
-      // Pago de suscripción fallido
       if (eventType === 'invoice.payment_failed') {
         this.logger.warn(
           `Stripe subscription payment failed: ${payload.data?.object?.subscription}`,
@@ -237,9 +214,6 @@ export class WebhookService {
       }
     }
 
-    // =============================================
-    // MERCADOPAGO
-    // =============================================
     if (provider === 'mercadopago') {
       if (eventType === 'payment' && payload.action === 'payment.created') {
         const mpPaymentId = payload.data?.id
@@ -261,9 +235,6 @@ export class WebhookService {
       }
     }
 
-    // =============================================
-    // DROPI
-    // =============================================
     if (provider === 'dropi') {
       if (eventType === 'charge.completed' || eventType === 'payment.completed') {
         const chargeId = payload.chargeId || payload.data?.chargeId
@@ -282,17 +253,9 @@ export class WebhookService {
       }
     }
 
-    // =============================================
-    // CONFIOPAGOS
-    // =============================================
     if (provider === 'confio') {
-      // Ruteo POR NOMBRE DE EVENTO, y sólo para el ramo firmado (los dos
-      // `subscription.*`). El camino de abajo —el del link one-shot, que
-      // despacha mirando `data.status`— queda intacto a propósito: es tráfico
-      // vivo que llega sin objeto `signature` y sin `event` conocido.
-      //
-      // La lógica del ramo firmado vive en `confio-subscription-webhook.service.ts`
-      // y NO acá: este archivo ya está en el límite de tamaño del repo.
+      // Signed `subscription.*` events route by event name; one-shot link notices below route by
+      // `data.status`, since they arrive with no `signature` and no known `event`.
       if (classifyConfioWebhookEvent(payload?.event) === 'firmado') {
         return this.confioSubscriptions.handle(event)
       }
@@ -330,9 +293,6 @@ export class WebhookService {
     this.logger.warn(`Evento no manejado: ${provider}/${eventType}`)
   }
 
-  /**
-   * Completar un pago — delega al CheckoutService.
-   */
   private async completePayment(
     paymentId: string,
     providerData: any,
@@ -345,9 +305,6 @@ export class WebhookService {
     }
   }
 
-  /**
-   * Listar todos los webhooks con filtros y stats (admin).
-   */
   async getAllWebhooks(filters: { status?: string; provider?: string; limit?: number }) {
     const where: any = {}
     if (filters.status) where.status = filters.status
@@ -370,7 +327,7 @@ export class WebhookService {
       ],
     })
 
-    // Stats globales
+    // Stats cover every event, not only the filtered page.
     const all = await this.webhookEventReadRepository.find({ select: ['status', 'provider'] })
     const byStatus: Record<string, number> = {}
     const byProvider: Record<string, number> = {}
@@ -384,9 +341,6 @@ export class WebhookService {
     return { data: events, meta: { total: all.length, byStatus, byProvider, deadLetters } }
   }
 
-  /**
-   * Listar webhooks fallidos (admin dashboard).
-   */
   async getFailedWebhooks(limit = 50) {
     const events = await this.webhookEventReadRepository.find({
       where: { status: In([WebhookStatus.FAILED]) },
@@ -396,9 +350,6 @@ export class WebhookService {
     return { data: events }
   }
 
-  /**
-   * Reintentar un webhook fallido manualmente.
-   */
   async retryWebhook(eventId: string) {
     const event = await this.webhookEventRepository.findOne({ where: { id: eventId } })
     if (!event) {
@@ -414,7 +365,6 @@ export class WebhookService {
     event.error = null
     await this.webhookEventRepository.save(event)
 
-    // Reprocesar
     this.processEvent(event).catch((error) => {
       this.logger.error(`Error reprocesando webhook ${event.id}: ${error.message}`)
     })
