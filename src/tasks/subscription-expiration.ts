@@ -66,10 +66,7 @@ async function expireLockedSubscription(
       },
     )
     if (!vencida) {
-      logger.log(
-        'info',
-        `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
-      )
+      logger.log('info', `[CRON] Subscription ${sub.id} was no longer past_due: not expired twice`)
       return 'skipped'
     }
     await release()
@@ -155,8 +152,8 @@ async function endMarkedTrialsWithoutCharge(deps: SubscriptionExpirationDeps): P
   if (closed > 0 || rejected > 0) {
     logger.log(
       rejected > 0 ? 'error' : 'info',
-      `[CRON] endMarkedTrialsWithoutCharge: ${closed} degradadas a ${freePlanSlug()}, ` +
-        `${rejected} sin degradar, backend-roles rechazó la degradación`,
+      `[CRON] endMarkedTrialsWithoutCharge: ${closed} downgraded to ${freePlanSlug()}, ` +
+        `${rejected} not downgraded, backend-roles refused the downgrade`,
     )
   }
 }
@@ -192,13 +189,13 @@ export async function expireCancelledSubscriptions(
   )
 
   if (cerradas > 0) {
-    logger.log('info', `[CRON] expireCancelledSubscriptions: ${cerradas} suscripciones cerradas`)
+    logger.log('info', `[CRON] expireCancelledSubscriptions: ${cerradas} subscriptions closed`)
   }
 
   if (rechazadas > 0) {
     logger.log(
       'error',
-      `[CRON] expireCancelledSubscriptions: ${rechazadas} sin cerrar, backend-roles rechazó la degradación`,
+      `[CRON] expireCancelledSubscriptions: ${rechazadas} not closed, backend-roles refused the downgrade`,
     )
   }
 }
@@ -345,7 +342,7 @@ export async function endTrialWithoutPayment(
     },
   )
   if (!terminado) {
-    logger.log('info', `[CRON] Trial ${sub.id} ya no estaba en trial: no se degrada dos veces`)
+    logger.log('info', `[CRON] Trial ${sub.id} was no longer a trial: not downgraded twice`)
     return 'skipped'
   }
   await release()

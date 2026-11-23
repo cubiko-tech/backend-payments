@@ -25,6 +25,7 @@ import {
 import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
 import { UpdateActivationRequestDto } from './dto/update-activation-request.dto'
 import { firstCompleteMonthStart, monthIndexOfYmd, validateWholeMonths } from './period.util'
+import { isUniqueViolation } from '../shared/db/unique-violation'
 
 /**
  * Una marca no puede tener dos solicitudes "abiertas" a la vez: mientras esté en
@@ -604,9 +605,4 @@ function resolveEligibility(
   if (bureauBand === 'veto') return 'vetoed_bureau'
   if (bureauBand === null) return 'bureau_pending'
   return 'eligible'
-}
-
-/** Violación de índice único en Postgres (p. ej. dos solicitudes abiertas). */
-function isUniqueViolation(e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
 }

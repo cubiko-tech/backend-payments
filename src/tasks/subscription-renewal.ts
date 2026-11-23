@@ -85,7 +85,7 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
     } catch (error) {
       logger.log(
         'error',
-        `[CRON] Trial ${sub.id} sin convertir, queda para la próxima pasada: ${error.message}`,
+        `[CRON] Trial ${sub.id} not converted, left for the next pass: ${error.message}`,
       )
       await release.abort()
     } finally {

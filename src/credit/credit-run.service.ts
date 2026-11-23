@@ -12,6 +12,7 @@ import { ScaleConfigService } from './scale-config.service'
 import { CreditService } from './credit.service'
 import { BureauService } from './bureau/bureau.service'
 import { validateWholeMonths } from './period.util'
+import { isUniqueViolation } from '../shared/db/unique-violation'
 
 export const CREDIT_RUN_QUEUE = 'credit-run'
 
@@ -257,10 +258,6 @@ export class CreditRunService {
     if (opts.finished) run.finishedAt = new Date()
     await this.runRepo.save(run)
   }
-}
-
-function isUniqueViolation(e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
 }
 
 function asMessage(e: unknown): string {

@@ -19,6 +19,7 @@ import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { isUniqueViolation } from '../shared/db/unique-violation'
 
 /**
  * Topes del BORDE para los dos textos libres de la baja. No son gusto: los dos
@@ -30,18 +31,6 @@ import { RequestException } from '../shared/exception/request.exception'
  */
 const MAX_CANCEL_REASON_LENGTH = 500
 const MAX_TRIGGERED_BY_LENGTH = 255
-
-/**
- * Violación de índice único en Postgres (verificado contra dev: `code=23505`).
- *
- * Predicado COPIADO —no extraído— de `webhook.service.ts:16`,
- * `credit-run.service.ts:262` y `credit.service.ts:608`: la convención ya está
- * establecida por triplicado en el servicio y centralizarla sería un drive-by
- * fuera del alcance de esta tarea.
- */
-function isUniqueViolation(e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
-}
 
 /**
  * Resource name de la suscripción que una fila tiene en ConfioPagos, o `undefined`.

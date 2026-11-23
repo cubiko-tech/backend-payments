@@ -85,7 +85,7 @@ export async function closeEach(
     } catch (error) {
       logger.log(
         'error',
-        `[CRON] ${cron}: ${sub.id} sin cerrar, queda para la próxima pasada: ${error?.message}`,
+        `[CRON] ${cron}: ${sub.id} not closed, left for the next pass: ${error?.message}`,
       )
     }
   }

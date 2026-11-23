@@ -209,9 +209,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
         ca: 'ca',
         rejectUnauthorized: true,
       })
-      expect(() => backfillSslOptions({ SSL: 'true', NODE_ENV: 'production' })).toThrow(
-        /SSL_CA_CERT/,
-      )
+      expect(() => backfillSslOptions({ SSL: 'true', ENV: 'production' })).toThrow(/SSL_CA_CERT/)
     })
   })
 })

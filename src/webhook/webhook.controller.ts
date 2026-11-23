@@ -40,14 +40,6 @@ import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 import { escapeLogValue } from '../shared/logger/log-value'
 
 /**
- * The only controller in the service without a class-level guard, so auth must be checked per handler.
- *
- * Provider `@Post` handlers are public on purpose: authenticity comes from the sender's signature or
- * bearer, the only credential an external provider can send. Restricting by IP at the gateway helps too.
- *
- * The `admin/*` handlers are NOT public: each one carries its own `@UseGuards(ApiAuthGuard)`.
- */
-/**
  * Rejection log fields when signature verification has not happened yet (bad bearer or body):
  * those fields do not exist, and saying so beats inventing them.
  */
@@ -67,6 +59,14 @@ function camposDeFirma(payload: ConfioWebhookPayload): string {
   return `signature.properties=[${declared}] data=[${keys}]`
 }
 
+/**
+ * The only controller in the service without a class-level guard, so auth must be checked per handler.
+ *
+ * Provider `@Post` handlers are public on purpose: authenticity comes from the sender's signature or
+ * bearer, the only credential an external provider can send. Restricting by IP at the gateway helps too.
+ *
+ * The `admin/*` handlers are NOT public: each one carries its own `@UseGuards(ApiAuthGuard)`.
+ */
 @ApiTags('Webhook')
 @Controller('webhook')
 export class WebhookController {

@@ -9,6 +9,7 @@ import {
 } from '../client/client-platform.service'
 import { Wallet, WalletProvider, WalletStatus } from './entities/wallet.entity'
 import { isTokenCurrency, TOKEN_CURRENCY } from './token-origin'
+import { isProductionEnv } from '../shared/env/is-production'
 
 /** The slice of `ClientPlatformService` the backfill reads: which brands exist and who owns each. */
 export interface BrandDirectory {
@@ -211,7 +212,7 @@ export function backfillSslOptions(
 ): { ca?: string; rejectUnauthorized: true } | undefined {
   if (env.SSL !== 'true') return undefined
   if (env.SSL_CA_CERT) return { ca: env.SSL_CA_CERT, rejectUnauthorized: true }
-  if (env.NODE_ENV === 'production') {
+  if (isProductionEnv(env)) {
     throw new Error('SSL=true without SSL_CA_CERT in production: refusing an unverified connection')
   }
   return { rejectUnauthorized: true }

@@ -112,7 +112,7 @@ export async function prepareTokenPackage(
   await deps.assertProviderAvailable(country)
   const pricing = await chargeFor(tokenPackage.priceUsd, country, deps)
 
-  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
+  const wallet = await openCheckoutTokenWallet(req.brandId, req.userId, deps.tokenWallets)
   return { ...pricing, country, walletId: wallet.id, snapshot: snapshotOf(tokenPackage) }
 }
 
@@ -179,7 +179,7 @@ export async function prepareTokenAmount(
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
   await deps.assertProviderAvailable(country)
   const pricing = await chargeFor(priceUsd, country, deps)
-  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
+  const wallet = await openCheckoutTokenWallet(req.brandId, req.userId, deps.tokenWallets)
   return {
     ...pricing,
     country,
@@ -248,7 +248,8 @@ export function assertAllowedReturnUrls(
   }
 }
 
-async function openBrandTokenWallet(
+/** The brand token wallet, opened in the buyer's name; a closed one refuses the purchase with 422. */
+async function openCheckoutTokenWallet(
   brandId: string,
   userId: string,
   tokenWallets: TokenWalletService,

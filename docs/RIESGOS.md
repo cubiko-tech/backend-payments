@@ -270,7 +270,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
 - **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:108`,
-  `:171` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:91`
+  `:171` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:88`
   (`expireSubscriptions`); `src/subscription/dto/create-subscription.dto.ts:78` (`nextBillingDate`)
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, de `POST /subscription` sin el campo o
   de una corrección a mano; entre ellas, las que ya pagaron antes de LOC-91 con llave `…:current`.
@@ -418,7 +418,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
-  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:196-198` sólo lo loguea).
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:198-200` sólo lo loguea).
 - **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
   `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
 - **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
@@ -448,7 +448,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
 
-- **Dónde**: `src/webhook/webhook.service.ts:91`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+- **Dónde**: `src/webhook/webhook.service.ts:88`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
   (`buildConfioWebhookEventId`)
 - **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -456,10 +456,21 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — lo cierra pasar el id por `escapeLogValue` en esa línea (LOC-162 la dejó como estaba porque
   su aceptación pide conservarla).
 
+## El id de un aviso de Confío llega sin escapar a los logs viejos de la suscripción
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:292` y `:887` (efecto ya aplicado), `:555` (la traza
+  de roles que usan `:565` y `:569`), y escapado en las líneas del 015, `:300`, `:342` y `:898`
+- **Qué lo dispara**: un aviso de Confío autenticado cuyo id, armado con su `data.name`, trae un salto de línea,
+  comillas o `=`.
+- **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
+  siendo la clave de idempotencia.
+- **Estado**: mitigado en las líneas del 015 por `escapeLogValue`; abierto en las viejas — lo cierra pasar el id por
+  `escapeLogValue` en ellas (tarea aparte).
+
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:198-200` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:682-688` (`planearCambioDeEstado`) y
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:684-690` (`planearCambioDeEstado`) y
   `:465-474` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
@@ -681,8 +692,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:890-901` (`aplicar`, el rechequeo de la marca),
-  y la llamada a roles antes del candado, `:316-326` (`handle`)
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:892-903` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:317-327` (`handle`)
 - **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
   llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
   a roles no está garantizado.
@@ -714,7 +725,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:316` (la traza antes de roles);
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:317` (la traza antes de roles);
   `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
 - **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
   la cola, `processing`, fuera de `GET webhook/admin/failed`.
@@ -725,7 +736,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una prueba de Confío con link emitido vence a `free` si el aviso de cobro llega pasadas 24 h (LOC-274)
 
-- **Dónde**: `src/tasks/subscription-expiration.ts:36`, `:124` (`MARKED_TRIAL_CHARGE_GRACE_HOURS`,
+- **Dónde**: `src/tasks/subscription-expiration.ts:36`, `:121` (`MARKED_TRIAL_CHARGE_GRACE_HOURS`,
   `endMarkedTrialsWithoutCharge`)
 - **Qué lo dispara**: una prueba con `initialPaymentLinkIssuedAt` cuyo aviso de cobro de Confío llega más de 24 h
   después de `nextBillingDate`.

@@ -95,7 +95,7 @@ export class ConfioPlanPriceCheckService {
       const run = await this.takeRun()
       release = run.release
       if (!run.taken) {
-        logger.log('info', '[CRON] verificarPreciosContraElCatalogo: otra réplica ya lo corre')
+        logger.log('info', '[CRON] verificarPreciosContraElCatalogo: another replica is running it')
         return
       }
       const filas = await this.planes.findAllMappings()

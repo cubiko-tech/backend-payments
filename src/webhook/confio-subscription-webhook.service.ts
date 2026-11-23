@@ -294,12 +294,13 @@ export class ConfioSubscriptionWebhookService {
     }
 
     // Before planning, so an older notice reaches neither ConfioPagos nor backend-roles.
-    const orden = readNoticeOrder(payload)
-    if (isOutOfOrder(sub, orden)) {
+    const order = readNoticeOrder(payload)
+    if (isOutOfOrder(sub, order)) {
       this.logger.log(
-        `Confio notice ${event.providerEventId} for ${sub.id} is out of order: not applied`,
+        `Confio notice ${escapeLogValue(event.providerEventId)} for ${sub.id} ` +
+          'is out of order: not applied',
       )
-      await this.descartarTrazaPendiente(sub.id, event.providerEventId, 'out of order')
+      await this.discardPendingTrace(sub.id, event.providerEventId, 'out of order')
       return 'out_of_order'
     }
 
@@ -308,16 +309,16 @@ export class ConfioSubscriptionWebhookService {
         ? await this.planearCobro(data, sub)
         : await this.planearCambioDeEstado(data, sub)
     if (!efecto) {
-      await this.descartarTrazaPendiente(sub.id, event.providerEventId, 'no effect on retry')
+      await this.discardPendingTrace(sub.id, event.providerEventId, 'no effect on retry')
       return 'no_effect'
     }
 
     // Before the bonus too: its plan catalog is also read from backend-roles.
-    if (efecto.roles) await this.escribirTrazaPendiente(sub, efecto, payload, event.providerEventId)
+    if (efecto.roles) await this.writePendingTrace(sub, efecto, payload, event.providerEventId)
 
     try {
       // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
-      const bono =
+      const plannedBonus =
         efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
           ? await this.bonus.plan(payload, sub)
           : null
@@ -332,13 +333,14 @@ export class ConfioSubscriptionWebhookService {
         payload,
         event.providerEventId,
         markerIds,
-        bono,
-        orden,
+        plannedBonus,
+        order,
       )
     } catch (error) {
       if (efecto.roles) {
         this.logger.warn(
-          `Confio notice ${event.providerEventId} left its trace pending for ${sub.id}: ${error?.message}`,
+          `Confio notice ${escapeLogValue(event.providerEventId)} left its trace pending ` +
+            `for ${sub.id}: ${error?.message}`,
         )
       }
       throw error
@@ -350,13 +352,13 @@ export class ConfioSubscriptionWebhookService {
    * signature digest, which the cycle bonus reads as an applied notice. A second dispatch of the same
    * notice keeps the first one (`UQ_subscription_events_pending_trace`).
    */
-  private async escribirTrazaPendiente(
+  private async writePendingTrace(
     sub: Subscription,
     efecto: EfectoConfio,
     payload: ConfioWebhookPayload,
     providerEventId: string,
   ): Promise<void> {
-    const traza = armarTrazaDelMovimiento({
+    const trace = armarTrazaDelMovimiento({
       sub,
       fromStatus: sub.status,
       eventType: efecto.eventType,
@@ -366,20 +368,20 @@ export class ConfioSubscriptionWebhookService {
       roles: efecto.roles,
       reason: efecto.reason,
     })
-    const metadata = { ...traza.metadata }
+    const metadata = { ...trace.metadata }
     delete metadata.signatureChecksum
 
     await this.subscriptionEventRepository
       .createQueryBuilder()
       .insert()
       .into(SubscriptionEvent)
-      .values({ ...traza, metadata, traceStatus: SubscriptionTraceStatus.PENDING })
+      .values({ ...trace, metadata, traceStatus: SubscriptionTraceStatus.PENDING })
       .orIgnore()
       .execute()
   }
 
   /** A pending trace of `providerEventId` that a later delivery decided not to apply. */
-  private async descartarTrazaPendiente(
+  private async discardPendingTrace(
     subscriptionId: string,
     providerEventId: string,
     why: string,
@@ -866,7 +868,7 @@ export class ConfioSubscriptionWebhookService {
     providerEventId: string,
     markerIds: string | string[] = providerEventId,
     bono: PlannedBonus | null = null,
-    orden?: NoticeOrder,
+    order?: NoticeOrder,
   ): Promise<ConfioNoticeOutcome> {
     return this.dataSource.transaction(async (manager: EntityManager) => {
       const sub = await manager.findOne(Subscription, {
@@ -888,13 +890,13 @@ export class ConfioSubscriptionWebhookService {
       }
 
       // The guarantee: a newer notice may have been applied since the unlocked check.
-      if (orden && isOutOfOrder(sub, orden)) {
-        await this.descartarTrazaPendiente(subscriptionId, providerEventId, 'out of order', manager)
+      if (order && isOutOfOrder(sub, order)) {
+        await this.discardPendingTrace(subscriptionId, providerEventId, 'out of order', manager)
         const roles = efecto.roles
         if (roles) {
           this.logger.warn(
-            `Confio notice ${providerEventId} lost the order under lock after backend-roles ran: ` +
-              `${roles.accion} brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId}`,
+            `Confio notice ${escapeLogValue(providerEventId)} lost the order under lock ` +
+              `after backend-roles ran: ${roles.accion} brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId}`,
           )
         }
         return 'out_of_order'
@@ -921,12 +923,12 @@ export class ConfioSubscriptionWebhookService {
         sub.trialStart = efecto.periodo.start
         sub.trialEnd = efecto.periodo.end
       }
-      if (orden) sub.providerWatermark = advanceMark(sub, orden)
+      if (order) sub.providerWatermark = advanceMark(sub, order)
 
       await manager.save(sub)
       if (bono) await this.bonus.credit(manager, bono, sub)
 
-      const pendiente = await manager
+      const pendingTrace = await manager
         .createQueryBuilder(SubscriptionEvent, 'e')
         .where('e."subscriptionId" = :sid', { sid: subscriptionId })
         .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
@@ -945,7 +947,9 @@ export class ConfioSubscriptionWebhookService {
           roles: efecto.roles,
           reason: efecto.reason,
         }),
-        ...(pendiente ? { id: pendiente.id, traceStatus: SubscriptionTraceStatus.APPLIED } : {}),
+        ...(pendingTrace
+          ? { id: pendingTrace.id, traceStatus: SubscriptionTraceStatus.APPLIED }
+          : {}),
       })
 
       return 'applied'

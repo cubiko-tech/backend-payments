@@ -15,16 +15,13 @@ import {
 } from './confio-subscription-webhook.service'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
+import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { RequestException } from '../shared/exception/request.exception'
+import { isUniqueViolation } from '../shared/db/unique-violation'
 
 const MAX_WEBHOOK_RETRIES = 3
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/** Postgres unique-index violation (`code=23505`). */
-function isUniqueViolation(e: unknown): boolean {
-  return !!e && typeof e === 'object' && (e as { code?: string }).code === '23505'
-}
 
 @Injectable()
 export class WebhookService {
@@ -107,7 +104,12 @@ export class WebhookService {
    * so it never takes the key of a dispatched event with the same `data` (the one-shot key does not
    * carry the event).
    */
-  async recordIgnored(provider: string, eventType: string, providerEventId: string, payload: any) {
+  async recordIgnored(
+    provider: string,
+    eventType: string,
+    providerEventId: string,
+    payload: ConfioWebhookPayload,
+  ) {
     const key = `ignored:${eventType}:${providerEventId}`
     try {
       const saved = await this.webhookEventRepository.save(

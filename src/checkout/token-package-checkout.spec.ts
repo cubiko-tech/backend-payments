@@ -68,6 +68,19 @@ describe('token package checkout', () => {
     expect(quoteUsdCopRate).not.toHaveBeenCalled()
   })
 
+  it('opens the brand token wallet in the buyer name and refuses a closed one with 422', async () => {
+    // Mutation: openCheckoutTokenWallet opens it in another name: getOrCreate sees brand-1 twice.
+    // Mutation: drop the WalletStatus.CLOSED check in openCheckoutTokenWallet: the closed one resolves.
+    await prepareTokenPackage(req, deps('MX'))
+    expect(tokenWallets.getOrCreate).toHaveBeenCalledWith('brand-1', 'user-1')
+
+    tokenWallets.getOrCreate.mockResolvedValueOnce({ id: 'tkn-1', status: WalletStatus.CLOSED })
+    await expect(prepareTokenPackage(req, deps('MX'))).rejects.toMatchObject({
+      status: 422,
+      code: 'WALLET_CLOSED',
+    })
+  })
+
   it('refuses a provider not enabled for the country before asking for the TRM', async () => {
     // R15: red when the provider check moves after chargeFor: the TRM is asked and its 503 wins.
     const notEnabled = new Error('PROVIDER_NOT_AVAILABLE')
