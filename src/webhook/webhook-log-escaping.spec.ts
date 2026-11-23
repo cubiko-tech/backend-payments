@@ -86,7 +86,7 @@ function realWebhookChain(found: Subscription | null = null) {
     confioProvider as unknown as ConfioProvider,
   )
 
-  return { controller, confioSubscriptions }
+  return { controller, confioSubscriptions, writeRepo }
 }
 
 describe('Confio webhook log lines escape provider values', () => {
@@ -122,6 +122,31 @@ describe('Confio webhook log lines escape provider values', () => {
       'Webhook ConfioPagos ignorado: evento fuera del contrato "x%22 forged%3D1"',
     )
     expect(lines.join('\n')).not.toContain('forged=1')
+  })
+
+  it('escapes an event outside the contract delivered twice, in its duplicate line too', async () => {
+    // Mutation: drop `escapeLogValue` from the duplicate ignored line and `forged=1` shows up loose.
+    const { controller, writeRepo } = realWebhookChain()
+    // The second delivery loses on `UQ_webhook_events_provider_event`, as PostgreSQL answers it.
+    writeRepo.save
+      .mockImplementationOnce(async (row: object) => row)
+      .mockRejectedValueOnce(Object.assign(new Error('duplicate key'), { code: '23505' }))
+    const payload = { event: 'x" forged=1\nFAKE', data: { name: 'stores/s/payments/p1' } }
+
+    await controller.confio(`Bearer ${ACCESS_TOKEN}`, rawRequest(payload))
+    const second = await controller.confio(`Bearer ${ACCESS_TOKEN}`, rawRequest(payload))
+
+    expect(second).toEqual({ ignored: true })
+    expect(writeRepo.save).toHaveBeenCalledTimes(2)
+    const lines = [...linesOf(warn), ...linesOf(log)]
+    expect(lines.some((line) => line.startsWith('Duplicate ignored event: '))).toBe(true)
+    expect(lines.join('\n')).not.toContain('forged=1')
+    expect(
+      lines
+        .join('\n')
+        .split('\n')
+        .some((line) => line.startsWith('FAKE')),
+    ).toBe(false)
   })
 
   it('logs one escaped unresolved-subscription line for an outside data.name', async () => {

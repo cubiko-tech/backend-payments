@@ -15,6 +15,7 @@ import {
 } from './confio-subscription-webhook.service'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
+import { escapeLogValue } from '../shared/logger/log-value'
 
 const MAX_WEBHOOK_RETRIES = 3
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -129,7 +130,7 @@ export class WebhookService {
       return { data: saved }
     } catch (error) {
       if (!isUniqueViolation(error)) throw error
-      this.logger.warn(`Duplicate ignored event: ${key} (${provider})`)
+      this.logger.warn(`Duplicate ignored event: ${escapeLogValue(key)} (${provider})`)
       return { duplicate: true }
     }
   }
