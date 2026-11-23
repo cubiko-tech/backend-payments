@@ -9,7 +9,10 @@ import { Payment, PaymentProvider } from '../payment/entities/payment.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { classifyConfioWebhookEvent } from '../provider/confio/confio-webhook'
 import { MAX_CONFIO_STRING_LENGTH } from '../provider/confio/confio-webhook-signature'
-import { ConfioSubscriptionWebhookService } from './confio-subscription-webhook.service'
+import {
+  ConfioNoticeOutcome,
+  ConfioSubscriptionWebhookService,
+} from './confio-subscription-webhook.service'
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
 
@@ -106,6 +109,32 @@ export class WebhookService {
   }
 
   /**
+   * Keeps an event that is not dispatched, as `ignored`. Its key carries its own prefix and the event,
+   * so it never takes the key of a dispatched event with the same `data` (the one-shot key does not
+   * carry the event).
+   */
+  async recordIgnored(provider: string, eventType: string, providerEventId: string, payload: any) {
+    const key = `ignored:${eventType}:${providerEventId}`
+    try {
+      const saved = await this.webhookEventRepository.save(
+        this.webhookEventRepository.create({
+          provider,
+          eventType,
+          providerEventId: key,
+          payload,
+          status: WebhookStatus.IGNORED,
+          processedAt: new Date(),
+        }),
+      )
+      return { data: saved }
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error
+      this.logger.warn(`Duplicate ignored event: ${key} (${provider})`)
+      return { duplicate: true }
+    }
+  }
+
+  /**
    * Procesar evento de webhook — despacha al flujo correcto según provider + eventType.
    */
   private async processEvent(event: WebhookEvent) {
@@ -113,9 +142,10 @@ export class WebhookService {
       event.status = WebhookStatus.PROCESSING
       await this.webhookEventRepository.save(event)
 
-      await this.dispatchEvent(event)
+      const outcome = await this.dispatchEvent(event)
 
-      event.status = WebhookStatus.PROCESSED
+      event.status =
+        outcome === 'out_of_order' ? WebhookStatus.OUT_OF_ORDER : WebhookStatus.PROCESSED
       event.processedAt = new Date()
       await this.webhookEventRepository.save(event)
     } catch (error) {
@@ -156,7 +186,7 @@ export class WebhookService {
   /**
    * Despachar evento al handler correcto.
    */
-  private async dispatchEvent(event: WebhookEvent) {
+  private async dispatchEvent(event: WebhookEvent): Promise<ConfioNoticeOutcome | void> {
     const { provider, eventType, payload } = event
 
     // =============================================
@@ -263,8 +293,7 @@ export class WebhookService {
       // La lógica del ramo firmado vive en `confio-subscription-webhook.service.ts`
       // y NO acá: este archivo ya está en el límite de tamaño del repo.
       if (classifyConfioWebhookEvent(payload?.event) === 'firmado') {
-        await this.confioSubscriptions.handle(event)
-        return
+        return this.confioSubscriptions.handle(event)
       }
 
       const data = payload?.data || {}
@@ -373,6 +402,10 @@ export class WebhookService {
     const event = await this.webhookEventRepository.findOne({ where: { id: eventId } })
     if (!event) {
       return { error: 'Webhook no encontrado' }
+    }
+    // An ignored event was never meant to be dispatched, and an out-of-order one is older than what applied.
+    if (event.status === WebhookStatus.IGNORED || event.status === WebhookStatus.OUT_OF_ORDER) {
+      return { error: `Webhook ${event.status}: no se reintenta` }
     }
 
     event.retryCount = 0

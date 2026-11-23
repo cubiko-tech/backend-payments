@@ -11,6 +11,7 @@ import {
 import {
   SubscriptionEvent,
   SubscriptionEventType,
+  SubscriptionTraceStatus,
 } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import {
@@ -31,6 +32,7 @@ import {
   periodoLocal,
 } from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
+import { advanceMark, isOutOfOrder, NoticeOrder, readNoticeOrder } from './confio-watermark.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.service'
@@ -258,6 +260,12 @@ interface EfectoConfio {
 }
 
 /**
+ * What a signed notice did: `out_of_order` when it is older than the one already applied to its
+ * subscription, `no_effect` when the guards decided nothing applies.
+ */
+export type ConfioNoticeOutcome = 'applied' | 'out_of_order' | 'no_effect'
+
+/**
  * Movimiento de acceso en `backend-roles`, decidido ANTES de tocar la base.
  *
  * Lleva `brandId` y `planSlug` PROPIOS en vez de releerlos de la fila bloqueada:
@@ -290,17 +298,16 @@ interface EfectoRoles {
  * fallo del canal no puede convertirse en un hecho sobre el objeto—. Los
  * errores REALES de base sí se dejan propagar, así la cola reintenta.
  *
- * Sí lanza, y sólo, cuando `backend-roles` rechaza el movimiento de acceso: eso
- * es un fallo de CANAL, no un hecho del objeto, y lanzar antes de abrir la
- * transacción deja cero escrituras locales —ni `past_due`, ni marcador, ni
- * historial— para que el reintento del webhook vuelva a intentarlo entero. Lo
- * recíproco también vale: no recibir el webhook no retira nada.
+ * It throws only when `backend-roles` rejects the access move, a CHANNEL failure and not a fact
+ * about the subscription. It throws before the transaction, so the row, the marker and the applied
+ * history stay as they were and only the `pending` trace is left, for the retry to apply. Not
+ * receiving the webhook removes nothing either.
  *
- * ⚠️ Residual aceptado: dos eventos DISTINTOS de la misma suscripción son
- * last-write-wins, así que una entrega fuera de orden puede aplicar un estado
- * viejo. Resolverlo pide una marca de agua por tiempo de evento, o sea una
- * migración: fuera de alcance. La concurrencia del MISMO evento sí está resuelta
- * (marcador releído bajo `pessimistic_write`).
+ * Two DIFFERENT notices of one subscription are ordered by `providerWatermark`
+ * (`confio-watermark.util.ts`): an older one is checked before planning and again on the locked row,
+ * and is kept as `out_of_order` without writing. The same notice twice is resolved by the marker,
+ * read again under `pessimistic_write`. Before backend-roles is called the movement trace is written
+ * `pending`, so a rejected call leaves it; `aplicar` turns it `applied`.
  */
 @Injectable()
 export class ConfioSubscriptionWebhookService {
@@ -318,7 +325,7 @@ export class ConfioSubscriptionWebhookService {
     private readonly bonus: SubscriptionBonusService,
   ) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEvent): Promise<ConfioNoticeOutcome> {
     const payload: ConfioWebhookPayload = event?.payload || {}
     const data = payload.data || {}
 
@@ -328,7 +335,7 @@ export class ConfioSubscriptionWebhookService {
         `Confio suscripción no resuelta: name=${escapeLogValue(data.name)} ` +
           `correlationId=${escapeLogValue(data.correlationId)}`,
       )
-      return
+      return 'no_effect'
     }
 
     const markerIds = [
@@ -345,26 +352,111 @@ export class ConfioSubscriptionWebhookService {
     )
     if (yaAplicado) {
       this.logger.log(`Confio efecto ya aplicado para ${event.providerEventId}, no se repite`)
-      return
+      return 'no_effect'
+    }
+
+    // Before planning, so an older notice reaches neither ConfioPagos nor backend-roles.
+    const orden = readNoticeOrder(payload)
+    if (isOutOfOrder(sub, orden)) {
+      this.logger.log(
+        `Confio notice ${event.providerEventId} for ${sub.id} is out of order: not applied`,
+      )
+      await this.descartarTrazaPendiente(sub.id, event.providerEventId, 'out of order')
+      return 'out_of_order'
     }
 
     const efecto =
       payload.event === 'subscription.billingStatusChanged'
         ? await this.planearCobro(data, sub)
         : await this.planearCambioDeEstado(data, sub)
-    if (!efecto) return
-
-    // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
-    const bono =
-      efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
-        ? await this.bonus.plan(payload, sub)
-        : null
-
-    if (efecto.roles) {
-      await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
+    if (!efecto) {
+      await this.descartarTrazaPendiente(sub.id, event.providerEventId, 'no effect on retry')
+      return 'no_effect'
     }
 
-    await this.aplicar(sub.id, efecto, payload, event.providerEventId, markerIds, bono)
+    // Before the bonus too: its plan catalog is also read from backend-roles.
+    if (efecto.roles) await this.escribirTrazaPendiente(sub, efecto, payload, event.providerEventId)
+
+    try {
+      // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
+      const bono =
+        efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
+          ? await this.bonus.plan(payload, sub)
+          : null
+
+      if (efecto.roles) {
+        await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
+      }
+
+      return await this.aplicar(
+        sub.id,
+        efecto,
+        payload,
+        event.providerEventId,
+        markerIds,
+        bono,
+        orden,
+      )
+    } catch (error) {
+      if (efecto.roles) {
+        this.logger.warn(
+          `Confio notice ${event.providerEventId} left its trace pending for ${sub.id}: ${error?.message}`,
+        )
+      }
+      throw error
+    }
+  }
+
+  /**
+   * The movement trace written before backend-roles is called, from the unlocked row. Without the
+   * signature digest, which the cycle bonus reads as an applied notice. A second dispatch of the same
+   * notice keeps the first one (`UQ_subscription_events_pending_trace`).
+   */
+  private async escribirTrazaPendiente(
+    sub: Subscription,
+    efecto: EfectoConfio,
+    payload: ConfioWebhookPayload,
+    providerEventId: string,
+  ): Promise<void> {
+    const traza = armarTrazaDelMovimiento({
+      sub,
+      fromStatus: sub.status,
+      eventType: efecto.eventType,
+      toStatus: efecto.toStatus,
+      payload,
+      providerEventId,
+      roles: efecto.roles,
+      reason: efecto.reason,
+    })
+    const metadata = { ...traza.metadata }
+    delete metadata.signatureChecksum
+
+    await this.subscriptionEventRepository
+      .createQueryBuilder()
+      .insert()
+      .into(SubscriptionEvent)
+      .values({ ...traza, metadata, traceStatus: SubscriptionTraceStatus.PENDING })
+      .orIgnore()
+      .execute()
+  }
+
+  /** A pending trace of `providerEventId` that a later delivery decided not to apply. */
+  private async descartarTrazaPendiente(
+    subscriptionId: string,
+    providerEventId: string,
+    why: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const qb = manager
+      ? manager.createQueryBuilder()
+      : this.subscriptionEventRepository.createQueryBuilder()
+    await qb
+      .update(SubscriptionEvent)
+      .set({ traceStatus: SubscriptionTraceStatus.DISCARDED, reason: `Discarded: ${why}` })
+      .where('"subscriptionId" = :sid', { sid: subscriptionId })
+      .andWhere("metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
+      .andWhere('"traceStatus" = :pending', { pending: SubscriptionTraceStatus.PENDING })
+      .execute()
   }
 
   /**
@@ -547,12 +639,10 @@ export class ConfioSubscriptionWebhookService {
    *     precedente que el alta (`subscription.service.ts:179-190`).
    * (2) Se llama ANTES de la transacción: es HTTP con timeout de 10 s y adentro
    *     retendría el lock de la fila todo ese tiempo.
-   * (3) Lanzar deja CERO escrituras locales, o sea que un canal caído no puede
-   *     quedar registrado como impago ni degradar por sí solo; el mensaje queda
-   *     en `webhook_events.error` y el evento se marca para reintento. Ese
-   *     reintento HOY no reprocesa solo (`webhook.processor.ts` incrementa el
-   *     contador y relanza): la reparación entra por `POST /webhook/:id/retry`.
-   *     Deuda preexistente de todos los proveedores, no de este camino.
+   * (3) Throwing leaves only the `pending` trace: a channel down is never recorded as unpaid
+   *     nor downgrades on its own. The message stays in `webhook_events.error` and the event is
+   *     marked for retry, which today does not reprocess by itself (`webhook.processor.ts` counts
+   *     and rethrows): the repair is `POST /webhook/:id/retry`. Debt of every provider.
    * (4) La degradación (`degradar`) delega en `plan-downgrade.util.ts`, que es el
    *     único dueño del movimiento y lo comparte con los dos crons de
    *     `tasks.service.ts`: retira el plan pago y deja `free` SIN `expiresAt`.
@@ -1005,13 +1095,14 @@ export class ConfioSubscriptionWebhookService {
     providerEventId: string,
     markerIds: string | string[] = providerEventId,
     bono: PlannedBonus | null = null,
-  ): Promise<void> {
-    await this.dataSource.transaction(async (manager: EntityManager) => {
+    orden?: NoticeOrder,
+  ): Promise<ConfioNoticeOutcome> {
+    return this.dataSource.transaction(async (manager: EntityManager) => {
       const sub = await manager.findOne(Subscription, {
         where: { id: subscriptionId },
         lock: { mode: 'pessimistic_write' },
       })
-      if (!sub) return
+      if (!sub) return 'no_effect'
 
       const marcador = await ConfioSubscriptionWebhookService.buscarMarcador(
         manager.createQueryBuilder(SubscriptionEvent, 'e'),
@@ -1022,7 +1113,20 @@ export class ConfioSubscriptionWebhookService {
         this.logger.log(
           `Confio efecto ya aplicado (bajo lock) para ${providerEventId}, no se repite`,
         )
-        return
+        return 'no_effect'
+      }
+
+      // The guarantee: a newer notice may have been applied since the unlocked check.
+      if (orden && isOutOfOrder(sub, orden)) {
+        await this.descartarTrazaPendiente(subscriptionId, providerEventId, 'out of order', manager)
+        const roles = efecto.roles
+        if (roles) {
+          this.logger.warn(
+            `Confio notice ${providerEventId} lost the order under lock after backend-roles ran: ` +
+              `${roles.accion} brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId}`,
+          )
+        }
+        return 'out_of_order'
       }
 
       const fromStatus = sub.status
@@ -1050,15 +1154,22 @@ export class ConfioSubscriptionWebhookService {
         sub.trialStart = efecto.periodo.start
         sub.trialEnd = efecto.periodo.end
       }
+      if (orden) sub.providerWatermark = advanceMark(sub, orden)
 
       await manager.save(sub)
       if (bono) await this.bonus.credit(manager, bono, sub)
 
+      const pendiente = await manager
+        .createQueryBuilder(SubscriptionEvent, 'e')
+        .where('e."subscriptionId" = :sid', { sid: subscriptionId })
+        .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
+        .andWhere('e."traceStatus" = :pending', { pending: SubscriptionTraceStatus.PENDING })
+        .getOne()
+
       // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
       // usuario y plan salen de esa fila y no de una relectura posterior.
-      await manager.save(
-        SubscriptionEvent,
-        armarTrazaDelMovimiento({
+      await manager.save(SubscriptionEvent, {
+        ...armarTrazaDelMovimiento({
           sub,
           fromStatus,
           eventType: efecto.eventType,
@@ -1068,7 +1179,10 @@ export class ConfioSubscriptionWebhookService {
           roles: efecto.roles,
           reason: efecto.reason,
         }),
-      )
+        ...(pendiente ? { id: pendiente.id, traceStatus: SubscriptionTraceStatus.APPLIED } : {}),
+      })
+
+      return 'applied'
     })
   }
 
@@ -1106,15 +1220,18 @@ export class ConfioSubscriptionWebhookService {
       (id): id is string => typeof id === 'string' && id.length > 0,
     )
     const uniqueIds = Array.from(new Set(ids))
+    const applied = { applied: SubscriptionTraceStatus.APPLIED }
     if (uniqueIds.length <= 1) {
       return qb
         .where('e."subscriptionId" = :sid', { sid: subscriptionId })
         .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: uniqueIds[0] })
+        .andWhere('e."traceStatus" = :applied', applied)
         .getOne()
     }
     return qb
       .where('e."subscriptionId" = :sid', { sid: subscriptionId })
       .andWhere("e.metadata ->> 'providerEventId' IN (:...pids)", { pids: uniqueIds })
+      .andWhere('e."traceStatus" = :applied', applied)
       .getOne()
   }
 }

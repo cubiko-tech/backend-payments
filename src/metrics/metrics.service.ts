@@ -95,6 +95,7 @@ export class MetricsService {
         COUNT(*) FILTER (WHERE se."eventType" = 'created') as new_subs
       FROM subscription_events se
       WHERE se."createdAt" >= NOW() - make_interval(months => $1)
+        AND se."traceStatus" = 'applied'
       GROUP BY month
       ORDER BY month DESC
     `,
@@ -172,6 +173,7 @@ export class MetricsService {
         DATE_TRUNC('month', se."createdAt") as month
       FROM subscription_events se
       WHERE se."eventType" = 'plan_changed'
+        AND se."traceStatus" = 'applied'
         AND se."createdAt" >= NOW() - INTERVAL '6 months'
       GROUP BY se."fromPlanSlug", se."toPlanSlug", month
       ORDER BY month DESC, count DESC
@@ -240,6 +242,7 @@ export class MetricsService {
         FROM subscription_events se
         JOIN subscriptions s ON s.id = se."subscriptionId"
         WHERE se."eventType" NOT IN ('cancelled', 'expired')
+          AND se."traceStatus" = 'applied'
           AND se."createdAt" >= NOW() - make_interval(months => $1)
       )
       SELECT

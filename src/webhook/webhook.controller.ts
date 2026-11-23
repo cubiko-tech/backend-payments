@@ -210,6 +210,13 @@ export class WebhookController {
       this.logger.warn(
         `Webhook ConfioPagos ignorado: evento fuera del contrato "${escapeLogValue(payload.event)}"`,
       )
+      // Kept as `ignored` and never dispatched; the answer stays the same.
+      await this.webhookService.recordIgnored(
+        'confio',
+        typeof payload.event === 'string' ? payload.event : 'unknown',
+        buildConfioWebhookEventId(payload),
+        payload,
+      )
 
       return { ignored: true }
     }

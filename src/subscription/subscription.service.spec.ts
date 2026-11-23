@@ -1769,7 +1769,11 @@ describe('SubscriptionService', () => {
       await service.cancel('brand-1', { reason: 'segundo click', triggeredBy: 'user-1' })
 
       expect(txManager.exists).toHaveBeenCalledWith(SubscriptionEvent, {
-        where: { subscriptionId: 'sub-1', eventType: SubscriptionEventType.CANCELLED },
+        where: {
+          subscriptionId: 'sub-1',
+          eventType: SubscriptionEventType.CANCELLED,
+          traceStatus: 'applied',
+        },
       })
       expect(eventRepo.create).not.toHaveBeenCalled()
       expect(eventRepo.save).not.toHaveBeenCalled()
@@ -2101,7 +2105,7 @@ describe('SubscriptionService', () => {
         where: { brandId: 'brand-1' },
       })
       expect(eventReadRepo.find).toHaveBeenCalledWith({
-        where: { subscriptionId: 'sub-1' },
+        where: { subscriptionId: 'sub-1', traceStatus: 'applied' },
         order: { createdAt: 'DESC' },
       })
     })

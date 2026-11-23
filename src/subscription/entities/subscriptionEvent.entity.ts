@@ -51,6 +51,17 @@ export const PLAN_APPLYING_EVENTS = [
   SubscriptionEventType.RENEWED,
 ]
 
+/**
+ * Whether the row is a movement that happened. A Confio trace is written `pending` before backend-roles
+ * is called, so a failed call still leaves it; it becomes `applied` with the state change, or
+ * `discarded` when a later delivery decides nothing applies. Every reader of movements reads `applied`.
+ */
+export enum SubscriptionTraceStatus {
+  PENDING = 'pending',
+  APPLIED = 'applied',
+  DISCARDED = 'discarded',
+}
+
 @Entity('subscription_events')
 @Index(['subscriptionId', 'createdAt'])
 @Index(['eventType', 'createdAt'])
@@ -66,6 +77,8 @@ export class SubscriptionEvent {
   @Column({ type: 'text', nullable: true }) reason: string
   @Column({ type: 'uuid', nullable: true }) paymentId: string
   @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'varchar', length: 16, default: SubscriptionTraceStatus.APPLIED })
+  traceStatus: SubscriptionTraceStatus
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date
 
   @ManyToOne(() => Subscription, { onDelete: 'CASCADE' })

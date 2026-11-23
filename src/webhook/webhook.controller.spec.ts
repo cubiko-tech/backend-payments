@@ -10,7 +10,6 @@ import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provide
 import { DropiProvider } from '../provider/dropi/dropi.provider'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { buildConfioWebhookEventId } from '../provider/confio/confio-webhook'
 
 /**
  * Capa 2: el handler real de `POST /webhook/confio`, con el reparto entre el
@@ -96,6 +95,7 @@ type EntornoDePrueba = Partial<Record<(typeof CLAVES_DE_ENTORNO)[number], string
 interface Armado {
   controller: WebhookController
   receive: jest.Mock
+  recordIgnored: jest.Mock
   warn: jest.SpyInstance
   error: jest.SpyInstance
 }
@@ -114,6 +114,8 @@ async function construirController(entorno: EntornoDePrueba): Promise<Armado> {
   Object.assign(process.env, entorno)
 
   const receive = jest.fn().mockResolvedValue({ data: {} })
+  // R17: the webhook service stores and dispatches; this spec only reads what the controller hands it.
+  const recordIgnored = jest.fn().mockResolvedValue({ data: {} })
   const confioProvider = {
     validateWebhookSignature: (_raw: Buffer, token: string) => token === ACCESS_TOKEN,
   }
@@ -121,7 +123,7 @@ async function construirController(entorno: EntornoDePrueba): Promise<Armado> {
   const module: TestingModule = await Test.createTestingModule({
     controllers: [WebhookController],
     providers: [
-      { provide: WebhookService, useValue: { receive } },
+      { provide: WebhookService, useValue: { receive, recordIgnored } },
       { provide: StripeProvider, useValue: {} },
       { provide: MercadoPagoProvider, useValue: {} },
       { provide: DropiProvider, useValue: {} },
@@ -142,6 +144,7 @@ async function construirController(entorno: EntornoDePrueba): Promise<Armado> {
   return {
     controller: module.get<WebhookController>(WebhookController),
     receive,
+    recordIgnored,
     warn: jest.spyOn(Logger.prototype, 'warn').mockImplementation(),
     error: jest.spyOn(Logger.prototype, 'error').mockImplementation(),
   }
@@ -180,7 +183,11 @@ describe('WebhookController (confio)', () => {
       await controller.confio(`Bearer ${WEBHOOK_KEY}`, reqCon(cobroFirmado(4)))
 
       const [primera, segunda] = receive.mock.calls.map((call) => call[2])
-      expect(primera).toBe(buildConfioWebhookEventId(cobroFirmado(3) as never))
+      // A literal: the production function would agree with itself whatever it builds.
+      expect(primera).toBe(
+        `${SUBSCRIPTION}:subscription.billingStatusChanged:ciclo-3:SUCCEEDED:` +
+          'organizations/o/stores/s/payments/p3',
+      )
       expect(primera).not.toEqual(segunda)
     })
 
@@ -295,10 +302,12 @@ describe('WebhookController (confio)', () => {
         }
 
         const receive = jest.fn().mockResolvedValue({ data: {} })
+        // R17: the webhook service stores and dispatches; this spec only reads what the controller hands it.
+        const recordIgnored = jest.fn().mockResolvedValue({ data: {} })
         const module: TestingModule = await Test.createTestingModule({
           controllers: [WebhookController],
           providers: [
-            { provide: WebhookService, useValue: { receive } },
+            { provide: WebhookService, useValue: { receive, recordIgnored } },
             { provide: StripeProvider, useValue: {} },
             { provide: MercadoPagoProvider, useValue: {} },
             { provide: DropiProvider, useValue: {} },
@@ -312,6 +321,7 @@ describe('WebhookController (confio)', () => {
         return {
           controller: module.get<WebhookController>(WebhookController),
           receive,
+          recordIgnored,
           warn: jest.spyOn(Logger.prototype, 'warn').mockImplementation(),
           error: jest.spyOn(Logger.prototype, 'error').mockImplementation(),
         }
@@ -458,7 +468,7 @@ describe('WebhookController (confio)', () => {
       ['sin Authorization', ''],
       ['con un bearer que no es ninguna de las dos claves', 'Bearer no-soy-nadie'],
     ])('%s responde 401 y no escribe log', async (_caso, authorization) => {
-      const { controller, receive, warn } = await construirController({
+      const { controller, receive, recordIgnored, warn } = await construirController({
         ENV: 'production',
         CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
       })
@@ -471,22 +481,28 @@ describe('WebhookController (confio)', () => {
       ).rejects.toBeInstanceOf(HttpException)
 
       expect(receive).not.toHaveBeenCalled()
+      expect(recordIgnored).not.toHaveBeenCalled()
       expect(lineas(warn)).not.toContain('fuera del contrato')
     })
 
     it('responde 200 ignorado sin despachar', async () => {
-      const { controller, receive } = await construirController({
+      const { controller, receive, recordIgnored } = await construirController({
         ENV: 'production',
         CONFIO_WEBHOOK_KEY: WEBHOOK_KEY,
       })
+      const payload = { event: 'invoice.created', data: { name: 'x' }, timestamp: TIMESTAMP }
 
-      const respuesta = await controller.confio(
-        `Bearer ${WEBHOOK_KEY}`,
-        reqCon({ event: 'invoice.created', data: { name: 'x' }, timestamp: TIMESTAMP }),
-      )
+      const respuesta = await controller.confio(`Bearer ${WEBHOOK_KEY}`, reqCon(payload))
 
       expect(respuesta).toEqual({ ignored: true })
       expect(receive).not.toHaveBeenCalled()
+      // R15: red if the controller answers without keeping the event.
+      expect(recordIgnored).toHaveBeenCalledWith(
+        'confio',
+        'invoice.created',
+        'x:invoice.created',
+        payload,
+      )
     })
   })
 })

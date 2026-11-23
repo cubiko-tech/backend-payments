@@ -469,8 +469,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:743-756` (`planearCambioDeEstado`) y
-  `:455-462` (`planearCobro`)
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:838-849` (`planearCambioDeEstado`) y
+  `:544-553` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
@@ -627,7 +627,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
 
 - **Dónde**: `src/client/client-roles.service.ts:267` y `:312` (campo ausente → 0),
-  `src/webhook/subscription-bonus.service.ts:77`
+  `src/webhook/subscription-bonus.service.ts:97`
 - **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
 - **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a
   acreditar. Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
@@ -635,10 +635,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El bono de un ciclo sale de un aviso de un tercero; sus topes por defecto son supuestos (LOC-214)
 
-- **Dónde**: `src/webhook/subscription-bonus.service.ts:124` y `:131`,
+- **Dónde**: `src/webhook/subscription-bonus.service.ts:144` y `:151`,
   `src/webhook/subscription-bonus-limits.ts:14`
-- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo; un ciclo de prueba con `SUCCEEDED`, si
-  ConfioPagos lo emite, también acredita (no se mira `amountCents`).
+- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo y `amountCents` firmado mayor que 0
+  (`subscription-bonus.service.ts:79-95`; un ciclo en 0 o sin monto firmado no acredita, LOC-272).
 - **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes
   calendario UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por
   defecto, valores supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
@@ -679,3 +679,47 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
   `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
   registrar la transacción inicial al crear desde sesión.
+
+## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:1119-1130` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:378-388` (`handle`)
+- **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
+  llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
+  a roles no está garantizado.
+- **Qué rompe**: la fila queda bien y el aviso viejo queda `out_of_order` con un `warn` (marca, plan y acción); pero si
+  el viejo era `degradar` o `retirar` y su llamada llegó a roles después del `reponer`, la marca que pagó queda sin
+  plan hasta el próximo aviso que aplique, en el peor caso el cobro del ciclo siguiente (unos 30 días).
+- **Estado**: abierto — se detecta con `GET webhook/admin/events?status=out_of_order` y el `warn` «lost the order
+  under lock after backend-roles ran»; lo cierra volver a sincronizar roles con la fila al descartar (tarea aparte).
+
+## La marca de orden de Confío nace vacía: el primer aviso viejo de cada suscripción tras el deploy se aplica (LOC-272)
+
+- **Dónde**: `src/webhook/confio-watermark.util.ts:46-51` (`currentMark`, con `providerWatermark` nula como la
+  deja la migración 1795394546441-ConfioWebhookOrderAndTrace)
+- **Qué lo dispara**: un terminal o un cobro fuera de orden que llega antes de que la suscripción reciba su primer aviso
+  aplicado después del deploy; también una fila reutilizada por un alta nueva (su marca es de otra suscripción).
+- **Qué rompe**: ese aviso se aplica como antes de LOC-272 (last-write-wins): un terminal viejo puede degradar una fila
+  que acaba de cobrar. No hay de dónde sembrar la marca: la traza no guardaba el `timestamp` firmado.
+- **Estado**: abierto — se cierra solo con el primer aviso aplicado de cada suscripción.
+
+## La marca supone que el `timestamp` firmado de Confío crece entre avisos distintos (LOC-272)
+
+- **Dónde**: `src/webhook/confio-watermark.util.ts:61-72` (`isOutOfOrder`)
+- **Qué lo dispara**: dos avisos de la misma suscripción cuyo `timestamp` del sobre no sigue el orden en que Confío
+  tomó las decisiones. Que crezca es hipótesis sobre el emisor: el contrato no lo dice (decidido por quien aprueba el
+  2026-11-18 sobre los campos firmados).
+- **Qué rompe**: un aviso real se guarda `out_of_order` y no se aplica. Un cobro de un ciclo firmado mayor se aplica
+  igual aunque su `timestamp` sea anterior.
+- **Estado**: abierto — lo cierra que Confío confirme el orden de su `timestamp`, o medirlo en tráfico.
+
+## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:378` (la traza antes de roles);
+  `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
+- **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
+  la cola, `processing`, fuera de `GET webhook/admin/failed`.
+- **Qué rompe**: el movimiento no se aplica hasta que alguien llama `POST webhook/admin/:id/retry`; la traza queda
+  `pending` en `subscription_events` (no se cuenta en métricas ni en el historial, que leen `applied`).
+- **Estado**: abierto — se encuentra con `subscription_events."traceStatus" = 'pending'` y el `warn` «left its trace
+  pending»; lo cierra que la cola reprocese (deuda previa de todos los proveedores).

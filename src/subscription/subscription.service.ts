@@ -8,7 +8,11 @@ import {
   TERMINAL_SUBSCRIPTION_STATUSES,
   LIVE_SUBSCRIPTION_STATUSES,
 } from './entities/subscription.entity'
-import { SubscriptionEvent, SubscriptionEventType } from './entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionEventType,
+  SubscriptionTraceStatus,
+} from './entities/subscriptionEvent.entity'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { ConfioTrialService } from './confio-trial.service'
 import { ConfioCancellationService } from './confio-cancellation.service'
@@ -1138,7 +1142,11 @@ export class SubscriptionService {
         const yaRegistrada =
           !!current.cancelledAt &&
           (await manager.exists(SubscriptionEvent, {
-            where: { subscriptionId: current.id, eventType: SubscriptionEventType.CANCELLED },
+            where: {
+              subscriptionId: current.id,
+              eventType: SubscriptionEventType.CANCELLED,
+              traceStatus: SubscriptionTraceStatus.APPLIED,
+            },
           }))
 
         // El estado vigente NO se toca: la baja apaga la renovación, no el acceso.
@@ -1383,7 +1391,7 @@ export class SubscriptionService {
       }
 
       const events = await this.subscriptionEventReadRepository.find({
-        where: { subscriptionId: subscription.id },
+        where: { subscriptionId: subscription.id, traceStatus: SubscriptionTraceStatus.APPLIED },
         order: { createdAt: 'DESC' },
       })
 

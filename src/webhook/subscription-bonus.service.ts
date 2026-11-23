@@ -5,7 +5,10 @@ import { AuditService } from '../audit/audit.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 import { Subscription } from '../subscription/entities/subscription.entity'
-import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
+import {
+  SubscriptionEvent,
+  SubscriptionTraceStatus,
+} from '../subscription/entities/subscriptionEvent.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../wallet/entities/wallet.entity'
 import { TokenOrigin } from '../wallet/token-origin'
@@ -71,6 +74,23 @@ export class SubscriptionBonusService {
     }
     if (!sub.brandId || !sub.planSlug) {
       this.logger.warn(`Cycle bonus skipped for ${sub.id}: subscription without brand or plan`)
+      return null
+    }
+    // A cycle that charged nothing gives no bonus; the plan is restored apart from it.
+    const amount = payload.data?.amountCents
+    const amountSigned =
+      Array.isArray(payload.signature?.properties) &&
+      payload.signature.properties.includes('amountCents')
+    if (
+      !amountSigned ||
+      typeof amount !== 'number' ||
+      !Number.isSafeInteger(amount) ||
+      amount <= 0
+    ) {
+      this.logger.log(
+        `Cycle bonus skipped for ${sub.id}: cycle ${payload.data?.cycleNumber} charged ` +
+          `${amountSigned ? String(amount) : 'an unsigned amount'}`,
+      )
       return null
     }
 
@@ -204,6 +224,7 @@ async function checksumApplied(
     .andWhere("e.metadata ->> 'signatureChecksum' = :digest", {
       digest: signatureChecksumDigest(checksum),
     })
+    .andWhere('e."traceStatus" = :applied', { applied: SubscriptionTraceStatus.APPLIED })
     .getCount()
   return count > 0
 }

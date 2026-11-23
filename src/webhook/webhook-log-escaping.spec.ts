@@ -37,6 +37,9 @@ function noMarkerQueryBuilder() {
   const qb = {
     where: () => qb,
     andWhere: () => qb,
+    update: () => qb,
+    set: () => qb,
+    execute: async () => ({}),
     getOne: async () => null,
   }
   return qb

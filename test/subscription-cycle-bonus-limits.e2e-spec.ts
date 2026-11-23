@@ -113,7 +113,8 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     expect(
       await ds().getRepository(AuditLog).countBy({ userId: 'system:confio-subscription' }),
     ).toBe(0)
-    expect(await eventsOf(ds(), sub.id)).toHaveLength(0)
+    // Only the trace written before backend-roles is left, still pending (LOC-272).
+    expect((await eventsOf(ds(), sub.id)).map((e) => e.traceStatus)).toEqual(['pending'])
     expect((await subscription(sub.id)).currentPeriodEnd).toEqual(before.currentPeriodEnd)
 
     failing.mockRestore()
@@ -123,7 +124,7 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     expect(retried.status).toBe(WebhookStatus.PROCESSED)
     expect(await bonusesOf(ds(), BRAND)).toHaveLength(1)
     expect(Number((await tokenWalletOf(ds(), BRAND)).balance)).toBe(500)
-    expect(await eventsOf(ds(), sub.id)).toHaveLength(1)
+    expect((await eventsOf(ds(), sub.id)).map((e) => e.traceStatus)).toEqual(['applied'])
   })
 
   it('S11: with backend-roles down and no catalog, the notice writes nothing and fails', async () => {
@@ -138,7 +139,8 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     expect(notice.error).toContain('Plan catalog unavailable')
     expect(await bonusesOf(ds(), BRAND)).toHaveLength(0)
     expect(await tokenWalletOf(ds(), BRAND)).toBeNull()
-    expect(await eventsOf(ds(), sub.id)).toHaveLength(0)
+    // Only the trace written before backend-roles is left, still pending (LOC-272).
+    expect((await eventsOf(ds(), sub.id)).map((e) => e.traceStatus)).toEqual(['pending'])
     expect((await subscription(sub.id)).currentPeriodEnd).toEqual(before.currentPeriodEnd)
   })
 })
