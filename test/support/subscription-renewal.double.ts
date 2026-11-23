@@ -19,6 +19,7 @@ export function renewalDeps(sub: Subscription) {
       find: jest.fn().mockResolvedValue([sub]),
       findOne: jest.fn().mockResolvedValue(null),
       save: jest.fn().mockImplementation(async (row: unknown) => row),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     },
     subscriptionEventRepo: {
       create: jest.fn().mockImplementation((row: unknown) => row),

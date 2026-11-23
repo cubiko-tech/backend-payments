@@ -1,4 +1,4 @@
-import { DataSource, QueryRunner, Repository } from 'typeorm'
+import { DataSource, EntityManager, QueryRunner, Repository } from 'typeorm'
 
 import { lockBrandPlan } from '../checkout/wallet-payment-close'
 import { logger } from '../shared/logger/logger'
@@ -11,6 +11,15 @@ export interface SubscriptionLockDeps {
 }
 
 /**
+ * Commits the lock's transaction and releases the lock. `manager` writes inside that transaction,
+ * or is null without one; `abort` rolls it back instead. Calling either after the first is a no-op.
+ */
+export type SubscriptionLockRelease = (() => Promise<void>) & {
+  manager: EntityManager | null
+  abort: () => Promise<void>
+}
+
+/**
  * Takes the brand's plan lock and refreshes `sub` from the primary, returning what releases the
  * lock. Returns null, with the lock released, if either failed: nothing was charged, so that is
  * no failed payment and the next pass retries the row.
@@ -18,8 +27,8 @@ export interface SubscriptionLockDeps {
 export async function lockAndReread(
   sub: Subscription,
   deps: SubscriptionLockDeps,
-): Promise<(() => Promise<void>) | null> {
-  let release: (() => Promise<void>) | null = null
+): Promise<SubscriptionLockRelease | null> {
+  let release: SubscriptionLockRelease | null = null
   try {
     release = await acquireSubscriptionLock(sub, deps)
     const fresh = await deps.subscriptionRepo.findOne?.({ where: { id: sub.id } })
@@ -41,7 +50,7 @@ export async function lockAndReread(
 export async function acquireSubscriptionLock(
   sub: Subscription,
   deps: SubscriptionLockDeps,
-): Promise<() => Promise<void>> {
+): Promise<SubscriptionLockRelease> {
   const locks = deps.subscriptionLocks ?? (deps.subscriptionLocks = new Map())
   const subId = sub.id
   const previous = locks.get(subId) ?? Promise.resolve()
@@ -94,7 +103,10 @@ export async function acquireSubscriptionLock(
         await lockBrandPlan(queryRunner, sub.brandId)
       }
     }
-    return () => release(true)
+    return Object.assign(() => release(true), {
+      manager: queryRunner?.manager ?? null,
+      abort: () => release(false),
+    })
   } catch (error) {
     await release(false).catch(() => undefined)
     throw error

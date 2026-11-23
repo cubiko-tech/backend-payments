@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Optional } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
+import { InjectDataSource } from '@nestjs/typeorm'
+import { DataSource } from 'typeorm'
 
 import { ConfioPlanService } from './confio-plan.service'
 import { ClientRolesService } from '../../client/client-roles.service'
@@ -17,6 +19,9 @@ import { logger } from '../../shared/logger/logger'
  * cambiara de nombre, el cero seguiría fabricándose para `free`.
  */
 const SLUG_CON_PRECIO_FABRICADO = 'free'
+
+/** Advisory lock key that lets one replica run the daily check while the others skip it. */
+export const PRICE_CHECK_LOCK = 'confio-plan-price-check'
 
 /**
  * Avisa cuando el precio del catálogo (`plan_prices` de backend-roles) se separó
@@ -46,7 +51,32 @@ export class ConfioPlanPriceCheckService {
   constructor(
     private readonly planes: ConfioPlanService,
     private readonly clientRoles: ClientRolesService,
+    @Optional() @InjectDataSource('DBWrite') private readonly dataSource?: DataSource,
   ) {}
+
+  /**
+   * Takes the run's advisory lock without waiting, held in a transaction until `release`. Without a
+   * data source the run is always taken.
+   */
+  private async takeRun(): Promise<{ taken: boolean; release: () => Promise<void> }> {
+    if (!this.dataSource) return { taken: true, release: async () => undefined }
+    const runner = this.dataSource.createQueryRunner()
+    const release = async () => {
+      if (runner.isTransactionActive) await runner.rollbackTransaction()
+      if (!runner.isReleased) await runner.release()
+    }
+    try {
+      await runner.connect()
+      await runner.startTransaction()
+      const [row] = await runner.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS taken', [
+        PRICE_CHECK_LOCK,
+      ])
+      return { taken: row?.taken === true, release }
+    } catch (error) {
+      await release().catch(() => undefined)
+      throw error
+    }
+  }
 
   /**
    * Recorre los mapeos y compara cada uno contra el precio vigente de SU moneda.
@@ -60,7 +90,14 @@ export class ConfioPlanPriceCheckService {
    */
   @Cron('0 6 * * *')
   async verificarPreciosContraElCatalogo(): Promise<void> {
+    let release = async () => undefined
     try {
+      const run = await this.takeRun()
+      release = run.release
+      if (!run.taken) {
+        logger.log('info', '[CRON] verificarPreciosContraElCatalogo: otra réplica ya lo corre')
+        return
+      }
       const filas = await this.planes.findAllMappings()
 
       let comparadas = 0
@@ -124,6 +161,8 @@ export class ConfioPlanPriceCheckService {
         'error',
         `[CRON] verificarPreciosContraElCatalogo: error al verificar precios: ${error.message}`,
       )
+    } finally {
+      await release().catch(() => undefined)
     }
   }
 }

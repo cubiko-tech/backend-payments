@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Inject, Injectable, Optional } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
 import { DataSource, LessThan, Repository } from 'typeorm'
@@ -10,6 +10,7 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { Payment } from '../payment/entities/payment.entity'
 import { ProviderFactory } from '../provider/provider.factory'
+import { APM_AGENT, ApmAgent } from '../shared/apm/apm-agent'
 import { logger } from '../shared/logger/logger'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
@@ -94,6 +95,7 @@ export class TasksService implements TasksDeps {
     readonly clientRoles: ClientRolesService,
     readonly checkoutService: CheckoutService,
     readonly confioWebhook: ConfioSubscriptionWebhookService,
+    @Optional() @Inject(APM_AGENT) readonly apm?: ApmAgent,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)

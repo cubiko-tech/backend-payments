@@ -15,6 +15,7 @@ import { PaymentModule } from '../payment/payment.module'
 import { CheckoutModule } from '../checkout/checkout.module'
 import { WebhookModule } from '../webhook/webhook.module'
 import { RechargeModule } from '../recharge/recharge.module'
+import { ApmModule } from '../shared/apm/apm.module'
 import { DropiRechargeBacklogTask } from './dropi-recharge-backlog'
 import { AutomaticRechargeInvoiceCloseTask } from './automatic-recharge-invoice-close'
 
@@ -45,6 +46,7 @@ import { AutomaticRechargeInvoiceCloseTask } from './automatic-recharge-invoice-
     // regla de qué se otorga vive allá y no se duplica acá.
     WebhookModule,
     RechargeModule,
+    ApmModule,
   ],
   providers: [TasksService, DropiRechargeBacklogTask, AutomaticRechargeInvoiceCloseTask],
 })

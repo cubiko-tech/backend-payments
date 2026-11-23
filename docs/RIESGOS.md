@@ -16,7 +16,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:117`, `:176` (`processSubscriptionRenewals`)
+- **Dónde**: `src/tasks/subscription-renewal.ts:129`, `:188` (`processSubscriptionRenewals`)
 - **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo.
 - **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet.
 - **Estado**: abierto — lo cierra corregir cada fila; el log de error con su id y el contador de la pasada
@@ -125,7 +125,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
 
 - **Dónde**: `src/checkout/wallet-payment-close.ts:59` (`lockBrandPlan`);
-  `src/tasks/subscription-lock.ts:18`, `:41` (`lockAndReread`, `acquireSubscriptionLock`)
+  `src/tasks/subscription-lock.ts:27`, `:50` (`lockAndReread`, `acquireSubscriptionLock`)
 - **Qué lo dispara**: bajo el candado se llama a roles, al proveedor y a ConfioPagos. Basta un checkout o
   un webhook de la marca mientras un cron procesa su fila; para agotar el pool, tantos cierres esperando
   como conexiones (10: default de `pg-pool`, `node_modules/pg-pool/index.js:89`; `src/orm` no fija otro).
@@ -149,20 +149,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   devuelve y regala los días.
 - **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez. Abierto en (a)–(c).
 
-## Una renovación que llega a roles después de la degradación deja plan pago sobre una fila cerrada (LOC-111)
-
-- **Dónde**: `src/tasks/wallet-renewal.ts:166` (`renewPlanForBrand`);
-  `src/tasks/subscription-expiration.ts:302` (`degradeInRoles`)
-- **Qué lo dispara**: una baja durante la espera a roles y el barrido de acceso, que no toma el candado de
-  plan, cierra la fila antes de que la extensión escriba; roles aplica la renovación después.
-- **Qué rompe**: la marca conserva el plan pago en roles con la fila `cancelled`. El débito queda pendiente
-  y el barrido de huérfanos lo devuelve una vez.
-- **Estado**: abierto — lo cierra que el barrido de acceso tome el candado, o degradar al abortar.
-
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
 - **Dónde**: `src/tasks/wallet-renewal.ts:157` (`extendSubscriptionPeriod`);
-  `src/tasks/subscription-renewal.ts:132` (`handleRenewalFailure`)
+  `src/tasks/subscription-renewal.ts:144` (`handleRenewalFailure`)
 - **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`; la pasada
   horaria no mira el backoff.
 - **Qué rompe**: en unas tres horas se agotan los reintentos: avisos de pago fallido y la fila vencida.
@@ -279,8 +269,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
-- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:92`,
-  `:155` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:88`
+- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:104`,
+  `:167` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:91`
   (`expireSubscriptions`); `src/subscription/dto/create-subscription.dto.ts:78` (`nextBillingDate`)
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, de `POST /subscription` sin el campo o
   de una corrección a mano; entre ellas, las que ya pagaron antes de LOC-91 con llave `…:current`.
@@ -468,7 +458,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
+- **Dónde**: `src/tasks/subscription-renewal.ts:194-196` (`retryFailedPayments` → `issueExternalCharge`); las
   entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:838-849` (`planearCambioDeEstado`) y
   `:544-553` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
@@ -723,3 +713,14 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   `pending` en `subscription_events` (no se cuenta en métricas ni en el historial, que leen `applied`).
 - **Estado**: abierto — se encuentra con `subscription_events."traceStatus" = 'pending'` y el `warn` «left its trace
   pending»; lo cierra que la cola reprocese (deuda previa de todos los proveedores).
+
+## Una prueba de Confío con link emitido vence a `free` si el aviso de cobro llega pasadas 24 h (LOC-274)
+
+- **Dónde**: `src/tasks/subscription-expiration.ts:36`, `:124` (`MARKED_TRIAL_CHARGE_GRACE_HOURS`,
+  `endMarkedTrialsWithoutCharge`)
+- **Qué lo dispara**: una prueba con `initialPaymentLinkIssuedAt` cuyo aviso de cobro de Confío llega más de 24 h
+  después de `nextBillingDate`.
+- **Qué rompe**: la fila queda `expired` y la marca en `free` aunque Confío cobre después. Las 24 h son supuesto: no
+  se midió cuánto tarda Confío en avisar el cobro al final de una prueba, ni qué hace el webhook sobre una fila
+  `expired` (no se abrió).
+- **Estado**: abierto — lo cierra medir esa demora y que el aviso tardío reactive la fila.

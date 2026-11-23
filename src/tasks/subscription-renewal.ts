@@ -1,4 +1,4 @@
-import { In, LessThan } from 'typeorm'
+import { In, IsNull, LessThan } from 'typeorm'
 
 import { freePlanSlug } from '../client/plan-downgrade.util'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
@@ -10,6 +10,7 @@ import {
   SubscriptionStatus,
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import { recordRefusedDowngrades } from './subscription-close'
 import { endTrialWithoutPayment } from './subscription-expiration'
 import { lockAndReread } from './subscription-lock'
 import {
@@ -28,12 +29,13 @@ export interface SubscriptionRenewalDeps extends WalletRenewalDeps {
  */
 export async function processTrialConversions(deps: SubscriptionRenewalDeps): Promise<void> {
   const now = new Date()
+  const due = { status: SubscriptionStatus.TRIAL, nextBillingDate: LessThan(now), autoRenew: true }
+  // A trial whose signup issued its link waits for the charge notice; expireSubscriptions ends it.
   const trials = await deps.subscriptionRepo.find({
-    where: {
-      status: SubscriptionStatus.TRIAL,
-      nextBillingDate: LessThan(now),
-      autoRenew: true,
-    },
+    where: [
+      { ...due, provider: SubscriptionProvider.WALLET },
+      { ...due, initialPaymentLinkIssuedAt: IsNull() },
+    ],
   })
 
   if (trials.length === 0) return
@@ -43,6 +45,7 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
   let downgraded = 0
   let linked = 0
   let skipped = 0
+  let refused = 0
   for (const sub of trials) {
     const release = await lockAndReread(sub, deps)
     if (!release) continue
@@ -51,7 +54,9 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
 
       if (sub.provider === 'wallet') {
         if (!sub.walletId) {
-          if (await endTrialWithoutPayment(sub, deps)) downgraded++
+          const outcome = await endTrialWithoutPayment(sub, deps, release)
+          if (outcome === 'closed') downgraded++
+          if (outcome === 'rejected') refused++
           continue
         }
         try {
@@ -73,10 +78,17 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
 
       await issueExternalCharge(sub, false, deps)
       linked++
+    } catch (error) {
+      logger.log(
+        'error',
+        `[CRON] Trial ${sub.id} sin convertir, queda para la próxima pasada: ${error.message}`,
+      )
+      await release.abort()
     } finally {
       await release()
     }
   }
+  if (refused > 0) recordRefusedDowngrades('processTrialConversions', refused, deps)
 
   logger.log(
     'info',
@@ -264,9 +276,7 @@ async function issueExternalCharge(
     })
 
     const previousStatus = sub.status
-    sub.status = SubscriptionStatus.PAST_DUE
-    if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
-    await deps.subscriptionRepo.save(sub)
+    await markLinkIssued(sub, isRetry, deps)
 
     await deps.subscriptionEventRepo.save(
       deps.subscriptionEventRepo.create({
@@ -301,11 +311,23 @@ async function issueExternalCharge(
     )
   } catch (error) {
     logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
-    sub.status = SubscriptionStatus.PAST_DUE
     // No TRM is a gap on our side, not a failed charge: it must not use up a retry.
-    if (isRetry && !isMissingExchangeRate(error)) sub.retryCount = (sub.retryCount || 0) + 1
-    await deps.subscriptionRepo.save(sub)
+    await markLinkIssued(sub, isRetry && !isMissingExchangeRate(error), deps)
   }
+}
+
+/** Moves the cycle to `past_due`, counting a retry if asked, writing only those two columns. */
+async function markLinkIssued(
+  sub: Subscription,
+  countRetry: boolean,
+  deps: SubscriptionRenewalDeps,
+): Promise<void> {
+  sub.status = SubscriptionStatus.PAST_DUE
+  if (countRetry) sub.retryCount = (sub.retryCount || 0) + 1
+  await deps.subscriptionRepo.update(
+    { id: sub.id },
+    { status: sub.status, ...(countRetry ? { retryCount: sub.retryCount } : {}) },
+  )
 }
 
 function isMissingExchangeRate(error: unknown): boolean {

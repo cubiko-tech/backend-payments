@@ -1,4 +1,5 @@
-import { Between, In, IsNull, LessThan, Repository } from 'typeorm'
+// R6: one responsibility, the crons that end a subscription; they share the roles downgrade.
+import { Between, In, IsNull, LessThan, Not } from 'typeorm'
 
 import { ClientRolesService } from '../client/client-roles.service'
 import { downgradeBrandToFree, freePlanSlug } from '../client/plan-downgrade.util'
@@ -7,34 +8,38 @@ import { logger } from '../shared/logger/logger'
 import {
   LIVE_SUBSCRIPTION_STATUSES,
   Subscription,
+  SubscriptionProvider,
   SubscriptionStatus,
 } from '../subscription/entities/subscription.entity'
-import {
-  SubscriptionEvent,
-  SubscriptionEventType,
-} from '../subscription/entities/subscriptionEvent.entity'
+import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioSubscriptionWebhookService } from '../webhook/confio-subscription-webhook.service'
-import { acquireSubscriptionLock, SubscriptionLockDeps } from './subscription-lock'
+import {
+  closeEach,
+  CloseOutcome,
+  closeRow,
+  SubscriptionCloseDeps,
+  underRowLock,
+} from './subscription-close'
+import { SubscriptionLockRelease } from './subscription-lock'
 
-export interface SubscriptionExpirationDeps extends SubscriptionLockDeps {
-  subscriptionEventRepo: Repository<SubscriptionEvent>
+export interface SubscriptionExpirationDeps extends SubscriptionCloseDeps {
   clientRoles: ClientRolesService
   eventBus: EventBusService
   confioWebhook: ConfioSubscriptionWebhookService
   MAX_RETRY: number
 }
 
+/**
+ * How long a Confio trial whose signup link was issued waits past its billing date for the charge
+ * notice before it ends as a trial without payment.
+ */
+export const MARKED_TRIAL_CHARGE_GRACE_HOURS = 24
+
 async function expireLockedSubscription(
   sub: Subscription,
   deps: SubscriptionExpirationDeps,
-): Promise<'expired' | 'rejected' | 'skipped'> {
-  let releaseSubscriptionLock: (() => Promise<void>) | null = null
-  try {
-    releaseSubscriptionLock = await acquireSubscriptionLock(sub, deps)
-    const fresh = await deps.subscriptionRepo.findOne?.({ where: { id: sub.id } })
-    if (fresh) {
-      Object.assign(sub, fresh)
-    }
+): Promise<CloseOutcome> {
+  return underRowLock(sub, deps, async (release) => {
     if (sub.status !== SubscriptionStatus.PAST_DUE || sub.retryCount < deps.MAX_RETRY) {
       return 'skipped'
     }
@@ -46,28 +51,28 @@ async function expireLockedSubscription(
     }
 
     // Compare-and-set on PAST_DUE prevents duplicate events and clears any pending cancellation date.
-    const vencida = await deps.subscriptionRepo.update(
+    const vencida = await closeRow(
+      release,
+      deps,
       { id: sub.id, status: SubscriptionStatus.PAST_DUE },
       { status: SubscriptionStatus.EXPIRED, autoRenew: false, accessEndsAt: null },
-    )
-    if (!vencida.affected) {
-      logger.log(
-        'info',
-        `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
-      )
-      return 'skipped'
-    }
-
-    await deps.subscriptionEventRepo.save(
-      deps.subscriptionEventRepo.create({
+      {
         subscriptionId: sub.id,
         eventType: SubscriptionEventType.EXPIRED,
         fromStatus: SubscriptionStatus.PAST_DUE,
         toStatus: SubscriptionStatus.EXPIRED,
         triggeredBy: 'system',
         reason: `Reintentos de pago agotados (${deps.MAX_RETRY} intentos)`,
-      }),
+      },
     )
+    if (!vencida) {
+      logger.log(
+        'info',
+        `[CRON] Suscripción ${sub.id} ya no estaba en past_due: no se vence dos veces`,
+      )
+      return 'skipped'
+    }
+    await release()
 
     deps.eventBus.publishSubscriptionExpired({
       brandId: sub.brandId,
@@ -76,10 +81,8 @@ async function expireLockedSubscription(
     })
 
     logger.log('info', `[CRON] Suscripción expirada: brandId=${sub.brandId}`)
-    return 'expired'
-  } finally {
-    await releaseSubscriptionLock?.()
-  }
+    return 'closed'
+  })
 }
 
 /**
@@ -92,17 +95,13 @@ export async function expireSubscriptions(deps: SubscriptionExpirationDeps): Pro
     },
   })
 
-  let count = 0
-  let rechazadas = 0
-  for (const sub of expired) {
-    if (sub.retryCount < deps.MAX_RETRY) continue
-    const outcome = await expireLockedSubscription(sub, deps)
-    if (outcome === 'expired') {
-      count++
-    } else if (outcome === 'rejected') {
-      rechazadas++
-    }
-  }
+  const exhausted = expired.filter((sub) => sub.retryCount >= deps.MAX_RETRY)
+  const { closed: count, rejected: rechazadas } = await closeEach(
+    'expireSubscriptions',
+    exhausted,
+    (sub) => expireLockedSubscription(sub, deps),
+    deps,
+  )
 
   if (count > 0) {
     logger.log('info', `[CRON] expireSubscriptions: ${count} suscripciones expiradas`)
@@ -112,6 +111,50 @@ export async function expireSubscriptions(deps: SubscriptionExpirationDeps): Pro
     logger.log(
       'error',
       `[CRON] expireSubscriptions: ${rechazadas} sin vencer, backend-roles rechazó la degradación`,
+    )
+  }
+
+  await endMarkedTrialsWithoutCharge(deps)
+}
+
+/**
+ * Ends the Confio trials whose signup issued their only payment link and whose charge notice did
+ * not arrive within `MARKED_TRIAL_CHARGE_GRACE_HOURS` of the billing date, as trials without payment.
+ */
+async function endMarkedTrialsWithoutCharge(deps: SubscriptionExpirationDeps): Promise<void> {
+  const cutoff = new Date(Date.now() - MARKED_TRIAL_CHARGE_GRACE_HOURS * 60 * 60 * 1000)
+  const isOverdue = (sub: Subscription) =>
+    sub.status === SubscriptionStatus.TRIAL &&
+    sub.autoRenew &&
+    sub.provider !== SubscriptionProvider.WALLET &&
+    !!sub.initialPaymentLinkIssuedAt &&
+    !!sub.nextBillingDate &&
+    new Date(sub.nextBillingDate) < cutoff
+  const marked = await deps.subscriptionRepo.find({
+    where: {
+      status: SubscriptionStatus.TRIAL,
+      autoRenew: true,
+      provider: Not(SubscriptionProvider.WALLET),
+      initialPaymentLinkIssuedAt: Not(IsNull()),
+      nextBillingDate: LessThan(cutoff),
+    },
+  })
+
+  const { closed, rejected } = await closeEach(
+    'endMarkedTrialsWithoutCharge',
+    marked.filter(isOverdue),
+    (sub) =>
+      underRowLock(sub, deps, async (release) => {
+        if (!isOverdue(sub)) return 'skipped'
+        return endTrialWithoutPayment(sub, deps, release)
+      }),
+    deps,
+  )
+  if (closed > 0 || rejected > 0) {
+    logger.log(
+      rejected > 0 ? 'error' : 'info',
+      `[CRON] endMarkedTrialsWithoutCharge: ${closed} degradadas a ${freePlanSlug()}, ` +
+        `${rejected} sin degradar, backend-roles rechazó la degradación`,
     )
   }
 }
@@ -139,29 +182,50 @@ export async function expireCancelledSubscriptions(
     take: 200,
   })
 
-  let cerradas = 0
-  let rechazadas = 0
-  for (const sub of vencidas) {
-    // Exhausted past-due rows belong to expireSubscriptions.
-    if (sub.status === SubscriptionStatus.PAST_DUE && sub.retryCount >= deps.MAX_RETRY) continue
+  const { closed: cerradas, rejected: rechazadas } = await closeEach(
+    'expireCancelledSubscriptions',
+    vencidas,
+    (sub) => closeCancelledSubscription(sub, ahora, deps),
+    deps,
+  )
 
-    if (!(await degradeInRoles(sub, deps))) {
-      rechazadas++
-      continue
-    }
+  if (cerradas > 0) {
+    logger.log('info', `[CRON] expireCancelledSubscriptions: ${cerradas} suscripciones cerradas`)
+  }
+
+  if (rechazadas > 0) {
+    logger.log(
+      'error',
+      `[CRON] expireCancelledSubscriptions: ${rechazadas} sin cerrar, backend-roles rechazó la degradación`,
+    )
+  }
+}
+
+function isDueCancellation(sub: Subscription, ahora: Date, deps: SubscriptionExpirationDeps) {
+  const live =
+    [SubscriptionStatus.TRIAL, SubscriptionStatus.ACTIVE].includes(sub.status) ||
+    // Exhausted past-due rows belong to expireSubscriptions.
+    (sub.status === SubscriptionStatus.PAST_DUE && sub.retryCount < deps.MAX_RETRY)
+  return live && !sub.autoRenew && !!sub.accessEndsAt && new Date(sub.accessEndsAt) < ahora
+}
+
+async function closeCancelledSubscription(
+  sub: Subscription,
+  ahora: Date,
+  deps: SubscriptionExpirationDeps,
+): Promise<CloseOutcome> {
+  return underRowLock(sub, deps, async (release) => {
+    if (!isDueCancellation(sub, ahora, deps)) return 'skipped'
+
+    if (!(await degradeInRoles(sub, deps))) return 'rejected'
 
     const finDeAcceso = sub.accessEndsAt
-    const cerrada = await deps.subscriptionRepo.update(
+    const cerrada = await closeRow(
+      release,
+      deps,
       { id: sub.id, status: sub.status, autoRenew: false, accessEndsAt: LessThan(ahora) },
       { status: SubscriptionStatus.CANCELLED, accessEndsAt: null },
-    )
-    if (!cerrada.affected) {
-      await restorePlanIfStillEntitled(sub, ahora, deps)
-      continue
-    }
-
-    await deps.subscriptionEventRepo.save(
-      deps.subscriptionEventRepo.create({
+      {
         subscriptionId: sub.id,
         eventType: SubscriptionEventType.EXPIRED,
         fromStatus: sub.status,
@@ -170,12 +234,17 @@ export async function expireCancelledSubscriptions(
         reason: `Fin del acceso pagado tras la baja — degradado a ${freePlanSlug()}`,
         metadata: {
           event: 'subscription.access_ended',
-          accessEndsAt: finDeAcceso ? finDeAcceso.toISOString() : null,
+          accessEndsAt: finDeAcceso ? new Date(finDeAcceso).toISOString() : null,
           brandId: sub.brandId,
           planSlug: sub.planSlug,
         },
-      }),
+      },
     )
+    if (!cerrada) {
+      await restorePlanIfStillEntitled(sub, ahora, deps)
+      return 'skipped'
+    }
+    await release()
 
     deps.eventBus.publishSubscriptionExpired({
       brandId: sub.brandId,
@@ -189,19 +258,8 @@ export async function expireCancelledSubscriptions(
       'info',
       `[CRON] Acceso pagado terminado, marca en ${freePlanSlug()}: brandId=${sub.brandId}`,
     )
-    cerradas++
-  }
-
-  if (cerradas > 0) {
-    logger.log('info', `[CRON] expireCancelledSubscriptions: ${cerradas} suscripciones cerradas`)
-  }
-
-  if (rechazadas > 0) {
-    logger.log(
-      'error',
-      `[CRON] expireCancelledSubscriptions: ${rechazadas} sin cerrar, backend-roles rechazó la degradación`,
-    )
-  }
+    return 'closed'
+  })
 }
 
 /**
@@ -260,33 +318,35 @@ export async function sendExpirationWarnings(deps: SubscriptionExpirationDeps): 
 }
 
 /**
- * Ends an expired wallet trial that has no payment method by downgrading the brand to `free` first.
+ * Ends an expired trial without payment by downgrading the brand to `free` first. Runs under the
+ * row's lock `release`, whose transaction takes the compare-and-set and its event, and commits it.
  */
 export async function endTrialWithoutPayment(
   sub: Subscription,
   deps: SubscriptionExpirationDeps,
-): Promise<boolean> {
-  if (!(await degradeInRoles(sub, deps))) return false
+  release: SubscriptionLockRelease,
+): Promise<CloseOutcome> {
+  if (!(await degradeInRoles(sub, deps))) return 'rejected'
 
-  const terminado = await deps.subscriptionRepo.update(
+  const terminado = await closeRow(
+    release,
+    deps,
     { id: sub.id, status: SubscriptionStatus.TRIAL },
     { status: SubscriptionStatus.EXPIRED, autoRenew: false },
-  )
-  if (!terminado.affected) {
-    logger.log('info', `[CRON] Trial ${sub.id} ya no estaba en trial: no se degrada dos veces`)
-    return false
-  }
-
-  await deps.subscriptionEventRepo.save(
-    deps.subscriptionEventRepo.create({
+    {
       subscriptionId: sub.id,
       eventType: SubscriptionEventType.TRIAL_ENDED,
       fromStatus: SubscriptionStatus.TRIAL,
       toStatus: SubscriptionStatus.EXPIRED,
       triggeredBy: 'system',
       reason: `Trial vencido sin método de pago — degradado a ${freePlanSlug()}`,
-    }),
+    },
   )
+  if (!terminado) {
+    logger.log('info', `[CRON] Trial ${sub.id} ya no estaba en trial: no se degrada dos veces`)
+    return 'skipped'
+  }
+  await release()
 
   deps.eventBus.publishSubscriptionExpired({
     brandId: sub.brandId,
@@ -296,7 +356,7 @@ export async function endTrialWithoutPayment(
   await deps.eventBus.notifySubscriptionExpired(sub.brandId, sub.planSlug)
 
   logger.log('info', `[CRON] Trial degradado a ${freePlanSlug()}: brandId=${sub.brandId}`)
-  return true
+  return 'closed'
 }
 
 async function degradeInRoles(
