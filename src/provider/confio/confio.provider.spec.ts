@@ -1,3 +1,4 @@
+// R6: Mirrors confio.provider.ts, one adapter of one provider API; it splits with it.
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { AddressInfo } from 'net'
 import { ConfioProvider, ConfioSubscriptionInputError } from './confio.provider'
