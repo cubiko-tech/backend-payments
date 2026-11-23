@@ -138,6 +138,8 @@ async function endMarkedTrialsWithoutCharge(deps: SubscriptionExpirationDeps): P
       initialPaymentLinkIssuedAt: Not(IsNull()),
       nextBillingDate: LessThan(cutoff),
     },
+    order: { nextBillingDate: 'ASC' },
+    take: 200,
   })
 
   const { closed, rejected } = await closeEach(

@@ -29,6 +29,11 @@ const BRANDS = [
   'b7274001-2222-4333-8444-555555555553',
 ]
 const [BRAND_ID] = BRANDS
+const CAPPED_BRANDS = Array.from(
+  { length: 250 },
+  (_, index) => `b7274001-2222-4333-8444-${String(319000000000 + index)}`,
+)
+const SEEDED = new Set([...BRANDS, ...CAPPED_BRANDS])
 
 /** The subscription crons close each row at once, one replica at a time (PostgreSQL, LOC-274). */
 describe('Subscription crons close each row at once', () => {
@@ -51,11 +56,17 @@ describe('Subscription crons close each row at once', () => {
     jest
       .spyOn((instance.tasks as any).subscriptionRepo, 'find')
       .mockImplementation((async (options: unknown) =>
-        (await find(options as any)).filter((row) => BRANDS.includes(row.brandId))) as any)
+        (await find(options as any)).filter((row) => SEEDED.has(row.brandId))) as any)
   }
 
   const cleanAll = async () => {
     for (const brandId of BRANDS) await cleanBrand(a.dataSource, brandId)
+    await a.dataSource.query(
+      'DELETE FROM subscription_events WHERE "subscriptionId" IN ' +
+        '(SELECT id FROM subscriptions WHERE "brandId" = ANY($1))',
+      [CAPPED_BRANDS],
+    )
+    await a.dataSource.query('DELETE FROM subscriptions WHERE "brandId" = ANY($1)', [CAPPED_BRANDS])
   }
 
   beforeAll(async () => {
@@ -257,4 +268,65 @@ describe('Subscription crons close each row at once', () => {
     expect(first.findAllMappings).toHaveBeenCalledTimes(1)
     expect(second.findAllMappings).not.toHaveBeenCalled()
   })
+
+  /** A Confio trial whose signup issued its link and whose billing date passed `daysAgo` days ago. */
+  const seedMarkedTrial = (brandId: string, daysAgo = 2) => {
+    const billed = new Date(Date.now() - daysAgo * DAY_MS)
+    return seedSubscription(a.dataSource, brandId, {
+      status: SubscriptionStatus.TRIAL,
+      provider: SubscriptionProvider.CONFIO,
+      initialPaymentLinkIssuedAt: new Date(billed.getTime() - 14 * DAY_MS),
+      nextBillingDate: billed,
+    })
+  }
+
+  it('C7: the expiration on two replicas downgrades each row in roles once', async () => {
+    // Mutation: underRowLock drops Object.assign(sub, fresh): the second replica downgrades its stale
+    // rows in roles before losing the compare-and-set, and this case sees more than two calls.
+    await seedSubscription(a.dataSource, BRANDS[0], {
+      status: SubscriptionStatus.PAST_DUE,
+      retryCount: a.tasks.MAX_RETRY,
+    })
+    await seedMarkedTrial(BRANDS[1])
+    const inRoles = createGate()
+    removePlan.mockImplementationOnce(async () => {
+      inRoles.arrive()
+      await inRoles.wait
+      return true
+    })
+
+    const first = a.tasks.expireSubscriptions()
+    await inRoles.reached
+    const second = b.tasks.expireSubscriptions()
+    await rivalWaitsOrEnds(second, a.dataSource)
+    inRoles.release()
+    await Promise.all([first, second])
+
+    expect((await subscriptionOf(BRANDS[0])).status).toBe(SubscriptionStatus.EXPIRED)
+    expect((await subscriptionOf(BRANDS[1])).status).toBe(SubscriptionStatus.EXPIRED)
+    expect(await eventsOf(BRANDS[0], SubscriptionEventType.EXPIRED)).toBe(1)
+    expect(await eventsOf(BRANDS[1], SubscriptionEventType.TRIAL_ENDED)).toBe(1)
+    expect(removePlan).toHaveBeenCalledTimes(2)
+  })
+
+  it('C8: the marked trials end 200 per pass, the rest on the next', async () => {
+    // Mutation: endMarkedTrialsWithoutCharge drops take: 200: the first pass ends all 250 and this
+    // case goes red.
+    for (const brandId of CAPPED_BRANDS) await seedMarkedTrial(brandId, 30)
+    const ended = async () =>
+      Number(
+        (
+          await a.dataSource.query(
+            'SELECT count(*) AS n FROM subscriptions WHERE "brandId" = ANY($1) AND status = $2',
+            [CAPPED_BRANDS, SubscriptionStatus.EXPIRED],
+          )
+        )[0].n,
+      )
+
+    await a.tasks.expireSubscriptions()
+    expect(await ended()).toBe(200)
+
+    await a.tasks.expireSubscriptions()
+    expect(await ended()).toBe(250)
+  }, 120_000)
 })
