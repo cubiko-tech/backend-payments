@@ -39,6 +39,19 @@ const [BRAND_A, BRAND_B, BRAND_TOKENS] = [
 ]
 const BRANDS = [BRAND_A, BRAND_B, BRAND_TOKENS]
 const TOKENS_LABEL = 'loc311-tercera'
+// A literal `%` or `_` in its label, and a look-alike only a wildcard reading of it matches.
+const [BRAND_PERCENT, BRAND_PERCENT_LOOKALIKE, BRAND_UNDERSCORE, BRAND_UNDERSCORE_LOOKALIKE] = [
+  'c3220001-0000-4000-8000-000000000001',
+  'c3220002-0000-4000-8000-000000000002',
+  'c3220003-0000-4000-8000-000000000003',
+  'c3220004-0000-4000-8000-000000000004',
+]
+const WILDCARD_BRANDS = [
+  BRAND_PERCENT,
+  BRAND_PERCENT_LOOKALIKE,
+  BRAND_UNDERSCORE,
+  BRAND_UNDERSCORE_LOOKALIKE,
+]
 const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc311-jwt-secret', 'e2e-loc311-server-token']
 
 describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
@@ -57,7 +70,9 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
 
   const clean = async () => {
     if (!dataSource?.isInitialized) return
-    await dataSource.query(`DELETE FROM wallets WHERE "brandId" = ANY($1)`, [BRANDS])
+    await dataSource.query(`DELETE FROM wallets WHERE "brandId" = ANY($1)`, [
+      [...BRANDS, ...WILDCARD_BRANDS],
+    ])
   }
 
   beforeAll(async () => {
@@ -111,6 +126,10 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
       [BRAND_A, 'COP', 'loc311-a'],
       [BRAND_B, 'COP', 'loc311-b'],
       [BRAND_TOKENS, 'TKN', TOKENS_LABEL],
+      [BRAND_PERCENT, 'COP', 'loc322 50% off'],
+      [BRAND_PERCENT_LOOKALIKE, 'COP', 'loc322 50 off'],
+      [BRAND_UNDERSCORE, 'COP', 'loc322 x_y'],
+      [BRAND_UNDERSCORE_LOOKALIKE, 'COP', 'loc322 xzy'],
     ]
     for (const [brandId, currency, label] of rows)
       await wallets.save(
@@ -148,6 +167,19 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
     expect(res.status).toBe(HttpStatus.OK)
     expect(res.body.count).toBe(2)
     expect(brandsOf(res.body)).toEqual([BRAND_A, BRAND_TOKENS])
+  })
+
+  it.each([
+    ['%', '50%', BRAND_PERCENT],
+    ['_', 'x_y', BRAND_UNDERSCORE],
+  ])('reads %s in the search as a literal next to two resolved brands', async (_c, search, hit) => {
+    // Mutation (%): drop `%` from the class in containsPattern, `50 off` joins.
+    // Mutation (_): drop `_` from the class in containsPattern, `xzy` joins.
+    const res = await get('wallets', { brandIds: `${BRAND_A},${BRAND_B}`, search, perPage: '100' })
+
+    expect(res.status).toBe(HttpStatus.OK)
+    const ours = brandsOf(res.body).filter((id) => [...BRANDS, ...WILDCARD_BRANDS].includes(id))
+    expect(ours).toEqual([BRAND_A, BRAND_B, hit].sort())
   })
 
   it.each(['wallets', 'subscriptions', 'payments'])(
