@@ -448,7 +448,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
 
-- **Dónde**: `src/webhook/webhook.service.ts:85`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+- **Dónde**: `src/webhook/webhook.service.ts:90`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
   (`buildConfioWebhookEventId`)
 - **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -459,7 +459,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:194-196` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:681-687` (`planearCambioDeEstado`) y
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:682-688` (`planearCambioDeEstado`) y
   `:465-474` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
