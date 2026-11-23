@@ -519,6 +519,7 @@ export class SubscriptionService {
         data: saved,
         acceptanceUrl: confioSub.acceptanceUrl,
         acceptanceExpireTime: confioSub.acceptanceExpireTime,
+        currency: confioSub.currency,
       }
     } catch (error) {
       // Marca nueva: no hay fila que lockear, así que la carrera la serializa el índice
@@ -737,6 +738,7 @@ export class SubscriptionService {
         data: saved,
         acceptanceUrl: confioSub.acceptanceUrl,
         acceptanceExpireTime: confioSub.acceptanceExpireTime,
+        currency: confioSub.currency,
       }
     } catch (error) {
       // Marca sin fila previa: la carrera la serializa el índice único por `brandId`, y el

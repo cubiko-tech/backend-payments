@@ -200,7 +200,7 @@ describe('ConfioTrialService', () => {
       expect(clientRoles.resolvePriceForCountry).toHaveBeenCalledWith(PLAN, 'CO')
       // La moneda sale de la FILA de precio, no del llamador ni del país.
       expect(confioPlans.resolveConfioPlanName).toHaveBeenCalledWith(PLAN, 'COP', true)
-      expect(result).toBe(ALTA)
+      expect(result).toEqual({ ...ALTA, currency: 'COP' })
     })
 
     /**

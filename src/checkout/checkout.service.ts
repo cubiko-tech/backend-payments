@@ -10,6 +10,8 @@ import { DataSource, EntityManager, In, Raw, Repository } from 'typeorm'
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
+import { invalidBuyerException } from '../subscription/invalid-buyer-exception'
+import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { AuditService } from '../audit/audit.service'
 import { TaxService } from '../tax/tax.service'
 import { resolveRechargeTax, validateRechargeTax } from '../tax/recharge-tax'
@@ -772,10 +774,13 @@ export class CheckoutService implements OnModuleInit {
       return result
     } catch (error) {
       this.logExternalCheckoutRejection(payment.id, req.provider, error)
+      const invalidBuyer = error instanceof ConfioSubscriptionInputError
       payment.status = PaymentStatus.FAILED
-      payment.failureReason = error.message
+      // The input error's message holds the buyer's contact; its code and field say enough.
+      payment.failureReason = invalidBuyer ? `${error.code} ${error.field}` : error.message
       await this.paymentRepo.save(payment)
 
+      if (invalidBuyer) throw invalidBuyerException(error.field)
       throw new RequestException({
         code: 'PROVIDER_ERROR',
         message: `Error con ${req.provider}: ${error.message}`,

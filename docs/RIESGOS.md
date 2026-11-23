@@ -52,9 +52,9 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Tres bordes del reintento con `Idempotency-Key` siguen sin salida (LOC-86)
 
 - **Dónde**: `src/checkout/checkout-idempotency.ts:199`, `:39` (`resolvePaymentStateOutcome`,
-  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:439`, `:759`
+  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:420`, `:731`
   (`retryFailedIdempotentPayment`, la llamada `provider.createCheckout` en `processExternalPayment`, con la
-  entrada pública `processCheckout` en `:226`); `src/provider/dropi/dropi.provider.ts:79`
+  entrada pública `processCheckout` en `:206`); `src/provider/dropi/dropi.provider.ts:79`
 - **Qué lo dispara**: un reintento con la misma llave sobre (a) un `completed` sin
   `metadata.checkoutResult` (falló después del cierre o lo completó un webhook); (b) un externo `failed`
   sin `providerPaymentId`; (c) una fila que la ruta retirada `POST /payment/checkout` (`c77a594`, LOC-93)

@@ -15,12 +15,10 @@ import { ConfioSubscriptionInputError } from './confio-subscription-error'
  *
  * Reglas, todas verificables y sin ningún relleno silencioso:
  *
- * - **Teléfono**: E.164 estricto tal cual, o compuesto con el `callingCode` del
- *   usuario. **Nunca se inventa un país por defecto**: sin `callingCode` un
- *   número local se RECHAZA. Queda PROHIBIDO el fallback de
- *   `ConfioProvider.normalizeColombianPhone` al `+573215786325` de la
- *   documentación: en un link one-shot es cosmético, pegado a un cobro que se
- *   repite todos los meses es un contacto falso permanente.
+ * - **Phone**: strict `E.164` as is, or composed with the user's `callingCode`. **A country is
+ *   never assumed**: without a `callingCode` a local number is REJECTED. Unlike
+ *   `ConfioProvider.normalizeColombianPhone`, used only by one-shot links, nothing here assumes
+ *   Colombia.
  * - **Nombre**: la primera palabra es `firstName` y el resto, unido por
  *   espacios, es `lastName`. **Con una sola palabra se REPLICA en `lastName`**:
  *   Confío sólo exige 3–64 caracteres, no un apellido real, y rechazar dejaría

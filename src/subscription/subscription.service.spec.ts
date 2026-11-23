@@ -485,6 +485,23 @@ describe('SubscriptionService', () => {
     const alta = (extra: Record<string, any> = {}) =>
       service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax', ...extra })
 
+    it.each(['startTrial', 'startPaid'] as const)(
+      '%s answers with the currency the signup charges in',
+      async (method) => {
+        // Mutation: `currency: undefined` in the trial (startTrial row) or the paid (startPaid row)
+        // response of subscription.service.ts -> that row turns red.
+        confioTrial.createForTrial.mockResolvedValueOnce({ ...ALTA_CONFIO, currency: 'USD' })
+
+        const result = await service[method]({
+          brandId: 'brand-1',
+          userId: 'user-1',
+          planSlug: 'dropi-roax',
+        })
+
+        expect(result.currency).toBe('USD')
+      },
+    )
+
     it('devuelve el link de aceptación y guarda el `name`, nunca el link', async () => {
       const result = await alta()
 

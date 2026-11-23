@@ -28,6 +28,7 @@ import {
   ConfioSubscriptionResult,
 } from '../provider/confio/confio.types'
 import { RequestException } from '../shared/exception/request.exception'
+import { invalidBuyerException } from './invalid-buyer-exception'
 
 /**
  * Preparación del alta de una suscripción de trial contra ConfioPagos.
@@ -157,7 +158,7 @@ export class ConfioTrialService {
      * llega a la red.
      */
     telefonoDeCobro?: string
-  }): Promise<ConfioSubscriptionResult> {
+  }): Promise<ConfioSubscriptionResult & { currency: string }> {
     const { brandId, userId, planSlug, correlationId, reemplazaA, conPrueba, telefonoDeCobro } =
       input
 
@@ -210,7 +211,7 @@ export class ConfioTrialService {
       this.logger.log(`Suscripción anterior cancelada en ConfioPagos antes del alta de ${brandId}`)
     }
 
-    return this.callConfio(() => {
+    const created = await this.callConfio(() => {
       // `buildConfioBuyer` rechaza con `ConfioSubscriptionInputError` ANTES de
       // tocar la red; por eso va DENTRO del mismo envoltorio que la llamada.
       // El teléfono elegido REEMPLAZA al de la cuenta, y sólo ese campo: el email
@@ -230,6 +231,7 @@ export class ConfioTrialService {
       if (redirectUri !== undefined) params.redirectUri = redirectUri
       return this.confio.createSubscription(params)
     })
+    return { ...created, currency }
   }
 
   /**
@@ -334,14 +336,7 @@ export class ConfioTrialService {
       case 'invalid_buyer':
       case 'missing_buyer_or_plan':
       default:
-        return new RequestException(
-          {
-            code: 'INVALID_BUYER',
-            message: 'Los datos del comprador no cumplen lo que exige ConfioPagos',
-            field: error.field,
-          },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
+        return invalidBuyerException(error.field)
     }
   }
 

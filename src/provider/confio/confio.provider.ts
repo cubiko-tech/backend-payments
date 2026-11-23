@@ -599,18 +599,18 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * ConfioPagos exige un comprador con email y teléfono E.164 (+57…).
-   * Toma los datos de `metadata.buyer` si vienen; si no, usa fallbacks
-   * configurables (para cobros emitidos por el cron sin contexto de usuario).
+   * ConfioPagos requires a buyer with an email and an E.164 phone, taken from `metadata.buyer`.
+   * Without a usable one `assertConfioBuyer` rejects with `invalid_buyer` before the request
+   * leaves, as a subscription does: no contact is ever made up.
    */
   private resolveBuyer(params: CreateCheckoutParams) {
     const b = params.metadata?.buyer || {}
-    return {
+    return assertConfioBuyer({
       firstName: b.firstName || 'Cliente',
       lastName: b.lastName || 'Cubiko',
-      email: b.email || process.env.CONFIO_FALLBACK_EMAIL || 'pagos@cubiko.co',
+      email: b.email,
       phoneNumber: ConfioProvider.normalizeColombianPhone(b.phoneNumber),
-    }
+    })
   }
 
   /** Metadata de ConfioPagos debe ser map<string,string>. */
@@ -626,24 +626,19 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Normaliza un teléfono colombiano a E.164 (+57XXXXXXXXXX). Fallback al
-   * ejemplo de la documentación de ConfioPagos cuando falta o es inválido.
+   * Turns a Colombian phone into E.164 (+57XXXXXXXXXX). Anything else comes back trimmed and
+   * unchanged so `assertConfioBuyer` judges it: a missing or invalid phone is rejected.
    *
-   * ⚠️ **PROHIBIDO en el camino de suscripción.** Sólo lo usa `resolveBuyer`,
-   * para los links de pago one-shot, donde un teléfono de contacto equivocado es
-   * cosmético y el cobro es uno solo. Pegado a un cobro RECURRENTE, ese
-   * `+573215786325` de la documentación es un contacto falso que se repite todos
-   * los meses, y además rompe al comprador de un plan en USD. El comprador de
-   * una suscripción se arma con `confio-buyer.ts`, que nunca inventa un país.
+   * Not for subscriptions: only `resolveBuyer` uses it, for one-shot payment links, because it
+   * assumes Colombia for a local number; `confio-buyer.ts` builds the subscription buyer.
    */
   static normalizeColombianPhone(raw?: string): string {
-    const fallback = '+573215786325' // de la documentación de ConfioPagos
-    let phone = (raw || '').trim()
-    if (!phone) return fallback
+    const original = (raw || '').trim()
+    let phone = original
     if (phone.startsWith('+57') && phone.length >= 12) return phone
     phone = phone.replace(/^\+/, '')
     if (phone.length === 10 && phone[0] === '3') return '+57' + phone
     if (phone.length === 12 && phone.startsWith('57')) return '+' + phone
-    return fallback
+    return original
   }
 }
