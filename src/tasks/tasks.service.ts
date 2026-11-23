@@ -6,6 +6,7 @@ import { DataSource, LessThan, Repository } from 'typeorm'
 import { AuditService } from '../audit/audit.service'
 import { checkoutExpiryHours } from '../checkout/checkout-expiry'
 import { CheckoutService } from '../checkout/checkout.service'
+import { ClientAuthService } from '../client/client-auth.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { Payment } from '../payment/entities/payment.entity'
@@ -95,6 +96,7 @@ export class TasksService implements TasksDeps {
     readonly clientRoles: ClientRolesService,
     readonly checkoutService: CheckoutService,
     readonly confioWebhook: ConfioSubscriptionWebhookService,
+    readonly clientAuth: ClientAuthService,
     @Optional() @Inject(APM_AGENT) readonly apm?: ApmAgent,
   ) {}
 

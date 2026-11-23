@@ -16,7 +16,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:129`, `:188` (`processSubscriptionRenewals`)
+- **Dónde**: `src/tasks/subscription-renewal.ts:134`, `:193` (`processSubscriptionRenewals`)
 - **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo.
 - **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet.
 - **Estado**: abierto — lo cierra corregir cada fila; el log de error con su id y el contador de la pasada
@@ -152,7 +152,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
 - **Dónde**: `src/tasks/wallet-renewal.ts:157` (`extendSubscriptionPeriod`);
-  `src/tasks/subscription-renewal.ts:144` (`handleRenewalFailure`)
+  `src/tasks/subscription-renewal.ts:149` (`handleRenewalFailure`)
 - **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`; la pasada
   horaria no mira el backoff.
 - **Qué rompe**: en unas tres horas se agotan los reintentos: avisos de pago fallido y la fila vencida.
@@ -269,8 +269,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
-- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:104`,
-  `:167` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:91`
+- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:109`,
+  `:172` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:91`
   (`expireSubscriptions`); `src/subscription/dto/create-subscription.dto.ts:78` (`nextBillingDate`)
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, de `POST /subscription` sin el campo o
   de una corrección a mano; entre ellas, las que ya pagaron antes de LOC-91 con llave `…:current`.
@@ -458,7 +458,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:194-196` (`retryFailedPayments` → `issueExternalCharge`); las
+- **Dónde**: `src/tasks/subscription-renewal.ts:199-201` (`retryFailedPayments` → `issueExternalCharge`); las
   entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:682-688` (`planearCambioDeEstado`) y
   `:465-474` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
@@ -467,6 +467,15 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
   Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
 - **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).
+
+## Un pagador de Confío sin contacto usable deja la fila en `past_due` sin cobrar ni vencer (LOC-318)
+
+- **Dónde**: `src/tasks/subscription-renewal.ts:276`, `:360` (`holdWithoutBuyer`);
+  `src/tasks/subscription-expiration.ts:43` (sólo vence con los reintentos agotados)
+- **Qué lo dispara**: auth no tiene un teléfono o email usable de quien paga, o no responde, en cada pasada.
+- **Qué rompe**: la renovación no emite link ni gasta un reintento, así que la fila nunca agota los reintentos
+  y nunca vence: el plan sigue sin cobrarse, con un evento `payment_failed` por pasada que dice por qué.
+- **Estado**: abierto — lo cierra decidir un tope para esa espera, o corregir el contacto en auth.
 
 ## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
 

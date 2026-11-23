@@ -150,6 +150,14 @@ export class ConfioTrialService {
     const contact = await this.clientAuth.resolveBuyerContact(userId)
     if (!contact.ok) throw this.buyerContactException(contact.code)
 
+    // Through the wrapper so an unusable buyer is the 422, and before the cancel so it keeps the old
+    // subscription; the charge phone replaces only the account phone.
+    const buyer = await this.callConfio(() =>
+      buildConfioBuyer(
+        telefonoDeCobro ? { ...contact.contact, phone: telefonoDeCobro } : contact.contact,
+      ),
+    )
+
     // R27: money risk. ConfioPagos allows several live subscriptions per buyer, so an uncancelled
     // previous one keeps charging with no row of ours. Cancel last, after every lookup that can fail;
     // a failed cancel aborts the signup with zero writes. `/cancel` is idempotent.
@@ -159,11 +167,6 @@ export class ConfioTrialService {
     }
 
     const created = await this.callConfio(() => {
-      // Inside the wrapper because `buildConfioBuyer` throws `ConfioSubscriptionInputError` before
-      // any network call; the charge phone replaces only the account phone.
-      const buyer = buildConfioBuyer(
-        telefonoDeCobro ? { ...contact.contact, phone: telefonoDeCobro } : contact.contact,
-      )
       const params: CreateConfioSubscriptionParams = { planName, buyer }
       // Set the KEY only when there is a value: the provider checks `!== undefined`, so an
       // undefined key would still travel as an empty field.

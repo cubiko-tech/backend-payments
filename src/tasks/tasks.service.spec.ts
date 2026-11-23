@@ -10,6 +10,7 @@ import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { logger } from '../shared/logger/logger'
+import { buyerContactLookup } from '../../test/support/subscription-renewal.double'
 
 const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -90,6 +91,7 @@ describe('TasksService — processTrialConversions', () => {
       clientRoles as any,
       checkoutService as any,
       confioWebhook as any,
+      buyerContactLookup() as any,
     )
   })
 
@@ -1342,6 +1344,7 @@ describe('TasksService — processTrialConversions', () => {
         clientRoles as any,
         checkoutService as any,
         confioWebhook as any,
+        buyerContactLookup() as any,
       )
     })
 
@@ -1873,6 +1876,7 @@ describe('TasksService — processTrialConversions', () => {
           realClientRoles,
           checkoutService as any,
           confioWebhook as any,
+          buyerContactLookup() as any,
         )
       })
 
@@ -2301,6 +2305,7 @@ describe('TasksService — processTrialConversions', () => {
         clientRoles as any,
         checkoutService as any,
         confioWebhook as any,
+        buyerContactLookup() as any,
       )
 
       return {

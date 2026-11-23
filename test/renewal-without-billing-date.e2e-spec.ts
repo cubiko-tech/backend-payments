@@ -3,6 +3,7 @@ import { config as dotenvConfig } from 'dotenv'
 import { DataSource, FindManyOptions, In, Repository } from 'typeorm'
 
 import { TasksService } from '../src/tasks/tasks.service'
+import { buyerContactLookup } from './support/subscription-renewal.double'
 import { Payment } from '../src/payment/entities/payment.entity'
 import { logger } from '../src/shared/logger/logger'
 import {
@@ -122,6 +123,7 @@ describe('Wallet renewal without nextBillingDate against a real database (e2e)',
       roles as any,
       { processCheckout: jest.fn(), completeExternalPayment: jest.fn() } as any,
       { confirmarContraElProveedor: jest.fn() } as any,
+      buyerContactLookup() as any,
     )
     return { service, roles, eventBus }
   }

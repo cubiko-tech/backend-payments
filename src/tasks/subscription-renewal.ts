@@ -1,7 +1,11 @@
 import { In, IsNull, LessThan } from 'typeorm'
 
+import { ClientAuthService } from '../client/client-auth.service'
 import { freePlanSlug } from '../client/plan-downgrade.util'
+import { buildConfioBuyer } from '../provider/confio/confio-buyer'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
+import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
+import { ConfioBuyer } from '../provider/confio/confio.types'
 import { ProviderFactory } from '../provider/provider.factory'
 import { logger } from '../shared/logger/logger'
 import {
@@ -21,6 +25,7 @@ import {
 
 export interface SubscriptionRenewalDeps extends WalletRenewalDeps {
   providerFactory: ProviderFactory
+  clientAuth: Pick<ClientAuthService, 'resolveBuyerContact'>
 }
 
 /**
@@ -265,6 +270,13 @@ async function issueExternalCharge(
   isRetry: boolean,
   deps: SubscriptionRenewalDeps,
 ): Promise<void> {
+  let buyer: ConfioBuyer | undefined
+  if (sub.provider === SubscriptionProvider.CONFIO) {
+    const resolved = await resolveRenewalBuyer(sub, deps)
+    if (!resolved.ok) return holdWithoutBuyer(sub, resolved.reason, deps)
+    buyer = resolved.buyer
+  }
+
   try {
     const result = await deps.checkoutService.processCheckout({
       brandId: sub.brandId,
@@ -273,6 +285,7 @@ async function issueExternalCharge(
       provider: sub.provider,
       planSlug: sub.planSlug,
       renewal: true,
+      ...(buyer ? { buyer } : {}),
     })
 
     const previousStatus = sub.status
@@ -314,6 +327,54 @@ async function issueExternalCharge(
     // No TRM is a gap on our side, not a failed charge: it must not use up a retry.
     await markLinkIssued(sub, isRetry && !isMissingExchangeRate(error), deps)
   }
+}
+
+type RenewalBuyer =
+  | { ok: true; buyer: ConfioBuyer; reason?: never }
+  | { ok: false; reason: string; buyer?: never }
+
+/**
+ * The payer's contact from auth, built as the signup builds it. The reason is a code and a field,
+ * never the contact itself: it is logged and stored on the cycle.
+ */
+async function resolveRenewalBuyer(
+  sub: Subscription,
+  deps: SubscriptionRenewalDeps,
+): Promise<RenewalBuyer> {
+  const contact = await deps.clientAuth.resolveBuyerContact(sub.userId)
+  if (!contact.ok) return { ok: false, reason: contact.code }
+  try {
+    return { ok: true, buyer: buildConfioBuyer(contact.contact) }
+  } catch (error) {
+    if (error instanceof ConfioSubscriptionInputError) {
+      return { ok: false, reason: `${error.code} ${error.field}` }
+    }
+    throw error
+  }
+}
+
+/**
+ * No usable buyer is not a failed charge: nothing goes to ConfioPagos and no retry is spent.
+ * The cycle moves to `past_due` with its reason, so the retry cron tries again after its backoff.
+ */
+async function holdWithoutBuyer(
+  sub: Subscription,
+  reason: string,
+  deps: SubscriptionRenewalDeps,
+): Promise<void> {
+  logger.log('error', `[CRON] ${sub.provider} charge for ${sub.id} not issued: buyer ${reason}`)
+  const previousStatus = sub.status
+  await markLinkIssued(sub, false, deps)
+  await deps.subscriptionEventRepo.save(
+    deps.subscriptionEventRepo.create({
+      subscriptionId: sub.id,
+      eventType: SubscriptionEventType.PAYMENT_FAILED,
+      fromStatus: previousStatus,
+      toStatus: SubscriptionStatus.PAST_DUE,
+      triggeredBy: 'system',
+      reason: `Cobro ${sub.provider} sin emitir: comprador sin contacto usable (${reason})`,
+    }),
+  )
 }
 
 /** Moves the cycle to `past_due`, counting a retry if asked, writing only those two columns. */

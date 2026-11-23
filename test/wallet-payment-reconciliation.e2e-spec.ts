@@ -5,6 +5,7 @@ import { DataSource, Repository } from 'typeorm'
 import { AuditService } from '../src/audit/audit.service'
 import { BillingProfile } from '../src/billing-profile/entities/billingProfile.entity'
 import { CheckoutService } from '../src/checkout/checkout.service'
+import { ClientAuthService } from '../src/client/client-auth.service'
 import { ClientPlatformService } from '../src/client/client-platform.service'
 import { ClientRolesService } from '../src/client/client-roles.service'
 import { DianService } from '../src/dian/dian.service'
@@ -32,6 +33,7 @@ import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscrip
 import { WebhookEvent } from '../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../src/webhook/webhook.service'
 import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
+import { buyerContactLookup } from './support/subscription-renewal.double'
 
 const BRAND_ID = 'f8787878-2222-4333-8444-555555555555'
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
@@ -214,6 +216,7 @@ describe('Wallet payment reconciliation & expiration e2e (PostgreSQL, LOC-87)', 
           resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
           getBrandCountry: jest.fn().mockResolvedValue('CO'),
         }),
+        provideVal(ClientAuthService, buyerContactLookup()),
         provideVal(ClientRolesService, {
           getPlanPrice: jest.fn().mockResolvedValue(19900),
           resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: DEFAULT_PRICE }),
