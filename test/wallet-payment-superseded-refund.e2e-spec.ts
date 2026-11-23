@@ -1,3 +1,4 @@
+// R6: one end-to-end scenario whose bulk is the full Nest wiring of checkout, tasks and webhooks.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { DataSource, Repository } from 'typeorm'

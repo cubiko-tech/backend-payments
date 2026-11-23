@@ -2,9 +2,7 @@ import { In, IsNull, LessThan } from 'typeorm'
 
 import { ClientAuthService } from '../client/client-auth.service'
 import { freePlanSlug } from '../client/plan-downgrade.util'
-import { buildConfioBuyer } from '../provider/confio/confio-buyer'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
-import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { ConfioBuyer } from '../provider/confio/confio.types'
 import { ProviderFactory } from '../provider/provider.factory'
 import { logger } from '../shared/logger/logger'
@@ -14,6 +12,7 @@ import {
   SubscriptionStatus,
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import { resolveRenewalBuyer } from './renewal-buyer'
 import { recordRefusedDowngrades } from './subscription-close'
 import { endTrialWithoutPayment } from './subscription-expiration'
 import { lockAndReread } from './subscription-lock'
@@ -272,7 +271,7 @@ async function issueExternalCharge(
 ): Promise<void> {
   let buyer: ConfioBuyer | undefined
   if (sub.provider === SubscriptionProvider.CONFIO) {
-    const resolved = await resolveRenewalBuyer(sub, deps)
+    const resolved = await resolveRenewalBuyer(sub.userId, deps.clientAuth)
     if (!resolved.ok) return holdWithoutBuyer(sub, resolved.reason, deps)
     buyer = resolved.buyer
   }
@@ -326,30 +325,6 @@ async function issueExternalCharge(
     logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
     // No TRM is a gap on our side, not a failed charge: it must not use up a retry.
     await markLinkIssued(sub, isRetry && !isMissingExchangeRate(error), deps)
-  }
-}
-
-type RenewalBuyer =
-  | { ok: true; buyer: ConfioBuyer; reason?: never }
-  | { ok: false; reason: string; buyer?: never }
-
-/**
- * The payer's contact from auth, built as the signup builds it. The reason is a code and a field,
- * never the contact itself: it is logged and stored on the cycle.
- */
-async function resolveRenewalBuyer(
-  sub: Subscription,
-  deps: SubscriptionRenewalDeps,
-): Promise<RenewalBuyer> {
-  const contact = await deps.clientAuth.resolveBuyerContact(sub.userId)
-  if (!contact.ok) return { ok: false, reason: contact.code }
-  try {
-    return { ok: true, buyer: buildConfioBuyer(contact.contact) }
-  } catch (error) {
-    if (error instanceof ConfioSubscriptionInputError) {
-      return { ok: false, reason: `${error.code} ${error.field}` }
-    }
-    throw error
   }
 }
 
