@@ -221,18 +221,17 @@ export async function processDropiBatchCharges(deps: SubscriptionRenewalDeps): P
 
   try {
     const dropiProvider = deps.providerFactory.getDropiProvider()
-    const allPrices = await deps.clientRoles.getAllPlanPrices()
-
-    const charges = dropiSubscriptions
-      .map((sub) => ({
+    const priced = await Promise.all(
+      dropiSubscriptions.map(async (sub) => ({
         userId: sub.userId,
         brandId: sub.brandId,
-        amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
+        amount: (await deps.clientRoles.getPlanPrice(sub.planSlug, 'COP')) || 0,
         currency: 'COP',
         description: `Suscripción plan ${sub.planSlug}`,
         referenceId: sub.id,
-      }))
-      .filter((c) => c.amount > 0)
+      })),
+    )
+    const charges = priced.filter((c) => c.amount > 0)
 
     if (charges.length > 0) {
       await dropiProvider.batchCharge(charges)

@@ -18,6 +18,8 @@ export interface PlanPriceRow {
   countryCode: string
   currency: string
   price: number
+  /** `price` in integer cents, parsed from the decimal string; NaN when the row has no valid amount. */
+  priceCents: number
   isDefault: boolean
 }
 
@@ -42,9 +44,46 @@ export const FALLBACK_CURRENCY = 'USD'
  * por país y la caída de moneda del alta— y la definición de «la fila en
  * dólares» tiene que ser una sola.
  */
-const findUsdRow = (rows: PlanPriceRow[]): PlanPriceRow | undefined => {
+const findUsdRow = (
+  rows: PlanPriceRow[],
+  warn: (message: string) => void,
+): PlanPriceRow | undefined => {
   const usd = rows.filter((row) => String(row.currency || '').toUpperCase() === FALLBACK_CURRENCY)
-  return usd.find((row) => row.isDefault) ?? usd[0]
+  return pickPriceRow(usd, warn)
+}
+
+/** Orders ids ascending: numerically when both are digit strings, as plain strings otherwise. */
+const compareIds = (a: string, b: string): number => {
+  if (/^\d+$/.test(a) && /^\d+$/.test(b) && a.length !== b.length) return a.length - b.length
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/**
+ * The row that prices a set of candidates: the `isDefault` one, and the lowest `id` among several
+ * defaults or among none, so the winner never depends on the order backend-roles returns them in.
+ * Two defaults for the same country break the `isDefault` contract and are reported through `warn`.
+ */
+export const pickPriceRow = (
+  rows: readonly PlanPriceRow[],
+  warn: (message: string) => void,
+): PlanPriceRow | undefined => {
+  const defaults = rows.filter((row) => row.isDefault)
+  const countries = new Set(defaults.map((row) => row.countryCode))
+  if (countries.size < defaults.length) {
+    warn(
+      `More than one isDefault price row for one country: ${defaults.map((row) => row.id).join(', ')}`,
+    )
+  }
+  return [...(defaults.length ? defaults : rows)].sort((a, b) => compareIds(a.id, b.id))[0]
+}
+
+/** Integer cents of a decimal amount without going through a float; NaN when it is not one. */
+const decimalToCents = (value: unknown): number => {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value * 100) : NaN
+  const match = /^\s*(-?)(\d+)(?:\.(\d{1,2}))?\s*$/.exec(typeof value === 'string' ? value : '')
+  if (!match) return NaN
+  const cents = Number(match[2]) * 100 + Number((match[3] ?? '').padEnd(2, '0'))
+  return match[1] ? -cents : cents
 }
 
 export type PriceResolutionErrorCode = typeof PLAN_NOT_FOUND | typeof PRICE_NOT_FOUND_FOR_COUNTRY
@@ -75,9 +114,17 @@ function tokensPerCycleOf(value: unknown): number {
   return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 0
 }
 
+/**
+ * Contract with backend-roles on `isDefault`: within one plan, at most one row per country is
+ * `isDefault`, and it is the price of that country when it has several rows. backend-roles does not
+ * enforce it (`plan_prices` has no unique constraint), so this client treats it as a promise it checks:
+ * `isDefault` counts only when it is `true` or `'true'`, a second default is logged, and every tie
+ * falls to the lowest `id`.
+ */
 @Injectable()
 export class ClientRolesService {
   private readonly logger = new Logger(ClientRolesService.name)
+  private readonly warn = (message: string) => this.logger.warn(message)
 
   private get rolesUrl(): string {
     return process.env.SERVICE_ROLES || ''
@@ -89,56 +136,39 @@ export class ClientRolesService {
 
   // Caché en memoria: TTL 5 minutos
   private cache: PlanPricesCache | null = null
+  private inflightRefresh: Promise<PlanPricesCache> | null = null
   private readonly CACHE_TTL_MS = 5 * 60 * 1000
 
   /**
-   * Obtener precio de un plan en una moneda específica.
-   * Retorna null si el plan o moneda no existen.
+   * Price of a plan in a currency, in the units the charge takes; null if the plan or the currency is
+   * missing. It is `getPlanPriceCents` divided at the edge where it is charged.
    */
   async getPlanPrice(planSlug: string, currency: string): Promise<number | null> {
-    const prices = await this.getAllPlanPrices()
-    const planPrices = prices.get(planSlug)
-    if (!planPrices) return null
-    const price = planPrices.get(currency)
-    return price !== undefined ? price : null
+    const cents = await this.getPlanPriceCents(planSlug, currency)
+    return cents === null ? null : cents / 100
+  }
+
+  /**
+   * Price of a plan in a currency, in integer cents; null if the plan or the currency is missing.
+   *
+   * Among the rows of that currency the winner is `pickPriceRow`'s, whatever their order. A `free`
+   * plan with no rows prices 0 in COP and USD: the zero is made up here, never stored in the cache.
+   */
+  async getPlanPriceCents(planSlug: string, currency: string): Promise<number | null> {
+    const rows = (await this.getPlanRows()).get(planSlug)
+    if (!rows) return null
+    if (rows.length === 0 && planSlug === 'free') {
+      return currency === 'COP' || currency === FALLBACK_CURRENCY ? 0 : null
+    }
+    const row = pickPriceRow(
+      rows.filter((candidate) => candidate.currency === currency),
+      this.warn,
+    )
+    return row && Number.isSafeInteger(row.priceCents) ? row.priceCents : null
   }
 
   hasCachedPrices(): boolean {
     return this.cache !== null
-  }
-
-  /**
-   * Obtener todos los precios de planes como mapa: planSlug → currency → price.
-   * Derivado de las filas cacheadas.
-   *
-   * La dimensión país se colapsa: si dos filas comparten moneda (p. ej. COP
-   * para CO y para EC) gana la última del array, exactamente como antes. Se
-   * preserva a propósito porque `checkout.service.ts:490`,
-   * `tasks.service.ts:435,537` y `metrics.service.ts:44` están fuera de alcance
-   * y consumen esta forma. La respuesta correcta por país es
-   * `resolvePriceForCountry`.
-   */
-  async getAllPlanPrices(): Promise<Map<string, Map<string, number>>> {
-    const rowsByPlan = await this.getPlanRows()
-    const pricesMap = new Map<string, Map<string, number>>()
-
-    for (const [planSlug, rows] of rowsByPlan) {
-      const currencyMap = new Map<string, number>()
-      for (const row of rows) {
-        currencyMap.set(row.currency, row.price)
-      }
-
-      // Plan free sin precios configurados → precio 0 (solo en esta derivación:
-      // nunca se inventan filas en el caché).
-      if (currencyMap.size === 0 && planSlug === 'free') {
-        currencyMap.set('COP', 0)
-        currencyMap.set('USD', 0)
-      }
-
-      pricesMap.set(planSlug, currencyMap)
-    }
-
-    return pricesMap
   }
 
   /**
@@ -152,12 +182,9 @@ export class ClientRolesService {
    *
    * Dos decisiones de borde deliberadas:
    * - un `countryCode` vacío o en blanco va directo a la fila en dólares;
-   * - un plan SIN filas de precio responde `PRICE_NOT_FOUND_FOR_COUNTRY` en vez del
-   *   cero fabricado que sí produce `getAllPlanPrices`, para que el alta no persista
-   *   un precio inventado. Medido en dev el 2026-08-25 con `GET /v1/plan`: los
-   *   planes sin filas son `ally_dropi_pro` y `ally_dropi_free`; **`free` SÍ tiene
-   *   filas reales de 0.00** (CO/COP `isDefault` y US/USD), así que resuelve normal
-   *   y cobra 0 — no lo alcanza esta rama.
+   * - a plan WITHOUT price rows answers `PRICE_NOT_FOUND_FOR_COUNTRY` instead of the
+   *   zero `getPlanPriceCents` makes up, so a signup never stores an invented price. A
+   *   `free` plan with real 0.00 rows resolves them and charges 0; this branch is not it.
    *
    * La fila se devuelve por referencia desde el caché, pero viene CONGELADA
    * (`Object.freeze` al construir el caché): la invariante "no la mutes" está
@@ -172,7 +199,7 @@ export class ClientRolesService {
 
     if (wanted) {
       const matches = rows.filter((row) => row.countryCode.toUpperCase() === wanted)
-      const winner = matches.find((row) => row.isDefault) ?? matches[0]
+      const winner = pickPriceRow(matches, this.warn)
       if (winner) return { ok: true, price: winner }
     }
 
@@ -182,7 +209,7 @@ export class ClientRolesService {
     // mexicana sin que nadie se entere. Dólares es la moneda de quien no tiene precio
     // propio, así que caer ahí no inventa un precio: usa el que el catálogo declara
     // para ese caso. Sin fila en dólares tampoco, se rechaza como antes.
-    const usd = findUsdRow(rows)
+    const usd = findUsdRow(rows, this.warn)
     if (usd) return { ok: true, price: usd }
 
     return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY }
@@ -240,10 +267,19 @@ export class ClientRolesService {
     return catalog.tokensPerCycle.get(planSlug) ?? 0
   }
 
-  private async refreshCatalog(): Promise<PlanPricesCache> {
-    const fresh = await this.fetchCatalogFromRoles()
-    this.cache = { ...fresh, fetchedAt: Date.now() }
-    return this.cache
+  /** Callers that find the cache expired at the same time share one call to backend-roles. */
+  private refreshCatalog(): Promise<PlanPricesCache> {
+    if (!this.inflightRefresh) {
+      this.inflightRefresh = this.fetchCatalogFromRoles()
+        .then((fresh) => {
+          this.cache = { ...fresh, fetchedAt: Date.now() }
+          return this.cache
+        })
+        .finally(() => {
+          this.inflightRefresh = null
+        })
+    }
+    return this.inflightRefresh
   }
 
   /**
@@ -278,17 +314,22 @@ export class ClientRolesService {
 
       if (Array.isArray(plan.prices)) {
         for (const price of plan.prices) {
+          // `price` arrives as a string because `plan_prices.price` is decimal in backend-roles.
+          const priceCents = decimalToCents(price.price)
+
           // Congelada: la fila se entrega por referencia desde el caché y una
           // mutación de un consumidor corrompería el precio para todos hasta que
           // expire el TTL.
           rows.push(
             Object.freeze({
               id: String(price.id),
-              countryCode: String(price.countryCode ?? ''),
-              // `price` arrives as a string because `plan_prices.price` is decimal in backend-roles.
+              countryCode: String(price.countryCode ?? '')
+                .trim()
+                .toUpperCase(),
               currency: String(price.currency),
-              price: Number(price.price),
-              isDefault: !!price.isDefault,
+              price: priceCents / 100,
+              priceCents,
+              isDefault: price.isDefault === true || price.isDefault === 'true',
             }),
           )
         }

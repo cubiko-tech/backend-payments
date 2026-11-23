@@ -73,7 +73,7 @@ describe('ClientRolesService', () => {
     jest.restoreAllMocks()
   })
 
-  describe('compatibilidad de getPlanPrice / getAllPlanPrices', () => {
+  describe('compatibilidad de getPlanPrice', () => {
     it('devuelve el número del precio aunque el API lo mande como string decimal, y consulta /v1/plan con Bearer', async () => {
       const fetchMock = mockPlans([dropiRoaxPlan()])
       global.fetch = fetchMock as unknown as typeof fetch
@@ -97,16 +97,6 @@ describe('ClientRolesService', () => {
       await expect(service.getPlanPrice('inexistente', 'COP')).resolves.toBeNull()
     })
 
-    it('getAllPlanPrices sigue devolviendo Map<planSlug, Map<currency, price>>', async () => {
-      global.fetch = mockPlans([dropiRoaxPlan()]) as unknown as typeof fetch
-
-      const all = await service.getAllPlanPrices()
-      expect(all).toBeInstanceOf(Map)
-      expect(all.get('dropi-roax')).toBeInstanceOf(Map)
-      expect(all.get('dropi-roax').get('COP')).toBe(19900)
-      expect(all.get('dropi-roax').get('USD')).toBe(6.99)
-    })
-
     it('mantiene el caso especial de free sin precios: 0 en COP y USD', async () => {
       global.fetch = mockPlans([{ slug: 'free', prices: [] }]) as unknown as typeof fetch
 
@@ -126,6 +116,7 @@ describe('ClientRolesService', () => {
         countryCode: 'US',
         currency: 'USD',
         price: 6.99,
+        priceCents: 699,
         isDefault: false,
       })
     })
@@ -345,8 +336,7 @@ describe('ClientRolesService', () => {
         .fn()
         .mockRejectedValue(new Error('ECONNREFUSED')) as unknown as typeof fetch
 
-      const all = await service.getAllPlanPrices()
-      expect(all.size).toBe(0)
+      await expect(service.getPlanPrice('dropi-roax', 'COP')).resolves.toBeNull()
 
       const result = await service.resolvePriceForCountry('dropi-roax', 'CO')
       expect(result.ok).toBe(false)

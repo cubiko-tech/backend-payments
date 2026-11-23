@@ -53,13 +53,14 @@ const filaUsd = (over: Partial<ConfioSubscriptionPlan> = {}) =>
 describe('ConfioPlanPriceCheckService', () => {
   let service: ConfioPlanPriceCheckService
   let planes: { findAllMappings: jest.Mock }
-  let clientRoles: { getPlanPrice: jest.Mock }
+  let clientRoles: { getPlanPriceCents: jest.Mock }
   let fetchSpy: jest.SpyInstance
 
   beforeEach(async () => {
     loggerLog.mockClear()
     planes = { findAllMappings: jest.fn().mockResolvedValue([]) }
-    clientRoles = { getPlanPrice: jest.fn().mockResolvedValue(null) }
+    // Stub: the backend-roles catalog; each case sets the price in cents it compares against.
+    clientRoles = { getPlanPriceCents: jest.fn().mockResolvedValue(null) }
 
     // Toda la salida hacia ConfioPagos del servicio pasa por `fetch`
     // (`confio.provider.ts:114`), así que espiarlo cubre cualquier alta,
@@ -85,44 +86,27 @@ describe('ConfioPlanPriceCheckService', () => {
   })
 
   /**
-   * MUTACIÓN 1 de R15, mitad «sin convertir»: con los montos sembrados de verdad
-   * —COP 19.900 → 1990000 y USD 6,99 → 699— comparar el precio crudo contra
-   * `amountCents` marca las dos filas. La otra mitad, «truncar en vez de
-   * redondear», NO la mata este caso y va en el que sigue.
+   * With the amounts really seeded —COP 19,900 → 1990000 and USD 6.99 → 699— the catalog in
+   * cents matches `amountCents` and flags no row. The decimal-to-cents conversion is tested in
+   * `client-roles-price-resolution.spec.ts`.
    */
-  it('[R15] no reporta nada cuando el catálogo coincide, convirtiendo con REDONDEO', async () => {
+  it('[R15] reports nothing when the catalog matches in cents', async () => {
+    // Mutation: the check converts the cents again, `Math.round(esperadoCents * 100)` → both rows flagged → red.
     planes.findAllMappings.mockResolvedValue([row(), filaUsd()])
-    clientRoles.getPlanPrice.mockImplementation((_slug: string, moneda: string) =>
-      Promise.resolve(moneda === 'COP' ? 19900 : 6.99),
+    clientRoles.getPlanPriceCents.mockImplementation((_slug: string, moneda: string) =>
+      Promise.resolve(moneda === 'COP' ? 1990000 : 699),
     )
 
     await service.verificarPreciosContraElCatalogo()
 
     expect(errores()).toEqual([])
-    expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('dropi-roax', 'COP')
-    expect(clientRoles.getPlanPrice).toHaveBeenCalledWith('dropi-roax', 'USD')
-  })
-
-  /**
-   * [edge] El caso de arriba NO alcanza para la mitad «con redondeo» de la
-   * mutación 1: `Math.trunc(6.99 * 100)` da 699, igual que redondear, así que
-   * con 6,99 truncar se queda en verde. El precio que sí distingue las dos
-   * implementaciones es uno cuyo producto por 100 cae por debajo del entero en
-   * IEEE-754, como 19,99 → `1998.9999999999998`: truncar ahí da 1998 y reporta
-   * una divergencia que no existe.
-   */
-  it('[R15] convierte con redondeo un precio que truncado daría un centavo de menos', async () => {
-    planes.findAllMappings.mockResolvedValue([filaUsd({ amountCents: 1999 })])
-    clientRoles.getPlanPrice.mockResolvedValue(19.99)
-
-    await service.verificarPreciosContraElCatalogo()
-
-    expect(errores()).toEqual([])
+    expect(clientRoles.getPlanPriceCents).toHaveBeenCalledWith('dropi-roax', 'COP')
+    expect(clientRoles.getPlanPriceCents).toHaveBeenCalledWith('dropi-roax', 'USD')
   })
 
   it('reporta en nivel error la fila cuyo amountCents se separó del catálogo, nombrándola entera', async () => {
     planes.findAllMappings.mockResolvedValue([row()])
-    clientRoles.getPlanPrice.mockResolvedValue(24900)
+    clientRoles.getPlanPriceCents.mockResolvedValue(2490000)
 
     await service.verificarPreciosContraElCatalogo()
 
@@ -139,11 +123,10 @@ describe('ConfioPlanPriceCheckService', () => {
   })
 
   /**
-   * [agregado] La otra mitad de la mutación 3: filtrar de más. Producción tiene
-   * CUATRO filas —dos monedas × dos variantes `withTrial`— y las dos variantes de
-   * una moneda comparan contra el MISMO precio del catálogo, porque la prueba
-   * cambia de plan en ConfioPagos, no de monto (`getPlanPrice` está keyed por
-   * `(planSlug, currency)`, sin `withTrial`).
+   * [agregado] The other half of mutation 3: filtering too much. Production has FOUR rows —two
+   * currencies × two `withTrial` variants— and both variants of a currency compare against the SAME
+   * catalog price, because the trial changes the ConfioPagos plan, not the amount
+   * (`getPlanPriceCents` is keyed by `(planSlug, currency)`, without `withTrial`).
    *
    * Ningún otro caso siembra la variante `withTrial: false` COMPARABLE —activa y
    * con `confioName`—: la única que aparece está `archived`, donde el filtro la
@@ -164,13 +147,13 @@ describe('ConfioPlanPriceCheckService', () => {
         confioName: 'stores/01STORE/subscription-plans/01SINPRUEBA',
       }),
     ])
-    clientRoles.getPlanPrice.mockResolvedValue(24900)
+    clientRoles.getPlanPriceCents.mockResolvedValue(2490000)
 
     await service.verificarPreciosContraElCatalogo()
 
     // El precio se pide UNA vez por fila y con la misma clave: mismo catálogo para
     // las dos variantes. Si alguna vez se buscara un precio por variante, esto cambia.
-    expect(clientRoles.getPlanPrice.mock.calls).toEqual([
+    expect(clientRoles.getPlanPriceCents.mock.calls).toEqual([
       ['dropi-roax', 'COP'],
       ['dropi-roax', 'COP'],
     ])
@@ -194,7 +177,7 @@ describe('ConfioPlanPriceCheckService', () => {
    */
   it('[R15] no crea ni modifica nada en ConfioPagos: el chequeo no sale a la red', async () => {
     planes.findAllMappings.mockResolvedValue([row(), filaUsd()])
-    clientRoles.getPlanPrice.mockResolvedValue(24900)
+    clientRoles.getPlanPriceCents.mockResolvedValue(2490000)
 
     await service.verificarPreciosContraElCatalogo()
 
@@ -215,23 +198,23 @@ describe('ConfioPlanPriceCheckService', () => {
       row({ id: 'b', currencyCode: 'USD', status: 'active', confioName: null, amountCents: 699 }),
       row({ id: 'c', withTrial: false, status: 'archived' }),
     ])
-    clientRoles.getPlanPrice.mockResolvedValue(24900)
+    clientRoles.getPlanPriceCents.mockResolvedValue(2490000)
 
     await service.verificarPreciosContraElCatalogo()
 
     expect(errores()).toEqual([])
-    expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
+    expect(clientRoles.getPlanPriceCents).not.toHaveBeenCalled()
   })
 
   /**
-   * MUTACIÓN 4 de R15. `getPlanRows` degrada a caché vencido o a `Map` vacío
-   * cuando backend-roles falla, y `getPlanPrice` sobre ese vacío devuelve `null`.
-   * Leer ese `null` como «precio 0» marcaría las cuatro filas de golpe: un fallo
-   * del canal no es un hecho sobre el objeto.
+   * R15 MUTATION 4. `getPlanRows` falls back to a stale cache or an empty `Map` when
+   * backend-roles fails, and `getPlanPriceCents` over that empty map returns `null`. Reading
+   * that `null` as «price 0» would flag all four rows at once: a channel failure is not a fact
+   * about the object.
    */
   it('[R15] con backend-roles caído (catálogo vacío) no reporta ninguna divergencia', async () => {
     planes.findAllMappings.mockResolvedValue([row(), filaUsd()])
-    clientRoles.getPlanPrice.mockResolvedValue(null)
+    clientRoles.getPlanPriceCents.mockResolvedValue(null)
 
     await service.verificarPreciosContraElCatalogo()
 
@@ -239,17 +222,17 @@ describe('ConfioPlanPriceCheckService', () => {
   })
 
   /**
-   * [agregado] El `0` que `getAllPlanPrices` fabrica para `free` sin filas
-   * (`client-roles.service.ts:99`) tampoco es precio del catálogo. La fila de
-   * `free` no llega a preguntarse el precio.
+   * [agregado] The `0` that `getPlanPriceCents` makes up for a `free` plan without rows is not a
+   * catalog price either. The `free` row never gets to ask for its price.
    */
-  it('[agregado] omite el plan free, cuyo precio 0 lo fabrica getAllPlanPrices', async () => {
+  it('[agregado] skips the free plan, whose 0 price getPlanPriceCents makes up', async () => {
+    // Mutation: the skip filter drops `fila.planSlug === SLUG_CON_PRECIO_FABRICADO` → price asked → red.
     planes.findAllMappings.mockResolvedValue([row({ planSlug: 'free', amountCents: 1990000 })])
 
     await service.verificarPreciosContraElCatalogo()
 
     expect(errores()).toEqual([])
-    expect(clientRoles.getPlanPrice).not.toHaveBeenCalled()
+    expect(clientRoles.getPlanPriceCents).not.toHaveBeenCalled()
   })
 
   /**
@@ -273,7 +256,7 @@ describe('ConfioPlanPriceCheckService', () => {
       row(),
       row({ id: 'x', status: 'pending', confioName: null }),
     ])
-    clientRoles.getPlanPrice.mockResolvedValue(19900)
+    clientRoles.getPlanPriceCents.mockResolvedValue(1990000)
 
     await service.verificarPreciosContraElCatalogo()
 
@@ -304,7 +287,8 @@ describe('el chequeo está cableado al scheduler y al módulo', () => {
    */
   it('[R15] el scheduler registra el chequeo a las 6am y el tick llega al método', async () => {
     const planes = { findAllMappings: jest.fn().mockResolvedValue([]) }
-    const clientRoles = { getPlanPrice: jest.fn().mockResolvedValue(null) }
+    // Stub: the backend-roles catalog; this case only checks the scheduler wiring.
+    const clientRoles = { getPlanPriceCents: jest.fn().mockResolvedValue(null) }
 
     const module: TestingModule = await Test.createTestingModule({
       imports: [ScheduleModule.forRoot()],

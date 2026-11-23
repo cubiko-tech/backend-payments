@@ -39,22 +39,22 @@ export class MetricsService {
     `)
 
     // Obtener precios desde backend-roles (caché)
-    const prices = await this.clientRoles.getAllPlanPrices()
-
-    const byPlan = subscribers.map((row: any) => {
-      const planPrices = prices.get(row.planSlug)
-      const price = planPrices?.get('COP') || 0
-      return {
+    const byPlanCents = await Promise.all(
+      subscribers.map(async (row: any) => ({
         planSlug: row.planSlug,
         subscribers: Number(row.subscribers),
-        pricePerMonth: price,
-        mrr: Number(row.subscribers) * price,
-      }
-    })
+        priceCents: (await this.clientRoles.getPlanPriceCents(row.planSlug, 'COP')) || 0,
+      })),
+    )
+    const byPlan = byPlanCents.map(({ priceCents, ...plan }) => ({
+      ...plan,
+      pricePerMonth: priceCents / 100,
+      mrr: (plan.subscribers * priceCents) / 100,
+    }))
 
-    const total = byPlan.reduce((sum: number, r: any) => sum + r.mrr, 0)
+    const totalCents = byPlanCents.reduce((sum, r) => sum + r.subscribers * r.priceCents, 0)
 
-    return { data: { total: Math.round(total * 100) / 100, byPlan } }
+    return { data: { total: totalCents / 100, byPlan } }
   }
 
   /**

@@ -6,10 +6,9 @@ import { ClientRolesService } from '../../client/client-roles.service'
 import { logger } from '../../shared/logger/logger'
 
 /**
- * El plan cuyo precio del catálogo está FABRICADO y por lo tanto no sirve para
- * comparar: `getAllPlanPrices` inventa `COP 0` y `USD 0` para `free` cuando no
- * tiene filas (rama `currencyMap.size === 0 && planSlug === 'free'` en
- * `client-roles.service.ts:99`).
+ * The plan whose catalog price is MADE UP and so cannot be compared: `getPlanPriceCents`
+ * invents `COP 0` and `USD 0` for `free` when it has no rows (the
+ * `rows.length === 0 && planSlug === 'free'` branch in `client-roles.service.ts`).
  *
  * El literal se repite en vez de usar `freePlanSlug()` porque no es el mismo
  * concepto: `freePlanSlug()` es el plan al que se degrada una marca —una
@@ -52,11 +51,9 @@ export class ConfioPlanPriceCheckService {
   /**
    * Recorre los mapeos y compara cada uno contra el precio vigente de SU moneda.
    *
-   * La clave del mapeo es la moneda y no el país: `resolvePriceForCountry` está
-   * keyed por país, y el lector por moneda es `getPlanPrice(planSlug, currency)`
-   * (`client-roles.service.ts:68`). Hoy `dropi-roax` tiene exactamente una fila
-   * de catálogo por moneda (CO/COP `isDefault` y US/USD), así que la
-   * correspondencia es 1:1; más de una fila por moneda queda fuera de esto.
+   * The mapping is keyed by currency, not country: `resolvePriceForCountry` is keyed by
+   * country, and the reader by currency is `getPlanPriceCents(planSlug, currency)`, which
+   * picks the same row among several of one currency whatever their order.
    *
    * Las dos variantes `withTrial` de una misma moneda comparan contra el mismo
    * precio: la prueba cambia de plan, no de monto.
@@ -84,20 +81,20 @@ export class ConfioPlanPriceCheckService {
           continue
         }
 
-        const precio = await this.clientRoles.getPlanPrice(fila.planSlug, fila.currencyCode)
+        const esperadoCents = await this.clientRoles.getPlanPriceCents(
+          fila.planSlug,
+          fila.currencyCode,
+        )
 
         // `null` es «no sé», no «cero». `getPlanRows` degrada a caché vencido o a
         // un `Map` vacío cuando backend-roles falla, y leer ese vacío como precio
         // marcaría las cuatro filas de golpe: un fallo del canal no es un hecho
         // sobre el objeto.
-        if (precio === null || precio === undefined) {
+        if (esperadoCents === null || esperadoCents === undefined) {
           omitidas++
           continue
         }
 
-        // REDONDEO, no truncado: `plan_prices` guarda 6.99 y `Math.trunc(6.99 * 100)`
-        // da 698 por el binario flotante, o sea una divergencia que no existe.
-        const esperadoCents = Math.round(precio * 100)
         comparadas++
 
         if (esperadoCents !== fila.amountCents) {
@@ -107,7 +104,7 @@ export class ConfioPlanPriceCheckService {
             'error',
             `[CRON] DIVERGENCIA de precio en ${fila.planSlug}/${fila.currencyCode} (${variante}, ` +
               `${fila.confioName}): el plan de ConfioPagos cobra ${fila.amountCents} centavos y el ` +
-              `catálogo vale ${esperadoCents} (${precio}). No se corrige sola: un plan de ConfioPagos ` +
+              `catálogo vale ${esperadoCents}. No se corrige sola: un plan de ConfioPagos ` +
               `no se puede editar, hay que crear otro y re-mapearlo, y las suscripciones vivas siguen ` +
               `cobrando el monto viejo hasta que se den de baja.`,
           )

@@ -106,7 +106,7 @@ describe('ClientRolesService.getTokensPerCycle', () => {
 
     await expect(service.getTokensPerCycle('pro')).rejects.toThrow('Plan catalog unavailable')
     // Prices keep serving that stale catalog: only the bonus has a max age.
-    expect(await service.getAllPlanPrices()).toBeInstanceOf(Map)
+    expect(await service.getPlanPrice('pro', 'COP')).toBeNull()
     expect(service.hasCachedPrices()).toBe(true)
   })
 })
