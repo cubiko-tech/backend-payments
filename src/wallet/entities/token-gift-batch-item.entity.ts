@@ -12,6 +12,8 @@ export enum GiftBatchOmitReason {
   SIN_WALLET = 'sin_wallet',
   CERRADA = 'cerrada',
   MARCA_INEXISTENTE = 'marca_inexistente',
+  // Values must fit the varchar(20) `omitReason` column.
+  BRAND_LOOKUP_UNAVAILABLE = 'lookup_unavailable',
 }
 
 @Entity('token_gift_batch_items')

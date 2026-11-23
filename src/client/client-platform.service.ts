@@ -319,7 +319,8 @@ export class ClientPlatformService {
       const body = await response.json()
       const page: Array<{ id?: unknown }> = Array.isArray(body?.data) ? body.data : []
       for (const brand of page) if (typeof brand.id === 'string') ids.push(brand.id)
-      if (page.length < pageSize || ids.length >= Number(body?.count ?? 0)) return ids
+      if (page.length < pageSize || (body?.count != null && ids.length >= Number(body.count)))
+        return ids
     }
   }
 }

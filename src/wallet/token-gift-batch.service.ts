@@ -306,9 +306,13 @@ export class TokenGiftBatchService {
     let walletId = item.walletId
     if (!walletId) {
       const opened = await openBrandTokenWallet(this.tokenWallets, this.platform, item.brandId)
-      // Platform not answering is transient: the item stays pending and the job retries it.
+      // Platform not answering for one brand omits only that brand; the batch keeps going.
       if (!opened.ok && opened.code === BRAND_LOOKUP_UNAVAILABLE) {
-        throw new Error(`Brand owner lookup unavailable for ${item.brandId}`)
+        await this.settleItem(item.id, {
+          outcome: GiftBatchItemOutcome.OMITIDA,
+          omitReason: GiftBatchOmitReason.BRAND_LOOKUP_UNAVAILABLE,
+        })
+        return
       }
       if (!opened.ok) {
         await this.settleItem(item.id, {
