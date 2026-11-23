@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common'
+import { HttpStatus, Logger } from '@nestjs/common'
 
 import { WebhookStatus } from './entities/webhookEvent.entity'
 import { WebhookService } from './webhook.service'
@@ -85,10 +85,14 @@ describe('WebhookService — ignored and out-of-order notices', () => {
     }
     events.findOne.mockResolvedValue(row)
 
-    const answer = await service.retryWebhook('we-ignored')
-    await flush()
+    // Mutation: retryWebhook back to `return { error }` answers 200 without `code`.
+    const answer = service.retryWebhook('we-ignored')
 
-    expect(answer).toEqual({ error: expect.stringContaining('ignored') })
+    await expect(answer).rejects.toMatchObject({
+      code: 'WEBHOOK_NOT_RETRYABLE',
+      status: HttpStatus.CONFLICT,
+    })
+    await flush()
     expect(events.save).not.toHaveBeenCalled()
     expect(checkout.completeExternalPayment).not.toHaveBeenCalled()
     expect(row.status).toBe(WebhookStatus.IGNORED)
@@ -98,7 +102,11 @@ describe('WebhookService — ignored and out-of-order notices', () => {
     // R15: red if `retryWebhook` accepts an out-of-order notice and dispatches it again.
     events.findOne.mockResolvedValue({ id: 'we-old', status: WebhookStatus.OUT_OF_ORDER })
 
-    expect(await service.retryWebhook('we-old')).toEqual({ error: expect.any(String) })
+    // Mutation: retryWebhook back to `return { error }` answers 200 without `code`.
+    await expect(service.retryWebhook('we-old')).rejects.toMatchObject({
+      code: 'WEBHOOK_NOT_RETRYABLE',
+      status: HttpStatus.CONFLICT,
+    })
     expect(confio.handle).not.toHaveBeenCalled()
   })
 })

@@ -418,7 +418,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
-  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:195-197` sólo lo loguea).
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:196-198` sólo lo loguea).
 - **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
   `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
 - **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
@@ -448,7 +448,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
 
-- **Dónde**: `src/webhook/webhook.service.ts:90`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+- **Dónde**: `src/webhook/webhook.service.ts:91`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
   (`buildConfioWebhookEventId`)
 - **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue

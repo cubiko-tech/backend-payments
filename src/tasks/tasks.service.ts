@@ -1,7 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
-import { DataSource, LessThan, Repository } from 'typeorm'
+import { DataSource, In, LessThan, Repository } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { checkoutExpiryHours } from '../checkout/checkout-expiry'
@@ -176,7 +176,7 @@ export class TasksService implements TasksDeps {
     cutoff.setDate(cutoff.getDate() - 90)
 
     const result = await this.webhookEventRepo.delete({
-      status: WebhookStatus.PROCESSED,
+      status: In([WebhookStatus.PROCESSED, WebhookStatus.IGNORED, WebhookStatus.OUT_OF_ORDER]),
       createdAt: LessThan(cutoff),
     })
 

@@ -45,14 +45,19 @@ describe('TasksService — domain filters the crons send', () => {
     expect(subscriptionRepo.find.mock.calls[0][0].where.provider).toBe(SubscriptionProvider.DROPI)
   })
 
-  it('deletes only processed webhooks in cleanupExpiredWebhooks', async () => {
+  it('deletes processed, ignored and out-of-order webhooks in cleanupExpiredWebhooks', async () => {
     // R15: red if tasks.service.ts deletes another WebhookStatus (e.g. FAILED).
+    // Mutation: cleanupExpiredWebhooks back to `status: WebhookStatus.PROCESSED` leaves the new states out.
     const { service, webhookEventRepo } = buildService()
 
     await service.cleanupExpiredWebhooks()
 
     expect(webhookEventRepo.delete).toHaveBeenCalledTimes(1)
-    expect(webhookEventRepo.delete.mock.calls[0][0].status).toBe(WebhookStatus.PROCESSED)
+    const status = webhookEventRepo.delete.mock.calls[0][0].status
+    expect(status.type).toBe('in')
+    expect([...status.value].sort()).toEqual(
+      [WebhookStatus.PROCESSED, WebhookStatus.IGNORED, WebhookStatus.OUT_OF_ORDER].sort(),
+    )
   })
 
   it('reconciles only active wallets in reconcileWalletBalances', async () => {

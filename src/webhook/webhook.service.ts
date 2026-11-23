@@ -1,5 +1,5 @@
 // R6: Keeps webhook reception, retry scheduling, provider dispatch, and admin inspection together.
-import { Injectable, Logger } from '@nestjs/common'
+import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { InjectQueue } from '@nestjs/bullmq'
 import { Repository, In } from 'typeorm'
@@ -16,6 +16,7 @@ import {
 import { MercadoPagoProvider } from '../provider/mercadopago/mercadopago.provider'
 import { resolveMercadoPagoNotice } from './mercadopago-payment-notice'
 import { escapeLogValue } from '../shared/logger/log-value'
+import { RequestException } from '../shared/exception/request.exception'
 
 const MAX_WEBHOOK_RETRIES = 3
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -357,7 +358,10 @@ export class WebhookService {
     }
     // An ignored event was never meant to be dispatched, and an out-of-order one is older than what applied.
     if (event.status === WebhookStatus.IGNORED || event.status === WebhookStatus.OUT_OF_ORDER) {
-      return { error: `Webhook ${event.status}: no se reintenta` }
+      throw new RequestException(
+        { code: 'WEBHOOK_NOT_RETRYABLE', message: `Webhook ${event.status}: no se reintenta` },
+        HttpStatus.CONFLICT,
+      )
     }
 
     event.retryCount = 0

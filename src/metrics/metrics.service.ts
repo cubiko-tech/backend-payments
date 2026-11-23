@@ -39,13 +39,19 @@ export class MetricsService {
     `)
 
     // Obtener precios desde backend-roles (caché)
-    const byPlanCents = await Promise.all(
+    const resolved = await Promise.all(
       subscribers.map(async (row: any) => ({
         planSlug: row.planSlug,
         subscribers: Number(row.subscribers),
-        priceCents: (await this.clientRoles.getPlanPriceCents(row.planSlug, 'COP')) || 0,
+        priceCents: await this.clientRoles.getPlanPriceCents(row.planSlug, 'COP'),
       })),
     )
+    // An unresolved price is not a free plan: it stays out of the total and is named instead.
+    const unpricedPlans = resolved.filter((r) => r.priceCents === null).map((r) => r.planSlug)
+    if (unpricedPlans.length > 0) {
+      this.logger.warn(`MRR without a COP price for plans: ${unpricedPlans.join(', ')}`)
+    }
+    const byPlanCents = resolved.filter((r) => r.priceCents !== null)
     const byPlan = byPlanCents.map(({ priceCents, ...plan }) => ({
       ...plan,
       pricePerMonth: priceCents / 100,
@@ -54,7 +60,7 @@ export class MetricsService {
 
     const totalCents = byPlanCents.reduce((sum, r) => sum + r.subscribers * r.priceCents, 0)
 
-    return { data: { total: totalCents / 100, byPlan } }
+    return { data: { total: totalCents / 100, byPlan, unpricedPlans } }
   }
 
   /**
