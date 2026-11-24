@@ -55,10 +55,7 @@ export class CreditRunService {
 
     const { error } = validateWholeMonths(periodStart, periodEnd, Date.now())
     if (error) {
-      throw new RequestException(
-        { code: error.code, message: error.message },
-        HttpStatus.BAD_REQUEST,
-      )
+      throw new RequestException({ ...error }, HttpStatus.BAD_REQUEST)
     }
 
     const active = await this.runReadRepo.findOne({

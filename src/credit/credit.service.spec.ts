@@ -1,3 +1,4 @@
+// R6: One unit, CreditService.calculate and getPreapproval, each with its own module; splitting is its own task.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 
