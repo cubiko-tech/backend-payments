@@ -410,6 +410,7 @@ describe('ConfioProvider', () => {
 
     describe('createSubscription', () => {
       it('POSTea a …/{plan}/subscriptions (sin duplicar /v1) con el buyer completo', async () => {
+        // Mutation: rename `planName` in `CreateConfioSubscriptionParams` without migrating a caller → red.
         replyWith(subResponse())
 
         const provider = new ConfioProvider()
