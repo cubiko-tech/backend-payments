@@ -96,6 +96,110 @@ describe('MetricsService — MRR with an unresolved price', () => {
   })
 })
 
+describe('MetricsService — each calculation with its case', () => {
+  // R17: readDataSource is the database; the rows it answers are all each calculation reads.
+  const serviceAnswering = (rows: unknown[]) => {
+    const query = jest.fn().mockResolvedValue(rows)
+    const service = new MetricsService({} as any, {} as any, { query } as any, {} as any)
+    return { service, query }
+  }
+  // Row factory: each metric reads its own column set; overrides pick the values under test.
+  const metricRow = (overrides: Record<string, unknown> = {}) => ({
+    date: '2026-11-01T00:00:00.000Z',
+    month: '2026-11-01T00:00:00.000Z',
+    provider: 'confio',
+    purpose: 'subscription',
+    count: '1',
+    total: '0',
+    ...overrides,
+  })
+
+  it('revenue adds every completed row and rounds the total to cents', async () => {
+    // Mutation: getRevenue returns `totalRevenue` without `Math.round(... * 100) / 100` → 1200.567, red.
+    const rows = [
+      metricRow({ total: '1000.456' }),
+      metricRow({ provider: 'dropi', total: '200.111' }),
+      metricRow({ provider: 'stripe', total: null }),
+    ]
+    const { service, query } = serviceAnswering(rows)
+
+    const result = await service.getRevenue(14)
+
+    expect(result).toEqual({ data: { days: 14, totalRevenue: 1200.57, breakdown: rows } })
+    expect(String(query.mock.calls[0][0])).toContain(
+      `p."paidAt" >= NOW() - make_interval(days => $1)`,
+    )
+    expect(query.mock.calls[0][1]).toEqual([14])
+  })
+
+  it('churn counts cancelled and expired events inside the requested months', async () => {
+    // Mutation: the getChurn window shifted by one month (`months => $1 + 1`) → red.
+    const rows = [metricRow({ churned: '2', new_subs: '5' })]
+    const { service, query } = serviceAnswering(rows)
+
+    const result = await service.getChurn(3)
+
+    const sql = String(query.mock.calls[0][0])
+    expect(result).toEqual({ data: { months: 3, monthly: rows } })
+    expect(sql).toContain(`se."createdAt" >= NOW() - make_interval(months => $1)`)
+    expect(sql).toContain(`FILTER (WHERE se."eventType" IN ('cancelled', 'expired')) as churned`)
+    expect(query.mock.calls[0][1]).toEqual([3])
+  })
+
+  it('ARPU divides the revenue by paying brands, not by payments', async () => {
+    // Mutation: the getARPU division uses `COUNT(*)` instead of the distinct brands → red.
+    const { service, query } = serviceAnswering([
+      metricRow({ paying_brands: '4', total_revenue: '400000', arpu: '100000.00' }),
+    ])
+
+    const result = await service.getARPU(15)
+
+    expect(result.data).toMatchObject({
+      days: 15,
+      paying_brands: '4',
+      total_revenue: '400000',
+      arpu: '100000.00',
+    })
+    expect(String(query.mock.calls[0][0])).toContain(
+      `ROUND(SUM(p.amount) / COUNT(DISTINCT p."brandId"), 2)`,
+    )
+    expect(query.mock.calls[0][1]).toEqual([15])
+  })
+
+  it('payment methods group the completed payments of the last 90 days by provider', async () => {
+    // Mutation: the getPaymentMethods window becomes `INTERVAL '30 days'` → red.
+    const rows = [
+      metricRow({ count: '7', total: '70000' }),
+      metricRow({ provider: 'dropi', count: '3' }),
+    ]
+    const { service, query } = serviceAnswering(rows)
+
+    const result = await service.getPaymentMethods()
+
+    const sql = String(query.mock.calls[0][0])
+    expect(result).toEqual({ data: rows })
+    expect(sql).toContain(`p.status = 'completed'`)
+    expect(sql).toContain(`p."paidAt" >= NOW() - INTERVAL '90 days'`)
+    expect(sql).toContain('GROUP BY p.provider')
+  })
+
+  it('retention only counts activity that is not a cancellation or an expiry', async () => {
+    // Mutation: the getRetention activity filter drops its `NOT` before `IN ('cancelled', 'expired')` → red.
+    const rows = [
+      metricRow({ cohort_month: '2026-09-01', activity_month: '2026-10-01', brands: '6' }),
+    ]
+    const { service, query } = serviceAnswering(rows)
+
+    const result = await service.getRetention(4)
+
+    expect(result).toEqual({ data: { months: 4, cohorts: rows } })
+    expect(String(query.mock.calls[0][0])).toContain(
+      `se."eventType" NOT IN ('cancelled', 'expired')`,
+    )
+    expect(query.mock.calls[0][1]).toEqual([4])
+  })
+})
+
 describe('Admin Metrics - range validation and SQL parameterization (PAYL-9)', () => {
   let app: INestApplication
   let query: jest.Mock
