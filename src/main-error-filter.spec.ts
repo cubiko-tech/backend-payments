@@ -2,6 +2,7 @@ import * as request from 'supertest'
 import { INestApplication } from '@nestjs/common'
 import { NestApplication, NestFactory } from '@nestjs/core'
 import { bootstrap } from './main'
+import { logger } from './shared/logger/logger'
 
 // R17: the real AppModule needs Postgres and Redis; one route that throws is all the bootstrap check needs.
 jest.mock('./app.module', () => {
@@ -75,5 +76,24 @@ describe('bootstrap installs the global error filter', () => {
       code: 'WALLET_ALREADY_EXISTS',
       message: 'Ya existe',
     })
+  })
+
+  it('answers a body over the parser limit with 413 payloadTooLarge and logs no error', async () => {
+    // R15: red when the filter sends every non-HttpException to 500: the 413 of body-parser becomes internalError.
+    await bootstrap()
+    jest.mocked(logger.error).mockClear()
+
+    const res = await request(createdApp!.getHttpServer())
+      .post('/v1/probe/conflict')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ padding: 'x'.repeat(200 * 1024) }))
+
+    expect(res.status).toBe(413)
+    expect(res.body).toEqual({
+      statusCode: 413,
+      code: 'payloadTooLarge',
+      message: 'Payload too large',
+    })
+    expect(logger.error).not.toHaveBeenCalled()
   })
 })

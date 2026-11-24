@@ -141,6 +141,20 @@ describe('HttpErrorFilter', () => {
     expect(JSON.stringify(body)).not.toMatch(/reading 'id'|at /)
   })
 
+  it('answers a middleware error with a 4xx statusCode with that status and never its own message', () => {
+    // R15: red when the middleware branch answers with the error's message: the parser's limit text reaches the body.
+    const { status, body } = respond(
+      Object.assign(new Error('request entity too large: limit 102400'), {
+        statusCode: 413,
+        type: 'entity.too.large',
+      }),
+    )
+
+    expect(status).toBe(413)
+    expect(body).toEqual({ statusCode: 413, code: 'payloadTooLarge', message: 'Payload too large' })
+    expect(logError).not.toHaveBeenCalled()
+  })
+
   it('keeps the code of a 5xx HttpException but never its message', () => {
     // R15: red when a 5xx keeps the message it was thrown with: the provider text reaches the body.
     const { status, body } = respond(
