@@ -755,3 +755,17 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   se midió cuánto tarda Confío en avisar el cobro al final de una prueba, ni qué hace el webhook sobre una fila
   `expired` (no se abrió).
 - **Estado**: abierto — lo cierra medir esa demora y que el aviso tardío reactive la fila.
+
+## Revertir la marca de conversión de Confío abre un segundo link y corre la repesca (LOC-350)
+
+- **Dónde**: `migrations/1787862750922-AddInitialPaymentLinkIssuedAt.ts:40-44` (`down`, `DROP COLUMN`) y `:31-37`
+  (backfill); lectores: `src/tasks/subscription-renewal.ts:41`, `:78` y `src/tasks/pending-signup-confirmation.ts:77`.
+- **Qué lo dispara**: un `migration:revert` de esa migración, o volver a correr su `up` después.
+- **Qué rompe**: con el código actual, sin la columna toda lectura de `subscriptions` falla (la entidad la
+  selecciona): el `down` sólo es seguro junto con el código que deja de leerla. Sin la marca,
+  `processTrialConversions` emite un segundo link de pago a cada fila que ya lo tuvo en el alta. Re-correr el `up`
+  no devuelve las fechas reales: el backfill marca con `COALESCE("trialStart", "createdAt")` sólo las filas Confío
+  con `providerSubscriptionId`, y corre las franjas de la repesca de altas pendientes. El criterio del backfill es de
+  una sola vez y ya se aplicó donde la migración corrió: no es un punto de control.
+- **Estado**: abierto — lo cierra no revertir esa migración en un ambiente con datos; documentarlo en su
+  encabezado espera la aprobación de `guard-files.sh` (migración ya en el historial).
