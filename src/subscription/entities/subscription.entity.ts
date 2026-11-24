@@ -1,5 +1,5 @@
 import { Content } from '../../shared/entities/content.abstract'
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, Index, Unique } from 'typeorm'
 
 /**
  * Order mark of the Confio notices of one Confio subscription: `name` is the subscription it belongs
@@ -113,16 +113,24 @@ export const LIVE_SUBSCRIPTION_STATUSES = [
 ]
 
 @Entity('subscriptions')
-@Index(['brandId'], { unique: true })
-@Index(['status', 'nextBillingDate'])
+@Unique('UQ_subscriptions_brand', ['brandId'])
+@Index('IDX_subscriptions_billing', ['status', 'nextBillingDate'], {
+  where: `"status" IN ('active', 'past_due')`,
+})
 export class Subscription extends Content {
   @Column() brandId: string
   @Column() userId: string
   @Column() planSlug: string
-  @Column({ type: 'enum', enum: SubscriptionStatus, default: SubscriptionStatus.TRIAL })
+  @Column({
+    type: 'enum',
+    enum: SubscriptionStatus,
+    enumName: 'subscription_status_enum',
+    default: SubscriptionStatus.TRIAL,
+  })
   status: SubscriptionStatus
   @Column({ type: 'uuid', nullable: true }) walletId: string
-  @Column({ type: 'enum', enum: SubscriptionProvider }) provider: SubscriptionProvider
+  @Column({ type: 'enum', enum: SubscriptionProvider, enumName: 'subscription_provider_enum' })
+  provider: SubscriptionProvider
   @Column({ nullable: true }) providerSubscriptionId: string
   @Column({ type: 'timestamptz' }) currentPeriodStart: Date
   @Column({ type: 'timestamptz' }) currentPeriodEnd: Date

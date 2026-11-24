@@ -28,8 +28,11 @@ export enum PaymentPurpose {
 }
 
 @Entity('payments')
-@Index(['brandId', 'status', 'createdAt'])
-@Index(['providerPaymentId'])
+@Index('IDX_payments_brand_status_date', ['brandId', 'status', 'createdAt'])
+@Index('IDX_payments_provider_id', ['providerPaymentId'], {
+  where: `"providerPaymentId" IS NOT NULL`,
+})
+@Index('IDX_payments_pending', ['status'], { where: `"status" = 'pending'` })
 // One Dropi operation closes one recharge; only recharges carry `metadata.dropiRecharge`.
 @Index('UQ_payments_dropi_operation', ['providerPaymentId'], {
   unique: true,
@@ -41,7 +44,8 @@ export class Payment extends Content {
   @Column() userId: string
   @Column({ nullable: true }) idempotencyKey: string
   @Column({ type: 'uuid', nullable: true }) walletId: string
-  @Column({ type: 'enum', enum: PaymentProvider }) provider: PaymentProvider
+  @Column({ type: 'enum', enum: PaymentProvider, enumName: 'payment_provider_enum' })
+  provider: PaymentProvider
   @Column({ nullable: true }) providerPaymentId: string
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ length: 3 }) currency: string
@@ -56,9 +60,15 @@ export class Payment extends Content {
   })
   exchangeRate: number
   @Column({ type: 'date', nullable: true }) exchangeRateDate: string
-  @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: PaymentStatus,
+    enumName: 'payment_status_enum',
+    default: PaymentStatus.PENDING,
+  })
   status: PaymentStatus
-  @Column({ type: 'enum', enum: PaymentPurpose }) purpose: PaymentPurpose
+  @Column({ type: 'enum', enum: PaymentPurpose, enumName: 'payment_purpose_enum' })
+  purpose: PaymentPurpose
   @Column({ nullable: true }) purposeId: string
   @Column({ type: 'text', nullable: true }) checkoutUrl: string
   @Column({ type: 'text', nullable: true }) failureReason: string

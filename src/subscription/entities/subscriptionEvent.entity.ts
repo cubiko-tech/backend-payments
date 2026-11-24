@@ -63,12 +63,15 @@ export enum SubscriptionTraceStatus {
 }
 
 @Entity('subscription_events')
-@Index(['subscriptionId', 'createdAt'])
-@Index(['eventType', 'createdAt'])
+@Index('IDX_subscription_events_sub_date', ['subscriptionId', 'createdAt'])
+@Index('IDX_subscription_events_type_date', ['eventType', 'createdAt'])
+// Expression index TypeORM cannot describe; owned by migration 1795394546441.
+@Index('UQ_subscription_events_pending_trace', { synchronize: false })
 export class SubscriptionEvent {
   @PrimaryGeneratedColumn('uuid') id: string
   @Column('uuid') subscriptionId: string
-  @Column({ type: 'enum', enum: SubscriptionEventType }) eventType: SubscriptionEventType
+  @Column({ type: 'enum', enum: SubscriptionEventType, enumName: 'subscription_event_type_enum' })
+  eventType: SubscriptionEventType
   @Column({ nullable: true }) fromPlanSlug: string
   @Column({ nullable: true }) toPlanSlug: string
   @Column({ nullable: true }) fromStatus: string
@@ -82,6 +85,6 @@ export class SubscriptionEvent {
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date
 
   @ManyToOne(() => Subscription, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'subscriptionId' })
+  @JoinColumn({ name: 'subscriptionId', foreignKeyConstraintName: 'FK_subscription_events_sub' })
   subscription: Subscription
 }

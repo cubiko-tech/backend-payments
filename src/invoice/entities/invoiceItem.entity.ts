@@ -10,7 +10,7 @@ import {
 import { Invoice } from './invoice.entity'
 
 @Entity('invoice_items')
-@Index(['invoiceId'])
+@Index('IDX_invoice_items_invoice', ['invoiceId'])
 export class InvoiceItem {
   @PrimaryGeneratedColumn('uuid') id: string
   @Column('uuid') invoiceId: string
@@ -27,6 +27,6 @@ export class InvoiceItem {
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date
 
   @ManyToOne(() => Invoice, (invoice) => invoice.items, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'invoiceId' })
+  @JoinColumn({ name: 'invoiceId', foreignKeyConstraintName: 'FK_invoice_items_invoice' })
   invoice: Invoice
 }

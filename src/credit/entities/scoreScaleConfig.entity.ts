@@ -14,7 +14,7 @@ export enum ScaleConfigStatus {
  * versión usada. Solo una `active` a la vez. Ver DISEÑO_SCORING_CREDITO §7.
  */
 @Entity('credit_score_scale_config')
-@Index(['version'], { unique: true })
+@Index('IDX_credit_scale_config_version', ['version'], { unique: true })
 export class ScoreScaleConfig extends Content {
   @Column({ type: 'int' })
   version: number

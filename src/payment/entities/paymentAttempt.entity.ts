@@ -9,19 +9,20 @@ export enum AttemptStatus {
 }
 
 @Entity('payment_attempts')
-@Index(['paymentId', 'attemptNumber'])
+@Index('IDX_payment_attempts_payment', ['paymentId', 'attemptNumber'])
 export class PaymentAttempt extends Content {
   @Column('uuid') paymentId: string
   @Column({ type: 'int' }) attemptNumber: number
   @Column({ nullable: true }) provider: string
   @Column({ nullable: true }) providerResponseCode: string
   @Column({ type: 'text', nullable: true }) providerResponseMessage: string
-  @Column({ type: 'enum', enum: AttemptStatus }) status: AttemptStatus
+  @Column({ type: 'enum', enum: AttemptStatus, enumName: 'attempt_status_enum' })
+  status: AttemptStatus
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ type: 'jsonb', nullable: true }) metadata: any
   @Column({ type: 'timestamptz' }) attemptedAt: Date
 
   @ManyToOne(() => Payment, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'paymentId' })
+  @JoinColumn({ name: 'paymentId', foreignKeyConstraintName: 'FK_payment_attempts_payment' })
   payment: Payment
 }

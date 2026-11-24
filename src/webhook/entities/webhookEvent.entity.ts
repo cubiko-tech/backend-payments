@@ -14,13 +14,18 @@ export enum WebhookStatus {
 
 @Entity('webhook_events')
 @Index('UQ_webhook_events_provider_event', ['provider', 'providerEventId'], { unique: true })
-@Index(['status'])
+@Index('IDX_webhook_events_pending', ['status'], { where: `"status" IN ('received', 'failed')` })
 export class WebhookEvent extends Content {
   @Column() provider: string
   @Column() eventType: string
   @Column() providerEventId: string
   @Column({ type: 'jsonb' }) payload: any
-  @Column({ type: 'enum', enum: WebhookStatus, default: WebhookStatus.RECEIVED })
+  @Column({
+    type: 'enum',
+    enum: WebhookStatus,
+    enumName: 'webhook_status_enum',
+    default: WebhookStatus.RECEIVED,
+  })
   status: WebhookStatus
   @Column({ type: 'timestamptz', nullable: true }) processedAt: Date
   @Column({ type: 'text', nullable: true }) error: string

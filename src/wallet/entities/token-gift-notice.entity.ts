@@ -1,4 +1,4 @@
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, Index, Unique } from 'typeorm'
 import { Content } from '../../shared/entities/content.abstract'
 
 export enum TokenGiftNoticeStatus {
@@ -6,7 +6,7 @@ export enum TokenGiftNoticeStatus {
 }
 
 @Entity('token_gift_notices')
-@Index('UQ_token_gift_notices_movement_key', ['movementKey'], { unique: true })
+@Unique('UQ_token_gift_notices_movement_key', ['movementKey'])
 @Index('IDX_token_gift_notices_brand_status', ['brandId', 'status', 'createdAt'])
 export class TokenGiftNotice extends Content {
   @Column({ type: 'varchar', length: 255 })

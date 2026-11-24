@@ -14,7 +14,7 @@ import {
  * Si no, se usa el precio estándar de plan_prices en backend-roles.
  */
 @Entity('enterprise_pricing')
-@Index(['brandId'], { unique: true })
+@Index('IDX_enterprise_pricing_brandId', ['brandId'], { unique: true })
 export class EnterprisePricing {
   @PrimaryGeneratedColumn('uuid')
   id: string

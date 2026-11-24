@@ -5,7 +5,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index } from 
  * Se generan via cron y evitan recalcular sobre toda la BD.
  */
 @Entity('metrics_snapshots')
-@Index(['date', 'type'], { unique: true })
+@Index('IDX_metrics_snapshots_date_type', ['date', 'type'], { unique: true })
 export class MetricsSnapshot {
   @PrimaryGeneratedColumn('uuid')
   id: string

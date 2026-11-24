@@ -14,17 +14,23 @@ export enum TransactionStatus {
 }
 
 @Entity('transactions')
-@Index(['walletId', 'createdAt'])
-@Index(['brandId', 'createdAt'])
-@Index(['referenceType', 'referenceId'])
+@Index('IDX_transactions_wallet_date', ['walletId', 'createdAt'])
+@Index('IDX_transactions_brand_date', ['brandId', 'createdAt'])
+@Index('IDX_transactions_reference', ['referenceType', 'referenceId'])
 export class Transaction extends Content {
   @Column('uuid') walletId: string
   @Column() brandId: string
-  @Column({ type: 'enum', enum: TransactionType }) type: TransactionType
+  @Column({ type: 'enum', enum: TransactionType, enumName: 'transaction_type_enum' })
+  type: TransactionType
   @Column({ type: 'decimal', precision: 15, scale: 2 }) amount: number
   @Column({ type: 'decimal', precision: 15, scale: 2 }) balanceBefore: number
   @Column({ type: 'decimal', precision: 15, scale: 2 }) balanceAfter: number
-  @Column({ type: 'enum', enum: TransactionStatus, default: TransactionStatus.COMPLETED })
+  @Column({
+    type: 'enum',
+    enum: TransactionStatus,
+    enumName: 'transaction_status_enum',
+    default: TransactionStatus.COMPLETED,
+  })
   status: TransactionStatus
   @Column({ nullable: true }) category: string
   @Column({ type: 'text', nullable: true }) description: string
@@ -35,6 +41,6 @@ export class Transaction extends Content {
   @Column({ type: 'jsonb', nullable: true }) metadata: any
 
   @ManyToOne(() => Wallet, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'walletId' })
+  @JoinColumn({ name: 'walletId', foreignKeyConstraintName: 'FK_transactions_wallet' })
   wallet: Wallet
 }

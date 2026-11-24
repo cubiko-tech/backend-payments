@@ -15,19 +15,27 @@ export enum PaymentMethodStatus {
 }
 
 @Entity('payment_methods')
-@Index(['brandId', 'isDefault'])
+@Index('IDX_payment_methods_brand_default', ['brandId', 'isDefault'], {
+  where: `"status" = 'active'`,
+})
 export class PaymentMethod extends Content {
   @Column() brandId: string
   @Column() userId: string
   @Column() provider: string
   @Column() providerMethodId: string
-  @Column({ type: 'enum', enum: PaymentMethodType }) type: PaymentMethodType
+  @Column({ type: 'enum', enum: PaymentMethodType, enumName: 'payment_method_type_enum' })
+  type: PaymentMethodType
   @Column({ length: 4, nullable: true }) last4: string
   @Column({ nullable: true }) brand: string
   @Column({ type: 'int', nullable: true }) expiryMonth: number
   @Column({ type: 'int', nullable: true }) expiryYear: number
   @Column({ default: false }) isDefault: boolean
-  @Column({ type: 'enum', enum: PaymentMethodStatus, default: PaymentMethodStatus.ACTIVE })
+  @Column({
+    type: 'enum',
+    enum: PaymentMethodStatus,
+    enumName: 'payment_method_status_enum',
+    default: PaymentMethodStatus.ACTIVE,
+  })
   status: PaymentMethodStatus
   @Column({ type: 'jsonb', nullable: true }) metadata: any
 }

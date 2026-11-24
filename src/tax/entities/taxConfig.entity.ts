@@ -2,7 +2,7 @@ import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
 @Entity('tax_config')
-@Index(['country'], { unique: true })
+@Index('IDX_tax_config_country', ['country'], { unique: true, where: `"isActive" = true` })
 export class TaxConfig extends Content {
   @Column({ length: 2 }) country: string
   @Column() taxName: string

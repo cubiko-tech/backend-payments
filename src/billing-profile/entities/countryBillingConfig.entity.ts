@@ -13,7 +13,7 @@ import {
  * qué proveedor de facturación electrónica se usa, y más.
  */
 @Entity('country_billing_config')
-@Index(['country'], { unique: true })
+@Index('IDX_country_billing_config_country', ['country'], { unique: true })
 export class CountryBillingConfig {
   @PrimaryGeneratedColumn('uuid')
   id: string

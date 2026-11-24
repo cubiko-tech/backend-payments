@@ -18,7 +18,11 @@ export enum ScoreRunStatus {
  * (índice parcial único en la migración). Ver DISEÑO_SCORING_CREDITO §6.3, §7.
  */
 @Entity('score_run')
-@Index(['periodStart', 'periodEnd'])
+@Index('IDX_score_run_period', ['periodStart', 'periodEnd'])
+@Index('IDX_score_run_active_period', ['periodStart', 'periodEnd'], {
+  unique: true,
+  where: `"status" IN ('pending', 'running')`,
+})
 export class ScoreRun extends Content {
   @Column({ type: 'date' })
   periodStart: string

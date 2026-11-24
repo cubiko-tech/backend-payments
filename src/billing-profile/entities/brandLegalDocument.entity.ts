@@ -18,7 +18,8 @@ export enum DocumentStatus {
  * Cada país requiere documentos diferentes (RUT, Cámara de Comercio, RFC, etc.)
  */
 @Entity('brand_legal_documents')
-@Index(['brandId', 'documentType'], { unique: true })
+@Index('IDX_brand_legal_documents_brandId_type', ['brandId', 'documentType'], { unique: true })
+@Index('IDX_brand_legal_documents_status', ['status'], { where: `"status" = 'pending'` })
 export class BrandLegalDocument {
   @PrimaryGeneratedColumn('uuid')
   id: string
@@ -35,7 +36,12 @@ export class BrandLegalDocument {
   @Column({ nullable: false })
   documentUrl: string // Uploaded file URL (S3/GCS)
 
-  @Column({ type: 'enum', enum: DocumentStatus, default: DocumentStatus.PENDING })
+  @Column({
+    type: 'enum',
+    enum: DocumentStatus,
+    enumName: 'document_status_enum',
+    default: DocumentStatus.PENDING,
+  })
   status: DocumentStatus
 
   @Column({ type: 'timestamptz', nullable: true })

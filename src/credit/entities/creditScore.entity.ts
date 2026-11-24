@@ -18,8 +18,11 @@ import {
  * Ver DISEÑO_SCORING_CREDITO §7.
  */
 @Entity('credit_score')
-@Index(['brandId', 'createdAt'])
-@Index(['brandId', 'runId'], { unique: true, where: '"runId" IS NOT NULL' })
+@Index('IDX_credit_score_brand_created', ['brandId', 'createdAt'])
+@Index('IDX_credit_score_brand_run', ['brandId', 'runId'], {
+  unique: true,
+  where: '"runId" IS NOT NULL',
+})
 export class CreditScore extends Content {
   @Column()
   brandId: string

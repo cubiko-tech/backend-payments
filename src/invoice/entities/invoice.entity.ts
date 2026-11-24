@@ -1,5 +1,6 @@
 import { Content } from '../../shared/entities/content.abstract'
-import { Column, Entity, Index, OneToMany } from 'typeorm'
+import { Column, Entity, ForeignKey, Index, OneToMany, Unique } from 'typeorm'
+import { BillingProfile } from '../../billing-profile/entities/billingProfile.entity'
 import { InvoiceItem } from './invoiceItem.entity'
 
 export enum InvoiceType {
@@ -20,8 +21,8 @@ export const DIAN_PENDING_FLAG = 'dianPending'
 export const DIAN_SENDING_FLAG = 'dianSendingAt'
 
 @Entity('invoices')
-@Index(['brandId', 'createdAt'])
-@Index(['invoiceNumber'], { unique: true })
+@Index('IDX_invoices_brand_date', ['brandId', 'createdAt'])
+@Unique('UQ_invoices_number', ['invoiceNumber'])
 @Index('UQ_invoices_payment_id', ['paymentId'], { unique: true })
 // One consolidated recharge invoice per brand and month.
 @Index('UQ_invoices_brand_period', ['brandId', 'period'], {
@@ -34,15 +35,29 @@ export class Invoice extends Content {
   // `YYYY-MM` in America/Bogota of a monthly recharge invoice; null on every other invoice.
   @Column({ type: 'varchar', length: 7, nullable: true }) period: string | null
   @Column({ type: 'uuid', nullable: true }) subscriptionId: string
-  @Column({ type: 'uuid', nullable: true }) billingProfileId: string
-  @Column({ type: 'enum', enum: InvoiceType, default: InvoiceType.INVOICE }) type: InvoiceType
+  @Column({ type: 'uuid', nullable: true })
+  @ForeignKey(() => BillingProfile, { name: 'FK_invoices_billing_profile', onDelete: 'SET NULL' })
+  billingProfileId: string
+  @Column({
+    type: 'enum',
+    enum: InvoiceType,
+    enumName: 'invoice_type_enum',
+    default: InvoiceType.INVOICE,
+  })
+  type: InvoiceType
   @Column({ type: 'uuid', nullable: true }) creditNoteForId: string
   @Column({ unique: true }) invoiceNumber: string
   @Column({ type: 'decimal', precision: 15, scale: 2 }) subtotal: number
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) taxTotal: number
   @Column({ type: 'decimal', precision: 15, scale: 2 }) total: number
   @Column({ length: 3 }) currency: string
-  @Column({ type: 'enum', enum: InvoiceStatus, default: InvoiceStatus.DRAFT }) status: InvoiceStatus
+  @Column({
+    type: 'enum',
+    enum: InvoiceStatus,
+    enumName: 'invoice_status_enum',
+    default: InvoiceStatus.DRAFT,
+  })
+  status: InvoiceStatus
   @Column({ type: 'timestamptz', nullable: true }) issuedAt: Date
   @Column({ type: 'timestamptz', nullable: true }) paidAt: Date
   @Column({ type: 'timestamptz', nullable: true }) dueAt: Date

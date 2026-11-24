@@ -1,5 +1,6 @@
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, ForeignKey, Index, Unique } from 'typeorm'
 import { Content } from '../../shared/entities/content.abstract'
+import { TokenGiftBatch } from './token-gift-batch.entity'
 
 export enum GiftBatchItemOutcome {
   PENDING = 'pending',
@@ -17,11 +18,15 @@ export enum GiftBatchOmitReason {
 }
 
 @Entity('token_gift_batch_items')
-@Index('UQ_token_gift_batch_items_batch_brand', ['batchId', 'brandId'], { unique: true })
+@Unique('UQ_token_gift_batch_items_batch_brand', ['batchId', 'brandId'])
 @Index('IDX_token_gift_batch_items_batch_outcome_seq', ['batchId', 'outcome', 'seq'])
 @Index('IDX_token_gift_batch_items_batch_seq', ['batchId', 'seq'])
 export class TokenGiftBatchItem extends Content {
   @Column({ type: 'uuid' })
+  @ForeignKey(() => TokenGiftBatch, {
+    name: 'FK_token_gift_batch_items_batch',
+    onDelete: 'CASCADE',
+  })
   batchId: string
 
   @Column({ type: 'int' })

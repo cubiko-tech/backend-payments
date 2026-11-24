@@ -1,10 +1,21 @@
-import { Column, Entity, Index, PrimaryGeneratedColumn, CreateDateColumn } from 'typeorm'
+import {
+  Column,
+  Entity,
+  ForeignKey,
+  Index,
+  PrimaryGeneratedColumn,
+  CreateDateColumn,
+} from 'typeorm'
+import { Wallet } from './wallet.entity'
 
 @Entity('wallet_balance_snapshots')
-@Index(['walletId', 'snapshotAt'])
+@Index('IDX_wallet_snapshots_wallet_date', ['walletId', 'snapshotAt'])
+@Index('IDX_wallet_snapshots_inconsistent', ['isConsistent'], { where: `"isConsistent" = false` })
 export class WalletBalanceSnapshot {
   @PrimaryGeneratedColumn('uuid') id: string
-  @Column('uuid') walletId: string
+  @Column('uuid')
+  @ForeignKey(() => Wallet, { name: 'FK_wallet_snapshots_wallet', onDelete: 'CASCADE' })
+  walletId: string
   @Column({ type: 'decimal', precision: 15, scale: 2 }) balance: number
   @Column({ type: 'decimal', precision: 15, scale: 2 }) calculatedBalance: number
   @Column({ type: 'int' }) transactionCount: number

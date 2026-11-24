@@ -13,7 +13,7 @@ export enum CreditProfileStatus {
  * service en Fase 5). Ver DISEÑO_SCORING_CREDITO §4.
  */
 @Entity('credit_profile')
-@Index(['brandId'], { unique: true })
+@Index('IDX_credit_profile_brandId', ['brandId'], { unique: true })
 export class CreditProfile extends Content {
   @Column()
   brandId: string
