@@ -84,7 +84,6 @@ export interface PaymentProvider {
   refundPayment(providerPaymentId: string, amount?: number): Promise<RefundResult>
 
   // Suscripciones
-  createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult>
   // `reason` es OBLIGATORIO también en la firma: ConfioPagos lo EXIGE en runtime,
   // así que dejarlo opcional acá le regalaba al primer llamador que pase por
   // `ProviderFactory` un 503 que el compilador podía atajar. Stripe, mercadopago y

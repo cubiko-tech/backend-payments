@@ -14,6 +14,17 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: mitigado por el alcance: sólo cae a una fila en dólares que el catálogo declara. Abierto en lo
   comercial: no vender en un país se expresa quitando la fila en dólares del plan.
 
+## Archivar el mapeo de Confío de una moneda cobra el alta en dólares a una marca que paga en esa moneda
+
+- **Dónde**: `src/subscription/confio-trial.service.ts:276`, `:137` (`resolvePlanConCaidaAUsd`, `createForTrial`);
+  sus altas, `src/subscription/subscription.service.ts:292`, `:608` (`startTrial`, `startPaid`)
+- **Qué lo dispara**: un alta de Confío de una marca cuyo precio sale en pesos mientras la fila COP de
+  `confio_subscription_plan` está `archived` (la pasarela de esa moneda apagada).
+- **Qué rompe**: el alta va al plan USD de Confío y la marca queda suscrita en dólares, con el monto congelado en
+  ese plan. El único rastro es un `logger.warn` (`:290`) y la línea de log del alta: `subscriptions` no guarda la
+  moneda.
+- **Estado**: abierto — lo cierra guardar la moneda del alta y que apagar una moneda avise más que un `warn`.
+
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:133`, `:192` (`processSubscriptionRenewals`)

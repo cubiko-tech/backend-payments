@@ -641,18 +641,11 @@ describe('ConfioProvider', () => {
         expect(received).toHaveLength(0)
       })
 
-      it('rechaza la firma compartida de PaymentProvider (sin planName ni buyer)', async () => {
+      it('rejects a signup without planName before any network call', async () => {
+        // Mutation: drop `!params?.planName ||` from the guard in `createSubscription` → red.
         const provider = new ConfioProvider()
 
-        const err = await rechazo(
-          provider.createSubscription({
-            brandId: 'b1',
-            userId: 'u1',
-            planSlug: 'dropi-roax',
-            priceAmount: 19900,
-            currency: 'COP',
-          }),
-        )
+        const err = await rechazo(provider.createSubscription({ planName: '', buyer: buyer() }))
 
         expect(err).toBeInstanceOf(ConfioSubscriptionInputError)
         expect(err.code).toBe('missing_buyer_or_plan')

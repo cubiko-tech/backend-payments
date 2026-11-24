@@ -575,8 +575,8 @@ export class ConfioSubscriptionWebhookService {
    * The resource name comes from the row or, failing that, `data.name`: `ConfioProvider.toSubscriptionPath`
    * rejects an empty name, and that failure would read as Confio being down.
    *
-   * Each date is validated: `ConfioSubscriptionResult` declares them required, but they arrive `undefined`
-   * until the subscription opens a period, and `strictNullChecks: false` hides it from the compiler.
+   * Each date is validated: they arrive `undefined` until the subscription opens a period, and
+   * `strictNullChecks: false` hides it from the compiler.
    */
   private async leerPeriodoDelProveedor(
     data: ConfioWebhookPayload['data'],

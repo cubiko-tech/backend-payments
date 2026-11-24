@@ -48,12 +48,6 @@ export interface ConfioBuyerSource {
   callingCode?: string
 }
 
-/**
- * User lookup, injected as a function so this module stays free of network and Nest. Production
- * uses `ClientAuthService.getBuyerContact`.
- */
-export type ConfioBuyerLookup = (userId: string) => Promise<ConfioBuyerSource>
-
 const reject = (field: string, detail: string): never => {
   throw new ConfioSubscriptionInputError('invalid_buyer', `buyer.${field}`, detail)
 }
@@ -92,19 +86,6 @@ export function assertConfioBuyer(buyer: ConfioBuyer): ConfioBuyer {
     ...resolveNameParts((buyer?.firstName || '').trim(), (buyer?.lastName || '').trim(), email),
     phoneNumber: toE164(buyer?.phoneNumber),
   }
-}
-
-/**
- * Builds the buyer for the authenticated user from `lookup`, since `req.user` only has the id.
- *
- * A `lookup` rejection propagates unchanged: a channel failure (auth down, timeout) must never
- * surface as `invalid_buyer`, which would tell the user their data is wrong.
- */
-export async function resolveConfioBuyer(
-  user: { id: string },
-  lookup: ConfioBuyerLookup,
-): Promise<ConfioBuyer> {
-  return buildConfioBuyer(await lookup(user.id))
 }
 
 /** Mirrors Confio, which only checks for a non-empty email with `@`. */

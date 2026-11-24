@@ -8,6 +8,13 @@ import {
 } from 'typeorm'
 
 /**
+ * Lifecycle of OUR mapping row, lowercase: `pending` (not created in ConfioPagos yet), `active`,
+ * `archived` (currency switched off). It is never ConfioPagos' own plan status (`ConfioPlanStatus`,
+ * uppercase), which is not stored here.
+ */
+export type ConfioPlanMappingStatus = 'pending' | 'active' | 'archived'
+
+/**
  * Mapeo de nuestro plan del catálogo (`plans.slug` de backend-roles) al plan
  * recurrente equivalente del lado de ConfioPagos, **una fila por moneda y por
  * variante de prueba**.
@@ -85,9 +92,8 @@ export class ConfioSubscriptionPlan {
   @Column({ nullable: true })
   confioName: string | null
 
-  /** `pending` (sin crear en ConfioPagos) | `active` | `archived`. */
   @Column({ default: 'pending' })
-  status: string
+  status: ConfioPlanMappingStatus
 
   /**
    * Si el plan de ConfioPagos al que apunta esta fila fue creado CON período de

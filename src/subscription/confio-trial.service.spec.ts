@@ -118,6 +118,7 @@ describe('ConfioTrialService', () => {
       )
 
     it('con la pasarela en pesos apagada, el alta se cobra en dólares', async () => {
+      // Mutation: rename `planName` in `CreateConfioSubscriptionParams` without migrating the caller → red.
       confioPlans.resolveConfioPlanName
         .mockRejectedValueOnce(archivado('COP'))
         .mockResolvedValueOnce(CONFIO_PLAN_USD)
