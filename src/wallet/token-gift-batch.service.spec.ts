@@ -4,6 +4,11 @@ import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { Job } from 'bullmq'
 import { AuditService } from '../audit/audit.service'
+import {
+  BRAND_LOOKUP_UNAVAILABLE,
+  BRAND_NOT_FOUND,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 import { GiftBatchStatus, TokenGiftBatch } from './entities/token-gift-batch.entity'
 import {
@@ -66,6 +71,9 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
   const auditService = {
     record: jest.fn().mockResolvedValue(undefined),
   }
+  const platform = {
+    resolveBrandOwner: jest.fn().mockResolvedValue({ ok: false, code: BRAND_NOT_FOUND }),
+  }
 
   beforeEach(async () => {
     jest.clearAllMocks()
@@ -81,6 +89,7 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
         { provide: getQueueToken(TOKEN_GIFT_BATCH_QUEUE), useValue: queue },
         { provide: TokenWalletService, useValue: tokenWallets },
         { provide: AuditService, useValue: auditService },
+        { provide: ClientPlatformService, useValue: platform },
       ],
     }).compile()
 
@@ -205,7 +214,7 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
       { id: 'i-1', outcome: GiftBatchItemOutcome.PENDING },
       expect.objectContaining({
         outcome: GiftBatchItemOutcome.OMITIDA,
-        omitReason: GiftBatchOmitReason.SIN_WALLET,
+        omitReason: GiftBatchOmitReason.MARCA_INEXISTENTE,
       }),
     )
     expect(itemRepo.update).toHaveBeenCalledWith(
@@ -243,6 +252,64 @@ describe('TokenGiftBatchService & TokenGiftBatchProcessor (LOC-253)', () => {
     expect(batchRepo.update).toHaveBeenCalledWith(
       { id: BATCH_ID },
       expect.objectContaining({ status: GiftBatchStatus.FAILED }),
+    )
+  })
+
+  it('omits only the brand platform does not answer for and completes the batch', async () => {
+    // Mutation: throw again on BRAND_LOOKUP_UNAVAILABLE in processItem; the batch ends FAILED.
+    batchRepo.findOne.mockResolvedValueOnce({
+      id: BATCH_ID,
+      status: GiftBatchStatus.PENDING,
+      amount: 50,
+      reason: 'Bonus',
+      authorId: 'admin-1',
+    })
+    itemRepo.find
+      .mockResolvedValueOnce([
+        { id: 'i-1', batchId: BATCH_ID, seq: 1, brandId: 'b-1', walletId: WALLET_A },
+        { id: 'i-2', batchId: BATCH_ID, seq: 2, brandId: 'b-down', walletId: null },
+        { id: 'i-3', batchId: BATCH_ID, seq: 3, brandId: 'b-3', walletId: WALLET_A },
+      ])
+      .mockResolvedValueOnce([])
+    platform.resolveBrandOwner.mockResolvedValueOnce({ ok: false, code: BRAND_LOOKUP_UNAVAILABLE })
+    const credited = {
+      transaction: { id: 'tx-1', metadata: { giftBatchId: BATCH_ID } },
+      replayed: false,
+    }
+    tokenWallets.creditTokens.mockResolvedValueOnce(credited).mockResolvedValueOnce(credited)
+
+    // The final BullMQ attempt: a rejected process() is followed by onFailed on the running batch.
+    const job = {
+      data: { batchId: BATCH_ID },
+      attemptsMade: 3,
+      opts: { attempts: 3 },
+    } as unknown as Job<{ batchId: string }>
+    await processor.process(job).catch(() => {
+      batchRepo.findOne.mockResolvedValueOnce({ id: BATCH_ID, status: GiftBatchStatus.RUNNING })
+      dataSource.query.mockResolvedValueOnce([])
+      return processor.onFailed(job)
+    })
+
+    expect(batchRepo.update).not.toHaveBeenCalledWith(
+      { id: BATCH_ID },
+      expect.objectContaining({ status: GiftBatchStatus.FAILED }),
+    )
+    expect(batchRepo.update).toHaveBeenCalledWith(
+      { id: BATCH_ID },
+      expect.objectContaining({ status: GiftBatchStatus.COMPLETED }),
+    )
+    for (const id of ['i-1', 'i-3']) {
+      expect(itemRepo.update).toHaveBeenCalledWith(
+        { id, outcome: GiftBatchItemOutcome.PENDING },
+        expect.objectContaining({ outcome: GiftBatchItemOutcome.ACREDITADA, creditedAmount: 50 }),
+      )
+    }
+    expect(itemRepo.update).toHaveBeenCalledWith(
+      { id: 'i-2', outcome: GiftBatchItemOutcome.PENDING },
+      expect.objectContaining({
+        outcome: GiftBatchItemOutcome.OMITIDA,
+        omitReason: GiftBatchOmitReason.BRAND_LOOKUP_UNAVAILABLE,
+      }),
     )
   })
 

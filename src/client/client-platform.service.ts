@@ -40,6 +40,19 @@ export type BrandCountryResolution =
   | { ok: true; country: string; code?: never }
   | { ok: false; code: BrandCountryErrorCode; country?: never }
 
+/** The brand exists but platform has no `owner` for it. Definitive. */
+export const BRAND_WITHOUT_OWNER = 'BRAND_WITHOUT_OWNER'
+
+export type BrandOwnerErrorCode =
+  | typeof BRAND_LOOKUP_UNAVAILABLE
+  | typeof BRAND_NOT_FOUND
+  | typeof BRAND_WITHOUT_OWNER
+
+/** Same discriminated shape as `BrandCountryResolution`. */
+export type BrandOwnerResolution =
+  | { ok: true; owner: string; code?: never }
+  | { ok: false; code: BrandOwnerErrorCode; owner?: never }
+
 /**
  * Cliente a backend-platform para verificar membresía de marca. Usado por el
  * gate de visibilidad del crédito (defense-in-depth además del BFF).
@@ -261,6 +274,53 @@ export class ClientPlatformService {
     } catch (error) {
       this.logger.error(`Error consultando el país de la marca en platform: ${error.message}`)
       return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
+    }
+  }
+
+  /**
+   * The brand's `owner` from `GET /v1/brand/:id`, uncached. A 200 with `{}` is the
+   * definitive "unknown brand"; any other failure is the channel (see `resolveBrandCountry`).
+   */
+  async resolveBrandOwner(brandId: string): Promise<BrandOwnerResolution> {
+    if (!this.platformUrl) return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
+    try {
+      const response = await fetch(`${this.platformUrl}/v1/brand/${encodeURIComponent(brandId)}`, {
+        headers: { Authorization: `Bearer ${this.accessServer}` },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!response.ok) {
+        this.logger.warn(`backend-platform brand/:id responded ${response.status} for the owner`)
+        return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
+      }
+      const brand = (await response.json())?.data
+      if (!brand) return { ok: false, code: BRAND_NOT_FOUND }
+      const owner = typeof brand.owner === 'string' ? brand.owner.trim() : ''
+      return owner ? { ok: true, owner } : { ok: false, code: BRAND_WITHOUT_OWNER }
+    } catch (error) {
+      this.logger.error(`Failed to read the brand owner from platform: ${error.message}`)
+      return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
+    }
+  }
+
+  /**
+   * Every brand id platform lists to the server token, paged through `GET /v1/brand?count=true`.
+   * Throws when a page fails: a partial list would read as "these are all the brands".
+   */
+  async listBrandIds(pageSize = 500): Promise<string[]> {
+    if (!this.platformUrl) throw new Error('SERVICE_PLATFORM is not configured')
+    const ids: string[] = []
+    for (let offset = 0; ; offset += pageSize) {
+      const url = `${this.platformUrl}/v1/brand?count=true&limit=${pageSize}&offset=${offset}`
+      const response = await fetch(url, {
+        headers: { Authorization: `Bearer ${this.accessServer}` },
+        signal: AbortSignal.timeout(30000),
+      })
+      if (!response.ok) throw new Error(`backend-platform brand list responded ${response.status}`)
+      const body = await response.json()
+      const page: Array<{ id?: unknown }> = Array.isArray(body?.data) ? body.data : []
+      for (const brand of page) if (typeof brand.id === 'string') ids.push(brand.id)
+      if (page.length < pageSize || (body?.count != null && ids.length >= Number(body.count)))
+        return ids
     }
   }
 }

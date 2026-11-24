@@ -1,3 +1,4 @@
+// R6: one end-to-end scenario whose bulk is the full Nest wiring of checkout, tasks and webhooks.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { DataSource, Repository } from 'typeorm'
@@ -6,6 +7,7 @@ import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
 import { BillingProfile } from '../src/billing-profile/entities/billingProfile.entity'
 import { CheckoutService } from '../src/checkout/checkout.service'
+import { ClientAuthService } from '../src/client/client-auth.service'
 import { ClientPlatformService } from '../src/client/client-platform.service'
 import { ClientRolesService } from '../src/client/client-roles.service'
 import { DianService } from '../src/dian/dian.service'
@@ -33,6 +35,7 @@ import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscrip
 import { WebhookEvent } from '../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../src/webhook/webhook.service'
 import { scopeSweepsToBrand } from './support/brand-scoped-sweep'
+import { buyerContactLookup } from './support/subscription-renewal.double'
 
 const BRAND_ID = 'f8969696-2222-4333-8444-555555555555'
 const DEFAULT_PRICE = { countryCode: 'CO', currency: 'COP', price: 19900, isDefault: true }
@@ -63,6 +66,7 @@ async function compileSupersededE2eModule(realDataSource: DataSource, assignPlan
         resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
         getBrandCountry: jest.fn().mockResolvedValue('CO'),
       }),
+      provideVal(ClientAuthService, buyerContactLookup()),
       provideVal(ClientRolesService, {
         getPlanPrice: jest.fn().mockResolvedValue(19900),
         resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: DEFAULT_PRICE }),

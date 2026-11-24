@@ -15,9 +15,11 @@ import {
   PaymentStatus,
 } from '../src/payment/entities/payment.entity'
 import {
+  allowReturnUrls,
   cleanPackageBrand,
   fakeExternalProvider,
   packageCheckout,
+  PACKAGE_RETURN_ORIGIN,
   packageId,
   paymentsOf,
 } from './support/token-package.fixture'
@@ -37,6 +39,12 @@ describe('Checkout charged with the TRM (PostgreSQL)', () => {
     (await instance.checkout.processCheckout(packageCheckout(BRAND, id, overrides))).paymentId
   const paymentOf = (paymentId: string) =>
     instance.dataSource.getRepository(Payment).findOneByOrFail({ id: paymentId })
+
+  let restoreReturnUrls: () => void
+  beforeAll(() => {
+    restoreReturnUrls = allowReturnUrls(PACKAGE_RETURN_ORIGIN)
+  })
+  afterAll(() => restoreReturnUrls())
 
   // Each case gets a cold TRM cache: the instance caches the rate for an hour.
   beforeEach(async () => {

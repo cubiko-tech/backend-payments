@@ -3,6 +3,7 @@ import { config as dotenvConfig } from 'dotenv'
 import { DataSource, FindManyOptions, In, Repository } from 'typeorm'
 
 import { TasksService } from '../src/tasks/tasks.service'
+import { buyerContactLookup } from './support/subscription-renewal.double'
 import { Payment } from '../src/payment/entities/payment.entity'
 import {
   Subscription,
@@ -149,6 +150,7 @@ describe('TasksService renewal and expiration concurrency (e2e)', () => {
       rolesMock as any,
       { processCheckout: jest.fn(), completeExternalPayment: jest.fn() } as any,
       { confirmarContraElProveedor: jest.fn() } as any,
+      buyerContactLookup() as any,
     )
 
     return { tasksService, rolesMock, eventBusMock }
@@ -303,15 +305,21 @@ describe('TasksService renewal and expiration concurrency (e2e)', () => {
     )
     createdSubscriptionIds.push(sub.id)
 
-    const originalUpdate = subscriptionRepo.update.bind(subscriptionRepo)
-    const updateSpy = jest
-      .spyOn(subscriptionRepo, 'update')
-      .mockRejectedValueOnce(new Error('transient postgres update failure'))
-      .mockImplementation((...args: Parameters<typeof originalUpdate>) => originalUpdate(...args))
+    const update = Repository.prototype.update
+    let failures = 1
+    // R17: the close writes through the lock's transaction, and a failure at this statement
+    // cannot be provoked on demand.
+    const updateSpy = jest.spyOn(Repository.prototype, 'update').mockImplementation(async function (
+      this: Repository<any>,
+      ...args: any[]
+    ) {
+      if (this.target === Subscription && args[0]?.id === sub.id && failures-- > 0) {
+        throw new Error('transient postgres update failure')
+      }
+      return (update as any).apply(this, args)
+    } as any)
 
-    await expect(tasksService.expireSubscriptions()).rejects.toThrow(
-      'transient postgres update failure',
-    )
+    await tasksService.expireSubscriptions()
 
     const afterFailedPass = await subscriptionRepo.findOneByOrFail({ id: sub.id })
     expect(afterFailedPass.status).toBe(SubscriptionStatus.PAST_DUE)
@@ -329,6 +337,8 @@ describe('TasksService renewal and expiration concurrency (e2e)', () => {
     const afterRetryPass = await subscriptionRepo.findOneByOrFail({ id: sub.id })
     expect(afterRetryPass.status).toBe(SubscriptionStatus.EXPIRED)
     expect(afterRetryPass.autoRenew).toBe(false)
-    expect(updateSpy).toHaveBeenCalledTimes(2)
+    expect(
+      updateSpy.mock.calls.filter(([criteria]) => (criteria as any)?.id === sub.id),
+    ).toHaveLength(2)
   })
 })

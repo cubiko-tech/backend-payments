@@ -31,6 +31,21 @@ export function fakeExternalProvider(instance: RaceInstance) {
   return createCheckout
 }
 
+/** The origin the package cases allow, and the page of it they return to. */
+export const PACKAGE_RETURN_ORIGIN = 'https://ads.roax.test'
+export const PACKAGE_RETURN_URL = `${PACKAGE_RETURN_ORIGIN}/tokens`
+
+/** Sets TOKEN_CHECKOUT_ALLOWED_RETURN_URLS and returns what puts the previous value back. */
+export function allowReturnUrls(value: string | undefined) {
+  const previous = process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS
+  const apply = (next: string | undefined) => {
+    if (next === undefined) delete process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS
+    else process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS = next
+  }
+  apply(value)
+  return () => apply(previous)
+}
+
 export const packageCheckout = (
   brandId: string,
   id: string,
@@ -41,6 +56,7 @@ export const packageCheckout = (
   purpose: 'token_package',
   provider: 'confio',
   packageId: id,
+  successUrl: PACKAGE_RETURN_URL,
   ...overrides,
 })
 

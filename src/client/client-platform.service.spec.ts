@@ -369,4 +369,26 @@ describe('ClientPlatformService — país de la marca', () => {
       })
     })
   })
+
+  describe('listBrandIds', () => {
+    it('keeps paging while pages come full when platform sends no count', async () => {
+      // Mutation: stop on `ids.length >= Number(body?.count ?? 0)` again; the case sees one page only.
+      const pages = [
+        [{ id: 'b-1' }, { id: 'b-2' }],
+        [{ id: 'b-3' }, { id: 'b-4' }],
+        [{ id: 'b-5' }],
+      ]
+      const fetchMock = jest.fn()
+      for (const data of pages) {
+        fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data }) })
+      }
+      global.fetch = fetchMock as unknown as typeof fetch
+
+      await expect(service.listBrandIds(2)).resolves.toEqual(['b-1', 'b-2', 'b-3', 'b-4', 'b-5'])
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(fetchMock.mock.calls[2][0]).toBe(
+        `${PLATFORM_URL}/v1/brand?count=true&limit=2&offset=4`,
+      )
+    })
+  })
 })

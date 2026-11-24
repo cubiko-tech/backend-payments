@@ -2,6 +2,7 @@ import { HttpStatus } from '@nestjs/common'
 import { unknownServiceKeys } from '../../../test/support/service-credential.double'
 import { ApiAuthGuard } from './api-auth.guard'
 import {
+  AllowServerToken,
   API_PERMISSION_KEY,
   API_SESSION_ONLY_KEY,
   API_SUPER_ADMIN_KEY,
@@ -285,11 +286,12 @@ describe('ApiAuthGuard', () => {
     await expect(g.canActivate(withClass('Bearer superadmin-jwt'))).resolves.toBe(true)
   })
 
-  it('refuses the server token on a session-only handler before @RequirePermission lets it in', async () => {
-    // R15: red when the session-only check runs after the permission branch, which returns early.
+  it('refuses the server token on a @RequirePermission handler of a session-only class without asking roles (LOC-271)', async () => {
+    // R15: red when the permission branch drops its refusesServer check: the server passes as super admin.
     const handlerTarget = () => undefined
+    const classTarget = class AdminStub {}
     reflector.get.mockImplementation((key: string, target: unknown) => {
-      if (key === API_SESSION_ONLY_KEY && target === handlerTarget) return true
+      if (key === API_SESSION_ONLY_KEY && target === classTarget) return true
       if (key === API_PERMISSION_KEY && target === handlerTarget) return 'credit:runs'
       return undefined
     })
@@ -297,9 +299,49 @@ describe('ApiAuthGuard', () => {
     const context = {
       ...ctx({ authorization: 'Bearer srv-secret' }),
       getHandler: () => handlerTarget,
-      getClass: () => class Stub {},
+      getClass: () => classTarget,
     }
 
     await expect(g.canActivate(context)).rejects.toMatchObject({ status: HttpStatus.FORBIDDEN })
+    expect(roles.checkPermission).not.toHaveBeenCalled()
+  })
+
+  it('keeps letting the server token in on a @RequirePermission handler with no session-only mark', async () => {
+    // R15: red when the permission branch refuses the server on every route: CreditController is cut.
+    const handlerTarget = () => undefined
+    reflector.get.mockImplementation((key: string, target: unknown) =>
+      key === API_PERMISSION_KEY && target === handlerTarget ? 'credit:runs' : undefined,
+    )
+    const g = makeGuard(jest.fn())
+    const context = {
+      ...ctx({ authorization: 'Bearer srv-secret' }),
+      getHandler: () => handlerTarget,
+      getClass: () => class CreditStub {},
+    }
+
+    await expect(g.canActivate(context)).resolves.toBe(true)
+    expect(roles.checkPermission).not.toHaveBeenCalled()
+  })
+
+  it('lets the server token in on a handler marked @AllowServerToken of a session-only class (LOC-271)', async () => {
+    // R15: red when the guard reads the class mark before the handler: the exception gets 403.
+    const handlerTarget = () => undefined
+    const classTarget = class AdminStub {}
+    Reflect.defineMetadata(API_SESSION_ONLY_KEY, true, classTarget)
+    AllowServerToken()(handlerTarget, 'handler', { value: handlerTarget })
+    reflector.get.mockImplementation((key: string, target: object) =>
+      Reflect.getMetadata(key, target),
+    )
+    const g = makeGuard(jest.fn().mockReturnValue({ id: 'admin-1', isSuperAdmin: true }))
+    const withHandler = (handler: object) => ({
+      ...ctx({ authorization: 'Bearer srv-secret' }),
+      getHandler: () => handler,
+      getClass: () => classTarget,
+    })
+
+    await expect(g.canActivate(withHandler(handlerTarget))).resolves.toBe(true)
+    await expect(g.canActivate(withHandler(() => undefined))).rejects.toMatchObject({
+      status: HttpStatus.FORBIDDEN,
+    })
   })
 })

@@ -2,20 +2,41 @@ import { readFileSync } from 'fs'
 import { isUUID } from 'class-validator'
 import { config as dotenvConfig } from 'dotenv'
 import { DataSource } from 'typeorm'
+import {
+  BrandOwnerErrorCode,
+  BrandOwnerResolution,
+  ClientPlatformService,
+} from '../client/client-platform.service'
 import { Wallet, WalletProvider, WalletStatus } from './entities/wallet.entity'
 import { isTokenCurrency, TOKEN_CURRENCY } from './token-origin'
+import { isProductionEnv } from '../shared/env/is-production'
+
+/** The slice of `ClientPlatformService` the backfill reads: which brands exist and who owns each. */
+export interface BrandDirectory {
+  listBrandIds(): Promise<string[]>
+  resolveBrandOwner(brandId: string): Promise<BrandOwnerResolution>
+}
 
 export interface BackfillTokenWalletsOptions {
   dataSource: DataSource
+  platform: BrandDirectory
   apply?: boolean
   brandIdsFromFile?: readonly string[]
   brandsFilePath?: string
 }
 
+export interface OmittedBrand {
+  brandId: string
+  reason: BrandOwnerErrorCode
+}
+
 export interface BackfillTokenWalletsResult {
   apply: boolean
   missingBrandIds: string[]
+  omittedBrands: OmittedBrand[]
   createdBrandIds: string[]
+  tokenWalletsBefore: number
+  tokenWalletsAfter: number
 }
 
 export interface BackfillCliArgs {
@@ -88,6 +109,21 @@ export function parseBackfillArgs(argv: readonly string[]): BackfillCliArgs {
   return { apply, brandsFilePath }
 }
 
+async function brandsWithTokenWallet(dataSource: DataSource): Promise<string[]> {
+  const wallets = await dataSource.getRepository(Wallet).find({
+    select: ['brandId', 'provider', 'currency'],
+  })
+  return wallets
+    .filter(
+      (w) => w.brandId && w.provider === WalletProvider.INTERNAL && isTokenCurrency(w.currency),
+    )
+    .map((w) => w.brandId)
+}
+
+/**
+ * Candidates are platform's brands, or only the file's when one is given, minus those that
+ * already hold their internal TKN wallet. Each candidate is checked in platform before opening.
+ */
 export async function backfillTokenWallets(
   options: BackfillTokenWalletsOptions,
 ): Promise<BackfillTokenWalletsResult> {
@@ -102,37 +138,38 @@ export async function backfillTokenWallets(
     }
   }
 
-  const walletRepo = options.dataSource.getRepository(Wallet)
-  const existingWallets = await walletRepo.find({
-    select: ['brandId', 'userId', 'provider', 'currency'],
-  })
+  const fromFile = options.brandsFilePath !== undefined || options.brandIdsFromFile !== undefined
+  const sourceIds = fromFile ? [...fileIds, ...extraIds] : await options.platform.listBrandIds()
 
-  const candidateBrands = new Set<string>([...fileIds, ...extraIds])
-  const brandsWithTokenWallet = new Set<string>()
-  const userByBrand = new Map<string, string>()
-
-  for (const wallet of existingWallets) {
-    if (!wallet.brandId) continue
-    candidateBrands.add(wallet.brandId)
-    if (wallet.userId && !userByBrand.has(wallet.brandId)) {
-      userByBrand.set(wallet.brandId, wallet.userId)
-    }
-    if (wallet.provider === WalletProvider.INTERNAL && isTokenCurrency(wallet.currency)) {
-      brandsWithTokenWallet.add(wallet.brandId)
-    }
-  }
-
-  const missingBrandIds = Array.from(candidateBrands)
-    .filter((brandId) => !brandsWithTokenWallet.has(brandId))
+  const tokenBrandsBefore = await brandsWithTokenWallet(options.dataSource)
+  const withToken = new Set(tokenBrandsBefore)
+  const missingBrandIds = Array.from(new Set(sourceIds))
+    .filter((brandId) => !withToken.has(brandId))
     .sort()
 
-  if (!apply) {
-    return { apply: false, missingBrandIds, createdBrandIds: [] }
+  const omittedBrands: OmittedBrand[] = []
+  const ownerByBrand = new Map<string, string>()
+  for (const brandId of missingBrandIds) {
+    const owner = await options.platform.resolveBrandOwner(brandId)
+    if (owner.ok) ownerByBrand.set(brandId, owner.owner)
+    else omittedBrands.push({ brandId, reason: owner.code })
   }
 
+  const tokenWalletsBefore = tokenBrandsBefore.length
+  if (!apply) {
+    return {
+      apply: false,
+      missingBrandIds,
+      omittedBrands,
+      createdBrandIds: [],
+      tokenWalletsBefore,
+      tokenWalletsAfter: tokenWalletsBefore,
+    }
+  }
+
+  const walletRepo = options.dataSource.getRepository(Wallet)
   const createdBrandIds: string[] = []
-  for (const brandId of missingBrandIds) {
-    const userId = userByBrand.get(brandId) || brandId
+  for (const [brandId, userId] of ownerByBrand) {
     const insertResult = await walletRepo
       .createQueryBuilder()
       .insert()
@@ -158,13 +195,34 @@ export async function backfillTokenWallets(
     }
   }
 
-  return { apply, missingBrandIds, createdBrandIds }
+  const tokenWalletsAfter = (await brandsWithTokenWallet(options.dataSource)).length
+  return {
+    apply,
+    missingBrandIds,
+    omittedBrands,
+    createdBrandIds,
+    tokenWalletsBefore,
+    tokenWalletsAfter,
+  }
+}
+
+/** TLS always verifies the certificate; production without `SSL_CA_CERT` refuses to connect. */
+export function backfillSslOptions(
+  env: NodeJS.ProcessEnv,
+): { ca?: string; rejectUnauthorized: true } | undefined {
+  if (env.SSL !== 'true') return undefined
+  if (env.SSL_CA_CERT) return { ca: env.SSL_CA_CERT, rejectUnauthorized: true }
+  if (isProductionEnv(env)) {
+    throw new Error('SSL=true without SSL_CA_CERT in production: refusing an unverified connection')
+  }
+  return { rejectUnauthorized: true }
 }
 
 export async function runBackfillTokenWalletsCli(
   argv: readonly string[] = process.argv.slice(2),
   createDataSource?: () => DataSource,
   writeLine: (line: string) => void = (line) => process.stdout.write(`${line}\n`),
+  platform: BrandDirectory = new ClientPlatformService(),
 ): Promise<BackfillTokenWalletsResult> {
   dotenvConfig({ path: '.env' })
   const { apply, brandsFilePath } = parseBackfillArgs(argv)
@@ -179,7 +237,7 @@ export async function runBackfillTokenWalletsCli(
       database: process.env.POSTGRES_DB,
       entities: [Wallet],
       synchronize: false,
-      ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
+      ssl: backfillSslOptions(process.env),
     })
 
   const initializedHere = !dataSource.isInitialized
@@ -187,13 +245,26 @@ export async function runBackfillTokenWalletsCli(
     await dataSource.initialize()
   }
   try {
-    const result = await backfillTokenWallets({ dataSource, apply, brandsFilePath })
+    const result = await backfillTokenWallets({ dataSource, platform, apply, brandsFilePath })
+    const omittedByReason: Record<string, number> = {}
+    for (const { reason } of result.omittedBrands) {
+      omittedByReason[reason] = (omittedByReason[reason] ?? 0) + 1
+    }
     writeLine(
       JSON.stringify({
         apply: result.apply,
         count: result.missingBrandIds.length,
         missingBrandIds: result.missingBrandIds,
+        omittedByReason,
+        omittedBrands: result.omittedBrands,
+        createdCount: result.createdBrandIds.length,
         createdBrandIds: result.createdBrandIds,
+        ...(result.apply
+          ? {
+              tokenWalletsBefore: result.tokenWalletsBefore,
+              tokenWalletsAfter: result.tokenWalletsAfter,
+            }
+          : {}),
       }),
     )
     return result

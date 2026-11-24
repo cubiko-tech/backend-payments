@@ -48,6 +48,12 @@ const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc249-jwt-secret', 'e2e-loc249-server
 
 function platformDirectory(): Upstream['reply'] {
   return (path, res) => {
+    if (!path.includes('/rol/user')) {
+      // GET /v1/brand/:id: the owner the admin gift opens the token wallet in.
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ data: { owner: MEMBER_A_ID } }))
+      return
+    }
     const rows: { user: string; rol: string }[] = []
     if (
       path.includes(encodeURIComponent(BRAND_A)) ||

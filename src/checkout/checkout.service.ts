@@ -10,6 +10,8 @@ import { DataSource, EntityManager, In, Raw, Repository } from 'typeorm'
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
 import { SubscriptionService } from '../subscription/subscription.service'
+import { invalidBuyerException } from '../subscription/invalid-buyer-exception'
+import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
 import { AuditService } from '../audit/audit.service'
 import { TaxService } from '../tax/tax.service'
 import { resolveRechargeTax, validateRechargeTax } from '../tax/recharge-tax'
@@ -55,6 +57,7 @@ import {
   BRAND_WITHOUT_COUNTRY,
   BrandCountryErrorCode,
 } from '../client/client-platform.service'
+import { ClientAuthService } from '../client/client-auth.service'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
@@ -74,6 +77,7 @@ import {
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
 import { checkoutExpiryHours } from './checkout-expiry'
+import { BuyerLookupFailure, resolveCheckoutBuyer } from './checkout-buyer'
 import {
   hasWalletPaymentDebit,
   isLastPaymentNewer,
@@ -193,6 +197,8 @@ export class CheckoutService implements OnModuleInit {
     // Optional for the same reason: only a token_package checkout needs them, and fails closed without.
     @Optional() private tokenWallets?: TokenWalletService,
     @Optional() private tokenPackages?: TokenPackageService,
+    // Optional: only a Confio checkout without a usable buyer needs it, and fails closed (503) without.
+    @Optional() private clientAuth?: ClientAuthService,
   ) {}
 
   /** Late registration breaks the CheckoutService <-> WebhookService circular dependency. */
@@ -726,6 +732,7 @@ export class CheckoutService implements OnModuleInit {
   ): Promise<CheckoutResult> {
     try {
       const provider = this.providerFactory.getProvider(req.provider)
+      const buyer = await resolveCheckoutBuyer(req, this.clientAuth, this.clientPlatform)
       const checkout = await provider.createCheckout({
         amount: totalAmount,
         currency,
@@ -735,7 +742,7 @@ export class CheckoutService implements OnModuleInit {
         purposeId: req.planSlug,
         successUrl: req.successUrl,
         cancelUrl: req.cancelUrl,
-        metadata: { paymentId: payment.id, buyer: req.buyer },
+        metadata: { paymentId: payment.id, buyer },
       })
 
       const result: CheckoutResult = {
@@ -772,10 +779,14 @@ export class CheckoutService implements OnModuleInit {
       return result
     } catch (error) {
       this.logExternalCheckoutRejection(payment.id, req.provider, error)
+      const invalidBuyer = error instanceof ConfioSubscriptionInputError
       payment.status = PaymentStatus.FAILED
-      payment.failureReason = error.message
+      // The input error's message holds the buyer's contact; its code and field say enough.
+      payment.failureReason = invalidBuyer ? `${error.code} ${error.field}` : error.message
       await this.paymentRepo.save(payment)
 
+      if (invalidBuyer) throw invalidBuyerException(error.field)
+      if (error instanceof BuyerLookupFailure) throw error.toException()
       throw new RequestException({
         code: 'PROVIDER_ERROR',
         message: `Error con ${req.provider}: ${error.message}`,

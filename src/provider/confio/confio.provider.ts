@@ -26,53 +26,24 @@ import {
 } from './confio.types'
 
 /**
- * ConfioPagos — pasarela de pagos colombiana (links de pago one-shot).
+ * ConfioPagos adapter: one-shot payment links plus recurring plans and subscriptions.
  *
- * Flujo: se crea un pago en `POST /stores/{storeId}/payments` que devuelve una
- * `url` (link de pago). El usuario paga y ConfioPagos confirma vía webhook
- * (validado por el mismo `CONFIO_ACCESS_TOKEN` en el header Authorization).
+ * A one-shot payment returns a link; the buyer pays and ConfioPagos confirms by webhook,
+ * authenticated with the same `CONFIO_ACCESS_TOKEN` as a Bearer header.
  *
- * No tiene checkout session como Stripe; es un link + confirmación asíncrona,
- * similar a Dropi pero con URL de pago.
+ * Creating a subscription charges nothing: it returns `PENDING_ACCEPTANCE` plus a hosted
+ * `acceptanceUrl` where the buyer registers a card; ConfioPagos then bills each period itself.
  *
- * Para el cobro recurrente sí tiene API propia de planes y suscripciones
- * (`/stores/{store}/subscription-plans…`): ConfioPagos cobra cada período y
- * avisa por webhook. Acá viven los dos métodos de **planes**
- * (`createSubscriptionPlan`, `listSubscriptionPlans`) y los dos de
- * **suscripciones** (`createSubscription`, `getSubscription`).
+ * The `acceptanceUrl` is a bearer link (whoever holds it registers a card against the
+ * subscription): it is never logged nor persisted, and the mapper strips it from `raw`.
  *
- * Flujo real del alta: **no cobra**. Devuelve la suscripción en
- * `PENDING_ACCEPTANCE` más un `acceptanceUrl` hospedado por ConfioPagos — el
- * «único link de pago inicial» del criterio 1 de la épica 002. El comprador
- * acepta ahí y registra su tarjeta; recién entonces pasa a `TRIALING` (con los
- * 15 días de trial del plan) o a `ACTIVE`, y a partir de ahí ConfioPagos cobra
- * cada período por su cuenta.
+ * `CONFIO_API_BASE_URL` already ends in `/v1`, so paths go without it: a repeated `/v1` gets a
+ * plain-text 404 that looks like a missing endpoint.
  *
- * ⚠️ El `acceptanceUrl` es un **link portador**: quien lo tenga registra una
- * tarjeta contra esta suscripción. No se loguea, no se persiste y por eso el
- * mapeador lo saca del `raw` que devuelve.
- *
- * ⚠️ `getSubscription` **no forma parte de `PaymentProvider`**: se consume con
- * el tipo concreto `ConfioProvider`, no por `ProviderFactory.getProvider()`.
- *
- * `cancelSubscription` cancela DE VERDAD (`POST …/{sub}/cancel`, con `reason`
- * obligatorio). Medido contra dev el 2026-08-27: se puede cancelar incluso en
- * `PENDING_ACCEPTANCE`, la suscripción queda en `CANCELED`, el `acceptanceUrl`
- * desaparece y la respuesta trae cuerpo VACÍO — la confirmación es el HTTP 200,
- * no un objeto de vuelta. Cancelar dos veces también da 200: es idempotente, así
- * que reintentar es seguro y no hace falta preguntar antes si ya estaba cancelada.
- *
- * ⚠️ `CONFIO_API_BASE_URL` **ya termina en `/v1`** y `confioFetch` concatena, así
- * que los paths van SIN ese prefijo. Con `/v1` repetido ConfioPagos responde un
- * 404 en texto plano que parece «ese endpoint no existe».
- *
- * Referencia de contrato: roax-ads-back/internal/payment/.../confiopagos_client.go
+ * Contract reference: roax-ads-back/internal/payment/.../confiopagos_client.go
  */
-// El contrato de rechazo local vive en `confio-subscription-error.ts` y se
-// RE-EXPORTA acá: `confio-buyer.ts` lo necesita y el provider importa a
-// `confio-buyer.ts`, así que definirlo acá sería un ciclo de módulos que en
-// CommonJS deja la clase `undefined` en tiempo de evaluación. El re-export
-// mantiene vivo el import histórico `from './confio.provider'`.
+// Re-exported from its own module because `confio-buyer.ts` needs it and this file imports that one:
+// defining it here is a CommonJS cycle that leaves the class `undefined` at load time.
 export {
   CONFIO_SUBSCRIPTION_INPUT_ERROR,
   ConfioSubscriptionInputError,
@@ -132,8 +103,7 @@ export class ConfioProvider implements PaymentProvider {
       throw new ProviderPaymentNotFoundError('ConfioPagos error 404')
     }
 
-    // `any` y no `unknown`: es lo que `JSON.parse` ya devolvía acá, y los
-    // llamadores leen campos del cuerpo. Estrechar el tipo es otra tarea.
+    // `any` because callers read arbitrary body fields.
     let body: any
     try {
       body = text ? JSON.parse(text) : {}
@@ -152,10 +122,7 @@ export class ConfioProvider implements PaymentProvider {
     return body
   }
 
-  /**
-   * Crear un pago en ConfioPagos. Devuelve el link de pago (`url`) y el
-   * nombre del recurso (`name`) como `providerPaymentId`.
-   */
+  /** Returns the payment link as `checkoutUrl` and the resource `name` as `providerPaymentId`. */
   async createCheckout(params: CreateCheckoutParams): Promise<CheckoutResult> {
     this.ensureConfigured()
 
@@ -173,7 +140,7 @@ export class ConfioProvider implements PaymentProvider {
       title: 'Cubiko',
       description,
       buyer,
-      // correlationId = nuestro paymentId, para resolver el pago en el webhook.
+      // Our paymentId, so the webhook can resolve the payment.
       correlationId: params.metadata?.paymentId || '',
       paymentType: 'SERVICE',
       redirectUri: params.successUrl || undefined,
@@ -197,8 +164,7 @@ export class ConfioProvider implements PaymentProvider {
   async getPaymentStatus(providerPaymentId: string): Promise<PaymentStatusResult> {
     this.ensureConfigured()
 
-    // `providerPaymentId` suele ser el resource name completo (`stores/{id}/payments/{ulid}`);
-    // si ya viene así, se usa relativo a la base; si no, se compone la ruta.
+    // Accepts either the full resource name (`stores/{id}/payments/{ulid}`) or a bare id.
     const path = providerPaymentId.startsWith('stores/')
       ? `/${providerPaymentId}`
       : `/stores/${this.storeId}/payments/${providerPaymentId}`
@@ -215,25 +181,15 @@ export class ConfioProvider implements PaymentProvider {
     }
   }
 
-  /**
-   * ConfioPagos no expone reembolsos en este flujo de integración.
-   */
+  /** ConfioPagos exposes no refunds in this integration. */
   async refundPayment(_providerPaymentId: string, _amount?: number): Promise<RefundResult> {
     throw new Error('ConfioPagos no soporta reembolsos automáticos en esta integración')
   }
 
   /**
-   * Crear un plan recurrente en ConfioPagos.
-   *
-   * ⚠️ **Un plan creado NO se puede borrar** y ConfioPagos no expone update:
-   * `amountCents` y `trialPeriodDays` quedan congelados. Además el store está
-   * COMPARTIDO con backend-ads, así que un plan de más ensucia el store de otro
-   * servicio. Todo llamador debe **listar antes de crear** (`listSubscriptionPlans`).
-   *
-   * Por eso hoy este método NO tiene llamador: el alta real de los planes de
-   * `dropi-roax` es una decisión operativa pendiente (ver HUMAN_ACTIONS.md sobre
-   * quién es dueño de las suscripciones en ese store), no algo que dispare el
-   * arranque del servicio.
+   * A created plan can never be deleted nor updated (`amountCents` and `trialPeriodDays` are frozen),
+   * and the store is shared with backend-ads: every caller must list before creating
+   * (`listSubscriptionPlans`).
    */
   async createSubscriptionPlan(params: CreateConfioPlanParams): Promise<ConfioSubscriptionPlan> {
     this.ensureConfigured()
@@ -263,19 +219,15 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Listar todos los planes del store, siguiendo la paginación.
-   *
-   * El listado pagina: quedarse en la primera página puede "no encontrar" un
-   * plan que sí existe y llevar a crear un duplicado imborrable. `nextPageToken`
-   * llega como string VACÍO en la última página, no ausente.
+   * Follows every page: stopping at the first one can miss an existing plan and lead to an
+   * undeletable duplicate. `nextPageToken` is an empty string on the last page, not absent.
    */
   async listSubscriptionPlans(): Promise<ConfioSubscriptionPlan[]> {
     this.ensureConfigured()
 
     const out: ConfioSubscriptionPlan[] = []
     let pageToken: string | undefined
-    // Tope duro: 20 páginas × 100 = 2.000 planes. Corta un token que se repita
-    // en vez de girar para siempre.
+    // Hard cap so a repeating page token cannot loop forever.
     for (let page = 0; page < 20; page++) {
       const query = new URLSearchParams({ pageSize: '100' })
       if (pageToken) query.set('pageToken', pageToken)
@@ -295,21 +247,14 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Alta de suscripción — `POST …/subscription-plans/{plan}/subscriptions`.
+   * Charges nothing: returns `PENDING_ACCEPTANCE` plus an `acceptanceUrl`; once the buyer accepts it
+   * moves to `TRIALING` (with `trialPeriodDays > 0`) or `ACTIVE`.
    *
-   * **No cobra nada.** Devuelve la suscripción en `PENDING_ACCEPTANCE` más un
-   * `acceptanceUrl` hospedado por ConfioPagos: ése es el «único link inicial»
-   * del criterio 1 de la épica. El comprador acepta ahí, registra su tarjeta y
-   * la suscripción pasa a `TRIALING` (con `trialPeriodDays > 0`) o a `ACTIVE`.
+   * `CreateSubscriptionParams` is accepted only to satisfy `PaymentProvider`; it lacks plan and
+   * buyer, so it is rejected with `missing_buyer_or_plan`.
    *
-   * El parámetro acepta la unión con `CreateSubscriptionParams` sólo para
-   * satisfacer el contrato de `PaymentProvider`: esa forma no trae ni el plan de
-   * ConfioPagos ni el comprador, así que se rechaza con `missing_buyer_or_plan`.
-   * No es un camino soportado.
-   *
-   * Rechaza ANTES de tocar la red con `ConfioSubscriptionInputError` —
-   * **contrato con el alta** (`alta-crea-suscripcion-en-confiopagos`), que mapea
-   * por `instanceof` + `code` + `field`, nunca por el texto del mensaje.
+   * Input errors are `ConfioSubscriptionInputError`, thrown before any network call; callers map
+   * them by `instanceof` + `code` + `field`, never by message text.
    */
   async createSubscription(
     params: CreateConfioSubscriptionParams | CreateSubscriptionParams,
@@ -325,15 +270,10 @@ export class ConfioProvider implements PaymentProvider {
     }
 
     const planPath = this.assertPlanPath(params.planName)
-    // Normalizador ÚNICO del comprador: `confio-buyer.ts`. Acá es validación de
-    // BORDE (el buyer ya viene separado en campos) y no tiene reglas propias.
     const buyer = assertConfioBuyer(params.buyer)
 
-    // Body armado campo por campo con `!== undefined`, NO por truthiness como
-    // el `...(params.description ? … : {})` de createSubscriptionPlan: acá el 0
-    // de `firstChargeAmountCents` es válido (`minimum: 0` en el spec) y
-    // significa PRIMER CICLO GRATIS. Tragárselo haría que Confío cobre el ciclo
-    // entero, en silencio. Lo mismo con un `correlationId` vacío.
+    // Checked with `!== undefined`, not truthiness: `firstChargeAmountCents: 0` means a free first
+    // cycle, and dropping it makes Confio silently charge the full cycle.
     const body: Record<string, unknown> = { buyer }
     if (params.correlationId !== undefined) body.correlationId = params.correlationId
     if (params.firstChargeAmountCents !== undefined) {
@@ -349,8 +289,7 @@ export class ConfioProvider implements PaymentProvider {
       body: JSON.stringify(body),
     })
 
-    // El `acceptanceUrl` es un link PORTADOR (quien lo tenga registra una
-    // tarjeta): se loguea si vino, jamás su valor.
+    // `acceptanceUrl` is a bearer link: log whether it came, never its value.
     logger.log(
       'info',
       `ConfioProvider: suscripción creada ${resp.name} (${resp.status}, ` +
@@ -361,15 +300,11 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Consultar una suscripción por su resource name completo.
+   * Not part of `PaymentProvider`: use the concrete `ConfioProvider`, not
+   * `ProviderFactory.getProvider()`.
    *
-   * ⚠️ **No está en `PaymentProvider`**: se consume con el tipo concreto
-   * `ConfioProvider`, no por `ProviderFactory.getProvider()`, que devuelve la
-   * interfaz y no ve este método.
-   *
-   * A diferencia de `getPaymentStatus`, no compone la ruta desde `this.storeId`
-   * cuando el nombre viene suelto: haría falta también el id del plan, y
-   * adivinarlo produce un 404 que se lee como «esa suscripción no existe».
+   * Requires the full resource name: a bare id would also need the plan id, and guessing it yields a
+   * 404 that reads as a missing subscription.
    */
   async getSubscription(name: string): Promise<ConfioSubscriptionResult> {
     this.ensureConfigured()
@@ -383,30 +318,19 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Valida que el `planName` sea un resource name de NUESTRO store y devuelve
-   * la ruta relativa a la base.
-   *
-   * Los planes son POR AMBIENTE: un identificador de dev usado en producción (o
-   * de otra tienda) responde un 404 mudo que se lee como «el endpoint no
-   * existe». Mejor cortar acá y decir cuál era el store esperado.
+   * Plans are per environment: a dev or foreign-store plan id gets a silent 404 that reads as a
+   * missing endpoint, so it is rejected here naming the expected store.
    */
   private assertPlanPath(planName: string): string {
     return this.assertStorePath(planName, 'planName')
   }
 
   /**
-   * Valida que un resource name de SUSCRIPCIÓN sea de nuestro store Y tenga la
-   * forma exacta, y devuelve la ruta relativa a la base.
-   *
-   * Es la misma guarda del alta (`assertPlanPath`) MÁS la forma, y no un lujo:
-   * el `name` lo persistimos nosotros pero entra por caminos que no lo validan
-   * (`POST /subscription` lo acepta del body: `providerSubscriptionId` está en la
-   * lista blanca de `CreateSubscriptionDto`), así que interpolarlo crudo
-   * dejaba elegir la ruta del POST que sale con NUESTRO Bearer — la suscripción
-   * de otro store (el store está COMPARTIDO con backend-ads) o, vía segmentos
-   * `..` que `fetch` normaliza, cualquier otro endpoint de ConfioPagos. El
-   * charset cerrado (sin `.`, sin `%`, sin `#`, sin espacios) cierra de paso la
-   * inyección de líneas en el log de más abajo.
+   * Checks our store and the exact shape. The stored `name` can arrive unvalidated (e.g. from the
+   * `POST /subscription` body), and interpolated raw it would aim a request carrying our Bearer at
+   * another store's subscription (the store is shared with backend-ads) or, through `..` segments
+   * that `fetch` normalizes, at any ConfioPagos endpoint. The closed charset also blocks log line
+   * injection.
    */
   private assertSubscriptionPath(name: string): string {
     const path = this.assertStorePath(name, 'name')
@@ -420,7 +344,7 @@ export class ConfioProvider implements PaymentProvider {
     return path
   }
 
-  /** Guarda de store compartida por el alta y por la cancelación. */
+  /** Rejects any resource outside the configured store. */
   private assertStorePath(name: string, field: 'planName' | 'name'): string {
     const path = ConfioProvider.toSubscriptionPath(name)
     if (!path.startsWith(`stores/${this.storeId}/`)) {
@@ -434,24 +358,18 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Forma exacta de la ruta de una suscripción, ya recortada a `stores/`.
-   * Charset cerrado a propósito: los ids de ConfioPagos son ULIDs y cualquier
-   * otra cosa (un `..`, un `#`, un salto de línea) es un intento de irse de la
-   * ruta, no un id.
+   * Closed charset on purpose: ConfioPagos ids are ULIDs, so a `..`, `#` or newline is an attempt
+   * to escape the path, not an id.
    */
   private static readonly SUBSCRIPTION_PATH =
     /^stores\/[A-Za-z0-9_-]+\/subscription-plans\/[A-Za-z0-9_-]+\/subscriptions\/[A-Za-z0-9_-]+$/
 
   /**
-   * Normaliza un resource name a ruta relativa a la base (que ya trae `/v1`).
-   *
-   * ConfioPagos devuelve algunos names prefijados con `organizations/…` (se ve
-   * en el ejemplo de payload de webhook), así que se recorta todo lo anterior a
-   * `stores/`. Un id suelto se rechaza: de ahí no se puede componer la ruta.
+   * Some ConfioPagos names carry an `organizations/...` prefix, so everything before `stores/` is
+   * cut. A bare id is rejected: no path can be built from it.
    */
   private static toSubscriptionPath(name: string): string {
-    // `name` viene de `metadata` (jsonb SIN tipar): si no es string se rechaza
-    // acá y no explota con un TypeError opaco más abajo.
+    // `name` can come from untyped jsonb: a non-string is rejected here, not as an opaque TypeError.
     const raw = typeof name === 'string' ? name : ''
     const at = raw.indexOf('stores/')
     if (at < 0) {
@@ -465,11 +383,8 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Mapeador único del envelope de suscripción, para el alta y para la consulta.
-   *
-   * El `acceptanceUrl` se **saca** del objeto que queda en `raw` y se expone en
-   * un solo campo de primer nivel: así un `metadata: result.raw` aguas abajo no
-   * puede persistir un link portador.
+   * `acceptanceUrl` is stripped from `raw` and exposed only at top level, so a downstream
+   * `metadata: result.raw` can never persist the bearer link.
    */
   private static toSubscriptionResult(raw: ConfioSubscription): ConfioSubscriptionResult {
     const { acceptanceUrl, ...rest } = raw || ({} as ConfioSubscription)
@@ -481,8 +396,8 @@ export class ConfioProvider implements PaymentProvider {
       acceptanceExpireTime: rest.acceptanceExpireTime
         ? new Date(rest.acceptanceExpireTime)
         : undefined,
-      // En PENDING_ACCEPTANCE todavía no hay período abierto: quedan undefined
-      // pese a estar tipados obligatorios en `SubscriptionResult` (ver el tipo).
+      // Undefined in PENDING_ACCEPTANCE (no open period yet), although `SubscriptionResult` types them
+      // as required.
       currentPeriodStart: rest.currentPeriodStart ? new Date(rest.currentPeriodStart) : undefined,
       currentPeriodEnd: rest.currentPeriodEnd ? new Date(rest.currentPeriodEnd) : undefined,
       nextBillingTime: rest.nextBillingTime ? new Date(rest.nextBillingTime) : undefined,
@@ -492,35 +407,19 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Cancelar una suscripción — `POST …/subscription-plans/{plan}/subscriptions/{sub}/cancel`.
+   * Works even in `PENDING_ACCEPTANCE`. The response body is empty, so HTTP 200 is the confirmation
+   * and this returns `void`. Idempotent: cancelling twice also returns 200, so retries are safe.
    *
-   * **Medido contra dev el 2026-08-27**, y de ahí sale el contrato de este método:
-   * ConfioPagos acepta cancelar incluso en `PENDING_ACCEPTANCE` (no hace falta
-   * esperar a que el comprador acepte), la suscripción queda en `CANCELED`, el
-   * `acceptanceUrl` desaparece y la respuesta viene con **cuerpo vacío** (`{}`).
-   * O sea: la confirmación es el **HTTP 200**, no un objeto de vuelta — por eso
-   * devuelve `void`. Cancelar dos veces también responde 200: **es idempotente**,
-   * así que un reintento no necesita ninguna guarda de «ya estaba cancelada».
+   * ConfioPagos requires `reason`; a missing one is a `ConfioSubscriptionInputError` thrown before
+   * any network call. `reason` is free user text and is never logged.
    *
-   * `reason` es OBLIGATORIO del lado de ConfioPagos y se rechaza acá, ANTES de la
-   * red, con `ConfioSubscriptionInputError` — el mismo contrato de rechazo local
-   * que usa el alta y que el llamador mapea por `instanceof` + `code`, nunca por
-   * el texto del mensaje.
-   *
-   * ⚠️ El `reason` es texto libre del usuario: NO se loguea. En el log va sólo el
-   * resource name, que para ese punto ya pasó por `assertSubscriptionPath` y por
-   * lo tanto no puede traer saltos de línea.
-   *
-   * ⚠️ La ruta se valida ENTERA antes de interpolarla (`assertSubscriptionPath`):
-   * store propio + forma exacta. Sin eso, un `name` elegido por el llamador
-   * dirigía este POST —con nuestro Bearer— a la suscripción de otro store o a
-   * otro endpoint de la API.
+   * The whole path is validated (`assertSubscriptionPath`) before interpolation, so a caller-chosen
+   * `name` cannot aim this Bearer-authenticated POST at another store or endpoint.
    */
   async cancelSubscription(providerSubscriptionId: string, reason?: string): Promise<void> {
     this.ensureConfigured()
 
-    // Va antes de resolver la ruta: sin `reason` la petición no puede salir, y
-    // mandarla igual sería un 4xx de ConfioPagos disfrazado de fallo del canal.
+    // Sending without `reason` would be a ConfioPagos 4xx disguised as a channel failure.
     if (!String(reason || '').trim()) {
       throw new ConfioSubscriptionInputError(
         'missing_cancel_reason',
@@ -529,9 +428,6 @@ export class ConfioProvider implements PaymentProvider {
       )
     }
 
-    // Un `name` vacío, corrupto, de OTRO store o con forma rara (lo persistimos
-    // nosotros, por caminos que no lo validan) sale por acá como rechazo LOCAL:
-    // la petición nunca salió. Es la MISMA guarda que el alta, más la forma.
     const path = this.assertSubscriptionPath(providerSubscriptionId)
 
     await this.confioFetch(`/${path}/cancel`, {
@@ -551,9 +447,8 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * ConfioPagos valida el webhook con el mismo access token en el header
-   * Authorization: Bearer — no hay secreto de firma separado. Aquí `signature`
-   * es el token recibido. Comparación en tiempo constante.
+   * ConfioPagos has no separate signing secret: `signature` is the received Bearer token, compared
+   * in constant time against our access token.
    */
   validateWebhookSignature(_payload: Buffer, signature: string): boolean {
     if (!this.accessToken) {
@@ -567,9 +462,6 @@ export class ConfioProvider implements PaymentProvider {
     return timingSafeEqual(received, expected)
   }
 
-  /**
-   * Mapea un estado crudo de ConfioPagos a nuestro estado interno de pago.
-   */
   static mapStatus(confioStatus: string): PaymentStatusResult['status'] {
     switch (confioStatus) {
       case 'FUNDED':
@@ -593,27 +485,26 @@ export class ConfioProvider implements PaymentProvider {
     }
   }
 
-  /** True si el estado de ConfioPagos representa un pago exitoso. */
   static isCompleted(confioStatus: string): boolean {
     return confioStatus === 'FUNDED' || confioStatus === 'DELIVERING' || confioStatus === 'APPROVED'
   }
 
   /**
-   * ConfioPagos exige un comprador con email y teléfono E.164 (+57…).
-   * Toma los datos de `metadata.buyer` si vienen; si no, usa fallbacks
-   * configurables (para cobros emitidos por el cron sin contexto de usuario).
+   * ConfioPagos requires a buyer with an email and an E.164 phone, taken from `metadata.buyer`.
+   * Without a usable one `assertConfioBuyer` rejects with `invalid_buyer` before the request
+   * leaves, as a subscription does: no contact is ever made up.
    */
   private resolveBuyer(params: CreateCheckoutParams) {
     const b = params.metadata?.buyer || {}
-    return {
+    return assertConfioBuyer({
       firstName: b.firstName || 'Cliente',
       lastName: b.lastName || 'Cubiko',
-      email: b.email || process.env.CONFIO_FALLBACK_EMAIL || 'pagos@cubiko.co',
+      email: b.email,
       phoneNumber: ConfioProvider.normalizeColombianPhone(b.phoneNumber),
-    }
+    })
   }
 
-  /** Metadata de ConfioPagos debe ser map<string,string>. */
+  /** ConfioPagos requires metadata as map<string,string>. */
   private stringifyMetadata(metadata?: Record<string, any>): Record<string, string> | undefined {
     if (!metadata) return undefined
     const out: Record<string, string> = {}
@@ -626,24 +517,19 @@ export class ConfioProvider implements PaymentProvider {
   }
 
   /**
-   * Normaliza un teléfono colombiano a E.164 (+57XXXXXXXXXX). Fallback al
-   * ejemplo de la documentación de ConfioPagos cuando falta o es inválido.
+   * Turns a Colombian phone into E.164 (+57XXXXXXXXXX). Anything else comes back trimmed and
+   * unchanged so `assertConfioBuyer` judges it: a missing or invalid phone is rejected.
    *
-   * ⚠️ **PROHIBIDO en el camino de suscripción.** Sólo lo usa `resolveBuyer`,
-   * para los links de pago one-shot, donde un teléfono de contacto equivocado es
-   * cosmético y el cobro es uno solo. Pegado a un cobro RECURRENTE, ese
-   * `+573215786325` de la documentación es un contacto falso que se repite todos
-   * los meses, y además rompe al comprador de un plan en USD. El comprador de
-   * una suscripción se arma con `confio-buyer.ts`, que nunca inventa un país.
+   * Not for subscriptions: only `resolveBuyer` uses it, for one-shot payment links, because it
+   * assumes Colombia for a local number; `confio-buyer.ts` builds the subscription buyer.
    */
   static normalizeColombianPhone(raw?: string): string {
-    const fallback = '+573215786325' // de la documentación de ConfioPagos
-    let phone = (raw || '').trim()
-    if (!phone) return fallback
+    const original = (raw || '').trim()
+    let phone = original
     if (phone.startsWith('+57') && phone.length >= 12) return phone
     phone = phone.replace(/^\+/, '')
     if (phone.length === 10 && phone[0] === '3') return '+57' + phone
     if (phone.length === 12 && phone.startsWith('57')) return '+' + phone
-    return fallback
+    return original
   }
 }

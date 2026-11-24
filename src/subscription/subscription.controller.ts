@@ -83,13 +83,12 @@ export class SubscriptionController {
   }
 
   /**
-   * Re-pide el link de aceptación a ConfioPagos en vez de devolver uno guardado.
+   * Fetches the acceptance link from ConfioPagos again instead of returning a stored one.
    *
-   * El `acceptanceUrl` es un link PORTADOR —quien lo tenga registra una tarjeta—
-   * y por eso NO se persiste: lo que se guarda es el `name` del recurso, y el
-   * link se pide de nuevo por acá, detrás del guard. Confío sólo lo entrega
-   * mientras la suscripción está en `PENDING_ACCEPTANCE`; después no hay link
-   * que dar y el servicio lo dice con su propio código.
+   * `acceptanceUrl` is a BEARER link (whoever holds it registers a card), so it is never persisted:
+   * only the resource `name` is stored and the link is re-fetched here, behind the guard. Confio only
+   * returns it while the subscription is `PENDING_ACCEPTANCE`; afterwards the service answers with
+   * its own error code.
    */
   @Get('acceptance-link')
   @ApiOperation({ summary: 'Obtener el link de aceptación vigente de una marca' })
@@ -112,16 +111,12 @@ export class SubscriptionController {
   }
 
   /**
-   * ⚠️ El body va TIPADO y no es opcional: `SubscriptionService.create` guarda lo
-   * que reciba (`repository.create(data)` + `save(data)`), así que el DTO ES el
-   * control de acceso a las columnas. Con `@Body() data: any` no hay metatype y el
-   * `ValidationPipe` global no filtra nada: se podía mandar el `id` de la fila de
-   * otra marca —que el `GET` de arriba entrega— y convertir el `save` en un UPDATE
-   * ajeno, o mandar `trialStart: null` para que `POST /subscription/trial` regale
-   * una segunda prueba. El porqué de cada campo, en `dto/create-subscription.dto.ts`.
+   * The body MUST stay typed: `SubscriptionService.create` saves whatever it receives, so the DTO is
+   * the column access control. Untyped, the global `ValidationPipe` filters nothing, and a caller
+   * could send another brand's row `id` (turning the save into a foreign UPDATE) or
+   * `trialStart: null` to get a second trial. Per-field reasons live in `dto/create-subscription.dto.ts`.
    *
-   * Las fechas viajan ISO y se convierten acá, como en `upsertEnterprisePricing`:
-   * el pipe global corre sin `transform`, así que del body salen strings.
+   * Dates arrive as ISO strings and are converted here because the global pipe runs without `transform`.
    */
   @Post()
   @RequireSuperAdmin()
@@ -161,10 +156,10 @@ export class SubscriptionController {
   }
 
   /**
-   * Alta PAGA, sin prueba: para la marca que ya consumió su trial y quiere volver.
+   * Paid signup without a trial, for a brand that already used its trial.
    *
-   * Devuelve el `acceptanceUrl` en el TOPE de la respuesta —igual que `/trial`— y NUNCA
-   * dentro de `data`: es un link PORTADOR y `data` es la fila, que se serializa entera.
+   * Returns `acceptanceUrl` at the TOP of the response (like `/trial`) and NEVER inside `data`: it is
+   * a bearer link and `data` is the row, which is serialized whole.
    */
   @Post('paid')
   @ApiOperation({ summary: 'Alta de suscripción paga (sin prueba) contra ConfioPagos' })

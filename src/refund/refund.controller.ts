@@ -17,7 +17,7 @@ import { RequestRefundDto } from './dto/request-refund.dto'
 import { ApproveRefundDto } from './dto/approve-refund.dto'
 import { ListRefundsQueryDto } from './dto/list-refunds-query.dto'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 import {
@@ -30,12 +30,9 @@ import {
 @ApiTags('Refund')
 @Controller('refund')
 /**
- * AUTENTICADO desde el 2026-08-29. Antes el decorador de guards de esta clase
- * venía SIN argumento: registra CERO guards, o sea que se leía como protegido y
- * no lo estaba. `ApiAuthGuard` **sólo autentica** —cookie, Bearer JWT o el
- * `ACCESS_SERVER` de servicio—; los permisos siguen siendo cosa de
- * `@RequirePermission` por handler, así que esto no le agrega requisitos a
- * ningún llamador que hoy pase. Ver `shared/auth/controllers-guarded.spec.ts`.
+ * `ApiAuthGuard` only authenticates (cookie, Bearer JWT or service `ACCESS_SERVER`); permissions are
+ * enforced per handler by `@RequirePermission`. Note `@UseGuards()` with no argument registers zero
+ * guards. Pinned by `shared/auth/controllers-guarded.spec.ts`.
  */
 @UseGuards(ApiAuthGuard)
 export class RefundController {
@@ -103,6 +100,7 @@ export class RefundController {
 
   @Post(':id/approve')
   @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Aprobar un reembolso pendiente' })
   @ApiResponse({ status: 200, description: 'Reembolso aprobado correctamente' })
   async approve(

@@ -127,21 +127,20 @@ describe('Token wallet of a brand on PostgreSQL (CA1, LOC-132)', () => {
     ])
   })
 
-  it('CA1 with 3 Dropi and 2 gift, a debit of 4 outside Dropi is refused and Dropi stays at 3', async () => {
-    // R15: red when Dropi tokens are spendable outside Dropi: the debit of 4 is applied.
+  it('CA1 with 3 Dropi and 2 gift, a debit of 4 outside Dropi takes gift 2 and Dropi 2', async () => {
+    // Mutation: drop 'dropi' from the order in planTokenSpend, the debit is refused.
     const wallet = await a.tokens.getOrCreate(BRAND_A, 'user-1')
     await creditOf(wallet.id, 3, TokenOrigin.DROPI)
     await creditOf(wallet.id, 2, TokenOrigin.GIFT)
 
-    await expect(a.tokens.debitTokens(wallet.id, 4, { brandId: BRAND_A })).rejects.toMatchObject({
-      response: { code: 'INSUFFICIENT_BALANCE' },
-    })
+    const result = await a.tokens.debitTokens(wallet.id, 4, { brandId: BRAND_A })
 
+    expect(result.wallet.byOrigin).toEqual({ gift: 0, purchased: 0, dropi: 1 })
     const row = await stored(wallet.id)
     expect([Number(row.dropiTokens), Number(row.giftTokens), Number(row.balance)]).toEqual([
-      3, 2, 5,
+      1, 0, 1,
     ])
-    expect(await debitsOf(wallet.id)).toHaveLength(0)
+    expect(await debitsOf(wallet.id)).toHaveLength(1)
   })
 
   it('a token credit stores its origin, and the view adds the balance up by origin', async () => {

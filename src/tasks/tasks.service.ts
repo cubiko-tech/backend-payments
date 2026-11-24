@@ -1,15 +1,17 @@
-import { Injectable } from '@nestjs/common'
+import { Inject, Injectable, Optional } from '@nestjs/common'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm'
-import { DataSource, LessThan, Repository } from 'typeorm'
+import { DataSource, In, LessThan, Repository } from 'typeorm'
 
 import { AuditService } from '../audit/audit.service'
 import { checkoutExpiryHours } from '../checkout/checkout-expiry'
 import { CheckoutService } from '../checkout/checkout.service'
+import { ClientAuthService } from '../client/client-auth.service'
 import { ClientRolesService } from '../client/client-roles.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { Payment } from '../payment/entities/payment.entity'
 import { ProviderFactory } from '../provider/provider.factory'
+import { APM_AGENT, ApmAgent } from '../shared/apm/apm-agent'
 import { logger } from '../shared/logger/logger'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
@@ -94,6 +96,8 @@ export class TasksService implements TasksDeps {
     readonly clientRoles: ClientRolesService,
     readonly checkoutService: CheckoutService,
     readonly confioWebhook: ConfioSubscriptionWebhookService,
+    readonly clientAuth: ClientAuthService,
+    @Optional() @Inject(APM_AGENT) readonly apm?: ApmAgent,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
@@ -172,7 +176,7 @@ export class TasksService implements TasksDeps {
     cutoff.setDate(cutoff.getDate() - 90)
 
     const result = await this.webhookEventRepo.delete({
-      status: WebhookStatus.PROCESSED,
+      status: In([WebhookStatus.PROCESSED, WebhookStatus.IGNORED, WebhookStatus.OUT_OF_ORDER]),
       createdAt: LessThan(cutoff),
     })
 

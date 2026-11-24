@@ -61,9 +61,10 @@ export const bonusTokensKey = (paymentId: string) => `payment:${paymentId}:token
 /**
  * Prices a `token_package` checkout from the catalog and opens the brand token wallet, before
  * the payment exists. A Colombian billing country pays in COP at the day's TRM; any other pays
- * the USD price. Rejects, with nothing saved: `provider: 'wallet'` (422), an unknown or
- * inactive package (404), a provider not enabled for the country (400, checked before the TRM),
- * no TRM (503) and a closed token wallet (422).
+ * the USD price. Rejects, with nothing saved: `provider: 'wallet'` (422), a return URL outside
+ * the allowlist (400) or no allowlist (503), both before pricing, an unknown or inactive package
+ * (404), a provider not enabled for the country (400, checked before the TRM), no TRM (503) and a
+ * closed token wallet (422).
  */
 export async function prepareTokenPackage(
   req: {
@@ -72,6 +73,8 @@ export async function prepareTokenPackage(
     provider: string
     packageId?: string
     tokens?: unknown
+    successUrl?: string
+    cancelUrl?: string
   },
   deps: TokenPackageDeps,
 ): Promise<PreparedTokenPackage> {
@@ -99,12 +102,17 @@ export async function prepareTokenPackage(
   if (typeof req.packageId !== 'string' || !req.packageId) {
     throw fail('MISSING_PACKAGE_ID', 'packageId is required', HttpStatus.BAD_REQUEST)
   }
+  assertAllowedReturnUrls(
+    req.successUrl,
+    req.cancelUrl,
+    deps.allowedReturnUrls ?? process.env.TOKEN_CHECKOUT_ALLOWED_RETURN_URLS,
+  )
   const tokenPackage = await deps.tokenPackages.findActive(req.packageId)
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
   await deps.assertProviderAvailable(country)
   const pricing = await chargeFor(tokenPackage.priceUsd, country, deps)
 
-  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
+  const wallet = await openCheckoutTokenWallet(req.brandId, req.userId, deps.tokenWallets)
   return { ...pricing, country, walletId: wallet.id, snapshot: snapshotOf(tokenPackage) }
 }
 
@@ -171,7 +179,7 @@ export async function prepareTokenAmount(
   const country = String(await deps.billingCountry(req.brandId)).toUpperCase()
   await deps.assertProviderAvailable(country)
   const pricing = await chargeFor(priceUsd, country, deps)
-  const wallet = await openBrandTokenWallet(req.brandId, req.userId, deps.tokenWallets)
+  const wallet = await openCheckoutTokenWallet(req.brandId, req.userId, deps.tokenWallets)
   return {
     ...pricing,
     country,
@@ -188,6 +196,29 @@ export function parseAllowedReturnUrls(raw?: string): string[] {
     .filter((entry) => entry.length > 0)
 }
 
+/**
+ * A return URL is allowed when it equals an entry, or when the entry is a bare origin
+ * (`https://host[:port]`, nothing after it) and the URL is an http(s) page of that origin with no
+ * user info, query or fragment. A bare origin lets the front return to whatever page it is on.
+ */
+export function isAllowedReturnUrl(candidate: unknown, allowed: string[]): boolean {
+  if (typeof candidate !== 'string') return false
+  if (allowed.includes(candidate)) return true
+  const url = parseUrl(candidate)
+  if (!url || !['https:', 'http:'].includes(url.protocol) || url.username || url.password)
+    return false
+  if (url.search || url.hash || candidate.includes('?') || candidate.includes('#')) return false
+  return allowed.some((entry) => parseUrl(entry)?.origin === entry && entry === url.origin)
+}
+
+function parseUrl(raw: string): URL | null {
+  try {
+    return new URL(raw)
+  } catch {
+    return null
+  }
+}
+
 export function assertAllowedReturnUrls(
   successUrl: string | undefined,
   cancelUrl: string | undefined,
@@ -201,14 +232,14 @@ export function assertAllowedReturnUrls(
       HttpStatus.SERVICE_UNAVAILABLE,
     )
   }
-  if (typeof successUrl !== 'string' || !allowed.includes(successUrl)) {
+  if (!isAllowedReturnUrl(successUrl, allowed)) {
     throw fail(
       'INVALID_RETURN_URL',
       'successUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',
       HttpStatus.BAD_REQUEST,
     )
   }
-  if (cancelUrl !== undefined && (typeof cancelUrl !== 'string' || !allowed.includes(cancelUrl))) {
+  if (cancelUrl !== undefined && !isAllowedReturnUrl(cancelUrl, allowed)) {
     throw fail(
       'INVALID_RETURN_URL',
       'cancelUrl is not in TOKEN_CHECKOUT_ALLOWED_RETURN_URLS',
@@ -217,7 +248,8 @@ export function assertAllowedReturnUrls(
   }
 }
 
-async function openBrandTokenWallet(
+/** The brand token wallet, opened in the buyer's name; a closed one refuses the purchase with 422. */
+async function openCheckoutTokenWallet(
   brandId: string,
   userId: string,
   tokenWallets: TokenWalletService,

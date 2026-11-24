@@ -231,6 +231,13 @@ describe('WebhookService — ramo de suscripción de ConfioPagos', () => {
     return {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
+      insert: jest.fn().mockReturnThis(),
+      into: jest.fn().mockReturnThis(),
+      values: jest.fn().mockReturnThis(),
+      orIgnore: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({}),
       getOne: jest.fn().mockResolvedValue(resultado),
     }
   }

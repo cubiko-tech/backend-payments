@@ -96,12 +96,14 @@ export class ApiAuthGuard implements CanActivate {
       req.onBehalfOf = person
     }
 
-    if (readMeta<boolean>(API_SESSION_ONLY_KEY) && user.isServer) {
-      throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
-    }
+    const refusesServer = !!user.isServer && !!readMeta<boolean>(API_SESSION_ONLY_KEY)
+    const forbidden = () =>
+      new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
 
     const required = this.reflector.get<string>(API_PERMISSION_KEY, handler)
     if (required) {
+      // The server counts as super admin, so a session-only permission route refuses it here.
+      if (refusesServer) throw forbidden()
       if (user.isSuperAdmin) return true
 
       const allowed = await this.roles.checkPermission(user.id, required)
@@ -113,6 +115,8 @@ export class ApiAuthGuard implements CanActivate {
       }
       return true
     }
+
+    if (refusesServer) throw forbidden()
 
     if (readMeta<boolean>(API_SUPER_ADMIN_KEY) && !user.isSuperAdmin) {
       throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)

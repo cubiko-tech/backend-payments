@@ -1,3 +1,4 @@
+// R6: Mirrors confio.provider.ts, one adapter of one provider API; it splits with it.
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http'
 import { AddressInfo } from 'net'
 import { ConfioProvider, ConfioSubscriptionInputError } from './confio.provider'
@@ -921,9 +922,10 @@ describe('ConfioProvider', () => {
       ['3001234567', '+573001234567'],
       ['+573001234567', '+573001234567'],
       ['573001234567', '+573001234567'],
-      ['', '+573215786325'],
-      ['123', '+573215786325'],
+      ['', ''],
+      ['123', '123'],
     ])('%s → %s', (raw, expected) => {
+      // Mutation: the last `return original` becomes `return '+573215786325'` -> '' and '123' are red.
       expect(ConfioProvider.normalizeColombianPhone(raw)).toBe(expected)
     })
   })

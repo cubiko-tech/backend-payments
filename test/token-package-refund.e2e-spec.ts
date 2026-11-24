@@ -21,10 +21,12 @@ import { TokenOrigin } from '../src/wallet/token-origin'
 import { refundTokensKey } from '../src/wallet/token-package-reclaim'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import {
+  allowReturnUrls,
   cleanPackageBrand,
   confioNotice,
   fakeExternalProvider,
   packageCheckout,
+  PACKAGE_RETURN_ORIGIN,
   packageId,
   tokenWalletOf,
 } from './support/token-package.fixture'
@@ -50,6 +52,7 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
   let id: string
   let refunds: RefundService
   let otherRefunds: RefundService
+  let restoreReturnUrls: () => void
   const refundSources: DataSource[] = []
 
   // Each one is its own pool, as two service instances would be.
@@ -98,6 +101,7 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
       .findBy({ referenceType: 'refund', referenceId: refundId })
 
   beforeAll(async () => {
+    restoreReturnUrls = allowReturnUrls(PACKAGE_RETURN_ORIGIN)
     source = await startTrmSource()
     instance = await startInstance({ realBilling: true, trmUrl: source.url })
     id = await packageId(instance.dataSource)
@@ -120,6 +124,7 @@ describe('Refunding a token package (PostgreSQL, LOC-161)', () => {
     for (const dataSource of refundSources) await dataSource.destroy()
     await stopInstance(instance)
     await source.close()
+    restoreReturnUrls()
   })
 
   it('CA3 approving an intact package takes 25 purchased and 2 gift in one debit of the refund', async () => {

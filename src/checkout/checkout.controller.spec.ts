@@ -12,6 +12,7 @@ import {
   ClientPlatformService,
 } from '../client/client-platform.service'
 import { ClientRolesService } from '../client/client-roles.service'
+import { ClientAuthService } from '../client/client-auth.service'
 import { DianService } from '../dian/dian.service'
 import { EventBusService } from '../event-bus/event-bus.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -341,6 +342,16 @@ describe('POST /checkout brand membership gate', () => {
           },
         },
         { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
+        {
+          // Auth is a network service; a usable contact lets Confio cases without a buyer reach the link.
+          provide: ClientAuthService,
+          useValue: {
+            resolveBuyerContact: jest.fn().mockResolvedValue({
+              ok: true,
+              contact: { email: 'ana@andina.co', name: 'Ana Rojas', phone: '+573001112233' },
+            }),
+          },
+        },
       ],
     }).compile()
 

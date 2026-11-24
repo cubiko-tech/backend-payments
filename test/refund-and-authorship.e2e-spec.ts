@@ -1,4 +1,4 @@
-// R6: Keeps all refund guards and session authorship e2e cases against PostgreSQL in one suite.
+// R6: Keeps all refund guards, session authorship and who may act e2e cases against PostgreSQL in one suite.
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
 import { JwtService } from '@nestjs/jwt'
@@ -49,7 +49,7 @@ import {
 import { SubscriptionController } from '../src/subscription/subscription.controller'
 import { SubscriptionService } from '../src/subscription/subscription.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
-import { Wallet } from '../src/wallet/entities/wallet.entity'
+import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletService } from '../src/wallet/wallet.service'
@@ -519,5 +519,103 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
       ['wallet_created', SUPERADMIN_ID],
       ['wallet_credit', SUPERADMIN_ID],
     ])
+  })
+
+  it('refuses approving a refund with the server token before and after a person approves it (LOC-271)', async () => {
+    // R15: red when approve loses @RequireSessionUser: the server moves it to processing as 'server'.
+    const payment = await seedPayment()
+    const created = await postRefund({ paymentId: payment.id, amount: 5000 })
+    expect(created.status).toBe(HttpStatus.CREATED)
+    const refundId = created.body.data.id
+    const approveAs = (token: string) =>
+      request(app.getHttpServer())
+        .post(`/v1/refund/${refundId}/approve`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ approvedBy: 'server' })
+    const brandTransactions = () =>
+      dataSource.getRepository(Transaction).countBy({ brandId: BRAND_A })
+
+    const serverRes = await approveAs(ACCESS_SERVER)
+    expect(serverRes.status).toBe(HttpStatus.FORBIDDEN)
+    const untouched = await refundRepo.findOneByOrFail({ id: refundId })
+    expect([untouched.status, untouched.approvedBy]).toEqual([RefundStatus.PENDING, null])
+    expect(await brandTransactions()).toBe(0)
+
+    const personRes = await approveAs(superAdminToken)
+    expect(personRes.status).toBe(HttpStatus.CREATED)
+    const approved = await refundRepo.findOneByOrFail({ id: refundId })
+    expect([approved.status, approved.approvedBy]).toEqual([RefundStatus.PROCESSING, SUPERADMIN_ID])
+
+    const retryRes = await approveAs(ACCESS_SERVER)
+    expect(retryRes.status).toBe(HttpStatus.FORBIDDEN)
+    const after = await refundRepo.findOneByOrFail({ id: refundId })
+    expect([after.status, after.approvedBy]).toEqual([RefundStatus.PROCESSING, SUPERADMIN_ID])
+  })
+
+  it('refuses the server token on admin retry, extend and toggle-freeze and leaves each row as it was (LOC-271)', async () => {
+    // R15: red when AdminController loses its class @RequireSessionUser: payments retry answers 2xx.
+    const payment = await seedPayment({ status: PaymentStatus.FAILED })
+    const now = new Date()
+    const sub = await subRepo.save(
+      subRepo.create({
+        brandId: BRAND_A,
+        userId: USER_A,
+        planSlug: 'pro',
+        status: SubscriptionStatus.ACTIVE,
+        provider: SubscriptionProvider.WALLET,
+        currentPeriodStart: now,
+        currentPeriodEnd: now,
+        nextBillingDate: now,
+      }),
+    )
+    const walletRepo = dataSource.getRepository(Wallet)
+    const wallet = await walletRepo.save(
+      walletRepo.create({
+        brandId: BRAND_A,
+        userId: USER_A,
+        provider: 'internal',
+        currency: 'COP',
+      }),
+    )
+    const asServer = (path: string, body: Record<string, unknown>) =>
+      request(app.getHttpServer())
+        .post(`/v1/admin/${path}`)
+        .set('Authorization', `Bearer ${ACCESS_SERVER}`)
+        .send(body)
+
+    expect((await asServer(`payments/${payment.id}/retry`, {})).status).toBe(HttpStatus.FORBIDDEN)
+    expect((await asServer(`subscriptions/${sub.id}/extend`, { days: 5 })).status).toBe(
+      HttpStatus.FORBIDDEN,
+    )
+    expect((await asServer(`wallets/${wallet.id}/toggle-freeze`, {})).status).toBe(
+      HttpStatus.FORBIDDEN,
+    )
+
+    const paymentAfter = await paymentRepo.findOneByOrFail({ id: payment.id })
+    expect(paymentAfter.status).toBe(PaymentStatus.FAILED)
+    const subAfter = await subRepo.findOneByOrFail({ id: sub.id })
+    expect(subAfter.currentPeriodEnd.toISOString()).toBe(sub.currentPeriodEnd.toISOString())
+    expect((await walletRepo.findOneByOrFail({ id: wallet.id })).status).toBe(WalletStatus.ACTIVE)
+    const audits = await dataSource
+      .getRepository(AuditLog)
+      .countBy([{ entityId: payment.id }, { entityId: sub.id }, { entityId: wallet.id }])
+    expect(audits).toBe(0)
+
+    const personRes = await request(app.getHttpServer())
+      .post(`/v1/admin/wallets/${wallet.id}/toggle-freeze`)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({})
+    expect(personRes.status).toBe(HttpStatus.CREATED)
+    expect((await walletRepo.findOneByOrFail({ id: wallet.id })).status).toBe(WalletStatus.FROZEN)
+  })
+
+  it('keeps letting the server token list subscriptions for the processes panel (LOC-271)', async () => {
+    // R15: red when subscriptionsList loses @AllowServerToken: processes gets 403.
+    const res = await request(app.getHttpServer())
+      .get('/v1/admin/subscriptions')
+      .set('Authorization', `Bearer ${ACCESS_SERVER}`)
+
+    expect(res.status).toBe(HttpStatus.OK)
+    expect(Array.isArray(res.body.data)).toBe(true)
   })
 })

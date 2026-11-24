@@ -11,6 +11,7 @@ import {
 import {
   SubscriptionEvent,
   SubscriptionEventType,
+  SubscriptionTraceStatus,
 } from '../subscription/entities/subscriptionEvent.entity'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import {
@@ -31,34 +32,22 @@ import {
   periodoLocal,
 } from './confio-period.util'
 import { armarTrazaDelMovimiento } from './confio-traza.util'
+import { advanceMark, isOutOfOrder, NoticeOrder, readNoticeOrder } from './confio-watermark.util'
 import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.service'
 
 /**
- * Mapa `status` de ConfioPagos → estado local, explícito y exportado.
+ * ConfioPagos `status` to local status.
  *
- * `SUSPENDED → past_due` y no un estado terminal: la regla de negocio de la
- * épica 002 dice que el acceso se corta al primer cobro fallido y VUELVE si un
- * cobro posterior tiene éxito, así que suspendido es cortable y recuperable.
- * `CANCELED` y `EXPIRED` sí son terminales del lado de ellos.
+ * `SUSPENDED` maps to `past_due`, not to a terminal status: access is cut on the first failed charge and
+ * comes back if a later charge succeeds. `CANCELED` and `EXPIRED` are terminal on the provider side.
  *
- * Los estados que faltan (`PENDING_ACCEPTANCE`, `PROCESSING`) están en
- * `CONFIO_ESTADOS_SIN_EFECTO`: son del ALTA, no del ciclo de cobro. Mientras la
- * suscripción espera que el comprador acepte, el estado local ya lo fijó el alta
- * y pisarlo con un `trial`/`active` prematuro mentiría sobre lo que se pagó.
- *
- * ⚠️ Ahora que existe un `SubscriptionStatus.PENDING` local, la mutación tentadora
- * es completar el mapa con `PENDING_ACCEPTANCE → PENDING`. **NO se hace**, y no por
- * pereza: el alta de PRUEBA también crea su suscripción en ConfioPagos y ellos la
- * dejan en `PENDING_ACCEPTANCE`, disparando el webhook ANTES de que exista nuestra
- * fila (la «CARRERA DEL WEBHOOK» documentada en `SubscriptionService.startTrial`).
- * Con ese mapeo, el re-despacho de ese evento pisaría una fila `trial` YA VIVA —con
- * el plan puesto en roles— devolviéndola a `pending`. `pending` lo escribe NUESTRO
- * endpoint de alta, nunca el wire status.
- * Candado que ya existe y que se pone rojo ante ese mapeo (asserta `manager.save` no
- * llamado): `webhook.service.spec.ts` →
- * `it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])('%s no cambia el estado ni escribe')`.
+ * Signup statuses (`PENDING_ACCEPTANCE`, `PROCESSING`) live in `CONFIO_ESTADOS_SIN_EFECTO` on purpose.
+ * Do NOT map `PENDING_ACCEPTANCE` to `PENDING`: the trial signup also creates the Confio subscription and its
+ * webhook can arrive before our row exists (see `SubscriptionService.startTrial`), so a redispatch would push
+ * a live `trial` row, plan already in roles, back to `pending`. Only our signup endpoint writes `pending`.
+ * Guarded by `it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])` in `webhook.service.spec.ts`.
  */
 export const CONFIO_SUBSCRIPTION_STATUS_MAP: {
   [K in ConfioSubscriptionStatus]?: SubscriptionStatus
@@ -71,53 +60,38 @@ export const CONFIO_SUBSCRIPTION_STATUS_MAP: {
   EXPIRED: SubscriptionStatus.EXPIRED,
 }
 
-/** Estados del alta: se loguean y NO tocan el estado local. */
+/** Signup statuses: they are logged and never change the local status. */
 export const CONFIO_ESTADOS_SIN_EFECTO: ConfioSubscriptionStatusWire[] = [
   'PENDING_ACCEPTANCE',
   'PROCESSING',
 ]
 
 /**
- * Los dos estados con los que ConfioPagos reporta una suscripción YA ACEPTADA y
- * corriendo: la prueba que arrancó del lado de ellos y el ciclo pago.
+ * Statuses ConfioPagos uses for a subscription already accepted and running (trial or paid cycle).
+ * They are the only ones that grant the plan in `backend-roles`; signup grants nothing.
  *
- * Son los que OTORGAN el plan en `backend-roles`, y desde la regla «no se otorga
- * el plan sin suscripción de verdad» son el único momento en que una prueba
- * consigue acceso — el alta no reparte nada.
- *
- * ⚠️ Es DISJUNTO de `CONFIO_ESTADOS_SIN_EFECTO` y tiene que seguir siéndolo:
- * `PENDING_ACCEPTANCE` es el alta esperando que el comprador acepte, o sea
- * exactamente lo contrario de una confirmación. Meterlo acá le daría el plan a
- * quien todavía no registró tarjeta, que es el defecto que esta tarea corrige.
+ * Must stay disjoint from `CONFIO_ESTADOS_SIN_EFECTO`: `PENDING_ACCEPTANCE` means the buyer has not accepted
+ * yet, and adding it here would grant the plan to someone with no card on file.
  */
 export const CONFIO_ESTADOS_QUE_OTORGAN: ConfioSubscriptionStatus[] = ['TRIALING', 'ACTIVE']
 
 /**
- * Los estados con los que ConfioPagos da por MUERTA su suscripción: ya no va a
- * cobrarla ni a aceptarla nunca.
+ * Statuses with which ConfioPagos declares its subscription dead: it will never charge or accept it.
  *
- * La confirmación activa los aplica sobre una fila que todavía espera, y es la
- * ÚNICA escritura de estado que esa vía se permite. La asimetría es deliberada:
- * revivir con un sondeo sería atribuirnos una autoridad que no tenemos, pero
- * cerrar lo que el dueño de la suscripción declaró cerrado es monótono —no
- * devuelve acceso, no cobra— y es lo que corta el sondeo infinito sobre un alta
- * que nadie va a pagar.
+ * Active confirmation applies them to a row still waiting, the only status write that path allows. Reviving
+ * from a poll would claim an authority we lack, but closing what the owner closed is monotonic (it grants
+ * nothing and charges nothing) and stops endless polling of a signup nobody will pay.
  */
 export const CONFIO_ESTADOS_MUERTOS: ConfioSubscriptionStatus[] = ['CANCELED', 'EXPIRED']
 
 /**
- * `subscription_events.eventType` es un enum de Postgres y NO tiene un
- * `status_changed` genérico, así que cada estado que reporta ConfioPagos se mapea
- * al miembro más cercano; el nombre EXACTO del evento de Confío queda igual en
- * `metadata.event`, que es lo que `trazabilidad-de-movimientos` va a leer.
+ * `subscription_events.eventType` is a Postgres enum without a generic `status_changed`, so each status maps
+ * to the closest member; the exact Confio event name stays in `metadata.event`.
  *
- * OJO CON EL ALCANCE: este mapa cubre los estados que sólo pueden significar UNA
- * cosa —mora, cancelado, expirado—. `TRIALING` y `ACTIVE` NO están, y su ausencia
- * es deliberada: son los dos estados de la CONFIRMACIÓN, donde el hecho no lo
- * dicta el proveedor sino si se otorgó el plan o no, y eso lo decide
- * `planearOtorgamiento` con el par `CONFIRMATION_GRANTED`/`CONFIRMATION_NOT_GRANTED`.
- * Volver a meterlos acá es reintroducir el defecto que dejaba el alta confirmada
- * por primera vez escrita como `reactivated`.
+ * Only statuses with a single meaning belong here. `TRIALING` and `ACTIVE` are left out on purpose: their
+ * event depends on whether the plan was granted, which `planearOtorgamiento` decides
+ * (`CONFIRMATION_GRANTED`/`CONFIRMATION_NOT_GRANTED`). Adding them would record a first confirmation as
+ * `reactivated`.
  */
 const CONFIO_TIPO_DE_EVENTO: { [K in ConfioSubscriptionStatus]?: SubscriptionEventType } = {
   PAST_DUE: SubscriptionEventType.PAYMENT_FAILED,
@@ -126,54 +100,46 @@ const CONFIO_TIPO_DE_EVENTO: { [K in ConfioSubscriptionStatus]?: SubscriptionEve
   EXPIRED: SubscriptionEventType.EXPIRED,
 }
 
-/** UUID canónico: `subscriptions.id`. Mismo formato que `checkout.service.ts:740`. */
+/** Canonical UUID: `subscriptions.id`. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
- * Estados terminales del lado nuestro: revivirlos merece un aviso. Espejo exacto de
- * `TERMINAL_SUBSCRIPTION_STATUSES` (`subscription.entity.ts`).
+ * Our terminal statuses: reviving them deserves a warning. Mirrors `TERMINAL_SUBSCRIPTION_STATUSES`
+ * (`subscription.entity.ts`).
  *
- * ⚠️ `pending` NO entra. Este conjunto es el que `planearCobro` usa para decidir si
- * un `SUCCEEDED` es una RESURRECCIÓN; el primer cobro del alta PAGA no lo es: es
- * exactamente el cobro que la fila `pending` estaba esperando. Metiéndolo acá,
- * `revive` daría `true`, el efecto saldría con `roles: undefined` y la fila pasaría a
- * `active` SIN que se le asigne el plan en roles — la marca paga y no habilita nada.
- * Lo fija el caso «el primer cobro exitoso sobre una fila `pending` la activa y le
- * asigna el plan en roles» de `confio-subscription-webhook.service.spec.ts`.
+ * `pending` must NOT be added: `planearCobro` uses this to detect a resurrection, and the first charge of a
+ * paid signup is not one. With `pending` here the row would become `active` without the plan in roles, so the
+ * brand pays and gets nothing.
  */
 const ESTADOS_TERMINALES = [SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED]
 
 /**
- * `event` con el que queda registrada en el historial la confirmación ACTIVA.
- *
- * No es un evento de ConfioPagos y por eso no se parece a los suyos: la traza tiene
- * que decir de qué vía salió el hecho. Quien lea `subscription_events` distingue
- * «nos avisaron» de «preguntamos».
+ * `event` recorded in the history for an ACTIVE confirmation. It is not a ConfioPagos event, so readers of
+ * `subscription_events` can tell "they notified us" from "we asked".
  */
 export const CONFIRMACION_ACTIVA = 'subscription.confirmacionActiva'
 
 /**
- * Qué pasó al preguntarle a ConfioPagos, con los cuatro desenlaces separados a
- * propósito: el llamador los cuenta distinto y colapsarlos es justo lo que la regla
- * «un fallo del canal nunca se convierte en un hecho sobre el objeto» prohíbe.
+ * Outcome of asking ConfioPagos. Outcomes stay separate on purpose: the caller counts them differently, and a
+ * channel failure must never become a fact about the subscription.
  */
 export interface ResultadoDeConfirmacion {
-  resultado: /** Se aplicó: la fila quedó viva y el plan asignado en roles. */
+  resultado: /** Applied: the row is live and the plan assigned in roles. */
     | 'otorgada'
-    /** El comprador todavía no completó el pago. Es el caso NORMAL, no un error. */
+    /** The buyer has not completed payment yet. The NORMAL case, not an error. */
     | 'sin_confirmar'
-    /** Ya estaba aplicado, o las guardas lo impiden (fila terminal, baja pendiente). */
+    /** Already applied, or the guards prevent it (terminal row, pending cancellation). */
     | 'sin_efecto'
-    /** El proveedor la dio por muerta y la fila se cerró: deja de repescarse. */
+    /** The provider declared it dead and the row was closed: polling stops. */
     | 'cerrada'
-    /** La fila no tiene suscripción en ConfioPagos que consultar. */
+    /** The row has no ConfioPagos subscription to query. */
     | 'sin_suscripcion_en_el_proveedor'
-    /** No se pudo preguntar. NO significa «no aceptó». */
+    /** Could not ask. Does NOT mean "not accepted". */
     | 'proveedor_no_disponible'
   estadoRemoto?: string
 }
 
-/** ¿La fila ya está parada en el mismo fin de período que se le va a escribir? */
+/** Is the row already at the period end that is about to be written? */
 function mismoFinDePeriodo(sub: Subscription, periodo: PeriodoConfio): boolean {
   const actual = aFecha(sub.currentPeriodEnd)
 
@@ -181,22 +147,16 @@ function mismoFinDePeriodo(sub: Subscription, periodo: PeriodoConfio): boolean {
 }
 
 /**
- * ¿La fila tiene una baja NUESTRA todavía en curso?
+ * Does the row have a cancellation of OURS still running?
  *
- * Es la invariante de `accessEndsAt` (`subscription.entity.ts`) leída desde este
- * lado: sello local + acceso ya pagado que aún no venció. Desde
- * `cancelar-marca-baja-al-fin-de-periodo` la baja NO mueve el `status` —la fila se
- * queda en `trial`/`active`/`past_due` mientras le debamos el servicio—, así que
- * `ESTADOS_TERMINALES.includes(sub.status)` dejó de alcanzar para reconocer una
- * suscripción que del lado de ConfioPagos ya está cancelada. Este predicado es la
- * mitad que faltaba, y las dos guardas del archivo lo usan: la que ignora el eco de
- * nuestra propia baja y la que impide resucitarla con un cobro tardío.
+ * The `accessEndsAt` invariant (`subscription.entity.ts`): local stamp plus paid access not yet expired.
+ * Cancelling does not move `status` (the row stays `trial`/`active`/`past_due` while we owe service), so
+ * `ESTADOS_TERMINALES.includes(sub.status)` alone misses a subscription ConfioPagos already cancelled.
+ * Both guards use it: ignoring the echo of our own cancellation, and blocking revival by a late charge.
  *
- * Discrimina por la FECHA, no sólo por el sello: una vez vencido el acceso la fila
- * vuelve a ser un caso terminal común y el webhook la trata como siempre. La fecha
- * pasa por `aFecha` como todo lo que este archivo lee de la fila: una columna que no
- * vuelva como `Date` (o un `Invalid Date`) tiene que caer del lado de «no hay baja
- * pendiente», que es el comportamiento de siempre, y nunca reventar el handler.
+ * It discriminates by date: once access expires the row is an ordinary terminal case again. The date goes
+ * through `aFecha`, so a column that is not a `Date` (or an `Invalid Date`) reads as "nothing pending" and
+ * never crashes the handler.
  */
 function bajaPendiente(sub: Subscription): boolean {
   const finDeAcceso = aFecha(sub.accessEndsAt)
@@ -205,102 +165,88 @@ function bajaPendiente(sub: Subscription): boolean {
 }
 
 /**
- * La fila ya está dada de baja DE NUESTRO LADO, con o sin acceso por delante.
+ * The row is already cancelled on OUR side, with or without access ahead.
  *
- * Es deliberadamente más ancho que `bajaPendiente`, que exige que el acceso NO
- * esté vencido: acá alcanza el sello. Los dos casos que `bajaPendiente` deja
- * afuera son justo los que hacían falta —una baja cuyo acceso ya venció, y una
- * baja sobre una fila `pending`, que nunca tuvo acceso que deber—, y ninguno de
- * los dos deja de ser una baja.
- *
- * MEDIDO EN PRODUCCIÓN el 2026-09-08, y por eso existe. Cancelar una suscripción
- * `pending` hizo que ConfioPagos emitiera un `billingStatusChanged` con `FAILED`
- * 85 ms después; el evento entró por `planearCobro`, no encontró guarda —el
- * `status` no era terminal y `bajaPendiente` daba `false` porque el período era
- * de largo cero, o sea ya vencido— y movió la fila a `past_due`. Resultado: una
- * baja mostrada como moroso VIVO, con `cancelledAt` puesto, 309 ms después de
- * haberse cancelado de verdad del otro lado.
+ * Wider than `bajaPendiente` on purpose: the stamp alone is enough. It also covers a cancellation whose access
+ * already expired and one on a `pending` row, which never had access. ConfioPagos sends a `FAILED`
+ * `billingStatusChanged` right after a `pending` subscription is cancelled, and without this `planearCobro`
+ * would move the row to `past_due`: a cancellation shown as a live debtor.
  */
 function yaDadaDeBaja(sub: Subscription): boolean {
   return ESTADOS_TERMINALES.includes(sub.status) || !!sub.cancelledAt
 }
 
 /**
- * Efecto YA DECIDIDO de un webhook, antes de tocar la base.
- *
- * Se calcula fuera de la transacción (incluida la consulta al proveedor, que es
- * red) y se aplica adentro sobre la fila BLOQUEADA: nunca se sostiene una
- * transacción abierta a través de la red.
+ * Effect of a webhook, decided before touching the database. Computed outside the transaction (including the
+ * provider call, which is network) and applied inside on the LOCKED row, so a transaction is never held open
+ * across the network.
  */
 interface EfectoConfio {
   eventType: SubscriptionEventType
   toStatus: SubscriptionStatus
-  /** Sólo el cobro exitoso avanza el período. */
+  /** Only a successful charge advances the period. */
   avanzaPeriodo?: boolean
-  /** Período del cobro: el del proveedor, o el avance local. */
+  /** Period of the charge: the provider one, or the local advance. */
   periodo?: PeriodoConfio
   reiniciaReintentos?: boolean
-  /** `CANCELED` sella `cancelledAt`, pero sólo si venía nulo. */
+  /** `CANCELED` stamps `cancelledAt`, only if it was null. */
   sellaCancelacion?: boolean
   /**
-   * La confirmación de una PRUEBA escribe `trialStart`/`trialEnd`, que el alta ya
-   * no sella. Sólo cuando venían vacías: una renovación no reescribe cuándo
-   * empezó la prueba.
+   * A TRIAL confirmation writes `trialStart`/`trialEnd`, only when empty: a renewal does not rewrite when the
+   * trial started.
    */
   sellaPrueba?: boolean
-  /** Movimiento de acceso en `backend-roles`; ausente = no se toca roles. */
+  /** Access move in `backend-roles`; absent means roles is not touched. */
   roles?: EfectoRoles
   /**
-   * Motivo para la COLUMNA `reason` cuando el payload no trae uno propio: el
-   * hecho que degradó tiene que ser identificable desde la fila sola.
+   * Value for the `reason` column when the payload brings none: the fact that downgraded must be identifiable
+   * from the row alone.
    */
   reason?: string
 }
 
 /**
- * Movimiento de acceso en `backend-roles`, decidido ANTES de tocar la base.
+ * What a signed notice did: `out_of_order` when it is older than the one already applied to its
+ * subscription, `no_effect` when the guards decided nothing applies.
+ */
+export type ConfioNoticeOutcome = 'applied' | 'out_of_order' | 'no_effect'
+
+/**
+ * Access move in `backend-roles`, decided BEFORE touching the database.
  *
- * Lleva `brandId` y `planSlug` PROPIOS en vez de releerlos de la fila bloqueada:
- * así lo que se empujó a roles y lo que queda escrito en `metadata` son el MISMO
- * dato, incluso si otra escritura le cambiara el plan a la fila en el medio.
+ * Carries its own `brandId` and `planSlug` instead of rereading the locked row, so what was pushed to roles
+ * and what `metadata` records are the same data even if another write changes the row plan meanwhile.
  */
 interface EfectoRoles {
   /**
-   * `retirar` es la mora (saca el plan pago y nada más), `degradar` es la baja
-   * definitiva (saca el pago y deja `free`) y `reponer` es el cobro exitoso.
+   * `retirar` is delinquency (removes the paid plan only), `degradar` is the final cancellation (removes it
+   * and leaves `free`), and `reponer` is a successful charge.
    */
   accion: 'retirar' | 'reponer' | 'degradar'
   brandId: string
   planSlug: string
-  /** Sólo la reposición: fin del período que se acaba de cobrar. */
+  /** Restore only: end of the period just charged. */
   expiresAt?: Date
 }
 
 /**
- * Handler del ramo FIRMADO del webhook de ConfioPagos: los dos eventos
- * `subscription.*` (`webhook.service.ts` → `dispatchEvent`, rama `confio`).
+ * Handler of the SIGNED branch of the ConfioPagos webhook: the two `subscription.*` events, routed by
+ * `webhook.service.ts`.
  *
- * Vive en su propio archivo porque `webhook.service.ts` ya está en el límite de
- * tamaño del repo (400 líneas); el ruteo se queda allá y sólo la lógica de
- * suscripción está acá.
+ * No path here throws for a business fact (unresolved subscription, unmapped status, effect already applied):
+ * it logs and returns, so `processEvent` marks the event `processed` and the endpoint answers 200. Real
+ * database errors propagate so the queue retries.
  *
- * Ningún camino de acá lanza por un hecho de negocio (suscripción no resuelta,
- * estado no mapeado, efecto ya aplicado): se loguea y se vuelve, para que
- * `processEvent` marque el evento `processed` y el endpoint responda 200 —un
- * fallo del canal no puede convertirse en un hecho sobre el objeto—. Los
- * errores REALES de base sí se dejan propagar, así la cola reintenta.
+ * It throws only when `backend-roles` rejects the access move, a CHANNEL failure and not a fact
+ * about the subscription. It throws before the transaction, so the row, the marker and the applied
+ * history stay as they were and only the `pending` trace is left, for the retry to apply. Not
+ * receiving the webhook removes nothing either.
  *
- * Sí lanza, y sólo, cuando `backend-roles` rechaza el movimiento de acceso: eso
- * es un fallo de CANAL, no un hecho del objeto, y lanzar antes de abrir la
- * transacción deja cero escrituras locales —ni `past_due`, ni marcador, ni
- * historial— para que el reintento del webhook vuelva a intentarlo entero. Lo
- * recíproco también vale: no recibir el webhook no retira nada.
- *
- * ⚠️ Residual aceptado: dos eventos DISTINTOS de la misma suscripción son
- * last-write-wins, así que una entrega fuera de orden puede aplicar un estado
- * viejo. Resolverlo pide una marca de agua por tiempo de evento, o sea una
- * migración: fuera de alcance. La concurrencia del MISMO evento sí está resuelta
- * (marcador releído bajo `pessimistic_write`).
+ * Two DIFFERENT notices of one subscription are ordered by `providerWatermark`
+ * (`confio-watermark.util.ts`): an older one is checked before planning and again on the locked row,
+ * and is kept as `out_of_order` without writing. The same notice twice is resolved by the marker,
+ * read again under `pessimistic_write`. Before backend-roles is called the movement trace is written
+ * `pending`, so a rejected call leaves it; `aplicar` turns it `applied`.
  */
 @Injectable()
 export class ConfioSubscriptionWebhookService {
@@ -318,7 +264,7 @@ export class ConfioSubscriptionWebhookService {
     private readonly bonus: SubscriptionBonusService,
   ) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEvent): Promise<ConfioNoticeOutcome> {
     const payload: ConfioWebhookPayload = event?.payload || {}
     const data = payload.data || {}
 
@@ -328,7 +274,7 @@ export class ConfioSubscriptionWebhookService {
         `Confio suscripción no resuelta: name=${escapeLogValue(data.name)} ` +
           `correlationId=${escapeLogValue(data.correlationId)}`,
       )
-      return
+      return 'no_effect'
     }
 
     const markerIds = [
@@ -336,8 +282,7 @@ export class ConfioSubscriptionWebhookService {
       buildLegacyConfioStatusChangedEventId(payload),
     ].filter((id): id is string => typeof id === 'string' && id.length > 0)
 
-    // Atajo de re-despacho: evita volver a consultar al proveedor. NO es la
-    // garantía —esa es la relectura bajo el lock, más abajo—, es sólo el ahorro.
+    // Redispatch shortcut that saves a provider call; the guarantee is the reread under lock in `aplicar`.
     const yaAplicado = await ConfioSubscriptionWebhookService.buscarMarcador(
       this.subscriptionEventRepository.createQueryBuilder('e'),
       sub.id,
@@ -345,38 +290,122 @@ export class ConfioSubscriptionWebhookService {
     )
     if (yaAplicado) {
       this.logger.log(`Confio efecto ya aplicado para ${event.providerEventId}, no se repite`)
-      return
+      return 'no_effect'
+    }
+
+    // Before planning, so an older notice reaches neither ConfioPagos nor backend-roles.
+    const order = readNoticeOrder(payload)
+    if (isOutOfOrder(sub, order)) {
+      this.logger.log(
+        `Confio notice ${escapeLogValue(event.providerEventId)} for ${sub.id} ` +
+          'is out of order: not applied',
+      )
+      await this.discardPendingTrace(sub.id, event.providerEventId, 'out of order')
+      return 'out_of_order'
     }
 
     const efecto =
       payload.event === 'subscription.billingStatusChanged'
         ? await this.planearCobro(data, sub)
         : await this.planearCambioDeEstado(data, sub)
-    if (!efecto) return
-
-    // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
-    const bono =
-      efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
-        ? await this.bonus.plan(payload, sub)
-        : null
-
-    if (efecto.roles) {
-      await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
+    if (!efecto) {
+      await this.discardPendingTrace(sub.id, event.providerEventId, 'no effect on retry')
+      return 'no_effect'
     }
 
-    await this.aplicar(sub.id, efecto, payload, event.providerEventId, markerIds, bono)
+    // Before the bonus too: its plan catalog is also read from backend-roles.
+    if (efecto.roles) await this.writePendingTrace(sub, efecto, payload, event.providerEventId)
+
+    try {
+      // Only a paid cycle that restores the plan gives the bonus; a late charge on a dead row does not.
+      const plannedBonus =
+        efecto.eventType === SubscriptionEventType.PAYMENT_SUCCEEDED && efecto.roles
+          ? await this.bonus.plan(payload, sub)
+          : null
+
+      if (efecto.roles) {
+        await this.sincronizarAccesoEnRoles(efecto.roles, sub.id, event.providerEventId)
+      }
+
+      return await this.aplicar(
+        sub.id,
+        efecto,
+        payload,
+        event.providerEventId,
+        markerIds,
+        plannedBonus,
+        order,
+      )
+    } catch (error) {
+      if (efecto.roles) {
+        this.logger.warn(
+          `Confio notice ${escapeLogValue(event.providerEventId)} left its trace pending ` +
+            `for ${sub.id}: ${error?.message}`,
+        )
+      }
+      throw error
+    }
   }
 
   /**
-   * Resolución por resource name y, si eso no da, por `correlationId` cuando es
-   * un UUID (nuestro `subscriptions.id`).
+   * The movement trace written before backend-roles is called, from the unlocked row. Without the
+   * signature digest, which the cycle bonus reads as an applied notice. A second dispatch of the same
+   * notice keeps the first one (`UQ_subscription_events_pending_trace`).
+   */
+  private async writePendingTrace(
+    sub: Subscription,
+    efecto: EfectoConfio,
+    payload: ConfioWebhookPayload,
+    providerEventId: string,
+  ): Promise<void> {
+    const trace = armarTrazaDelMovimiento({
+      sub,
+      fromStatus: sub.status,
+      eventType: efecto.eventType,
+      toStatus: efecto.toStatus,
+      payload,
+      providerEventId,
+      roles: efecto.roles,
+      reason: efecto.reason,
+    })
+    const metadata = { ...trace.metadata }
+    delete metadata.signatureChecksum
+
+    await this.subscriptionEventRepository
+      .createQueryBuilder()
+      .insert()
+      .into(SubscriptionEvent)
+      .values({ ...trace, metadata, traceStatus: SubscriptionTraceStatus.PENDING })
+      .orIgnore()
+      .execute()
+  }
+
+  /** A pending trace of `providerEventId` that a later delivery decided not to apply. */
+  private async discardPendingTrace(
+    subscriptionId: string,
+    providerEventId: string,
+    why: string,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const qb = manager
+      ? manager.createQueryBuilder()
+      : this.subscriptionEventRepository.createQueryBuilder()
+    await qb
+      .update(SubscriptionEvent)
+      .set({ traceStatus: SubscriptionTraceStatus.DISCARDED, reason: `Discarded: ${why}` })
+      .where('"subscriptionId" = :sid', { sid: subscriptionId })
+      .andWhere("metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
+      .andWhere('"traceStatus" = :pending', { pending: SubscriptionTraceStatus.PENDING })
+      .execute()
+  }
+
+  /**
+   * Resolves by resource name, then by `correlationId` when it is a UUID (our `subscriptions.id`).
    *
-   * Los dos `findOne` van guardados contra `undefined` A PROPÓSITO: TypeORM
-   * DESCARTA una condición con valor `undefined` y devolvería una suscripción
-   * CUALQUIERA — una escritura cruzada entre marcas, en silencio.
+   * Both `findOne` calls are guarded against `undefined` ON PURPOSE: TypeORM drops a condition whose value
+   * is `undefined` and would return ANY subscription, a silent cross-brand write.
    *
-   * Se lee contra la escritura y no contra la réplica por el mismo argumento ya
-   * escrito en `webhook.service.ts:55`: el lag de la réplica no entra acá.
+   * Reads from the write connection so replica lag cannot apply here.
    */
   private async resolverSuscripcion(
     data: ConfioWebhookPayload['data'],
@@ -418,28 +447,14 @@ export class ConfioSubscriptionWebhookService {
     return null
   }
 
-  /** Cobro del ciclo: `SUCCEEDED` renueva; cualquier otro estado deja mora. */
+  /** Cycle charge: `SUCCEEDED` renews; any other status means delinquency. */
   private async planearCobro(
     data: ConfioWebhookPayload['data'],
     sub: Subscription,
   ): Promise<EfectoConfio | null> {
     if (data?.status !== 'SUCCEEDED') {
-      // El acceso pro se corta al PRIMER cobro fallido que reporte el webhook,
-      // sin período de gracia (regla de negocio de la épica 002). Se retira el
-      // plan de la suscripción y NO se asigna `free`: un plan free no se cobra y
-      // la degradación es de `degradacion-a-free-y-baja-en-roles`.
-      //
-      // Corta cualquier estado que no sea `SUCCEEDED` y no una lista de fallos
-      // porque `billingStatusChanged` sólo reporta cobros YA procesados
-      // («exitoso o fallido», tabla de eventos del contrato): hoy no hay estado
-      // intermedio. Si Confío agrega uno, este predicado lo leería como impago.
-      //
-      // Un cobro fallido sobre una fila YA dada de baja no tiene efecto: mover a
-      // `past_due` la convertiría en un moroso vivo, que es peor que no hacer
-      // nada —la fila deja de ser una baja y pasa a ser una deuda—, y el acceso
-      // en roles ya lo retiró la cancelación. Es la guarda RECÍPROCA de la que
-      // `planearCambioDeEstado` ya tiene para el caso simétrico, y sigue su mismo
-      // precedente: `null`, o sea sin evento y sin escritura.
+      // Any non-`SUCCEEDED` status is unpaid, with no grace; a new intermediate Confio status would be too.
+      // On a row we already cancelled it does nothing: `past_due` would turn a cancellation into a live debt.
       if (yaDadaDeBaja(sub)) {
         this.logger.log(
           `Confio cobro no exitoso sobre una suscripción ya dada de baja (${sub.id}): ` +
@@ -470,31 +485,11 @@ export class ConfioSubscriptionWebhookService {
       }
     }
 
-    // El período se resuelve ACÁ, en la fase de decisión, y no al aplicar: el
-    // `expiresAt` que se le promete a roles tiene que ser EXACTAMENTE el
-    // `currentPeriodEnd` que después se persiste. Resolverlo dos veces (una para
-    // roles, otra para la fila) permitiría que difieran.
+    // Resolved once, here: the `expiresAt` promised to roles must equal the `currentPeriodEnd` persisted later.
     const periodo = (await this.leerPeriodoDelProveedor(data, sub)) || periodoLocal(sub)
 
-    // Resurrección: un `SUCCEEDED` tardío sobre una suscripción que del lado
-    // NUESTRO ya está cancelada o vencida no repone el acceso. El mapeo de estado
-    // lo dicta la aceptación y se aplica (con el aviso de `aplicar`, medido sobre
-    // la fila bloqueada), pero conceder pro por el cobro de una suscripción que
-    // consideramos muerta es la mitad IRREVERSIBLE: se decide ACÁ, no después de
-    // haber empujado el movimiento a roles.
-    //
-    // Una baja PENDIENTE cuenta como muerta a estos efectos, y por eso el predicado
-    // no es sólo el `status`: la fila sigue en `trial`/`active` porque le debemos el
-    // acceso ya pagado, pero del lado de ConfioPagos ya está `CANCELED` y no vuelve
-    // a cobrar. Un `SUCCEEDED` que llegue después —un link one-shot emitido ANTES de
-    // la baja y pagado a destiempo, o un cobro en vuelo— no puede volver a comprar
-    // el plan: la vuelta es un alta nueva por checkout, con pago propio.
-    //
-    // Una fila `pending` (alta PAGA que todavía no pagó su primer ciclo) NO cae acá,
-    // y tiene que seguir sin caer: ese `SUCCEEDED` es su PRIMER cobro, no un cobro
-    // tardío sobre algo que dimos por muerto, así que baja por el camino normal y
-    // repone el plan en roles con `efectoRoles('reponer', …)`. La guarda muerde sólo
-    // sobre `cancelled`/`expired` y sobre la baja pendiente.
+    // A late `SUCCEEDED` on a row we treat as dead (terminal, or cancellation pending) does not restore the plan.
+    // A `pending` row is excluded on purpose: that is its first charge and must restore the plan in roles.
     const revive = ESTADOS_TERMINALES.includes(sub.status) || bajaPendiente(sub)
     if (revive) {
       const porQue = ESTADOS_TERMINALES.includes(sub.status) ? sub.status : 'dada de baja'
@@ -514,11 +509,8 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Descriptor de roles, o `undefined` cuando la fila no alcanza para armarlo.
-   *
-   * La guarda es barata y necesaria: `brandId`/`planSlug` van al path de roles
-   * (`/v1/brand/{id}/plan/slug/{slug}`), y uno vacío devolvería 404 → `false` →
-   * un fallo de canal que reintentaría en bucle sin poder resolverse nunca.
+   * Roles descriptor, or `undefined` when the row lacks the data. `brandId`/`planSlug` go into the roles path,
+   * and an empty one returns 404, read as a channel failure that would retry forever.
    */
   private efectoRoles(
     accion: EfectoRoles['accion'],
@@ -538,34 +530,22 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Empuje del movimiento de acceso a `backend-roles`.
+   * Pushes the access move to `backend-roles`.
    *
-   * (1) Se ramifica sobre el BOOLEANO y no sobre un throw: `callRolesApi`
-   *     (`client-roles.service.ts:323-357`) atrapa 4xx, 5xx, timeout y
-   *     `SERVICE_ROLES` ausente y devuelve `false`, así que un rollback escrito
-   *     sobre «si rechaza» dejaría pasar de largo una caída de roles. Mismo
-   *     precedente que el alta (`subscription.service.ts:179-190`).
-   * (2) Se llama ANTES de la transacción: es HTTP con timeout de 10 s y adentro
-   *     retendría el lock de la fila todo ese tiempo.
-   * (3) Lanzar deja CERO escrituras locales, o sea que un canal caído no puede
-   *     quedar registrado como impago ni degradar por sí solo; el mensaje queda
-   *     en `webhook_events.error` y el evento se marca para reintento. Ese
-   *     reintento HOY no reprocesa solo (`webhook.processor.ts` incrementa el
-   *     contador y relanza): la reparación entra por `POST /webhook/:id/retry`.
-   *     Deuda preexistente de todos los proveedores, no de este camino.
-   * (4) La degradación (`degradar`) delega en `plan-downgrade.util.ts`, que es el
-   *     único dueño del movimiento y lo comparte con los dos crons de
-   *     `tasks.service.ts`: retira el plan pago y deja `free` SIN `expiresAt`.
-   * (5) La reposición usa `assignPlanToBrand` y NUNCA `renewPlanForBrand`:
-   *     `assignPlanToBrandBySlug` es un upsert (actualiza `expiresAt` si el
-   *     vínculo existe, lo crea si no), mientras que el `renew` tira 404 cuando
-   *     la marca no tiene el plan — que es justo el estado que dejó el retiro.
+   * (1) Branches on the BOOLEAN, not on a throw: `callRolesApi` catches 4xx, 5xx, timeouts and a missing
+   *     `SERVICE_ROLES` and returns `false`, so a rollback written for "rejected" would miss a roles outage.
+   * (2) Called BEFORE the transaction: it is HTTP with a 10 s timeout and would hold the row lock meanwhile.
+   * (3) Throwing leaves only the `pending` trace: a channel down is never recorded as unpaid
+   *     nor downgrades on its own. The message stays in `webhook_events.error` and the event is
+   *     marked for retry, which today does not reprocess by itself (`webhook.processor.ts` counts
+   *     and rethrows): the repair is `POST /webhook/:id/retry`. Debt of every provider.
+   * (4) `degradar` delegates to `plan-downgrade.util.ts`, the single owner of that move (shared with the
+   *     `tasks.service.ts` crons): it removes the paid plan and leaves `free` without `expiresAt`.
+   * (5) Restoring uses `assignPlanToBrand`, NEVER `renewPlanForBrand`: assign is an upsert, while renew
+   *     returns 404 when the brand lacks the plan, which is exactly the state a removal leaves.
    *
-   * ⚠️ `callRolesApi` colapsa 404 y 503 en el mismo `false`, así que un plan que
-   * NO esté sembrado en el catálogo de roles se lee acá como canal caído y el
-   * evento termina en dead letter tras 3 intentos. Falla ruidosa —lo correcto
-   * para un error de configuración—, pero mientras `plan-dropi-roax-en-catalogo`
-   * siga abierto es el resultado esperado de todo cobro de `dropi-roax`.
+   * `callRolesApi` collapses 404 and 503 into the same `false`, so a plan missing from the roles catalog reads
+   * as a channel outage and the event ends in dead letter after 3 attempts: loud, as a config error should be.
    */
   private async sincronizarAccesoEnRoles(
     roles: EfectoRoles,
@@ -590,17 +570,13 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Período según ConfioPagos, o `undefined` para avanzar localmente.
+   * Period according to ConfioPagos, or `undefined` to advance locally.
    *
-   * El resource name sale de `data.name` y, si no vino, de la fila: sin ese
-   * segundo intento el camino del `correlationId` degradaría SIEMPRE, porque
-   * `ConfioProvider.toSubscriptionPath` rechaza un name vacío
-   * (`invalid_subscription_name`) y el fallo se leería como «se cayó Confío».
+   * The resource name comes from the row or, failing that, `data.name`: `ConfioProvider.toSubscriptionPath`
+   * rejects an empty name, and that failure would read as Confio being down.
    *
-   * Las tres fechas se validan una por una: `ConfioSubscriptionResult` las
-   * declara obligatorias pero llegan `undefined` en runtime mientras la
-   * suscripción no abrió período, y con `strictNullChecks: false`
-   * (`tsconfig.json`) el compilador no lo ve.
+   * Each date is validated: `ConfioSubscriptionResult` declares them required, but they arrive `undefined`
+   * until the subscription opens a period, and `strictNullChecks: false` hides it from the compiler.
    */
   private async leerPeriodoDelProveedor(
     data: ConfioWebhookPayload['data'],
@@ -616,19 +592,15 @@ export class ConfioSubscriptionWebhookService {
     }
 
     try {
-      // `yaLeida` es la MISMA lectura que trajo el estado en la confirmación activa
-      // (`confirmarContraElProveedor`): sin esto se le pediría dos veces la misma
-      // suscripción al proveedor en cada sondeo del front. La validación de abajo
-      // es la única, venga de donde venga la lectura.
+      // `yaLeida` reuses the read that brought the status in active confirmation, so the provider is asked once.
       const remota = yaLeida || (await this.confio.getSubscription(resourceName))
       const start = aFecha(remota?.currentPeriodStart)
       const end = aFecha(remota?.currentPeriodEnd)
       const nextBilling = aFecha(remota?.nextBillingTime)
 
       if (start && end && nextBilling) {
-        // Un período YA VENCIDO no sirve ni como `expiresAt` (roles lo barre)
-        // ni como `nextBillingDate` (⚠️ DINERO): se degrada al avance local, que
-        // tiene piso en el ahora. Razones completas en `confio-period.util.ts`.
+        // An expired period is useless as `expiresAt` (roles sweeps it) and as `nextBillingDate` (MONEY),
+        // so fall back to the local advance, which is floored at now (`confio-period.util.ts`).
         if (!estaVencido(end)) return { start, end, nextBilling }
 
         this.logger.warn(
@@ -653,11 +625,8 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Cambio de estado de la suscripción. `null` = no hay nada que aplicar.
-   *
-   * Es `async` desde que la CONFIRMACIÓN otorga acceso: `TRIALING`/`ACTIVE`
-   * necesitan el período del proveedor, y eso es red. Sigue calculándose fuera
-   * de la transacción, como el cobro.
+   * Subscription status change; `null` means nothing to apply. Async because `TRIALING`/`ACTIVE` need the
+   * provider period (network); still computed outside the transaction.
    */
   private async planearCambioDeEstado(
     data: ConfioWebhookPayload['data'],
@@ -672,13 +641,8 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
-    // Se indexa con un cast porque la clave viene de la red y el tipo `Wire`
-    // admite un estado que Confío agregue mañana: ese cae acá como no mapeado.
-    //
-    // El `hasOwnProperty` NO es ceremonia: `wire` es texto de la red y el mapa es
-    // un object literal, así que `"constructor"` o `"valueOf"` devuelven una
-    // FUNCIÓN heredada del prototipo —truthy, o sea que pasa el guard de abajo— y
-    // terminaría asignada a `sub.status`, que es un enum de Postgres.
+    // `wire` is network text: an unknown status falls through as unmapped, and `hasOwnProperty` stops
+    // `"constructor"`/`"valueOf"` from returning an inherited function that would land in `sub.status`.
     const mapeado = Object.prototype.hasOwnProperty.call(CONFIO_SUBSCRIPTION_STATUS_MAP, wire)
     const toStatus = mapeado
       ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
@@ -690,16 +654,8 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
-    // Idempotencia por ESTADO TERMINAL, no sólo por `providerEventId`: ese id se
-    // acuña con `resource:event:status:updateTime` (`confio-webhook.ts`), así que
-    // la secuencia normal CANCELED→EXPIRED son DOS eventos distintos y los dos
-    // terminales. Sin esta guarda el segundo volvería a llamar a roles y
-    // escribiría un segundo `subscription_event` sobre una suscripción ya muerta,
-    // que es justo lo que prohíbe la aceptación 4. Peor todavía con el
-    // last-write-wins que documenta el header: un terminal fuera de orden que
-    // llegue DESPUÉS de un `SUCCEEDED` que repuso el plan le sacaría el plan pago
-    // a una marca que acaba de pagar y la dejaría en `free`. Es la guarda
-    // recíproca de la resurrección de `planearCobro`.
+    // Idempotent by TERMINAL status, not just `providerEventId`: CANCELED then EXPIRED are two distinct events,
+    // and a late terminal after a restoring `SUCCEEDED` would strip a plan the brand just paid for.
     if (ESTADOS_TERMINALES.includes(toStatus) && ESTADOS_TERMINALES.includes(sub.status)) {
       this.logger.log(
         `Confio ${wire} sobre una suscripción ya ${sub.status} (${sub.id}): sin efecto, ya está de baja`,
@@ -709,23 +665,9 @@ export class ConfioSubscriptionWebhookService {
 
     const esTerminal = ESTADOS_TERMINALES.includes(toStatus)
 
-    // EL ECO DE NUESTRA PROPIA BAJA. `SubscriptionService.cancel` cancela PRIMERO en
-    // ConfioPagos y ellos devuelven el hecho por webhook: ese `CANCELED` describe la
-    // MISMA baja que nosotros ya sellamos, no una decisión del proveedor. La guarda
-    // de arriba no lo agarra porque desde el corte diferido la fila NO queda
-    // terminal, y sin ésta el camino principal de la baja quedaba anulado:
-    //   (a) `efectoRoles('degradar')` le sacaba el plan a la marca segundos después
-    //       de que la baja se lo conservó — la aceptación entera de
-    //       `cancelar-marca-baja-al-fin-de-periodo` sólo era cierta en los tests;
-    //   (b) `aplicar` escribía un SEGUNDO `SubscriptionEvent` CANCELLED del mismo
-    //       hecho, que es lo que la idempotencia de `cancel` existe para evitar;
-    //   (c) quedaba `status = cancelled` con `accessEndsAt` NO nula, rompiendo la
-    //       invariante de la columna y dejando a la fila lista para una SEGUNDA
-    //       degradación cuando aterrice el cron de retiro.
-    // Mientras le debamos el acceso ya pagado esto es SIN EFECTO —ni roles, ni
-    // estado, ni traza—: la degradación tiene un solo dueño, el cron que barre
-    // `autoRenew = false` + `accessEndsAt` vencida. Una vez pasada esa fecha
-    // `bajaPendiente` deja de valer y el terminal se aplica como siempre.
+    // R27: three distinct harms, and the third is not visible from this line.
+    // ECHO of our own cancellation: while paid access remains, applying it would downgrade early, record a second
+    // CANCELLED, and leave `cancelled` with a non-null `accessEndsAt` that the sweeping cron downgrades again.
     if (esTerminal && bajaPendiente(sub)) {
       this.logger.log(
         `Confio ${wire} sobre la baja que ya registramos (${sub.id}): sin efecto, ` +
@@ -734,24 +676,13 @@ export class ConfioSubscriptionWebhookService {
       return null
     }
 
-    // LA CONFIRMACIÓN ES LA QUE OTORGA. `TRIALING`/`ACTIVE` son los dos estados
-    // con los que ConfioPagos reporta una suscripción ya aceptada y corriendo, y
-    // desde la regla «no se otorga el plan sin suscripción de verdad» (Manuel,
-    // 2026-09-02) son el ÚNICO momento en el que la prueba consigue acceso: el
-    // alta ya no reparte nada. Antes acá había un hueco deliberado —`ACTIVE` no
-    // reponía «porque ese efecto no trae período»—, y lo que lo cierra es pedirle
-    // el período al proveedor, igual que hace el cobro.
+    // The CONFIRMATION grants access: `TRIALING`/`ACTIVE` are the only moment a signup gets the plan.
     if (CONFIO_ESTADOS_QUE_OTORGAN.includes(wire as ConfioSubscriptionStatus)) {
       return await this.planearOtorgamiento(data, sub, wire as ConfioSubscriptionStatus, toStatus)
     }
 
-    // Dos escalones distintos y un solo predicado para cada uno:
-    // - `PAST_DUE`/`SUSPENDED` (los dos wire states que el mapa manda a
-    //   `past_due`) son MORA: se retira el plan pago y NADA más. Un primer cobro
-    //   fallido es recuperable por definición y poner `free` ahí lo convertiría
-    //   en una baja de plan (`corte-de-acceso-al-primer-fallo`).
-    // - `CANCELED`/`EXPIRED` son terminales: ya no hay cobro posible, así que la
-    //   marca pierde el plan pago y baja a `free`.
+    // Delinquency (`PAST_DUE`/`SUSPENDED`) is recoverable: only the paid plan is removed. Terminal statuses
+    // (`CANCELED`/`EXPIRED`) can never be charged again, so the brand drops to `free`.
     const roles = esTerminal
       ? this.efectoRoles('degradar', sub)
       : toStatus === SubscriptionStatus.PAST_DUE
@@ -762,39 +693,24 @@ export class ConfioSubscriptionWebhookService {
       eventType: CONFIO_TIPO_DE_EVENTO[wire as ConfioSubscriptionStatus],
       toStatus,
       sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
-      // El hecho que degradó, legible desde la fila de historial sin el payload.
+      // The downgrading fact, readable from the history row without the payload.
       ...(esTerminal ? { reason: `ConfioPagos reportó la suscripción ${wire}` } : {}),
       ...(roles ? { roles } : {}),
     }
   }
 
   /**
-   * La suscripción quedó aceptada del lado de ConfioPagos: acá es donde la marca
-   * consigue el acceso.
+   * The subscription was accepted on the ConfioPagos side: this is where the brand gets access.
    *
-   * El `expiresAt` que se le promete a roles y el `currentPeriodEnd` que después
-   * se persiste son EL MISMO objeto: el período se resuelve una sola vez, en la
-   * fase de decisión. Resolverlo dos veces —una para roles, otra para la fila—
-   * permitiría que difieran, que es el defecto que `planearCobro` ya evita.
+   * The `expiresAt` promised to roles and the persisted `currentPeriodEnd` are the same object, resolved once.
+   * The fallback depends on what was confirmed: `ACTIVE` is a paid cycle (`periodoLocal`); `TRIALING` uses
+   * `periodoDePrueba`, which respects the stamped `trialEnd` (the monthly period would gift extra days).
+   * Without a usable period nothing is granted and the status does not move, so the sweep retries it; the
+   * cause goes to the trace `reason` column.
    *
-   * El respaldo depende de QUÉ se confirmó, y por eso no es uno solo:
-   * - `ACTIVE` es un ciclo pago: `periodoLocal`, el mismo del cobro.
-   * - `TRIALING` es la prueba: `periodoDePrueba`, que respeta el `trialEnd` ya
-   *   sellado. Caer al mensual acá regalaría 30 días de acceso sobre una prueba
-   *   de 15.
-   * Sin ningún período utilizable NO se otorga y **el estado tampoco se mueve**:
-   * el acceso no se inventa, y la fila se deja en el estado que el barrido sabe
-   * buscar para que vuelva a intentarlo. El motivo queda en la columna `reason`
-   * de la traza, no sólo en el log.
-   *
-   * Y ES ACÁ DONDE SE NOMBRA EL HECHO. Las tres vías de la confirmación —webhook,
-   * confirmación activa del front y barrido de repesca— pasan por esta función, y
-   * su `eventType` sale de la única pregunta que el historial tiene que responder:
-   * `CONFIRMATION_GRANTED` si la marca terminó con acceso, `CONFIRMATION_NOT_GRANTED`
-   * en las dos salidas que no otorgan (fila muerta o baja pendiente, y sin período
-   * utilizable). NO sale de `CONFIO_TIPO_DE_EVENTO`: el estado del proveedor es el
-   * mismo `TRIALING` en las tres salidas, así que dictar el evento desde ahí
-   * escribía lo mismo para hechos opuestos.
+   * The webhook, active confirmation and the sweep all pass here, so the event names the OUTCOME:
+   * `CONFIRMATION_GRANTED` when the brand ended with access, `CONFIRMATION_NOT_GRANTED` otherwise. It never
+   * comes from `CONFIO_TIPO_DE_EVENTO`: the provider status is the same `TRIALING` in every exit.
    */
   private async planearOtorgamiento(
     data: ConfioWebhookPayload['data'],
@@ -803,20 +719,15 @@ export class ConfioSubscriptionWebhookService {
     toStatus: SubscriptionStatus,
     yaLeida?: ConfioSubscriptionResult,
   ): Promise<EfectoConfio | null> {
-    // EL EVENTO LO DICTA EL RESULTADO, NO EL ESTADO DEL PROVEEDOR. Esta función
-    // tiene tres salidas y sólo una otorga, así que el valor de NO OTORGADA es el
-    // piso: las dos salidas que no otorgan lo heredan sin decir nada, y la que
-    // otorga lo pisa. Darle a cada una un `eventType` propio volvería a permitir
-    // que las dos ramas escriban lo mismo por descuido.
+    // The outcome sets the event: not-granted is the floor every non-granting exit inherits, and only the
+    // grant overrides it.
     const efecto: EfectoConfio = {
       eventType: SubscriptionEventType.CONFIRMATION_NOT_GRANTED,
       toStatus,
     }
 
-    // Misma guarda de resurrección que `planearCobro`, y por el mismo motivo: una
-    // confirmación tardía sobre algo que del lado NUESTRO ya está muerto —o con
-    // una baja pendiente, que del lado de ellos ya está `CANCELED`— no vuelve a
-    // comprar el plan. La vuelta es un alta nueva, con su propio pago.
+    // Same resurrection guard as `planearCobro`: a late confirmation on a row dead on our side (or with a
+    // pending cancellation) applies the status but does not buy the plan again.
     if (ESTADOS_TERMINALES.includes(sub.status) || bajaPendiente(sub)) {
       this.logger.warn(
         `Confio ${wire} sobre una suscripción que dimos por muerta (${sub.id}, ${sub.status}): ` +
@@ -834,22 +745,8 @@ export class ConfioSubscriptionWebhookService {
           'NO se otorga el plan en roles y la fila se deja donde el barrido la alcance',
       )
 
-      // EL ESTADO NO SE MUEVE, y es lo único que mantiene viva la segunda
-      // oportunidad. `aplicar` hace `sub.status = efecto.toStatus`, y el barrido
-      // busca por `status: PENDING` (`tasks.service.ts`): moverla a `trial`/`active`
-      // sin haber otorgado nada la sacaba de esa red para siempre. Quedaba una fila
-      // que el proveedor da por buena, sin acceso, sin reintento y sin más rastro
-      // que una línea de log —el comprador pagó y no habilitó nada—.
-      //
-      // Devolver `null` tampoco sirve: sin efecto no se escribe traza, y entonces
-      // el motivo se pierde igual.
-      //
-      // El `eventType` heredado es `CONFIRMATION_NOT_GRANTED`, que es exactamente
-      // lo que pasó: el proveedor confirmó y NO se otorgó. Antes acá se escribía
-      // `TRIAL_STARTED` —el evento de una prueba que empieza— porque el enum no
-      // tenía valor para esto. `reason` sigue existiendo y sigue siendo obligatorio:
-      // el evento dice el QUÉ y la columna el POR QUÉ, que es lo único que
-      // distingue «sin período» de «fila muerta».
+      // The status does NOT move: the sweep looks for `PENDING` rows, so moving it would drop a paid signup
+      // with no access from any retry. Returning `null` would lose the `reason` the trace keeps.
       return {
         ...efecto,
         toStatus: sub.status,
@@ -860,14 +757,8 @@ export class ConfioSubscriptionWebhookService {
       }
     }
 
-    // MISMO HECHO, YA APLICADO: sin efecto. La confirmación tiene ahora TRES vías
-    // —el webhook, la confirmación activa del front y el barrido de repesca— y sus
-    // claves de idempotencia no pueden coincidir: la del webhook la acuña Confío con
-    // su `updateTime`, que su API de consulta ni siquiera devuelve. El marcador por
-    // `providerEventId` sigue cubriendo la reentrega de LA MISMA notificación; esta
-    // guarda cubre lo otro: que dos vías distintas cuenten el mismo hecho. Se compara
-    // el estado Y el fin de período, así que una renovación —mismo estado, período
-    // nuevo— sí pasa.
+    // Same fact already applied: the confirmation paths cannot share idempotency keys, so status and period end
+    // are compared. A renewal (same status, new period) still passes.
     if (sub.status === toStatus && mismoFinDePeriodo(sub, periodo)) {
       this.logger.log(
         `Confio ${wire} para ${sub.id} ya estaba aplicado (mismo estado y mismo período): sin efecto`,
@@ -877,17 +768,11 @@ export class ConfioSubscriptionWebhookService {
 
     const roles = this.efectoRoles('reponer', sub, periodo.end)
 
-    // La PRUEBA se sella acá, no en el alta. Desde el 2026-09-04 el alta deja
-    // `trialStart`/`trialEnd` vacíos a propósito: escribirlas antes de que el
-    // comprador aceptara hacía que una suscripción nunca pagada mostrara acceso y
-    // contara como prueba consumida. Se sella sólo si viene vacía —una renovación
-    // no puede reescribir cuándo empezó la prueba— y con el período que resolvió
-    // el proveedor, así que la prueba empieza cuando aceptó.
+    // The TRIAL is stamped here, not at signup, so an unpaid subscription never shows access or counts as a
+    // used trial. Only when empty (a renewal must not rewrite it), with the provider period.
     const sellaPrueba = toStatus === SubscriptionStatus.TRIAL && !sub.trialStart
 
-    // ÚNICO lugar del servicio que escribe `CONFIRMATION_GRANTED`, y esa unicidad
-    // es lo que sostiene la regla: el evento de otorgada no se puede escribir sin
-    // haber resuelto período y efecto de roles.
+    // The ONLY writer of `CONFIRMATION_GRANTED`: it cannot be recorded without a resolved period and roles effect.
     return {
       ...efecto,
       eventType: SubscriptionEventType.CONFIRMATION_GRANTED,
@@ -899,22 +784,13 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Confirmación ACTIVA: en vez de esperar la notificación, se le pregunta a
-   * ConfioPagos y se aplica el mismo efecto.
+   * ACTIVE confirmation: instead of waiting for the notification, asks ConfioPagos and applies the same effect,
+   * because the webhook cannot be the only way to learn of a payment. Used by `POST /subscription/confirm` and
+   * the recovery sweep.
    *
-   * Existe porque el webhook no puede ser la única vía de enterarse (decisión de
-   * Manuel del 2026-09-02, tras un pago real que ellos registraron y del que nunca
-   * llegó callback). Las consumen `POST /subscription/confirm` y el barrido de
-   * repesca.
-   *
-   * NO reimplementa la regla: arma el mismo `data` que traería la notificación y
-   * pasa por `planearOtorgamiento` —las guardas de fila terminal, baja pendiente,
-   * período utilizable y hecho ya aplicado son EXACTAMENTE las mismas— y por el
-   * mismo `sincronizarAccesoEnRoles` + `aplicar`.
-   *
-   * Una sola lectura del proveedor: la que trae el estado se le pasa al planificador
-   * para el período. Y ese `throw` de roles se propaga tal cual, igual que en el
-   * webhook: un canal caído no puede quedar registrado como un hecho.
+   * It does not reimplement the rule: it builds the `data` a notification would bring and goes through
+   * `planearOtorgamiento` (same guards), `sincronizarAccesoEnRoles` and `aplicar`. One provider read, reused
+   * for the period. A roles `throw` propagates as in the webhook: a channel down is never recorded as a fact.
    */
   async confirmarContraElProveedor(sub: Subscription): Promise<ResultadoDeConfirmacion> {
     const resourceName = sub.metadata?.confio?.name || sub.providerSubscriptionId
@@ -924,19 +800,15 @@ export class ConfioSubscriptionWebhookService {
     try {
       remota = await this.confio.getSubscription(resourceName)
     } catch (error) {
-      // Un fallo del canal NO es un hecho sobre la suscripción: no es «todavía no
-      // aceptó» ni una baja. Se distingue para que el llamador lo cuente distinto.
+      // A channel failure is not a fact about the subscription (neither "not accepted" nor a cancellation).
       this.logger.warn(`Confio no respondió el estado de ${sub.id}: ${error?.message}`)
       return { resultado: 'proveedor_no_disponible' }
     }
 
     const wire = String(remota?.status || '') as ConfioSubscriptionStatus
 
-    // El alta que ConfioPagos ya dio por muerta se CIERRA. Sin esto la fila se queda
-    // en `pending` y el barrido la vuelve a consultar cada pasada hasta que vence la
-    // ventana: llamadas al proveedor por un alta que nadie va a pagar. No se toca
-    // roles —una fila que espera confirmación nunca tuvo plan que retirar—, así que
-    // el cierre no puede quitarle acceso a nadie.
+    // A signup ConfioPagos declared dead is CLOSED, or the sweep would poll it until the window ends. Roles is
+    // left alone: a row awaiting confirmation never had a plan to remove.
     if (CONFIO_ESTADOS_MUERTOS.includes(wire) && sub.status === SubscriptionStatus.PENDING) {
       const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
       const data = { name: resourceName, status: wire }
@@ -959,7 +831,7 @@ export class ConfioSubscriptionWebhookService {
     }
 
     if (!CONFIO_ESTADOS_QUE_OTORGAN.includes(wire)) {
-      // El caso NORMAL mientras el comprador no completó el pago. No es un error.
+      // The NORMAL case while the buyer has not completed payment. Not an error.
       return { resultado: 'sin_confirmar', estadoRemoto: wire }
     }
 
@@ -967,17 +839,12 @@ export class ConfioSubscriptionWebhookService {
     const data = { name: resourceName, status: wire }
     const efecto = await this.planearOtorgamiento(data, sub, wire, toStatus, remota)
 
-    // Esta vía escribe SÓLO si hay acceso que dar. El webhook, en cambio, aplica el
-    // estado aunque no otorgue —lo trae una notificación, y el proveedor manda sobre
-    // su propio estado—; una consulta nuestra no tiene esa autoridad, y mover a
-    // `trial` una fila que dimos por muerta, sin acceso, sería un estado confuso
-    // escrito por un sondeo. Sin efecto de roles no se escribe nada y la próxima
-    // pasada —o el webhook— vuelve a intentar: queda REINTENTABLE en vez de a medias.
+    // This path writes ONLY when there is access to grant: a poll lacks the authority a notification has over
+    // provider status, so without a roles effect nothing is written and the next pass (or the webhook) retries.
     if (!efecto || !efecto.roles) return { resultado: 'sin_efecto', estadoRemoto: wire }
 
-    // Marcador propio de esta vía: el `updateTime` con el que Confío acuña el suyo no
-    // viaja en la consulta, así que no se puede reproducir. Lo que impide el efecto
-    // doble entre vías es la guarda de «mismo hecho ya aplicado», no este id.
+    // Own marker: the `updateTime` Confio uses for its id is not in the query response. Double effects across
+    // paths are prevented by the "same fact already applied" guard, not by this id.
     const providerEventId = `${resourceName}:confirmacion:${wire}:${efecto.periodo.end.toISOString()}`
 
     if (efecto.roles) {
@@ -989,14 +856,10 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Escritura atómica: fila bloqueada, marcador releído bajo ese lock, estado y
-   * fila de historial.
+   * Atomic write: locked row, marker reread under that lock, status and history row.
    *
-   * La relectura del marcador ACÁ ADENTRO es la garantía de idempotencia real:
-   * `retryWebhook` (admin) y la cola de reintentos pueden despachar el MISMO
-   * `WebhookEvent` a la vez, y el chequeo previo por sí solo dejaría escribir a
-   * los dos. El parche se recalcula sobre la fila BLOQUEADA, no sobre la copia
-   * que se leyó antes.
+   * The reread HERE is the real idempotency guarantee: `retryWebhook` (admin) and the retry queue may dispatch
+   * the SAME `WebhookEvent` at once. The patch is computed on the LOCKED row, not on the earlier copy.
    */
   private async aplicar(
     subscriptionId: string,
@@ -1005,13 +868,14 @@ export class ConfioSubscriptionWebhookService {
     providerEventId: string,
     markerIds: string | string[] = providerEventId,
     bono: PlannedBonus | null = null,
-  ): Promise<void> {
-    await this.dataSource.transaction(async (manager: EntityManager) => {
+    order?: NoticeOrder,
+  ): Promise<ConfioNoticeOutcome> {
+    return this.dataSource.transaction(async (manager: EntityManager) => {
       const sub = await manager.findOne(Subscription, {
         where: { id: subscriptionId },
         lock: { mode: 'pessimistic_write' },
       })
-      if (!sub) return
+      if (!sub) return 'no_effect'
 
       const marcador = await ConfioSubscriptionWebhookService.buscarMarcador(
         manager.createQueryBuilder(SubscriptionEvent, 'e'),
@@ -1022,12 +886,24 @@ export class ConfioSubscriptionWebhookService {
         this.logger.log(
           `Confio efecto ya aplicado (bajo lock) para ${providerEventId}, no se repite`,
         )
-        return
+        return 'no_effect'
+      }
+
+      // The guarantee: a newer notice may have been applied since the unlocked check.
+      if (order && isOutOfOrder(sub, order)) {
+        await this.discardPendingTrace(subscriptionId, providerEventId, 'out of order', manager)
+        const roles = efecto.roles
+        if (roles) {
+          this.logger.warn(
+            `Confio notice ${escapeLogValue(providerEventId)} lost the order under lock ` +
+              `after backend-roles ran: ${roles.accion} brand=${roles.brandId} plan=${roles.planSlug} sub=${subscriptionId}`,
+          )
+        }
+        return 'out_of_order'
       }
 
       const fromStatus = sub.status
-      // Resurrección: la aceptación DICTA el mapeo, así que se aplica, pero una
-      // entrega tardía puede devolver a `active` algo cancelado. Aviso + INBOX.
+      // Resurrection: the mapping is applied, but a late delivery may return something cancelled to `active`.
       if (ESTADOS_TERMINALES.includes(fromStatus) && efecto.toStatus !== fromStatus) {
         this.logger.warn(
           `Confio reactiva una suscripción en estado terminal: ${subscriptionId} ${fromStatus} → ${efecto.toStatus}`,
@@ -1037,28 +913,31 @@ export class ConfioSubscriptionWebhookService {
       sub.status = efecto.toStatus
       if (efecto.reiniciaReintentos) sub.retryCount = 0
       if (efecto.sellaCancelacion && !sub.cancelledAt) sub.cancelledAt = new Date()
-      // ⚠️ DINERO: una fila terminal con `autoRenew` encendido sigue siendo
-      // elegible para `processSubscriptionRenewals` y `retryFailedPayments`, que
-      // emiten cobro. Se deriva del MISMO predicado con el que se decidió
-      // `degradar`, así que los dos no pueden divergir.
+      // MONEY: a terminal row with `autoRenew` on stays eligible for renewal and retry charges. Same predicate
+      // as `degradar`, so the two cannot diverge.
       if (ESTADOS_TERMINALES.includes(efecto.toStatus)) sub.autoRenew = false
-      // ⚠️ DINERO: `nextBillingDate` alimenta a `processSubscriptionRenewals`
-      // (`tasks.service.ts:176-200`), que renueva lo que ya cobra ConfioPagos.
+      // MONEY: `nextBillingDate` drives `processSubscriptionRenewals`, which renews what ConfioPagos already charges.
       if (efecto.avanzaPeriodo) ConfioSubscriptionWebhookService.avanzarPeriodo(sub, efecto.periodo)
-      // El período de la prueba es el mismo que el del ciclo: lo dice el proveedor.
+      // The trial period is the cycle period, as the provider reports it.
       if (efecto.sellaPrueba && !sub.trialStart) {
         sub.trialStart = efecto.periodo.start
         sub.trialEnd = efecto.periodo.end
       }
+      if (order) sub.providerWatermark = advanceMark(sub, order)
 
       await manager.save(sub)
       if (bono) await this.bonus.credit(manager, bono, sub)
 
-      // La traza se arma con el `sub` que se acaba de leer BAJO EL LOCK: marca,
-      // usuario y plan salen de esa fila y no de una relectura posterior.
-      await manager.save(
-        SubscriptionEvent,
-        armarTrazaDelMovimiento({
+      const pendingTrace = await manager
+        .createQueryBuilder(SubscriptionEvent, 'e')
+        .where('e."subscriptionId" = :sid', { sid: subscriptionId })
+        .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: providerEventId })
+        .andWhere('e."traceStatus" = :pending', { pending: SubscriptionTraceStatus.PENDING })
+        .getOne()
+
+      // The trace uses the `sub` just read UNDER LOCK: brand, user and plan come from that row.
+      await manager.save(SubscriptionEvent, {
+        ...armarTrazaDelMovimiento({
           sub,
           fromStatus,
           eventType: efecto.eventType,
@@ -1068,18 +947,21 @@ export class ConfioSubscriptionWebhookService {
           roles: efecto.roles,
           reason: efecto.reason,
         }),
-      )
+        ...(pendingTrace
+          ? { id: pendingTrace.id, traceStatus: SubscriptionTraceStatus.APPLIED }
+          : {}),
+      })
+
+      return 'applied'
     })
   }
 
   /**
-   * Asigna el trío de fechas ya resuelto en la fase de decisión.
+   * Assigns the dates already resolved at decision time.
    *
-   * El respaldo local subió a `planearCobro` (que necesita el `end` para
-   * prometerlo a roles), así que ahora se calcula sobre la lectura SIN lock:
-   * aceptable porque el MISMO evento sigue deduplicado y dos eventos DISTINTOS
-   * ya eran last-write-wins. La alternativa era prometer un `expiresAt` distinto
-   * del que se persiste, o sostener HTTP dentro de la transacción.
+   * The local fallback is computed on the UNLOCKED read: acceptable because the same event stays deduplicated
+   * and distinct events are last-write-wins. The alternative is promising an `expiresAt` different from the
+   * persisted one, or holding HTTP inside the transaction.
    */
   private static avanzarPeriodo(sub: Subscription, periodo: PeriodoConfio): void {
     sub.currentPeriodStart = periodo.start
@@ -1088,14 +970,10 @@ export class ConfioSubscriptionWebhookService {
   }
 
   /**
-   * Marcador de efecto aplicado: la fila de historial que lleva este
-   * `providerEventId` en su `metadata`.
+   * Applied-effect marker: the history row carrying this `providerEventId` in its `metadata`.
    *
-   * Predicado jsonb LITERAL a propósito, sondeado contra la BD de dev antes de
-   * escribirlo (`metadata ->> 'providerEventId'`, `metadata` es `jsonb`). Se
-   * acota por `subscriptionId` —que tiene índice— y NUNCA por una ventana de
-   * filas: `retryWebhook` puede re-despachar un evento arbitrariamente viejo y
-   * el marcador quedaría fuera de cualquier ventana fija, regalando un período.
+   * Scoped by `subscriptionId` (indexed) and NEVER by a row window: `retryWebhook` can redispatch an
+   * arbitrarily old event, and a marker outside a fixed window would grant a free period.
    */
   private static buscarMarcador(
     qb: SelectQueryBuilder<SubscriptionEvent>,
@@ -1106,15 +984,18 @@ export class ConfioSubscriptionWebhookService {
       (id): id is string => typeof id === 'string' && id.length > 0,
     )
     const uniqueIds = Array.from(new Set(ids))
+    const applied = { applied: SubscriptionTraceStatus.APPLIED }
     if (uniqueIds.length <= 1) {
       return qb
         .where('e."subscriptionId" = :sid', { sid: subscriptionId })
         .andWhere("e.metadata ->> 'providerEventId' = :pid", { pid: uniqueIds[0] })
+        .andWhere('e."traceStatus" = :applied', applied)
         .getOne()
     }
     return qb
       .where('e."subscriptionId" = :sid', { sid: subscriptionId })
       .andWhere("e.metadata ->> 'providerEventId' IN (:...pids)", { pids: uniqueIds })
+      .andWhere('e."traceStatus" = :applied', applied)
       .getOne()
   }
 }

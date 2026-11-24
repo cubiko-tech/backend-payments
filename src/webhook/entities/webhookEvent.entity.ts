@@ -6,6 +6,10 @@ export enum WebhookStatus {
   PROCESSING = 'processing',
   PROCESSED = 'processed',
   FAILED = 'failed',
+  /** Kept without dispatching: a Confio event outside the contract. Never retried. */
+  IGNORED = 'ignored',
+  /** Older than the notice already applied to its subscription: kept, not applied, never retried. */
+  OUT_OF_ORDER = 'out_of_order',
 }
 
 @Entity('webhook_events')

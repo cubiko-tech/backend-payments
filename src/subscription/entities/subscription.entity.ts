@@ -2,6 +2,17 @@ import { Content } from '../../shared/entities/content.abstract'
 import { Column, Entity, Index } from 'typeorm'
 
 /**
+ * Order mark of the Confio notices of one Confio subscription: `name` is the subscription it belongs
+ * to, `cycle` the highest signed `cycleNumber` applied, `at` the latest signed envelope `timestamp`
+ * applied (ISO). Only signed fields feed it.
+ */
+export interface ProviderWatermark {
+  name: string | null
+  cycle?: number
+  at?: string
+}
+
+/**
  * Estados locales de una suscripción. `PENDING` va ÚLTIMO a propósito: es el orden
  * físico en que `ALTER TYPE … ADD VALUE` lo agrega en Postgres
  * (`migrations/1788270915241-AddPendingSubscriptionStatus.ts`), y con la lista TS
@@ -182,4 +193,6 @@ export class Subscription extends Content {
   @Column({ type: 'timestamptz', nullable: true }) nextBillingDate: Date
   @Column({ type: 'int', default: 0 }) retryCount: number
   @Column({ type: 'jsonb', nullable: true }) metadata: any
+  /** The latest signed Confio notice applied to the row; see `confio-watermark.util.ts`. */
+  @Column({ type: 'jsonb', nullable: true }) providerWatermark: ProviderWatermark | null
 }

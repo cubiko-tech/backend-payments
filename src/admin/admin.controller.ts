@@ -36,6 +36,7 @@ import {
 } from '../credit/credit.types'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import {
+  AllowServerToken,
   RequirePermission,
   RequireSessionUser,
   RequireSuperAdmin,
@@ -48,12 +49,24 @@ import { UpdateActivationRequestDto } from '../credit/dto/update-activation-requ
 import { adminIdempotencyKey } from './admin-idempotency-key'
 import { ExtendSubscriptionDto } from './dto/extend-subscription.dto'
 import { AdminCreateWalletDto, AdjustWalletDto } from './dto/admin-wallet.dto'
+import {
+  PAYMENT_LIST_ORDER_FIELDS,
+  PaymentsListQueryDto,
+  SUBSCRIPTION_LIST_ORDER_FIELDS,
+  SubscriptionsListQueryDto,
+  WALLET_LIST_ORDER_FIELDS,
+  WalletsListQueryDto,
+} from './dto/admin-list-query.dto'
 import { CreateProviderConfigDto, UpdateProviderConfigDto } from './dto/admin-provider.dto'
+
+// Backslash is Postgres's default LIKE escape, so `%` and `_` in the search match themselves.
+const containsPattern = (search: string) => `%${search.replace(/[\\%_]/g, '\\$&')}%`
 
 @ApiTags('Admin')
 @Controller('admin')
 @UseGuards(ApiAuthGuard)
 @RequireSuperAdmin()
+@RequireSessionUser()
 export class AdminController {
   constructor(
     @InjectRepository(Subscription, 'DBRead')
@@ -83,20 +96,14 @@ export class AdminController {
   ) {}
 
   @Get('subscriptions')
+  // backend-processes lists subscriptions for its panel with ACCESS_SERVER.
+  @AllowServerToken()
   @ApiOperation({ summary: 'Listado paginado de suscripciones con filtros' })
   @ApiResponse({ status: 200, description: 'Suscripciones paginadas' })
-  async subscriptionsList(
-    @Query('page') page?: number,
-    @Query('perPage') perPage?: number,
-    @Query('status') status?: string,
-    @Query('planSlug') planSlug?: string,
-    @Query('provider') provider?: string,
-    @Query('search') search?: string,
-    @Query('orderBy') orderBy?: string,
-    @Query('order') order?: 'ASC' | 'DESC',
-  ) {
-    const p = Math.max(1, Number(page) || 1)
-    const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+  async subscriptionsList(@Query() query: SubscriptionsListQueryDto) {
+    const { page, perPage, status, planSlug, provider, search, orderBy, order } = query
+    const p = page ?? 1
+    const limit = perPage ?? 20
     const skip = (p - 1) * limit
 
     const qb = this.subscriptionReadRepo.createQueryBuilder('s')
@@ -105,20 +112,11 @@ export class AdminController {
     if (planSlug) qb.andWhere('s.planSlug = :planSlug', { planSlug })
     if (provider) qb.andWhere('s.provider = :provider', { provider })
     if (search) {
-      qb.andWhere('(s.brandId::text ILIKE :q OR s.planSlug ILIKE :q)', { q: `%${search}%` })
+      qb.andWhere('("s"."brandId" ILIKE :q OR s.planSlug ILIKE :q)', { q: containsPattern(search) })
     }
 
-    const sortField = [
-      'createdAt',
-      'currentPeriodEnd',
-      'status',
-      'planSlug',
-      'retryCount',
-    ].includes(orderBy || '')
-      ? `s.${orderBy}`
-      : 's.createdAt'
-    const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
-    qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
+    const sortField = SUBSCRIPTION_LIST_ORDER_FIELDS.includes(orderBy || '') ? orderBy : 'createdAt'
+    qb.orderBy(`s.${sortField}`, order ?? 'DESC')
 
     const [data, total] = await qb.skip(skip).take(limit).getManyAndCount()
 
@@ -233,18 +231,10 @@ export class AdminController {
   @Get('payments')
   @ApiOperation({ summary: 'Listado paginado de pagos con filtros' })
   @ApiResponse({ status: 200, description: 'Pagos paginados' })
-  async paymentsList(
-    @Query('page') page?: number,
-    @Query('perPage') perPage?: number,
-    @Query('status') status?: string,
-    @Query('provider') provider?: string,
-    @Query('purpose') purpose?: string,
-    @Query('search') search?: string,
-    @Query('orderBy') orderBy?: string,
-    @Query('order') order?: 'ASC' | 'DESC',
-  ) {
-    const p = Math.max(1, Number(page) || 1)
-    const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+  async paymentsList(@Query() query: PaymentsListQueryDto) {
+    const { page, perPage, status, provider, purpose, search, orderBy, order } = query
+    const p = page ?? 1
+    const limit = perPage ?? 20
     const skip = (p - 1) * limit
 
     const qb = this.paymentReadRepo.createQueryBuilder('p')
@@ -253,18 +243,13 @@ export class AdminController {
     if (provider) qb.andWhere('p.provider = :provider', { provider })
     if (purpose) qb.andWhere('p.purpose = :purpose', { purpose })
     if (search) {
-      qb.andWhere('(p.brandId::text ILIKE :q OR p.providerPaymentId ILIKE :q)', {
-        q: `%${search}%`,
+      qb.andWhere('("p"."brandId" ILIKE :q OR p.providerPaymentId ILIKE :q)', {
+        q: containsPattern(search),
       })
     }
 
-    const sortField = ['createdAt', 'amount', 'status', 'provider', 'paidAt'].includes(
-      orderBy || '',
-    )
-      ? `p.${orderBy}`
-      : 'p.createdAt'
-    const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
-    qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
+    const sortField = PAYMENT_LIST_ORDER_FIELDS.includes(orderBy || '') ? orderBy : 'createdAt'
+    qb.orderBy(`p.${sortField}`, order ?? 'DESC')
 
     const [data, total] = await qb.skip(skip).take(limit).getManyAndCount()
 
@@ -495,18 +480,10 @@ export class AdminController {
   @Get('wallets')
   @ApiOperation({ summary: 'Listado paginado de wallets con filtros' })
   @ApiResponse({ status: 200, description: 'Wallets paginadas' })
-  async walletsList(
-    @Query('page') page?: number,
-    @Query('perPage') perPage?: number,
-    @Query('status') status?: string,
-    @Query('provider') provider?: string,
-    @Query('currency') currency?: string,
-    @Query('search') search?: string,
-    @Query('orderBy') orderBy?: string,
-    @Query('order') order?: 'ASC' | 'DESC',
-  ) {
-    const p = Math.max(1, Number(page) || 1)
-    const limit = Math.min(100, Math.max(1, Number(perPage) || 20))
+  async walletsList(@Query() query: WalletsListQueryDto) {
+    const { page, perPage, status, provider, currency, search, brandIds, orderBy, order } = query
+    const p = page ?? 1
+    const limit = perPage ?? 20
     const skip = (p - 1) * limit
 
     const qb = this.walletReadRepo.createQueryBuilder('w')
@@ -514,17 +491,20 @@ export class AdminController {
     if (status) qb.andWhere('w.status = :status', { status })
     if (provider) qb.andWhere('w.provider = :provider', { provider })
     if (currency) qb.andWhere('w.currency = :currency', { currency })
-    if (search) {
-      qb.andWhere('(w.brandId::text ILIKE :q OR w.label ILIKE :q)', { q: `%${search}%` })
+    // The admin sends the brands it resolved from a name plus that name as `search`, for the label.
+    const matches = [
+      ...(brandIds ? ['"w"."brandId" IN (:...brandIds)'] : []),
+      ...(search ? ['"w"."brandId" ILIKE :q', 'w.label ILIKE :q'] : []),
+    ]
+    if (matches.length) {
+      qb.andWhere(`(${matches.join(' OR ')})`, {
+        brandIds,
+        q: search ? containsPattern(search) : undefined,
+      })
     }
 
-    const sortField = ['createdAt', 'balance', 'status', 'provider', 'currency'].includes(
-      orderBy || '',
-    )
-      ? `w.${orderBy}`
-      : 'w.createdAt'
-    const sortOrder = (order || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
-    qb.orderBy(sortField, sortOrder as 'ASC' | 'DESC')
+    const sortField = WALLET_LIST_ORDER_FIELDS.includes(orderBy || '') ? orderBy : 'createdAt'
+    qb.orderBy(`w.${sortField}`, order ?? 'DESC')
 
     const [data, total] = await qb.skip(skip).take(limit).getManyAndCount()
 
@@ -536,6 +516,8 @@ export class AdminController {
   }
 
   @Post('wallets')
+  // backend-platform opens the brand's wallet with ACCESS_SERVER when the brand is created.
+  @AllowServerToken()
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
@@ -623,7 +605,6 @@ export class AdminController {
   }
 
   @Post('wallets/:id/adjust')
-  @RequireSessionUser()
   @ApiOperation({ summary: 'Acreditar o debitar fondos de una wallet (Admin)' })
   @ApiResponse({ status: 201, description: 'Ajuste realizado, o el primero bajo esta llave' })
   @ApiResponse({ status: 400, description: 'Falta la llave, o el monto o el tipo no son válidos' })

@@ -321,7 +321,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
   })
 
   it('adjusts for a super admin session and refuses the server token with 403 (LOC-133)', async () => {
-    // R15: red when the adjustment loses @RequireSessionUser: the server token gets 201.
+    // R15: red when AdminController loses its class @RequireSessionUser: the server token gets 201.
     const body = { type: 'credit', amount: 100, idempotencyKey: 'adjust-k2', adminUserId: 'otro' }
 
     const serverRes = await request(app.getHttpServer())
@@ -348,62 +348,97 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     expect(auditService.log).not.toHaveBeenCalled()
   })
 
+  const expectNoStateTouched = () => {
+    expect(subscriptionWriteRepo.findOne).not.toHaveBeenCalled()
+    expect(subscriptionWriteRepo.save).not.toHaveBeenCalled()
+    expect(paymentWriteRepo.findOne).not.toHaveBeenCalled()
+    expect(paymentWriteRepo.save).not.toHaveBeenCalled()
+    expect(walletReadRepo.findOne).not.toHaveBeenCalled()
+    expect(walletWriteRepo.findOne).not.toHaveBeenCalled()
+    expect(walletWriteRepo.create).not.toHaveBeenCalled()
+    expect(walletWriteRepo.save).not.toHaveBeenCalled()
+    expect(providerReadRepo.findOne).not.toHaveBeenCalled()
+    expect(providerWriteRepo.findOne).not.toHaveBeenCalled()
+    expect(providerWriteRepo.create).not.toHaveBeenCalled()
+    expect(providerWriteRepo.save).not.toHaveBeenCalled()
+    expect(auditService.log).not.toHaveBeenCalled()
+  }
+
+  // `server` is what ACCESS_SERVER gets: refused on AdminController except the two routes a
+  // service calls, allowed on MetricsController, which keeps its own class rules.
   it.each([
-    ['subscriptions', 'get', '/admin/subscriptions', undefined],
-    ['subscriptions summary', 'get', '/admin/subscriptions/summary', undefined],
-    ['subscriptions expiring', 'get', '/admin/subscriptions/expiring', undefined],
-    ['subscriptions past-due', 'get', '/admin/subscriptions/past-due', undefined],
-    ['subscriptions extend', 'post', `/admin/subscriptions/${TEST_UUID}/extend`, { days: 5 }],
-    ['payments', 'get', '/admin/payments', undefined],
-    ['payments pending', 'get', '/admin/payments/pending', undefined],
-    ['payments failed', 'get', '/admin/payments/failed', undefined],
-    ['payments stats', 'get', '/admin/payments/stats', undefined],
-    ['payments retry', 'post', `/admin/payments/${TEST_UUID}/retry`, {}],
-    ['dropi batch-status', 'get', '/admin/dropi/batch-status', undefined],
-    ['wallets list', 'get', '/admin/wallets', undefined],
+    ['subscriptions', 'get', '/admin/subscriptions', undefined, 'allowed'],
+    ['subscriptions summary', 'get', '/admin/subscriptions/summary', undefined, 'refused'],
+    ['subscriptions expiring', 'get', '/admin/subscriptions/expiring', undefined, 'refused'],
+    ['subscriptions past-due', 'get', '/admin/subscriptions/past-due', undefined, 'refused'],
+    [
+      'subscriptions extend',
+      'post',
+      `/admin/subscriptions/${TEST_UUID}/extend`,
+      { days: 5 },
+      'refused',
+    ],
+    ['payments', 'get', '/admin/payments', undefined, 'refused'],
+    ['payments pending', 'get', '/admin/payments/pending', undefined, 'refused'],
+    ['payments failed', 'get', '/admin/payments/failed', undefined, 'refused'],
+    ['payments stats', 'get', '/admin/payments/stats', undefined, 'refused'],
+    ['payments retry', 'post', `/admin/payments/${TEST_UUID}/retry`, {}, 'refused'],
+    ['dropi batch-status', 'get', '/admin/dropi/batch-status', undefined, 'refused'],
+    ['wallets list', 'get', '/admin/wallets', undefined, 'refused'],
     [
       'wallets create',
       'post',
       '/admin/wallets',
       { brandId: TEST_UUID, provider: 'internal', currency: 'COP' },
+      'allowed',
     ],
-    ['wallets toggle-freeze', 'post', `/admin/wallets/${TEST_UUID}/toggle-freeze`, {}],
-    ['wallets summary', 'get', '/admin/wallets/summary', undefined],
-    ['wallets inconsistent', 'get', '/admin/wallets/inconsistent', undefined],
-    ['audit-log', 'get', '/admin/audit-log', undefined],
-    ['providers list', 'get', '/admin/providers', undefined],
-    ['providers create', 'post', '/admin/providers', { country: 'CO', provider: 'stripe' }],
-    ['providers update', 'patch', `/admin/providers/${TEST_UUID}`, { isActive: false }],
-    ['metrics mrr', 'get', '/admin/metrics/mrr', undefined],
-    ['metrics revenue', 'get', '/admin/metrics/revenue', undefined],
-    ['metrics churn', 'get', '/admin/metrics/churn', undefined],
-    ['metrics ltv', 'get', '/admin/metrics/ltv', undefined],
-    ['metrics arpu', 'get', '/admin/metrics/arpu', undefined],
-    ['metrics conversion', 'get', '/admin/metrics/conversion', undefined],
-    ['metrics payment-methods', 'get', '/admin/metrics/payment-methods', undefined],
-    ['metrics retention', 'get', '/admin/metrics/retention', undefined],
-    ['metrics history', 'get', '/admin/metrics/history', undefined],
+    ['wallets toggle-freeze', 'post', `/admin/wallets/${TEST_UUID}/toggle-freeze`, {}, 'refused'],
+    ['wallets summary', 'get', '/admin/wallets/summary', undefined, 'refused'],
+    ['wallets inconsistent', 'get', '/admin/wallets/inconsistent', undefined, 'refused'],
+    ['audit-log', 'get', '/admin/audit-log', undefined, 'refused'],
+    ['providers list', 'get', '/admin/providers', undefined, 'refused'],
+    [
+      'providers create',
+      'post',
+      '/admin/providers',
+      { country: 'CO', provider: 'stripe' },
+      'refused',
+    ],
+    ['providers update', 'patch', `/admin/providers/${TEST_UUID}`, { isActive: false }, 'refused'],
+    ['metrics mrr', 'get', '/admin/metrics/mrr', undefined, 'allowed'],
+    ['metrics revenue', 'get', '/admin/metrics/revenue', undefined, 'allowed'],
+    ['metrics churn', 'get', '/admin/metrics/churn', undefined, 'allowed'],
+    ['metrics ltv', 'get', '/admin/metrics/ltv', undefined, 'allowed'],
+    ['metrics arpu', 'get', '/admin/metrics/arpu', undefined, 'allowed'],
+    ['metrics conversion', 'get', '/admin/metrics/conversion', undefined, 'allowed'],
+    ['metrics payment-methods', 'get', '/admin/metrics/payment-methods', undefined, 'allowed'],
+    ['metrics retention', 'get', '/admin/metrics/retention', undefined, 'allowed'],
+    ['metrics history', 'get', '/admin/metrics/history', undefined, 'allowed'],
   ] as const)(
-    'returns 403 for non-superadmin without touching state and 2xx for superadmin and ACCESS_SERVER on %s (%s %s)',
-    async (_group, method, path, body) => {
+    'returns 403 for non-superadmin, 2xx for superadmin, and ACCESS_SERVER as its column says on %s (%s %s)',
+    async (_group, method, path, body, server) => {
+      // R15: red when AdminController loses its class @RequireSessionUser: payments retry is 2xx.
       const forbiddenRes = await (request(app.getHttpServer()) as any)
         [method](path)
         .set('Authorization', `Bearer ${userToken}`)
         .send(body)
 
       expect(forbiddenRes.status).toBe(403)
-      expect(subscriptionWriteRepo.findOne).not.toHaveBeenCalled()
-      expect(subscriptionWriteRepo.save).not.toHaveBeenCalled()
-      expect(paymentWriteRepo.findOne).not.toHaveBeenCalled()
-      expect(paymentWriteRepo.save).not.toHaveBeenCalled()
-      expect(walletReadRepo.findOne).not.toHaveBeenCalled()
-      expect(walletWriteRepo.findOne).not.toHaveBeenCalled()
-      expect(walletWriteRepo.create).not.toHaveBeenCalled()
-      expect(walletWriteRepo.save).not.toHaveBeenCalled()
-      expect(providerReadRepo.findOne).not.toHaveBeenCalled()
-      expect(providerWriteRepo.findOne).not.toHaveBeenCalled()
-      expect(providerWriteRepo.create).not.toHaveBeenCalled()
-      expect(providerWriteRepo.save).not.toHaveBeenCalled()
+      expectNoStateTouched()
+
+      const serverRes = await (request(app.getHttpServer()) as any)
+        [method](path)
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+        .send(body)
+
+      if (server === 'refused') {
+        expect(serverRes.status).toBe(403)
+        expectNoStateTouched()
+      } else {
+        expect(serverRes.status).toBeGreaterThanOrEqual(200)
+        expect(serverRes.status).toBeLessThan(300)
+        expect(serverRes.body).not.toHaveProperty('error')
+      }
 
       const allowedRes = await (request(app.getHttpServer()) as any)
         [method](path)
@@ -413,32 +448,16 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       expect(allowedRes.status).toBeGreaterThanOrEqual(200)
       expect(allowedRes.status).toBeLessThan(300)
       expect(allowedRes.body).not.toHaveProperty('error')
-
-      const serverRes = await (request(app.getHttpServer()) as any)
-        [method](path)
-        .set('Authorization', `Bearer ${SERVER_SECRET}`)
-        .send(body)
-
-      expect(serverRes.status).toBeGreaterThanOrEqual(200)
-      expect(serverRes.status).toBeLessThan(300)
-      expect(serverRes.body).not.toHaveProperty('error')
     },
   )
 
-  it('allows ACCESS_SERVER token on admin and metrics routes, including POST /admin/wallets (LOC-49)', async () => {
-    for (const path of [
-      '/admin/subscriptions',
-      '/admin/wallets',
-      '/admin/audit-log',
-      '/admin/providers',
-      '/admin/metrics/mrr',
-    ]) {
-      const res = await request(app.getHttpServer())
-        .get(path)
-        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+  it('lets ACCESS_SERVER list subscriptions and open a wallet with zero balance (LOC-49, LOC-271)', async () => {
+    // R15: red when createWallet or subscriptionsList loses @AllowServerToken: the server gets 403.
+    const listRes = await request(app.getHttpServer())
+      .get('/admin/subscriptions')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
 
-      expect(res.status).toBe(200)
-    }
+    expect(listRes.status).toBe(200)
 
     const createWalletRes = await request(app.getHttpServer())
       .post('/admin/wallets')
@@ -487,6 +506,24 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
     expect(serverBalanceRes.body.code).toBe('SERVER_INITIAL_BALANCE_FORBIDDEN')
   })
 
+  it('refuses ACCESS_SERVER on credit/activation-requests without asking roles (LOC-271)', async () => {
+    // R15: red when the permission branch drops its refusesServer check: the server gets 200.
+    const serverGetRes = await request(app.getHttpServer())
+      .get('/admin/credit/activation-requests')
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+    expect(serverGetRes.status).toBe(403)
+
+    const serverPatchRes = await request(app.getHttpServer())
+      .patch(`/admin/credit/activation-requests/${TEST_UUID}`)
+      .set('Authorization', `Bearer ${SERVER_SECRET}`)
+      .send({ notes: 'reviewed' })
+    expect(serverPatchRes.status).toBe(403)
+
+    expect(rolesService.checkPermission).not.toHaveBeenCalled()
+    expect(creditService.listActivationRequests).not.toHaveBeenCalled()
+    expect(creditService.updateActivationRequest).not.toHaveBeenCalled()
+  })
+
   it('preserves credit:runs permission check and operator access on credit/activation-requests routes', async () => {
     rolesService.checkPermission.mockResolvedValue(false)
     const deniedRes = await request(app.getHttpServer())
@@ -517,11 +554,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       .get('/admin/credit/activation-requests')
       .set('Authorization', `Bearer ${superAdminToken}`)
     expect(superAdminGetRes.status).toBe(200)
-
-    const serverGetRes = await request(app.getHttpServer())
-      .get('/admin/credit/activation-requests')
-      .set('Authorization', `Bearer ${SERVER_SECRET}`)
-    expect(serverGetRes.status).toBe(200)
     expect(rolesService.checkPermission).not.toHaveBeenCalled()
   })
 
@@ -532,6 +564,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       { days: 5, adminUserId: 'otro' },
       'subscription_extended',
       'subscription',
+      'refused',
     ],
     [
       'payments/:id/retry',
@@ -539,6 +572,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       { adminUserId: 'otro' },
       'payment_retry',
       'payment',
+      'refused',
     ],
     [
       'wallets',
@@ -546,6 +580,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       { brandId: TEST_UUID, provider: 'internal', currency: 'COP', adminUserId: 'otro' },
       'wallet_created',
       'wallet',
+      'allowed',
     ],
     [
       'wallets/:id/toggle-freeze',
@@ -553,10 +588,11 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       { adminUserId: 'otro' },
       'wallet_frozen',
       'wallet',
+      'refused',
     ],
   ] as const)(
-    'records session actor and ignores body.adminUserId on POST %s (LOC-50)',
-    async (_routeName, path, body, expectedAction, expectedEntityType) => {
+    'records session actor and ignores body.adminUserId on POST %s (LOC-50, LOC-271)',
+    async (_routeName, path, body, expectedAction, expectedEntityType, server) => {
       const auditEntries: Array<Record<string, any>> = []
       auditService.log.mockImplementation(
         async (userId, action, entityType, entityId, changes, description) => {
@@ -569,6 +605,28 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         data: [...auditEntries],
         count: auditEntries.length,
       }))
+
+      const serverRes = await request(app.getHttpServer())
+        .post(path)
+        .set('Authorization', `Bearer ${SERVER_SECRET}`)
+        .send(body)
+
+      if (server === 'refused') {
+        expect(serverRes.status).toBe(403)
+        expectNoStateTouched()
+      } else {
+        expect(serverRes.status).toBe(201)
+        expect(auditService.log).toHaveBeenCalledTimes(1)
+        expect(auditService.log).toHaveBeenCalledWith(
+          'server',
+          expectedAction,
+          expectedEntityType,
+          TEST_UUID,
+          expect.any(Object),
+          expect.any(String),
+        )
+        auditService.log.mockClear()
+      }
 
       const superAdminRes = await request(app.getHttpServer())
         .post(path)
@@ -593,37 +651,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
       expect(superAdminAuditRes.body.data[0]).toEqual(
         expect.objectContaining({
           userId: 'user-superadmin',
-          action: expectedAction,
-          entityType: expectedEntityType,
-          entityId: TEST_UUID,
-        }),
-      )
-
-      auditService.log.mockClear()
-
-      const serverRes = await request(app.getHttpServer())
-        .post(path)
-        .set('Authorization', `Bearer ${SERVER_SECRET}`)
-        .send(body)
-
-      expect(serverRes.status).toBe(201)
-      expect(auditService.log).toHaveBeenCalledTimes(1)
-      expect(auditService.log).toHaveBeenCalledWith(
-        'server',
-        expectedAction,
-        expectedEntityType,
-        TEST_UUID,
-        expect.any(Object),
-        expect.any(String),
-      )
-
-      const serverAuditRes = await request(app.getHttpServer())
-        .get('/admin/audit-log')
-        .set('Authorization', `Bearer ${SERVER_SECRET}`)
-      expect(serverAuditRes.status).toBe(200)
-      expect(serverAuditRes.body.data[0]).toEqual(
-        expect.objectContaining({
-          userId: 'server',
           action: expectedAction,
           entityType: expectedEntityType,
           entityId: TEST_UUID,

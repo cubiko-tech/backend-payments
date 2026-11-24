@@ -45,6 +45,7 @@ import { failNextWriteOf } from './support/audit-failure.fixture'
 import { databaseExists, withDisposableDatabase } from './support/disposable-database.fixture'
 import { unknownServiceKeys } from './support/service-credential.double'
 import { raceConnectionOptions } from './support/wallet-race.fixture'
+import { brandOwnerLookup } from './support/brand-owner.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -238,6 +239,7 @@ describe('Token gift notices across gifts, debits, batches, and history (Postgre
         {
           provide: ClientPlatformService,
           useValue: {
+            resolveBrandOwner: brandOwnerLookup(),
             canViewBrandCredit: jest.fn(
               async (userId: string, brandId: string) =>
                 userId === BRAND_ADMIN_ID && brandId === BRAND_1,

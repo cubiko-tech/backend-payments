@@ -17,7 +17,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger'
 import { Request } from 'express'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
-import { RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
+import { RequireSessionUser, RequireSuperAdmin } from '../shared/auth/require-permission.decorator'
 import { WebhookService } from './webhook.service'
 import {
   ListFailedWebhooksQueryDto,
@@ -40,28 +40,14 @@ import { ConfioWebhookPayload } from '../provider/confio/confio.types'
 import { escapeLogValue } from '../shared/logger/log-value'
 
 /**
- * Webhook Controller — el ÚNICO controller del servicio sin guard de clase, y
- * por eso el único donde hay que mirar handler por handler.
- *
- * Los `@Post` de proveedor son públicos a propósito: la autenticidad se valida
- * con la firma criptográfica o el bearer del emisor, que es lo único que un
- * proveedor externo puede mandar. En producción conviene además restringir por
- * IP desde el gateway/firewall.
- *
- * Los `admin/*` del final NO son públicos: llevan `@UseGuards(ApiAuthGuard)` uno
- * por uno desde el 2026-09-07. Ver el comentario de esa sección.
- */
-/**
- * Lo que se pone en la línea de rechazo cuando todavía NO hubo verificación de
- * firma (bearer o cuerpo inválidos): esos campos no existen, y decirlo vale más
- * que inventarlos.
+ * Rejection log fields when signature verification has not happened yet (bad bearer or body):
+ * those fields do not exist, and saying so beats inventing them.
  */
 const SIN_CAMPOS_DE_FIRMA = 'signature.properties=no aplica data=no aplica'
 
 /**
- * Campos del payload que acompañan a un rechazo POSTERIOR a la verificación de
- * firma: el conjunto declarado por el emisor y las claves de `data`. Nunca el
- * digest esperado ni la clave.
+ * Payload fields logged with a rejection AFTER signature verification: the property set the sender
+ * declared and the keys of `data`. Never the expected digest or the key.
  */
 function camposDeFirma(payload: ConfioWebhookPayload): string {
   const properties = payload?.signature?.properties
@@ -73,6 +59,14 @@ function camposDeFirma(payload: ConfioWebhookPayload): string {
   return `signature.properties=[${declared}] data=[${keys}]`
 }
 
+/**
+ * The only controller in the service without a class-level guard, so auth must be checked per handler.
+ *
+ * Provider `@Post` handlers are public on purpose: authenticity comes from the sender's signature or
+ * bearer, the only credential an external provider can send. Restricting by IP at the gateway helps too.
+ *
+ * The `admin/*` handlers are NOT public: each one carries its own `@UseGuards(ApiAuthGuard)`.
+ */
 @ApiTags('Webhook')
 @Controller('webhook')
 export class WebhookController {
@@ -86,8 +80,7 @@ export class WebhookController {
     private readonly confioProvider: ConfioProvider,
   ) {}
 
-  // Entorno leído UNA sola vez, al construir —mismo hábito que `ConfioProvider`—:
-  // rotar CONFIO_WEBHOOK_KEY exige reiniciar el servicio.
+  // Read once at construction: rotating CONFIO_WEBHOOK_KEY requires a service restart.
   private readonly webhookKey = readConfioWebhookKey()
 
   @Post('stripe')
@@ -109,7 +102,6 @@ export class WebhookController {
       throw new HttpException('Firma de Stripe inválida', HttpStatus.UNAUTHORIZED)
     }
 
-    // Construir evento verificado para extraer datos seguros
     const verifiedEvent = this.stripeProvider.constructWebhookEvent(rawBody, signature)
 
     const eventType = verifiedEvent.type
@@ -137,7 +129,6 @@ export class WebhookController {
       throw new HttpException('Firma de MercadoPago inválida', HttpStatus.UNAUTHORIZED)
     }
 
-    // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.type || payload?.action || 'unknown'
     const providerEventId = this.mercadoPagoProvider.webhookEventId(rawBody, signature)
@@ -164,7 +155,6 @@ export class WebhookController {
       throw new HttpException('Firma de Dropi inválida', HttpStatus.UNAUTHORIZED)
     }
 
-    // Firma válida — parsear el body
     const payload = JSON.parse(rawBody.toString())
     const eventType = payload?.event || payload?.type || 'unknown'
     const providerEventId = this.dropiProvider.webhookEventId(rawBody, payload)
@@ -188,27 +178,24 @@ export class WebhookController {
 
     const bearer = (authorization || '').replace(/^Bearer\s+/i, '')
 
-    // El parseo va PRIMERO porque el ramo —y con él qué bearer se espera y si
-    // hay firma que verificar— no se puede saber sin leer el `event`.
+    // Parse first: the branch (which bearer is expected, whether a signature exists) depends on `event`.
     const payload = this.parsearWebhookConfio(rawBody)
 
-    // Fuera del contrato: no sabemos cómo autenticarlo, así que no se despacha.
-    // Se responde 200 igual para que Confío no reintente en bucle un evento que
-    // nunca vamos a aceptar.
-    //
-    // Pero primero se AUTENTICA. No saber qué credencial espera un evento no lo
-    // vuelve anónimo: se exige la del ramo one-shot, que acepta cualquiera de las
-    // dos claves que ya conocemos, así que un llamador legítimo pasa igual que
-    // antes. Hasta acá el `return` de abajo estaba por encima de esto y un
-    // anónimo mandaba cualquier JSON con un `event` inventado, recibía 200 y
-    // escribía un warn por request: le regalaba un oráculo de qué eventos
-    // reconoce el sistema y una vía de ruido en el log (CWE-306).
+    // Unknown events are never dispatched but get 200 so Confio stops retrying. They must still
+    // authenticate first, else anyone could probe which events exist and flood the log (CWE-306).
     const ramo = classifyConfioWebhookEvent(payload.event)
     if (ramo === 'fuera_de_contrato') {
       this.autenticarRamoOneShot(rawBody, bearer)
 
       this.logger.warn(
         `Webhook ConfioPagos ignorado: evento fuera del contrato "${escapeLogValue(payload.event)}"`,
+      )
+      // Kept as `ignored` and never dispatched; the answer stays the same.
+      await this.webhookService.recordIgnored(
+        'confio',
+        typeof payload.event === 'string' ? payload.event : 'unknown',
+        buildConfioWebhookEventId(payload),
+        payload,
       )
 
       return { ignored: true }
@@ -218,17 +205,15 @@ export class WebhookController {
     else this.autenticarRamoOneShot(rawBody, bearer)
 
     const eventType = payload?.event || 'unknown'
-    // La clave identifica a la notificación, no al intento de entrega: la deriva
-    // `buildConfioWebhookEventId` a partir de los campos que Confío reenvía igual.
+    // The key identifies the notification, not the delivery attempt, so redeliveries dedupe.
     const providerEventId = buildConfioWebhookEventId(payload)
 
     return this.webhookService.receive('confio', eventType, providerEventId, payload)
   }
 
   /**
-   * Parsea el cuerpo con veredicto propio: `null`, `[]` y `"x"` son JSON válido
-   * pero no son un envelope, y sin este chequeo caerían con `event: undefined`
-   * en el camino de 200 ignorado en vez de rechazarse.
+   * `null`, `[]` and `"x"` are valid JSON but not an envelope; without this check they would reach
+   * the ignored-200 path with `event: undefined` instead of being rejected.
    */
   private parsearWebhookConfio(rawBody: Buffer): ConfioWebhookPayload {
     let parsed: unknown
@@ -250,22 +235,14 @@ export class WebhookController {
   }
 
   /**
-   * Ramo FIRMADO (los dos eventos de suscripción): bearer + checksum.
+   * Signed branch (the two subscription events): bearer + checksum.
    *
-   * La política de "sin clave configurada" es DE ESTE RAMO, no del endpoint:
-   * los eventos one-shot nunca traen `signature` y hoy se autentican con el
-   * access token, así que aplicarles esta compuerta apagaría cobros vivos.
+   * The missing-key policy belongs to this branch only: one-shot events never carry `signature` and
+   * authenticate with the access token, so applying it there would block live charges.
    *
-   * Sin clave se rechaza EN TODOS LOS AMBIENTES, no sólo en producción. Antes
-   * fallaba abierto fuera de producción, y eso dejó de ser inocuo cuando
-   * `subscription.subscriptionStatusChanged` pasó a tener efecto CROSS-SERVICE:
-   * un `status: CANCELED` sin autenticar ya no mueve nada más que una columna
-   * local, ahora revoca el plan de la marca en backend-roles y la baja a `free`.
-   * Un default que falla abierto no puede gobernar un efecto irreversible sobre
-   * los permisos de otro servicio, aunque sea en dev.
-   *
-   * Precio: dev y staging necesitan `CONFIO_WEBHOOK_KEY` sembrada en Infisical
-   * para poder recibir estos dos eventos (registrado en HUMAN_ACTIONS).
+   * Without a key it rejects in EVERY environment: a `CANCELED` status revokes the brand plan in
+   * backend-roles, an irreversible cross-service effect that must never fail open. Every environment
+   * that receives these events therefore needs `CONFIO_WEBHOOK_KEY` set.
    */
   private autenticarRamoFirmado(payload: ConfioWebhookPayload, bearer: string): void {
     if (!this.webhookKey) {
@@ -276,8 +253,7 @@ export class WebhookController {
       throw new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)
     }
 
-    // El bearer se compara ANTES del checksum: es la comprobación barata, y va
-    // en tiempo constante con la misma primitiva que usa el digest.
+    // Bearer before checksum: it is the cheap check, and it is constant-time like the digest.
     if (!timingSafeEqualStrings(bearer, this.webhookKey)) {
       throw this.rechazarWebhookConfio(
         'bearer_mismatch',
@@ -293,11 +269,10 @@ export class WebhookController {
   }
 
   /**
-   * Ramo ONE-SHOT (link de pago): tráfico VIVO que llega sin `signature`.
+   * One-shot branch (payment link): live traffic that arrives without `signature`.
    *
-   * Se aceptan LOS DOS bearer —el access token de hoy y la clave de webhook—
-   * porque no está confirmado con Confío cuál mandan estos eventos una vez
-   * registrada la URL, y provisionar la clave no puede apagar cobros en vuelo.
+   * Both bearers are accepted (access token and webhook key) because it is unconfirmed which one
+   * Confio sends once the URL is registered, and provisioning the key must not block live charges.
    */
   private autenticarRamoOneShot(rawBody: Buffer, bearer: string): void {
     const conAccessToken = this.confioProvider.validateWebhookSignature(rawBody, bearer)
@@ -312,7 +287,7 @@ export class WebhookController {
     }
   }
 
-  /** Rechazo de webhook de ConfioPagos: UNA línea de log y un 401. */
+  /** Logs exactly one line per rejection and returns the 401 to throw. */
   private rechazarWebhookConfio(reason: string, campos: string, detail: string): HttpException {
     this.logger.warn(
       `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${escapeLogValue(detail)}"`,
@@ -321,26 +296,8 @@ export class WebhookController {
     return new HttpException('Webhook de ConfioPagos rechazado', HttpStatus.UNAUTHORIZED)
   }
 
-  // ============================================
-  // Admin — gestión de webhooks fallidos
-  // ============================================
-  //
-  // AUTENTICADOS desde el 2026-09-07, y el guard va POR HANDLER, no en la clase.
-  // Este controller es el único del servicio deliberadamente exento del guard de
-  // clase, porque los `@Post` de proveedor se autentican con la firma o el bearer
-  // del emisor y no pueden exigir sesión. La exención se escribió pensando en
-  // esos cuatro handlers y se llevó puestos, sin quererlo, los tres de acá abajo:
-  // medido por el gateway el 2026-09-07, `GET admin/events` respondía 200 sin
-  // credencial en dev, staging Y PRODUCCIÓN, y `POST admin/:id/retry` no sólo
-  // respondía —ejecutaba: 201 y el `processedAt` del evento se movió—. O sea que
-  // cualquiera podía leer el índice de webhooks (los `providerEventId` traen
-  // resource names de suscripciones y pagos reales) y reprocesar cualquiera de
-  // ellos a voluntad.
-  //
-  // Subir el guard a la clase cerraría esto y apagaría los webhooks entrantes:
-  // ConfioPagos no manda cookie de sesión ni JWT nuestro. Por eso va por handler,
-  // y `controllers-guarded.spec.ts` fija las dos mitades para que nadie
-  // "arregle" una rompiendo la otra.
+  // Admin handlers: each MUST carry its own guard, since a class guard would block provider webhooks.
+  // `controllers-guarded.spec.ts` pins both halves so fixing one cannot break the other.
 
   @Get('admin/events')
   @UseGuards(ApiAuthGuard)
@@ -367,6 +324,7 @@ export class WebhookController {
   @Post('admin/:id/retry')
   @UseGuards(ApiAuthGuard)
   @RequireSuperAdmin()
+  @RequireSessionUser()
   @ApiOperation({ summary: 'Reintentar webhook fallido (Admin)' })
   @ApiResponse({ status: 200, description: 'Reintento encolado' })
   async retryWebhook(@Param('id', ParseUUIDPipe) id: string) {

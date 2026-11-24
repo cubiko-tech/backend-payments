@@ -1,3 +1,4 @@
+// R6: Mirrors subscription.service.ts, which still keeps the whole lifecycle; it splits with it.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm'
 import { SubscriptionService } from './subscription.service'
@@ -483,6 +484,23 @@ describe('SubscriptionService', () => {
   describe('startTrial — alta contra ConfioPagos', () => {
     const alta = (extra: Record<string, any> = {}) =>
       service.startTrial({ brandId: 'brand-1', userId: 'user-1', planSlug: 'dropi-roax', ...extra })
+
+    it.each(['startTrial', 'startPaid'] as const)(
+      '%s answers with the currency the signup charges in',
+      async (method) => {
+        // Mutation: `currency: undefined` in the trial (startTrial row) or the paid (startPaid row)
+        // response of subscription.service.ts -> that row turns red.
+        confioTrial.createForTrial.mockResolvedValueOnce({ ...ALTA_CONFIO, currency: 'USD' })
+
+        const result = await service[method]({
+          brandId: 'brand-1',
+          userId: 'user-1',
+          planSlug: 'dropi-roax',
+        })
+
+        expect(result.currency).toBe('USD')
+      },
+    )
 
     it('devuelve el link de aceptación y guarda el `name`, nunca el link', async () => {
       const result = await alta()
@@ -1769,7 +1787,11 @@ describe('SubscriptionService', () => {
       await service.cancel('brand-1', { reason: 'segundo click', triggeredBy: 'user-1' })
 
       expect(txManager.exists).toHaveBeenCalledWith(SubscriptionEvent, {
-        where: { subscriptionId: 'sub-1', eventType: SubscriptionEventType.CANCELLED },
+        where: {
+          subscriptionId: 'sub-1',
+          eventType: SubscriptionEventType.CANCELLED,
+          traceStatus: 'applied',
+        },
       })
       expect(eventRepo.create).not.toHaveBeenCalled()
       expect(eventRepo.save).not.toHaveBeenCalled()
@@ -2101,7 +2123,7 @@ describe('SubscriptionService', () => {
         where: { brandId: 'brand-1' },
       })
       expect(eventReadRepo.find).toHaveBeenCalledWith({
-        where: { subscriptionId: 'sub-1' },
+        where: { subscriptionId: 'sub-1', traceStatus: 'applied' },
         order: { createdAt: 'DESC' },
       })
     })

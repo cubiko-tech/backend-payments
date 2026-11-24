@@ -73,6 +73,29 @@ describe('MetricsService — criterios de estado', () => {
   })
 })
 
+describe('MetricsService — MRR with an unresolved price', () => {
+  it('leaves a plan without a COP price out of the total and names it', async () => {
+    // Mutation: getMRR back to `getPlanPriceCents(...) || 0` counts `ghost` as MRR 0.
+    const query = jest.fn().mockResolvedValue([
+      { planSlug: 'pro', subscribers: '2' },
+      { planSlug: 'ghost', subscribers: '3' },
+    ])
+    // R17: the roles client is another service; only the price it answers per plan matters here.
+    const clientRoles = {
+      getPlanPriceCents: jest.fn(async (slug: string) => (slug === 'pro' ? 10000 : null)),
+    }
+    const service = new MetricsService({} as any, {} as any, { query } as any, clientRoles as any)
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined)
+
+    const { data } = await service.getMRR()
+
+    expect(data.total).toBe(200)
+    expect(data.byPlan.map((p) => p.planSlug)).toEqual(['pro'])
+    expect(data.unpricedPlans).toEqual(['ghost'])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('ghost'))
+  })
+})
+
 describe('Admin Metrics - range validation and SQL parameterization (PAYL-9)', () => {
   let app: INestApplication
   let query: jest.Mock

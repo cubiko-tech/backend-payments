@@ -39,22 +39,28 @@ export class MetricsService {
     `)
 
     // Obtener precios desde backend-roles (caché)
-    const prices = await this.clientRoles.getAllPlanPrices()
-
-    const byPlan = subscribers.map((row: any) => {
-      const planPrices = prices.get(row.planSlug)
-      const price = planPrices?.get('COP') || 0
-      return {
+    const resolved = await Promise.all(
+      subscribers.map(async (row: any) => ({
         planSlug: row.planSlug,
         subscribers: Number(row.subscribers),
-        pricePerMonth: price,
-        mrr: Number(row.subscribers) * price,
-      }
-    })
+        priceCents: await this.clientRoles.getPlanPriceCents(row.planSlug, 'COP'),
+      })),
+    )
+    // An unresolved price is not a free plan: it stays out of the total and is named instead.
+    const unpricedPlans = resolved.filter((r) => r.priceCents === null).map((r) => r.planSlug)
+    if (unpricedPlans.length > 0) {
+      this.logger.warn(`MRR without a COP price for plans: ${unpricedPlans.join(', ')}`)
+    }
+    const byPlanCents = resolved.filter((r) => r.priceCents !== null)
+    const byPlan = byPlanCents.map(({ priceCents, ...plan }) => ({
+      ...plan,
+      pricePerMonth: priceCents / 100,
+      mrr: (plan.subscribers * priceCents) / 100,
+    }))
 
-    const total = byPlan.reduce((sum: number, r: any) => sum + r.mrr, 0)
+    const totalCents = byPlanCents.reduce((sum, r) => sum + r.subscribers * r.priceCents, 0)
 
-    return { data: { total: Math.round(total * 100) / 100, byPlan } }
+    return { data: { total: totalCents / 100, byPlan, unpricedPlans } }
   }
 
   /**
@@ -95,6 +101,7 @@ export class MetricsService {
         COUNT(*) FILTER (WHERE se."eventType" = 'created') as new_subs
       FROM subscription_events se
       WHERE se."createdAt" >= NOW() - make_interval(months => $1)
+        AND se."traceStatus" = 'applied'
       GROUP BY month
       ORDER BY month DESC
     `,
@@ -172,6 +179,7 @@ export class MetricsService {
         DATE_TRUNC('month', se."createdAt") as month
       FROM subscription_events se
       WHERE se."eventType" = 'plan_changed'
+        AND se."traceStatus" = 'applied'
         AND se."createdAt" >= NOW() - INTERVAL '6 months'
       GROUP BY se."fromPlanSlug", se."toPlanSlug", month
       ORDER BY month DESC, count DESC
@@ -240,6 +248,7 @@ export class MetricsService {
         FROM subscription_events se
         JOIN subscriptions s ON s.id = se."subscriptionId"
         WHERE se."eventType" NOT IN ('cancelled', 'expired')
+          AND se."traceStatus" = 'applied'
           AND se."createdAt" >= NOW() - make_interval(months => $1)
       )
       SELECT

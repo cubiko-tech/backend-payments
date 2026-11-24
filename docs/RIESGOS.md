@@ -6,7 +6,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un país sin fila de precio propia pasa a cobrarse en dólares en vez de ser rechazado
 
-- **Dónde**: `src/client/client-roles.service.ts:173` (`findUsdRow`)
+- **Dónde**: `src/client/client-roles.service.ts:34` (`findUsdRow`)
 - **Qué lo dispara**: un alta o un checkout de una marca cuyo país no tiene fila en `plan_prices`, para un
   plan con fila en dólares; incluye el checkout general de `starter`, `pro` y `enterprise`.
 - **Qué rompe**: un país donde no se decidió vender cobra en dólares en vez de rechazar con
@@ -16,7 +16,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:117`, `:176` (`processSubscriptionRenewals`)
+- **Dónde**: `src/tasks/subscription-renewal.ts:133`, `:192` (`processSubscriptionRenewals`)
 - **Qué lo dispara**: una fila `provider = 'wallet'`, `autoRenew`, vencida y con `walletId` nulo.
 - **Qué rompe**: la marca sigue con su plan pago sin que se le cobre, mientras nadie le ponga wallet.
 - **Estado**: abierto — lo cierra corregir cada fila; el log de error con su id y el contador de la pasada
@@ -34,7 +34,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El caché tibio de precios sirve precios vencidos sin tope cuando cae `backend-roles` (LOC-16)
 
-- **Dónde**: `src/client/client-roles.service.ts:187`, `:94` (`getPlanRows`, `hasCachedPrices`);
+- **Dónde**: `src/client/client-roles.service.ts:204`, `:160` (`getPlanRows`, `hasCachedPrices`);
   `src/tasks/wallet-renewal.ts:77` (`isPostponementGraceExceeded`)
 - **Qué lo dispara**: `backend-roles` cae después de que el proceso cargó precios una vez.
 - **Qué rompe**: la renovación cobra al último precio cacheado, de cualquier antigüedad, o rechaza con
@@ -52,9 +52,9 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Tres bordes del reintento con `Idempotency-Key` siguen sin salida (LOC-86)
 
 - **Dónde**: `src/checkout/checkout-idempotency.ts:199`, `:39` (`resolvePaymentStateOutcome`,
-  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:439`, `:759`
+  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:420`, `:731`
   (`retryFailedIdempotentPayment`, la llamada `provider.createCheckout` en `processExternalPayment`, con la
-  entrada pública `processCheckout` en `:226`); `src/provider/dropi/dropi.provider.ts:79`
+  entrada pública `processCheckout` en `:206`); `src/provider/dropi/dropi.provider.ts:79`
 - **Qué lo dispara**: un reintento con la misma llave sobre (a) un `completed` sin
   `metadata.checkoutResult` (falló después del cierre o lo completó un webhook); (b) un externo `failed`
   sin `providerPaymentId`; (c) una fila que la ruta retirada `POST /payment/checkout` (`c77a594`, LOC-93)
@@ -69,7 +69,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:351` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
+  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
   (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
@@ -125,7 +125,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Los crons sostienen el candado de marca mientras escriben por otras conexiones y llaman por HTTP (LOC-88)
 
 - **Dónde**: `src/checkout/wallet-payment-close.ts:59` (`lockBrandPlan`);
-  `src/tasks/subscription-lock.ts:18`, `:41` (`lockAndReread`, `acquireSubscriptionLock`)
+  `src/tasks/subscription-lock.ts:27`, `:50` (`lockAndReread`, `acquireSubscriptionLock`)
 - **Qué lo dispara**: bajo el candado se llama a roles, al proveedor y a ConfioPagos. Basta un checkout o
   un webhook de la marca mientras un cron procesa su fila; para agotar el pool, tantos cierres esperando
   como conexiones (10: default de `pg-pool`, `node_modules/pg-pool/index.js:89`; `src/orm` no fija otro).
@@ -149,20 +149,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   devuelve y regala los días.
 - **Estado**: mitigado por `refundOrphanRenewalDebits`, que acredita el débito una sola vez. Abierto en (a)–(c).
 
-## Una renovación que llega a roles después de la degradación deja plan pago sobre una fila cerrada (LOC-111)
-
-- **Dónde**: `src/tasks/wallet-renewal.ts:166` (`renewPlanForBrand`);
-  `src/tasks/subscription-expiration.ts:302` (`degradeInRoles`)
-- **Qué lo dispara**: una baja durante la espera a roles y el barrido de acceso, que no toma el candado de
-  plan, cierra la fila antes de que la extensión escriba; roles aplica la renovación después.
-- **Qué rompe**: la marca conserva el plan pago en roles con la fila `cancelled`. El débito queda pendiente
-  y el barrido de huérfanos lo devuelve una vez.
-- **Estado**: abierto — lo cierra que el barrido de acceso tome el candado, o degradar al abortar.
-
 ## Un guardado de renovación que falla siempre cuesta el plan a quien ya pagó (LOC-108)
 
 - **Dónde**: `src/tasks/wallet-renewal.ts:157` (`extendSubscriptionPeriod`);
-  `src/tasks/subscription-renewal.ts:132` (`handleRenewalFailure`)
+  `src/tasks/subscription-renewal.ts:148` (`handleRenewalFailure`)
 - **Qué lo dispara**: falla cada guardado de la extensión y no el de `handleRenewalFailure`; la pasada
   horaria no mira el backoff.
 - **Qué rompe**: en unas tres horas se agotan los reintentos: avisos de pago fallido y la fila vencida.
@@ -205,7 +195,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
 
-- **Dónde**: `src/provider/confio/confio.provider.ts:132`; `src/provider/stripe/stripe.provider.ts:86`
+- **Dónde**: `src/provider/confio/confio.provider.ts:103`; `src/provider/stripe/stripe.provider.ts:86`
   (`ProviderPaymentNotFoundError`)
 - **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado: el 404 se lee como «el
   pago no existe».
@@ -215,7 +205,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:49` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
-  (`providerLetsExpire`); `src/admin/admin.controller.ts:301` (`paymentsPending`, con la ruta en `:298`)
+  (`providerLetsExpire`); `src/admin/admin.controller.ts:266` (`paymentsPending`, con la ruta en `:263`)
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id` por una ruta que no existe o por un cobro que no
   existe: no se distinguen. Se midió contra el core-back local; la API real no se conoce.
 - **Qué rompe**: un `pending` abandonado no vence, sin tope, hasta que el usuario lo cancela: una llamada y
@@ -266,7 +256,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con el claim `brand` del token se escribe en la suscripción sin consultar a platform y con cualquier rol (LOC-94)
 
-- **Dónde**: `src/subscription/subscription.controller.ts:320`, `:335` (`resolveBrandId`, `sessionBrand`);
+- **Dónde**: `src/subscription/subscription.controller.ts:315`, `:330` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
   `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
@@ -279,8 +269,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una fila wallet sin `nextBillingDate` no se cobra y ningún barrido la saca (LOC-91)
 
-- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:92`,
-  `:155` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:88`
+- **Dónde**: `src/tasks/wallet-renewal.ts:46` (`renewFromWallet`); `src/tasks/subscription-renewal.ts:108`,
+  `:171` (`processSubscriptionRenewals`, `retryFailedPayments`); `src/tasks/subscription-expiration.ts:88`
   (`expireSubscriptions`); `src/subscription/dto/create-subscription.dto.ts:78` (`nextBillingDate`)
 - **Qué lo dispara**: una fila wallet con `autoRenew` y sin fecha, de `POST /subscription` sin el campo o
   de una corrección a mano; entre ellas, las que ya pagaron antes de LOC-91 con llave `…:current`.
@@ -377,7 +367,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:6`, `:456`
-  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:270` (`autenticarRamoFirmado`)
+  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:247` (`autenticarRamoFirmado`)
 - **Qué lo dispara**: un aviso firmado de suscripción que llega o se reintenta a más de 24 h de su `timestamp`.
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
@@ -400,13 +390,6 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué rompe**: la marca ve en `GET /wallet` una segunda wallet de tokens que `GET /token-wallet` no usa.
 - **Estado**: abierto — lo cierra un índice único parcial por marca sobre `UPPER(currency) = 'TKN'`, después de
   contar si hay filas así por ambiente.
-
-## Un regalo de tokens a un `brandId` que no es una marca crea su wallet `TKN` (LOC-133)
-
-- **Dónde**: `src/admin/admin-token-gift.controller.ts:40` (`getOrCreate`)
-- **Qué lo dispara**: un super admin que manda un UUID válido que no corresponde a ninguna marca.
-- **Qué rompe**: queda una wallet `TKN` con regalo que nadie ve; los tokens no llegan a la marca buscada.
-- **Estado**: abierto — lo cierra preguntarle a platform si la marca existe antes de acreditar.
 
 ## Con la fuente de la TRM caída más de una hora, el pago que la usa se rechaza
 
@@ -435,7 +418,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
-  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:184-186` sólo lo loguea).
+  reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:198-200` sólo lo loguea).
 - **Qué rompe**: en el primer caso la marca queda sin tokens y sin plata, porque ningún código pasa un reembolso a
   `completed` ni a `failed` ni devuelve los tokens; en el segundo, recupera la plata y conserva los tokens.
 - **Estado**: abierto — lo cierra el flujo que complete o falle el reembolso con el proveedor y escuche sus
@@ -465,7 +448,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La línea «Webhook recibido» de Confío lleva el `data.name` del proveedor sin escapar
 
-- **Dónde**: `src/webhook/webhook.service.ts:94`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
+- **Dónde**: `src/webhook/webhook.service.ts:88`; el id, `src/provider/confio/confio-webhook.ts:65-67` y `:107`
   (`buildConfioWebhookEventId`)
 - **Qué lo dispara**: un webhook de Confío autenticado cuyo `data.name` trae un salto de línea, comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -473,17 +456,37 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: abierto — lo cierra pasar el id por `escapeLogValue` en esa línea (LOC-162 la dejó como estaba porque
   su aceptación pide conservarla).
 
+## El id de un aviso de Confío llega sin escapar a los logs viejos de la suscripción
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:292` y `:887` (efecto ya aplicado), `:555` (la traza
+  de roles que usan `:565` y `:569`), y escapado en las líneas del 015, `:300`, `:342` y `:898`
+- **Qué lo dispara**: un aviso de Confío autenticado cuyo id, armado con su `data.name`, trae un salto de línea,
+  comillas o `=`.
+- **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
+  siendo la clave de idempotencia.
+- **Estado**: mitigado en las líneas del 015 por `escapeLogValue`; abierto en las viejas — lo cierra pasar el id por
+  `escapeLogValue` en ellas (tarea aparte).
+
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
-- **Dónde**: `src/tasks/subscription-renewal.ts:182-184` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:743-756` (`planearCambioDeEstado`) y
-  `:455-462` (`planearCobro`)
+- **Dónde**: `src/tasks/subscription-renewal.ts:198-200` (`retryFailedPayments` → `issueExternalCharge`); las
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:684-690` (`planearCambioDeEstado`) y
+  `:465-474` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
   recibe un link nuestro mientras Confío reintenta su propio cobro: dos caminos para pagar el mismo ciclo. Que
   Confío emita (a) para un alta no aceptada, y que reintente por su cuenta en (b), es hipótesis (no se midió).
 - **Estado**: abierto — lo cierra decidir si el cron emite links para `provider = 'confio'` (tarea aparte).
+
+## Un pagador de Confío sin contacto usable deja la fila en `past_due` sin cobrar ni vencer (LOC-318)
+
+- **Dónde**: `src/tasks/subscription-renewal.ts:275`, `:335` (`holdWithoutBuyer`);
+  `src/tasks/subscription-expiration.ts:43` (sólo vence con los reintentos agotados)
+- **Qué lo dispara**: auth no tiene un teléfono o email usable de quien paga, o no responde, en cada pasada.
+- **Qué rompe**: la renovación no emite link ni gasta un reintento, así que la fila nunca agota los reintentos
+  y nunca vence: el plan sigue sin cobrarse, con un evento `payment_failed` por pasada que dice por qué.
+- **Estado**: abierto — lo cierra decidir un tope para esa espera, o corregir el contacto en auth.
 
 ## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
 
@@ -532,7 +535,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una recarga desde Dropi informada `failed` y cobrada después no tiene corrección (LOC-175)
 
 - **Dónde**: `src/recharge/dropi-recharge-result.ts:31-35` (un `charged` sobre una `failed` es `conflict`) y
-  `src/admin/admin.controller.ts:382-387` (el reintento de admin la rechaza con 409)
+  `src/admin/admin.controller.ts:347-352` (el reintento de admin la rechaza con 409)
 - **Qué lo dispara**: ROAX Ads informa `failed` y Dropi termina descontando el saldo (un cobro que se confirma
   tarde, o un `failed` informado por error).
 - **Qué rompe**: la recarga queda `failed` sin tokens y el saldo de Dropi ya salió: la marca pagó sin recibir, y
@@ -585,7 +588,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: el aviso `charged` de una recarga manual y una escritura de la factura o sus ítems que falla.
 - **Qué rompe**: se revierte todo —tokens, `completed`, factura y auditoría—; el aviso recibe 500 y la recarga sigue
   `pending` con el saldo de Dropi ya descontado. Si la falla persiste en cada reintento, la marca pagó y no recibe
-  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:378-387`).
+  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:343-352`).
 - **Estado**: abierto — lo cierra acreditar sin esperar la factura y escribirla después, o una corrección manual que
   decida quien aprueba.
 
@@ -633,8 +636,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un Pagos con el bono del ciclo antes que el roles de LOC-227 cobra ciclos sin bono, y no se repara (LOC-214)
 
-- **Dónde**: `src/client/client-roles.service.ts:240` y `:276` (campo ausente → 0),
-  `src/webhook/subscription-bonus.service.ts:77`
+- **Dónde**: `src/client/client-roles.service.ts:241` y `:287` (campo ausente → 0),
+  `src/webhook/subscription-bonus.service.ts:97`
 - **Qué lo dispara**: `GET /v1/plan` todavía no trae `tokensPerCycle` cuando llega un cobro `SUCCEEDED`.
 - **Qué rompe**: el cobro queda aplicado con su marcador y sin bono; ningún reintento ni barrido lo vuelve a
   acreditar. Lo mismo para un plan que admin deja en 0 y corrige después del cobro.
@@ -642,10 +645,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El bono de un ciclo sale de un aviso de un tercero; sus topes por defecto son supuestos (LOC-214)
 
-- **Dónde**: `src/webhook/subscription-bonus.service.ts:124` y `:131`,
+- **Dónde**: `src/webhook/subscription-bonus.service.ts:144` y `:151`,
   `src/webhook/subscription-bonus-limits.ts:14`
-- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo; un ciclo de prueba con `SUCCEEDED`, si
-  ConfioPagos lo emite, también acredita (no se mira `amountCents`).
+- **Qué lo dispara**: un aviso firmado de ConfioPagos con un ciclo nuevo y `amountCents` firmado mayor que 0
+  (`subscription-bonus.service.ts:79-95`; un ciclo en 0 o sin monto firmado no acredita, LOC-272).
 - **Qué rompe**: tokens `gift` acreditados a la marca de la suscripción, hasta el tope por crédito y por mes
   calendario UTC (`SUBSCRIPTION_BONUS_MAX_TOKENS` 10000 y `SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH` 20000 por
   defecto, valores supuestos). Un tope alcanzado no acredita y no se repite: el bono de ese ciclo queda sin dar.
@@ -663,29 +666,81 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: mitigado para el bono por la regla del checksum y del ciclo creciente; abierto para el efecto del
   cobro — fuera de LOC-235, pendiente de unidad propia.
 
-## El toggle de admin congela y descongela wallets con el token de servidor, sin persona (LOC-262)
+## Un llamador de `admin/*` con el token de servidor que no se relevó recibe 403 (LOC-271)
 
-- **Dónde**: `src/admin/admin.controller.ts:64`, `:622` (`toggleFreezeWallet`);
-  `src/shared/auth/api-auth.guard.ts:128-130` (`isServerToken`)
-- **Qué lo dispara**: `POST /admin/wallets/:id/toggle-freeze` autenticado con `ACCESS_SERVER`, sin sesión de
-  usuario.
-- **Qué rompe**: quien posea `ACCESS_SERVER` congela o descongela cualquier wallet (incluida una `TKN`
-  congelada) y la auditoría queda a nombre de `'server'` (`src/admin/admin.controller.ts:643`), sin persona.
-  `POST /wallet/:id/freeze`, `unfreeze` y `close` ya exigen `@RequireSessionUser()`.
-- **Estado**: abierto — lo cierra exigir sesión de super admin en esa ruta junto con el resto de mutaciones
-  de admin que aún aceptan `ACCESS_SERVER` (INBOX
-  `backend-payments-token-de-servidor-aprueba-reembolsos-y-reintenta-avisos`).
+- **Dónde**: `src/admin/admin.controller.ts:69` (`@RequireSessionUser()` en la clase), `:100` y `:520`
+  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:99`, `:106`, `:119`
+- **Qué lo dispara**: un servicio fuera de platform, processes, roles, auth, mcp-server, alerts-service y
+  backend-ads que llame una ruta de `AdminController` distinta de `POST /admin/wallets` o
+  `GET /admin/subscriptions` con `ACCESS_SERVER`.
+- **Qué rompe**: esa llamada pasa de 2xx a 403 y lo que hacía deja de pasar; en el código leído no hay ninguno.
+- **Estado**: abierto — lo cierra mirar los 403 de `admin/*` en los logs de Pagos de `dev` después del despliegue.
 
 ## `POST /admin/wallets` no verifica que la marca exista y con sesión de super admin abre saldo sin movimiento (LOC-251)
 
-- **Dónde**: `src/admin/admin.controller.ts:569`, `:587`, `:591-599`, `:597` y `:602` (`createWallet`);
+- **Dónde**: `src/admin/admin.controller.ts:523`, `:536`, `:544-551`, `:550` y `:557` (`createWallet`);
   `src/admin/dto/admin-wallet.dto.ts:20`, `:48-54` (`AdminCreateWalletDto`)
 - **Qué lo dispara**: (a) un pedido autenticado a `POST /admin/wallets` con un `brandId` UUID que no
   corresponde a ninguna marca en `backend-platform`; (b) un super admin con sesión que envía `balance > 0`
   desde el diálogo «Crear wallet» del admin (`admin` `src/app/(finance)/finance/wallets/page.tsx:201`).
 - **Qué rompe**: (a) se abren la wallet de dinero y la `internal/TKN` para un UUID sin marca; (b) la wallet
   de dinero nace con `balance: body.balance` y auditoría `wallet_created`, pero sin fila en `transactions`.
-  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:572-580`).
+  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:553-561`).
 - **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
   `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
   registrar la transacción inicial al crear desde sesión.
+
+## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:892-903` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:317-327` (`handle`)
+- **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
+  llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
+  a roles no está garantizado.
+- **Qué rompe**: la fila queda bien y el aviso viejo queda `out_of_order` con un `warn` (marca, plan y acción); pero si
+  el viejo era `degradar` o `retirar` y su llamada llegó a roles después del `reponer`, la marca que pagó queda sin
+  plan hasta el próximo aviso que aplique, en el peor caso el cobro del ciclo siguiente (unos 30 días).
+- **Estado**: abierto — se detecta con `GET webhook/admin/events?status=out_of_order` y el `warn` «lost the order
+  under lock after backend-roles ran»; lo cierra volver a sincronizar roles con la fila al descartar (tarea aparte).
+
+## La marca de orden de Confío nace vacía: el primer aviso viejo de cada suscripción tras el deploy se aplica (LOC-272)
+
+- **Dónde**: `src/webhook/confio-watermark.util.ts:46-51` (`currentMark`, con `providerWatermark` nula como la
+  deja la migración 1795394546441-ConfioWebhookOrderAndTrace)
+- **Qué lo dispara**: un terminal o un cobro fuera de orden que llega antes de que la suscripción reciba su primer aviso
+  aplicado después del deploy; también una fila reutilizada por un alta nueva (su marca es de otra suscripción).
+- **Qué rompe**: ese aviso se aplica como antes de LOC-272 (last-write-wins): un terminal viejo puede degradar una fila
+  que acaba de cobrar. No hay de dónde sembrar la marca: la traza no guardaba el `timestamp` firmado.
+- **Estado**: abierto — se cierra solo con el primer aviso aplicado de cada suscripción.
+
+## La marca supone que el `timestamp` firmado de Confío crece entre avisos distintos (LOC-272)
+
+- **Dónde**: `src/webhook/confio-watermark.util.ts:61-72` (`isOutOfOrder`)
+- **Qué lo dispara**: dos avisos de la misma suscripción cuyo `timestamp` del sobre no sigue el orden en que Confío
+  tomó las decisiones. Que crezca es hipótesis sobre el emisor: el contrato no lo dice (decidido por quien aprueba el
+  2026-11-18 sobre los campos firmados).
+- **Qué rompe**: un aviso real se guarda `out_of_order` y no se aplica. Un cobro de un ciclo firmado mayor se aplica
+  igual aunque su `timestamp` sea anterior.
+- **Estado**: abierto — lo cierra que Confío confirme el orden de su `timestamp`, o medirlo en tráfico.
+
+## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
+
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:317` (la traza antes de roles);
+  `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
+- **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
+  la cola, `processing`, fuera de `GET webhook/admin/failed`.
+- **Qué rompe**: el movimiento no se aplica hasta que alguien llama `POST webhook/admin/:id/retry`; la traza queda
+  `pending` en `subscription_events` (no se cuenta en métricas ni en el historial, que leen `applied`).
+- **Estado**: abierto — se encuentra con `subscription_events."traceStatus" = 'pending'` y el `warn` «left its trace
+  pending»; lo cierra que la cola reprocese (deuda previa de todos los proveedores).
+
+## Una prueba de Confío con link emitido vence a `free` si el aviso de cobro llega pasadas 24 h (LOC-274)
+
+- **Dónde**: `src/tasks/subscription-expiration.ts:36`, `:121` (`MARKED_TRIAL_CHARGE_GRACE_HOURS`,
+  `endMarkedTrialsWithoutCharge`)
+- **Qué lo dispara**: una prueba con `initialPaymentLinkIssuedAt` cuyo aviso de cobro de Confío llega más de 24 h
+  después de `nextBillingDate`.
+- **Qué rompe**: la fila queda `expired` y la marca en `free` aunque Confío cobre después. Las 24 h son supuesto: no
+  se midió cuánto tarda Confío en avisar el cobro al final de una prueba, ni qué hace el webhook sobre una fila
+  `expired` (no se abrió).
+- **Estado**: abierto — lo cierra medir esa demora y que el aviso tardío reactive la fila.

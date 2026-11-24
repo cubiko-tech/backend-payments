@@ -10,6 +10,7 @@ import { WalletStatus } from '../wallet/entities/wallet.entity'
 import { Transaction } from '../transaction/entities/transaction.entity'
 import { ClientRolesService } from '../client/client-roles.service'
 import { logger } from '../shared/logger/logger'
+import { buyerContactLookup } from '../../test/support/subscription-renewal.double'
 
 const mockRepo = () => ({
   find: jest.fn().mockResolvedValue([]),
@@ -90,6 +91,7 @@ describe('TasksService — processTrialConversions', () => {
       clientRoles as any,
       checkoutService as any,
       confioWebhook as any,
+      buyerContactLookup() as any,
     )
   })
 
@@ -303,7 +305,8 @@ describe('TasksService — processTrialConversions', () => {
         renewal: true,
       }),
     )
-    expect(subscriptionRepo.save).toHaveBeenCalledWith(
+    expect(subscriptionRepo.update).toHaveBeenCalledWith(
+      { id: 's1' },
       expect.objectContaining({ status: SubscriptionStatus.PAST_DUE }),
     )
     // Notifica el link de pago, NO degrada a free.
@@ -390,9 +393,14 @@ describe('TasksService — processTrialConversions', () => {
     // tiene que ponerlo rojo. Verificarlo devolviendo filas desde un repo falso que
     // implemente el mismo filtro no probaría nada: probaría el doble.
     const { where } = subscriptionRepo.find.mock.calls[0][0]
-    expect(Object.keys(where).sort()).toEqual(['autoRenew', 'nextBillingDate', 'status'])
-    expect(where.status).toBe(SubscriptionStatus.TRIAL)
-    expect(where.autoRenew).toBe(true)
+    expect(where.map((branch: object) => Object.keys(branch).sort())).toEqual([
+      ['autoRenew', 'nextBillingDate', 'provider', 'status'],
+      ['autoRenew', 'initialPaymentLinkIssuedAt', 'nextBillingDate', 'status'],
+    ])
+    for (const branch of where) {
+      expect(branch.status).toBe(SubscriptionStatus.TRIAL)
+      expect(branch.autoRenew).toBe(true)
+    }
   })
 
   /**
@@ -674,6 +682,8 @@ describe('TasksService — processTrialConversions', () => {
       const periodoVigente = new Date('2026-09-20T10:00:00.000Z')
       subscriptionRepo.update.mockResolvedValue({ affected: 0 })
       subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      // The pass re-reads the row due under its lock; it revives while roles downgrades.
+      subscriptionRepo.findOne.mockResolvedValueOnce(dadaDeBaja())
       subscriptionRepo.findOne.mockResolvedValue({
         id: 's1',
         brandId: 'b1',
@@ -702,6 +712,8 @@ describe('TasksService — processTrialConversions', () => {
       const enUnMes = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
       subscriptionRepo.update.mockResolvedValue({ affected: 0 })
       subscriptionRepo.find.mockResolvedValue([dadaDeBaja()])
+      // The pass re-reads the row due under its lock; it revives while roles downgrades.
+      subscriptionRepo.findOne.mockResolvedValueOnce(dadaDeBaja())
       subscriptionRepo.findOne.mockResolvedValue({
         id: 's1',
         brandId: 'b1',
@@ -1332,6 +1344,7 @@ describe('TasksService — processTrialConversions', () => {
         clientRoles as any,
         checkoutService as any,
         confioWebhook as any,
+        buyerContactLookup() as any,
       )
     })
 
@@ -1863,6 +1876,7 @@ describe('TasksService — processTrialConversions', () => {
           realClientRoles,
           checkoutService as any,
           confioWebhook as any,
+          buyerContactLookup() as any,
         )
       })
 
@@ -2291,6 +2305,7 @@ describe('TasksService — processTrialConversions', () => {
         clientRoles as any,
         checkoutService as any,
         confioWebhook as any,
+        buyerContactLookup() as any,
       )
 
       return {
@@ -2462,12 +2477,10 @@ describe('TasksService — processTrialConversions', () => {
       clientRoles.removePlanFromBrand.mockResolvedValue(true)
       clientRoles.assignPlanToBrand.mockResolvedValue(true)
 
-      await expect(serviceWithLocks.expireSubscriptions()).rejects.toThrow(
-        'transient db update error',
-      )
+      await serviceWithLocks.expireSubscriptions()
 
       expect(lockQueryRunners).toHaveLength(1)
-      expect(lockQueryRunners[0].commitTransaction).toHaveBeenCalledTimes(1)
+      expect(lockQueryRunners[0].rollbackTransaction).toHaveBeenCalledTimes(1)
       expect(lockQueryRunners[0].release).toHaveBeenCalledTimes(1)
       expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
 
@@ -2525,9 +2538,7 @@ describe('TasksService — processTrialConversions', () => {
         return qr
       })
 
-      await expect(serviceWithLocks.expireSubscriptions()).rejects.toThrow(
-        'transient startTransaction error',
-      )
+      await serviceWithLocks.expireSubscriptions()
       expect(lockQueryRunners[0].release).toHaveBeenCalledTimes(1)
       expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
 

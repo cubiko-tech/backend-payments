@@ -19,6 +19,12 @@ export const API_SESSION_ONLY_KEY = 'require_session_user'
  */
 export const RequireSessionUser = () => SetMetadata(API_SESSION_ONLY_KEY, true)
 
+/**
+ * Lets the server token in on one handler of a `@RequireSessionUser` controller: the guard reads
+ * the handler before the class. Each use carries the line that says which service calls it.
+ */
+export const AllowServerToken = () => SetMetadata(API_SESSION_ONLY_KEY, false)
+
 export const API_SERVICE_CLIENT_KEY = 'require_service_client'
 
 /** The client name of ROAX Ads' service credential, the only one that recharges from Dropi. */

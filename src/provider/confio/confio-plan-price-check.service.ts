@@ -1,15 +1,16 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Optional } from '@nestjs/common'
 import { Cron } from '@nestjs/schedule'
+import { InjectDataSource } from '@nestjs/typeorm'
+import { DataSource } from 'typeorm'
 
 import { ConfioPlanService } from './confio-plan.service'
 import { ClientRolesService } from '../../client/client-roles.service'
 import { logger } from '../../shared/logger/logger'
 
 /**
- * El plan cuyo precio del catálogo está FABRICADO y por lo tanto no sirve para
- * comparar: `getAllPlanPrices` inventa `COP 0` y `USD 0` para `free` cuando no
- * tiene filas (rama `currencyMap.size === 0 && planSlug === 'free'` en
- * `client-roles.service.ts:99`).
+ * The plan whose catalog price is MADE UP and so cannot be compared: `getPlanPriceCents`
+ * invents `COP 0` and `USD 0` for `free` when it has no rows (the
+ * `rows.length === 0 && planSlug === 'free'` branch in `client-roles.service.ts`).
  *
  * El literal se repite en vez de usar `freePlanSlug()` porque no es el mismo
  * concepto: `freePlanSlug()` es el plan al que se degrada una marca —una
@@ -18,6 +19,9 @@ import { logger } from '../../shared/logger/logger'
  * cambiara de nombre, el cero seguiría fabricándose para `free`.
  */
 const SLUG_CON_PRECIO_FABRICADO = 'free'
+
+/** Advisory lock key that lets one replica run the daily check while the others skip it. */
+export const PRICE_CHECK_LOCK = 'confio-plan-price-check'
 
 /**
  * Avisa cuando el precio del catálogo (`plan_prices` de backend-roles) se separó
@@ -47,23 +51,53 @@ export class ConfioPlanPriceCheckService {
   constructor(
     private readonly planes: ConfioPlanService,
     private readonly clientRoles: ClientRolesService,
+    @Optional() @InjectDataSource('DBWrite') private readonly dataSource?: DataSource,
   ) {}
+
+  /**
+   * Takes the run's advisory lock without waiting, held in a transaction until `release`. Without a
+   * data source the run is always taken.
+   */
+  private async takeRun(): Promise<{ taken: boolean; release: () => Promise<void> }> {
+    if (!this.dataSource) return { taken: true, release: async () => undefined }
+    const runner = this.dataSource.createQueryRunner()
+    const release = async () => {
+      if (runner.isTransactionActive) await runner.rollbackTransaction()
+      if (!runner.isReleased) await runner.release()
+    }
+    try {
+      await runner.connect()
+      await runner.startTransaction()
+      const [row] = await runner.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS taken', [
+        PRICE_CHECK_LOCK,
+      ])
+      return { taken: row?.taken === true, release }
+    } catch (error) {
+      await release().catch(() => undefined)
+      throw error
+    }
+  }
 
   /**
    * Recorre los mapeos y compara cada uno contra el precio vigente de SU moneda.
    *
-   * La clave del mapeo es la moneda y no el país: `resolvePriceForCountry` está
-   * keyed por país, y el lector por moneda es `getPlanPrice(planSlug, currency)`
-   * (`client-roles.service.ts:68`). Hoy `dropi-roax` tiene exactamente una fila
-   * de catálogo por moneda (CO/COP `isDefault` y US/USD), así que la
-   * correspondencia es 1:1; más de una fila por moneda queda fuera de esto.
+   * The mapping is keyed by currency, not country: `resolvePriceForCountry` is keyed by
+   * country, and the reader by currency is `getPlanPriceCents(planSlug, currency)`, which
+   * picks the same row among several of one currency whatever their order.
    *
    * Las dos variantes `withTrial` de una misma moneda comparan contra el mismo
    * precio: la prueba cambia de plan, no de monto.
    */
   @Cron('0 6 * * *')
   async verificarPreciosContraElCatalogo(): Promise<void> {
+    let release = async () => undefined
     try {
+      const run = await this.takeRun()
+      release = run.release
+      if (!run.taken) {
+        logger.log('info', '[CRON] verificarPreciosContraElCatalogo: another replica is running it')
+        return
+      }
       const filas = await this.planes.findAllMappings()
 
       let comparadas = 0
@@ -84,20 +118,20 @@ export class ConfioPlanPriceCheckService {
           continue
         }
 
-        const precio = await this.clientRoles.getPlanPrice(fila.planSlug, fila.currencyCode)
+        const esperadoCents = await this.clientRoles.getPlanPriceCents(
+          fila.planSlug,
+          fila.currencyCode,
+        )
 
         // `null` es «no sé», no «cero». `getPlanRows` degrada a caché vencido o a
         // un `Map` vacío cuando backend-roles falla, y leer ese vacío como precio
         // marcaría las cuatro filas de golpe: un fallo del canal no es un hecho
         // sobre el objeto.
-        if (precio === null || precio === undefined) {
+        if (esperadoCents === null || esperadoCents === undefined) {
           omitidas++
           continue
         }
 
-        // REDONDEO, no truncado: `plan_prices` guarda 6.99 y `Math.trunc(6.99 * 100)`
-        // da 698 por el binario flotante, o sea una divergencia que no existe.
-        const esperadoCents = Math.round(precio * 100)
         comparadas++
 
         if (esperadoCents !== fila.amountCents) {
@@ -107,7 +141,7 @@ export class ConfioPlanPriceCheckService {
             'error',
             `[CRON] DIVERGENCIA de precio en ${fila.planSlug}/${fila.currencyCode} (${variante}, ` +
               `${fila.confioName}): el plan de ConfioPagos cobra ${fila.amountCents} centavos y el ` +
-              `catálogo vale ${esperadoCents} (${precio}). No se corrige sola: un plan de ConfioPagos ` +
+              `catálogo vale ${esperadoCents}. No se corrige sola: un plan de ConfioPagos ` +
               `no se puede editar, hay que crear otro y re-mapearlo, y las suscripciones vivas siguen ` +
               `cobrando el monto viejo hasta que se den de baja.`,
           )
@@ -127,6 +161,8 @@ export class ConfioPlanPriceCheckService {
         'error',
         `[CRON] verificarPreciosContraElCatalogo: error al verificar precios: ${error.message}`,
       )
+    } finally {
+      await release().catch(() => undefined)
     }
   }
 }

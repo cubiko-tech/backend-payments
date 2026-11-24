@@ -967,6 +967,13 @@ describe('CheckoutService external payment completion concurrency (real database
           walletId: wallet.id,
           amount: 100000,
           currency: 'COP',
+          // Mutation: drop this buyer and the auth lookup has no client here, so checkout answers 503.
+          buyer: {
+            firstName: 'Ana',
+            lastName: 'Perez',
+            email: 'ana.perez@example.com',
+            phoneNumber: '+573001234567',
+          },
         },
         { headers: {} },
       )

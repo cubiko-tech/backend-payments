@@ -1,7 +1,9 @@
-import { In, LessThan } from 'typeorm'
+import { In, IsNull, LessThan } from 'typeorm'
 
+import { ClientAuthService } from '../client/client-auth.service'
 import { freePlanSlug } from '../client/plan-downgrade.util'
 import { esSuscripcionRecurrenteDeConfio } from '../provider/confio/confio-recurrencia.util'
+import { ConfioBuyer } from '../provider/confio/confio.types'
 import { ProviderFactory } from '../provider/provider.factory'
 import { logger } from '../shared/logger/logger'
 import {
@@ -10,6 +12,8 @@ import {
   SubscriptionStatus,
 } from '../subscription/entities/subscription.entity'
 import { SubscriptionEventType } from '../subscription/entities/subscriptionEvent.entity'
+import { resolveRenewalBuyer } from './renewal-buyer'
+import { recordRefusedDowngrades } from './subscription-close'
 import { endTrialWithoutPayment } from './subscription-expiration'
 import { lockAndReread } from './subscription-lock'
 import {
@@ -20,6 +24,7 @@ import {
 
 export interface SubscriptionRenewalDeps extends WalletRenewalDeps {
   providerFactory: ProviderFactory
+  clientAuth: Pick<ClientAuthService, 'resolveBuyerContact'>
 }
 
 /**
@@ -28,12 +33,13 @@ export interface SubscriptionRenewalDeps extends WalletRenewalDeps {
  */
 export async function processTrialConversions(deps: SubscriptionRenewalDeps): Promise<void> {
   const now = new Date()
+  const due = { status: SubscriptionStatus.TRIAL, nextBillingDate: LessThan(now), autoRenew: true }
+  // A trial whose signup issued its link waits for the charge notice; expireSubscriptions ends it.
   const trials = await deps.subscriptionRepo.find({
-    where: {
-      status: SubscriptionStatus.TRIAL,
-      nextBillingDate: LessThan(now),
-      autoRenew: true,
-    },
+    where: [
+      { ...due, provider: SubscriptionProvider.WALLET },
+      { ...due, initialPaymentLinkIssuedAt: IsNull() },
+    ],
   })
 
   if (trials.length === 0) return
@@ -43,6 +49,7 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
   let downgraded = 0
   let linked = 0
   let skipped = 0
+  let refused = 0
   for (const sub of trials) {
     const release = await lockAndReread(sub, deps)
     if (!release) continue
@@ -51,7 +58,9 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
 
       if (sub.provider === 'wallet') {
         if (!sub.walletId) {
-          if (await endTrialWithoutPayment(sub, deps)) downgraded++
+          const outcome = await endTrialWithoutPayment(sub, deps, release)
+          if (outcome === 'closed') downgraded++
+          if (outcome === 'rejected') refused++
           continue
         }
         try {
@@ -73,10 +82,17 @@ export async function processTrialConversions(deps: SubscriptionRenewalDeps): Pr
 
       await issueExternalCharge(sub, false, deps)
       linked++
+    } catch (error) {
+      logger.log(
+        'error',
+        `[CRON] Trial ${sub.id} not converted, left for the next pass: ${error.message}`,
+      )
+      await release.abort()
     } finally {
       await release()
     }
   }
+  if (refused > 0) recordRefusedDowngrades('processTrialConversions', refused, deps)
 
   logger.log(
     'info',
@@ -221,18 +237,17 @@ export async function processDropiBatchCharges(deps: SubscriptionRenewalDeps): P
 
   try {
     const dropiProvider = deps.providerFactory.getDropiProvider()
-    const allPrices = await deps.clientRoles.getAllPlanPrices()
-
-    const charges = dropiSubscriptions
-      .map((sub) => ({
+    const priced = await Promise.all(
+      dropiSubscriptions.map(async (sub) => ({
         userId: sub.userId,
         brandId: sub.brandId,
-        amount: allPrices.get(sub.planSlug)?.get('COP') || 0,
+        amount: (await deps.clientRoles.getPlanPrice(sub.planSlug, 'COP')) || 0,
         currency: 'COP',
         description: `Suscripción plan ${sub.planSlug}`,
         referenceId: sub.id,
-      }))
-      .filter((c) => c.amount > 0)
+      })),
+    )
+    const charges = priced.filter((c) => c.amount > 0)
 
     if (charges.length > 0) {
       await dropiProvider.batchCharge(charges)
@@ -254,6 +269,13 @@ async function issueExternalCharge(
   isRetry: boolean,
   deps: SubscriptionRenewalDeps,
 ): Promise<void> {
+  let buyer: ConfioBuyer | undefined
+  if (sub.provider === SubscriptionProvider.CONFIO) {
+    const resolved = await resolveRenewalBuyer(sub.userId, deps.clientAuth)
+    if (!resolved.ok) return holdWithoutBuyer(sub, resolved.reason, deps)
+    buyer = resolved.buyer
+  }
+
   try {
     const result = await deps.checkoutService.processCheckout({
       brandId: sub.brandId,
@@ -262,12 +284,11 @@ async function issueExternalCharge(
       provider: sub.provider,
       planSlug: sub.planSlug,
       renewal: true,
+      ...(buyer ? { buyer } : {}),
     })
 
     const previousStatus = sub.status
-    sub.status = SubscriptionStatus.PAST_DUE
-    if (isRetry) sub.retryCount = (sub.retryCount || 0) + 1
-    await deps.subscriptionRepo.save(sub)
+    await markLinkIssued(sub, isRetry, deps)
 
     await deps.subscriptionEventRepo.save(
       deps.subscriptionEventRepo.create({
@@ -302,11 +323,47 @@ async function issueExternalCharge(
     )
   } catch (error) {
     logger.log('error', `[CRON] Error emitiendo cobro externo ${sub.id}: ${error.message}`)
-    sub.status = SubscriptionStatus.PAST_DUE
     // No TRM is a gap on our side, not a failed charge: it must not use up a retry.
-    if (isRetry && !isMissingExchangeRate(error)) sub.retryCount = (sub.retryCount || 0) + 1
-    await deps.subscriptionRepo.save(sub)
+    await markLinkIssued(sub, isRetry && !isMissingExchangeRate(error), deps)
   }
+}
+
+/**
+ * No usable buyer is not a failed charge: nothing goes to ConfioPagos and no retry is spent.
+ * The cycle moves to `past_due` with its reason, so the retry cron tries again after its backoff.
+ */
+async function holdWithoutBuyer(
+  sub: Subscription,
+  reason: string,
+  deps: SubscriptionRenewalDeps,
+): Promise<void> {
+  logger.log('error', `[CRON] ${sub.provider} charge for ${sub.id} not issued: buyer ${reason}`)
+  const previousStatus = sub.status
+  await markLinkIssued(sub, false, deps)
+  await deps.subscriptionEventRepo.save(
+    deps.subscriptionEventRepo.create({
+      subscriptionId: sub.id,
+      eventType: SubscriptionEventType.PAYMENT_FAILED,
+      fromStatus: previousStatus,
+      toStatus: SubscriptionStatus.PAST_DUE,
+      triggeredBy: 'system',
+      reason: `Cobro ${sub.provider} sin emitir: comprador sin contacto usable (${reason})`,
+    }),
+  )
+}
+
+/** Moves the cycle to `past_due`, counting a retry if asked, writing only those two columns. */
+async function markLinkIssued(
+  sub: Subscription,
+  countRetry: boolean,
+  deps: SubscriptionRenewalDeps,
+): Promise<void> {
+  sub.status = SubscriptionStatus.PAST_DUE
+  if (countRetry) sub.retryCount = (sub.retryCount || 0) + 1
+  await deps.subscriptionRepo.update(
+    { id: sub.id },
+    { status: sub.status, ...(countRetry ? { retryCount: sub.retryCount } : {}) },
+  )
 }
 
 function isMissingExchangeRate(error: unknown): boolean {

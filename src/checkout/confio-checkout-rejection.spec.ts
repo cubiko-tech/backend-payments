@@ -69,6 +69,8 @@ function checkoutWithRealConfio() {
     { getUsdCopRate: stub({ rate: 4000, date: '2026-11-06' }) },
     { getOrCreate: stub({ id: 'tkn-1', status: 'active' }) },
     { findActive: stub(tokenPackage) },
+    // Auth knows a name and nothing else: an incomplete request buyer finds no contact to complete.
+    { resolveBuyerContact: stub({ ok: true, contact: { name: 'Ana Perez' } }) },
   ] as unknown as ConstructorParameters<typeof CheckoutService>
 
   return { service: new CheckoutService(...args), saved }
@@ -80,6 +82,7 @@ const packageRequest: CheckoutRequest = {
   purpose: 'token_package',
   provider: 'confio',
   packageId: 'pkg-10',
+  successUrl: 'https://ads.roax.ai/tokens',
   buyer: { email: BUYER_EMAIL, phoneNumber: '3001234567' },
 } as CheckoutRequest
 
@@ -92,6 +95,7 @@ describe('Confio rejection on an external checkout', () => {
       CONFIO_STORE_ID: '01TESTSTORE',
       CONFIO_ACCESS_TOKEN: 'test-token-123',
       CONFIO_API_BASE_URL: 'https://api.dev.confiopagos.com/v1',
+      TOKEN_CHECKOUT_ALLOWED_RETURN_URLS: 'https://ads.roax.ai/tokens',
     }
   })
 
@@ -127,5 +131,35 @@ describe('Confio rejection on an external checkout', () => {
     expect(all).not.toContain(BUYER_EMAIL)
     expect(all).not.toContain('pay.confio')
     expect(all).not.toContain('1234567890')
+  })
+
+  it.each([
+    ['phone', { email: BUYER_EMAIL }, 'buyer.phoneNumber'],
+    ['email', { phoneNumber: '3001234567' }, 'buyer.email'],
+  ])('rejects a buyer without a %s with the 422 of a subscription', async (_, buyer, field) => {
+    // Mutation (phone row): `normalizeColombianPhone` returns '+573215786325' for '' -> red.
+    // Mutation (email row): `resolveCheckoutBuyer` sends `contact.email || 'pagos@cubiko.co'` -> red.
+
+    // R17: silences the expected rejection warn; the case asserts on the response, not on the log.
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation()
+    // R17: Confio is external and has a cost; the spy is where the case reads what would be sent.
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      text: async () => JSON.stringify({ name: 'payments/01PAY', url: 'https://pay.confio/01PAY' }),
+    })
+    global.fetch = fetchMock as unknown as typeof fetch
+    const { service, saved } = checkoutWithRealConfio()
+
+    const failure = await service
+      .processCheckout({ ...packageRequest, buyer } as CheckoutRequest)
+      .catch((error) => error)
+
+    expect(failure.getStatus()).toBe(422)
+    expect(failure.getResponse()).toMatchObject({ code: 'INVALID_BUYER', field })
+    expect(saved[saved.length - 1].status).toBe(PaymentStatus.FAILED)
+    const sent = fetchMock.mock.calls.map((call) => String(call[1]?.body)).join('\n')
+    expect(sent).not.toContain('+573215786325')
+    expect(sent).not.toContain('pagos@cubiko.co')
   })
 })

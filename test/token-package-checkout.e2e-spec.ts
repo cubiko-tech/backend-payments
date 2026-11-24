@@ -9,6 +9,7 @@ import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controll
 import { AuditService } from '../src/audit/audit.service'
 import { buildIdempotencyFingerprint } from '../src/checkout/checkout-idempotency'
 import { bonusTokensKey, purchasedTokensKey } from '../src/checkout/token-package-checkout'
+import { ClientPlatformService } from '../src/client/client-platform.service'
 import { InvoiceService } from '../src/invoice/invoice.service'
 import {
   Payment,
@@ -20,11 +21,15 @@ import { ProviderConfigService } from '../src/provider/provider-config.service'
 import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { TokenPackage } from '../src/wallet/entities/token-package.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
+import { brandOwnerLookup } from './support/brand-owner.double'
 import {
+  allowReturnUrls,
   cleanPackageBrand,
   confioNotice,
   fakeExternalProvider,
   packageCheckout,
+  PACKAGE_RETURN_ORIGIN,
+  PACKAGE_RETURN_URL,
   packageId,
   paymentsOf,
   TESTEO_SEMANAL,
@@ -48,6 +53,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
   let source: TrmSource
   let instance: RaceInstance
   let id: string
+  let restoreReturnUrls: () => void
 
   const tokenMoves = async () => {
     const wallet = await tokenWalletOf(instance.dataSource, BRAND)
@@ -69,12 +75,14 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       .update({ slug: TESTEO_SEMANAL.slug }, TESTEO_SEMANAL)
 
   beforeAll(async () => {
+    restoreReturnUrls = allowReturnUrls(PACKAGE_RETURN_URL)
     source = await startTrmSource()
     instance = await startInstance({ realBilling: true, trmUrl: source.url })
     id = await packageId(instance.dataSource)
   })
 
   beforeEach(async () => {
+    allowReturnUrls(PACKAGE_RETURN_URL)
     await cleanPackageBrand(instance.dataSource, BRAND)
     await restoreCatalog()
     source.reply = trmOk
@@ -88,6 +96,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
     await restoreCatalog()
     await stopInstance(instance)
     await source.close()
+    restoreReturnUrls()
   })
 
   it('CA3 the USD 25 package charges COP at its TRM, invoices VAT included and credits 25 + 2', async () => {
@@ -190,6 +199,7 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
       const gifts = new AdminTokenGiftController(
         instance.moduleRef.get(TokenWalletService),
         instance.moduleRef.get(AuditService),
+        { resolveBrandOwner: brandOwnerLookup() } as unknown as ClientPlatformService,
       )
       const gift = { amount, reason: 'Bonus', idempotencyKey: keyOf(paymentId) }
       await gifts.gift(BRAND, gift, { user: { id: 'superadmin-loc140' } })
@@ -334,5 +344,49 @@ describe('Buying a token package (PostgreSQL, LOC-136)', () => {
 
     await expect(buy()).rejects.toMatchObject({ status: 422, code: 'WALLET_CLOSED' })
     expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
+  })
+
+  it('LOC-270 a successUrl in the list gets its payment link and a pending payment', async () => {
+    // Mutation: make isAllowedReturnUrl return false for an exact entry: the purchase gets 400.
+    const result = await instance.checkout.processCheckout(packageCheckout(BRAND, id))
+
+    expect(result.checkoutUrl).toBe('https://pay.example/external')
+    const payments = await paymentsOf(instance.dataSource, BRAND)
+    expect(payments.map((payment) => payment.status)).toEqual([PaymentStatus.PENDING])
+  })
+
+  it('LOC-270 a bare origin in the list lets the package return to a page of that origin', async () => {
+    // Mutation: drop the bare-origin branch of isAllowedReturnUrl: the page gets 400.
+    allowReturnUrls(PACKAGE_RETURN_ORIGIN)
+    const result = await instance.checkout.processCheckout(
+      packageCheckout(BRAND, id, { successUrl: `${PACKAGE_RETURN_ORIGIN}/dashboard/roax-ads` }),
+    )
+
+    expect(result.checkoutUrl).toBe('https://pay.example/external')
+  })
+
+  it.each([
+    ['successUrl', { successUrl: 'https://otro.example/' }],
+    ['cancelUrl', { successUrl: PACKAGE_RETURN_URL, cancelUrl: 'https://otro.example/' }],
+  ])('LOC-270 refuses a %s outside the list with 400, saving no payment', async (_field, urls) => {
+    // Mutation: drop the assertAllowedReturnUrls call in prepareTokenPackage: it gets a link.
+    const createCheckout = fakeExternalProvider(instance)
+
+    await expect(buy(urls)).rejects.toMatchObject({ status: 400, code: 'INVALID_RETURN_URL' })
+    expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
+    expect(await tokenWalletOf(instance.dataSource, BRAND)).toBeNull()
+    expect(createCheckout).not.toHaveBeenCalled()
+  })
+
+  it('LOC-270 refuses with 503 and saves nothing when the return list is empty', async () => {
+    // Mutation: check the list after paymentRepo.save in processCheckout: a pending payment is found.
+    allowReturnUrls('')
+
+    await expect(buy()).rejects.toMatchObject({
+      status: 503,
+      code: 'TOKEN_CHECKOUT_RETURN_URLS_NOT_CONFIGURED',
+    })
+    expect(await paymentsOf(instance.dataSource, BRAND)).toHaveLength(0)
+    expect(await tokenWalletOf(instance.dataSource, BRAND)).toBeNull()
   })
 })

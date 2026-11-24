@@ -29,7 +29,7 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
-import { runBackfillTokenWalletsCli } from '../src/wallet/backfill-token-wallets'
+import { BrandDirectory, runBackfillTokenWalletsCli } from '../src/wallet/backfill-token-wallets'
 import { TokenGiftNotice } from '../src/wallet/entities/token-gift-notice.entity'
 import { Wallet, WalletProvider, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
@@ -38,6 +38,7 @@ import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { brandOwnerLookup } from './support/brand-owner.double'
 
 dotenvConfig({ path: '.env' })
 
@@ -96,6 +97,12 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
     adminUserId: 'system',
     ...overrides,
   })
+
+  // R17: platform is another service; it lists every backfill brand, and the file narrows them.
+  const backfillPlatform: BrandDirectory = {
+    listBrandIds: async () => [...BACKFILL_BRANDS],
+    resolveBrandOwner: async () => ({ ok: true, owner: USER_OWNER }),
+  }
 
   const seedBackfillScenario = async () => {
     const walletRepo = dataSource.getRepository(Wallet)
@@ -237,6 +244,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
         {
           provide: ClientPlatformService,
           useValue: {
+            resolveBrandOwner: brandOwnerLookup(),
             canViewBrandCredit: jest.fn(async (_userId: string, brandId: string) =>
               ALL_BRANDS.includes(brandId),
             ),
@@ -264,6 +272,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
 
   it('CA5 opens both the money wallet and the TKN wallet in 0 and active when a brand is born with the server token', async () => {
     // R15: red when createWallet stops calling tokenWallets.getOrCreate: the TKN wallet is missing.
+    // R15: red when createWallet loses @AllowServerToken: platform's server token gets 403.
     const res = await http()
       .post('/admin/wallets')
       .set('Authorization', `Bearer ${ACCESS_SERVER}`)
@@ -369,8 +378,9 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
     expect(tknWallets[0].id).toBe(readRes.body.data.id)
   })
 
-  it('lists the 3 brands without TKN and opens nothing when the backfill command runs without --apply', async () => {
-    // R15: red when backfillTokenWallets writes without --apply: the dry-run creates 3 TKN wallets.
+  it('lists the 2 brands the file names without TKN and opens nothing without --apply', async () => {
+    // R15: red when backfillTokenWallets writes without --apply: the dry-run creates 2 TKN wallets.
+    // Mutation: backfillTokenWallets builds sourceIds without the file, BRAND_BF_2 is proposed.
     const { walletRepo, brandsFile } = await seedBackfillScenario()
 
     const dryRunLines: string[] = []
@@ -378,20 +388,21 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile],
       () => dataSource,
       (line) => dryRunLines.push(line),
+      backfillPlatform,
     )
 
     expect(await walletRepo.countBy({ brandId: In(BACKFILL_BRANDS), currency: 'TKN' })).toBe(2)
     expect(dryRun.apply).toBe(false)
     expect(dryRun.missingBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([
       BRAND_BF_1,
-      BRAND_BF_2,
       BRAND_BF_3,
     ])
     expect(dryRun.createdBrandIds).toEqual([])
   })
 
-  it('opens 3 new TKN wallets on the first --apply run and none on the second', async () => {
+  it('opens the 2 TKN wallets the file names on the first --apply run and none on the second', async () => {
     // R15: red when --apply fails to insert missing TKN wallets in 0/active or duplicates on rerun.
+    // Mutation: backfillTokenWallets builds sourceIds without the file, BRAND_BF_2 gets a wallet.
     const { walletRepo, brandsFile } = await seedBackfillScenario()
     const countTkn = () => walletRepo.countBy({ brandId: In(BACKFILL_BRANDS), currency: 'TKN' })
 
@@ -399,16 +410,17 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile, '--apply'],
       () => dataSource,
       () => undefined,
+      backfillPlatform,
     )
     expect(firstApply.apply).toBe(true)
     expect(firstApply.createdBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([
       BRAND_BF_1,
-      BRAND_BF_2,
       BRAND_BF_3,
     ])
-    expect(await countTkn()).toBe(5)
+    expect(await countTkn()).toBe(4)
+    expect(await walletRepo.countBy({ brandId: BRAND_BF_2, currency: 'TKN' })).toBe(0)
 
-    for (const brandId of [BRAND_BF_1, BRAND_BF_2, BRAND_BF_3]) {
+    for (const brandId of [BRAND_BF_1, BRAND_BF_3]) {
       const created = await walletRepo.findOneByOrFail({ brandId, currency: 'TKN' })
       expect([
         created.provider,
@@ -424,10 +436,11 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       ['--brands-file', brandsFile, '--apply'],
       () => dataSource,
       () => undefined,
+      backfillPlatform,
     )
     expect(secondApply.missingBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([])
     expect(secondApply.createdBrandIds.filter((id) => BACKFILL_BRANDS.includes(id))).toEqual([])
-    expect(await countTkn()).toBe(5)
+    expect(await countTkn()).toBe(4)
   })
 
   it('excludes the TKN wallet from GET /wallet while returning the money wallet for home', async () => {

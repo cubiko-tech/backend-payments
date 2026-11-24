@@ -123,11 +123,21 @@ function evento(payload: any, providerEventId = 'ev-1'): any {
   }
 }
 
-/** Query builder encadenable: lo único que se le pide es `getOne()`. */
+/**
+ * Chainable query builder: `getOne()` answers `resultado`; the pending-trace insert and the discard
+ * update chain and execute without effect.
+ */
 function qb(resultado: any) {
   return {
     where: jest.fn().mockReturnThis(),
     andWhere: jest.fn().mockReturnThis(),
+    insert: jest.fn().mockReturnThis(),
+    into: jest.fn().mockReturnThis(),
+    values: jest.fn().mockReturnThis(),
+    orIgnore: jest.fn().mockReturnThis(),
+    update: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
+    execute: jest.fn().mockResolvedValue({}),
     getOne: jest.fn().mockResolvedValue(resultado),
   }
 }
@@ -414,8 +424,7 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       // Mismo doble realista que el test de guarda de la traza: los DOS builders,
       // porque el pre-chequeo usa el repo y la relectura bajo lock usa el manager.
       const buscador = () => ({
-        where: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
+        ...qb(null),
         getOne: jest.fn(
           async () => historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
         ),
@@ -1448,10 +1457,10 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
   // ------------------------------------------------------- (4) roles caído
   describe('un fallo del canal de roles no es un impago', () => {
     it.each([
-      ['el retiro', cobro('FAILED'), 'removePlanFromBrand'],
-      ['la reposición', cobro('SUCCEEDED'), 'assignPlanToBrand'],
+      ['the removal', cobro('FAILED'), 'removePlanFromBrand'],
+      ['the restore', cobro('SUCCEEDED'), 'assignPlanToBrand'],
     ] as Array<[string, any, 'removePlanFromBrand' | 'assignPlanToBrand']>)(
-      '%s que roles rechaza deja CERO escrituras locales y lanza',
+      '%s that roles rejects leaves only its pending trace and throws',
       async (_nombre, payload, metodo) => {
         conSuscripcion(suscripcion())
         confio.getSubscription.mockRejectedValue(new Error('502 confio'))
@@ -1462,6 +1471,15 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         // Ni el estado ni el historial: el acceso no cambió y no se degradó.
         expect(dataSource.transaction).not.toHaveBeenCalled()
         expect(manager.save).not.toHaveBeenCalled()
+        // R15: red if the trace is written after backend-roles answers.
+        const inserted = eventRepo.createQueryBuilder.mock.results
+          .map((r: any) => r.value)
+          .filter((b: any) => b.insert.mock.calls.length)
+        expect(inserted).toHaveLength(1)
+        const [row] = inserted[0].values.mock.calls[0]
+        expect(row.traceStatus).toBe('pending')
+        expect(row.metadata.providerEventId).toBe('ev-1')
+        expect(row.metadata).not.toHaveProperty('signatureChecksum')
       },
     )
   })
@@ -1479,6 +1497,25 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
    * sobre el acoplamiento traza↔idempotencia.
    */
   describe('la traza del movimiento reconstruye el hecho sin el proveedor', () => {
+    it('patches and traces the row read under the lock, not the one read before it', async () => {
+      // R15: red if `aplicar` writes the unlocked copy, or traces from it.
+      subRepo.findOne.mockResolvedValue(suscripcion({ status: SubscriptionStatus.ACTIVE }))
+      const locked = suscripcion({
+        status: SubscriptionStatus.PAST_DUE,
+        userId: 'user-locked',
+        retryCount: 5,
+      })
+      manager.findOne.mockResolvedValue(locked)
+      confio.getSubscription.mockRejectedValue(new Error('502 confio'))
+
+      await despachar(cobro('SUCCEEDED'))
+
+      expect(suscripcionGuardada()).toBe(locked)
+      expect(locked.retryCount).toBe(0)
+      expect(historial()[0].fromStatus).toBe(SubscriptionStatus.PAST_DUE)
+      expect(historial()[0].metadata.userId).toBe('user-locked')
+    })
+
     it('el cobro exitoso deja la fila completa (forma CERRADA del metadata)', async () => {
       conSuscripcion(suscripcion({ status: SubscriptionStatus.PAST_DUE }))
       // Se rechaza a propósito: la traza no depende del período remoto.
@@ -1505,7 +1542,9 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       // resource names de más— pone el build en rojo acá.
       // rojo si: se borra `brandId` del metadata armado (o se agrega CUALQUIER
       // clave nueva).
-      expect(fila.metadata).toEqual({
+
+      // R15: `toStrictEqual`, so a new key set to `undefined` is red too; `toEqual` skips it.
+      expect(fila.metadata).toStrictEqual({
         event: 'subscription.billingStatusChanged',
         providerEventId: 'ev-1',
         brandId: BRAND_ID,
@@ -1634,8 +1673,7 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       // spec; acá y sólo acá se sobreescriben los DOS builders, porque el
       // pre-chequeo usa el repo y la relectura bajo lock usa el manager.
       const buscador = () => ({
-        where: jest.fn().mockReturnThis(),
-        andWhere: jest.fn().mockReturnThis(),
+        ...qb(null),
         getOne: jest.fn(
           async () => historial().find((f: any) => f?.metadata?.providerEventId === 'ev-1') || null,
         ),

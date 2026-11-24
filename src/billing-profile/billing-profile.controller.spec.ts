@@ -243,7 +243,6 @@ describe('BillingProfileController and WebhookController admin operator authoriz
     ],
     ['webhook admin events', 'get', '/webhook/admin/events', undefined],
     ['webhook admin failed', 'get', '/webhook/admin/failed', undefined],
-    ['webhook admin retry', 'post', `/webhook/admin/${WEBHOOK_EVENT_ID}/retry`, {}],
   ] as const)(
     'returns 403 for non-superadmin without invoking service and 2xx for superadmin and ACCESS_SERVER on %s (%s %s)',
     async (_label, method, path, body) => {
@@ -278,6 +277,26 @@ describe('BillingProfileController and WebhookController admin operator authoriz
       expect(serverRes.status).toBeLessThan(300)
     },
   )
+
+  it('refuses POST /webhook/admin/:id/retry to non-superadmin and to the server token, and enqueues it for a super admin (LOC-271)', async () => {
+    // R15: red when retryWebhook loses @RequireSessionUser: the server gets 2xx and the retry is enqueued.
+    const path = `/webhook/admin/${WEBHOOK_EVENT_ID}/retry`
+    for (const token of [userToken, SERVER_SECRET]) {
+      const res = await request(app.getHttpServer())
+        .post(path)
+        .set('Authorization', `Bearer ${token}`)
+        .send({})
+      expect(res.status).toBe(HttpStatus.FORBIDDEN)
+    }
+    expect(webhookService.retryWebhook).not.toHaveBeenCalled()
+
+    const superAdminRes = await request(app.getHttpServer())
+      .post(path)
+      .set('Authorization', `Bearer ${superAdminToken}`)
+      .send({})
+    expect(superAdminRes.status).toBe(HttpStatus.CREATED)
+    expect(webhookService.retryWebhook).toHaveBeenCalledWith(WEBHOOK_EVENT_ID)
+  })
 
   it('keeps incoming webhook POST /webhook/confio free of session guard (401 unsigned, 200 signed)', async () => {
     const unsignedRes = await request(app.getHttpServer()).post('/webhook/confio').send({})

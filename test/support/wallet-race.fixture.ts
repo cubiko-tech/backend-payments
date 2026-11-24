@@ -10,6 +10,7 @@ import { BillingProfile } from '../../src/billing-profile/entities/billingProfil
 import { CheckoutService } from '../../src/checkout/checkout.service'
 import { CountryBillingConfigService } from '../../src/billing-profile/country-billing-config.service'
 import { CountryBillingConfig } from '../../src/billing-profile/entities/countryBillingConfig.entity'
+import { ClientAuthService } from '../../src/client/client-auth.service'
 import { ClientPlatformService } from '../../src/client/client-platform.service'
 import { ClientRolesService } from '../../src/client/client-roles.service'
 import { DianService } from '../../src/dian/dian.service'
@@ -40,6 +41,7 @@ import { TRM_SOURCE_URL, TrmService } from '../../src/trm/trm.service'
 import { ConfioSubscriptionWebhookService } from '../../src/webhook/confio-subscription-webhook.service'
 import { WebhookEvent } from '../../src/webhook/entities/webhookEvent.entity'
 import { WebhookService } from '../../src/webhook/webhook.service'
+import { buyerContactLookup } from './subscription-renewal.double'
 
 const READ_ENTITIES = [
   Payment,
@@ -142,6 +144,7 @@ export async function startInstance(
         resolveBrandCountry: jest.fn().mockResolvedValue({ ok: true, country: 'CO' }),
         getBrandCountry: jest.fn().mockResolvedValue('CO'),
       }),
+      provideVal(ClientAuthService, buyerContactLookup()),
       provideVal(ClientRolesService, {
         getPlanPrice: jest.fn().mockResolvedValue(PLAN_PRICE),
         resolvePriceForCountry: jest.fn().mockResolvedValue({ ok: true, price: DEFAULT_PRICE }),

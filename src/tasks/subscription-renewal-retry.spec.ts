@@ -37,7 +37,12 @@ describe('retry of an external charge that fails', () => {
     expect(processCheckout).toHaveBeenCalledTimes(1)
     expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
     expect(sub.retryCount).toBe(1)
-    expect(deps.subscriptionRepo.save).toHaveBeenCalledWith(sub)
+    // Red if the link saves the whole row again: the stale copy overwrites every column.
+    expect(deps.subscriptionRepo.save).not.toHaveBeenCalled()
+    expect(deps.subscriptionRepo.update).toHaveBeenCalledWith(
+      { id: sub.id },
+      { status: SubscriptionStatus.PAST_DUE },
+    )
   })
 
   it('still counts a retry that fails for any other reason', async () => {
@@ -50,5 +55,9 @@ describe('retry of an external charge that fails', () => {
 
     expect(sub.status).toBe(SubscriptionStatus.PAST_DUE)
     expect(sub.retryCount).toBe(2)
+    expect(deps.subscriptionRepo.update).toHaveBeenCalledWith(
+      { id: sub.id },
+      { status: SubscriptionStatus.PAST_DUE, retryCount: 2 },
+    )
   })
 })

@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { DataSource } from 'typeorm'
+import { BRAND_NOT_FOUND, BrandOwnerResolution } from '../client/client-platform.service'
 import {
+  BrandDirectory,
+  backfillSslOptions,
   backfillTokenWallets,
   parseBackfillArgs,
   parseBackfillBrandIds,
@@ -98,39 +101,46 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
       return { ds: ds as unknown as DataSource, repo, qb, execute }
     }
 
-    it('lists missing brands without inserting when apply is false and inserts when apply is true', async () => {
-      // R15: red when backfillTokenWallets inserts during dry-run or omits brands without TKN.
-      const { ds, qb, execute } = buildDataSourceDouble([
-        { brandId: BRAND_1, userId: 'user-1', provider: WalletProvider.INTERNAL, currency: 'COP' },
-        { brandId: BRAND_2, userId: 'user-2', provider: WalletProvider.INTERNAL, currency: 'TKN' },
-      ])
+    // R17: platform is another service; the double fixes which brands exist and who owns each.
+    const buildPlatformDouble = (owners: Record<string, string>): BrandDirectory => ({
+      listBrandIds: jest.fn(async () => Object.keys(owners)),
+      resolveBrandOwner: jest.fn(
+        async (brandId: string): Promise<BrandOwnerResolution> =>
+          owners[brandId]
+            ? { ok: true, owner: owners[brandId] }
+            : { ok: false, code: BRAND_NOT_FOUND },
+      ),
+    })
 
-      const dryRun = await backfillTokenWallets({
-        dataSource: ds,
-        apply: false,
-        brandIdsFromFile: [BRAND_3],
+    const walletRows = [
+      { brandId: BRAND_1, userId: 'user-1', provider: WalletProvider.INTERNAL, currency: 'COP' },
+      { brandId: BRAND_2, userId: 'user-2', provider: WalletProvider.INTERNAL, currency: 'TKN' },
+    ]
+
+    it('takes platform brands without TKN as candidates and opens them in the owner name', async () => {
+      // Mutation: candidates built again from Pagos wallets (backfill-token-wallets.ts, sourceIds)
+      // drop BRAND_3, which has no wallet at all, and this case fails.
+      const { ds, qb, execute } = buildDataSourceDouble(walletRows)
+      const platform = buildPlatformDouble({
+        [BRAND_1]: 'owner-1',
+        [BRAND_2]: 'owner-2',
+        [BRAND_3]: 'owner-3',
       })
-      expect(dryRun).toEqual({
-        apply: false,
-        missingBrandIds: [BRAND_1, BRAND_3],
-        createdBrandIds: [],
-      })
+
+      const dryRun = await backfillTokenWallets({ dataSource: ds, platform, apply: false })
+      expect(dryRun.missingBrandIds).toEqual([BRAND_1, BRAND_3])
+      expect(dryRun.createdBrandIds).toEqual([])
       expect(execute).not.toHaveBeenCalled()
 
-      const applied = await backfillTokenWallets({
-        dataSource: ds,
-        apply: true,
-        brandIdsFromFile: [BRAND_3],
-      })
-      expect(applied).toEqual({
-        apply: true,
-        missingBrandIds: [BRAND_1, BRAND_3],
-        createdBrandIds: [BRAND_1, BRAND_3],
-      })
+      const applied = await backfillTokenWallets({ dataSource: ds, platform, apply: true })
+      expect(applied.createdBrandIds).toEqual([BRAND_1, BRAND_3])
+      expect(qb.values).toHaveBeenCalledWith(
+        expect.objectContaining({ brandId: BRAND_1, userId: 'owner-1', currency: 'TKN' }),
+      )
       expect(qb.values).toHaveBeenCalledWith(
         expect.objectContaining({
-          brandId: BRAND_1,
-          userId: 'user-1',
+          brandId: BRAND_3,
+          userId: 'owner-3',
           provider: WalletProvider.INTERNAL,
           currency: 'TKN',
           balance: 0,
@@ -139,11 +149,29 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
       )
     })
 
+    it('narrows candidates to the file and omits a brand platform does not know', async () => {
+      // R15: red when the file adds to the Pagos wallets again (BRAND_1 shows up) or an unknown brand is opened.
+      const { ds, execute } = buildDataSourceDouble(walletRows)
+      const platform = buildPlatformDouble({ [BRAND_1]: 'owner-1' })
+
+      const applied = await backfillTokenWallets({
+        dataSource: ds,
+        platform,
+        apply: true,
+        brandIdsFromFile: [BRAND_3],
+      })
+      expect(applied.missingBrandIds).toEqual([BRAND_3])
+      expect(applied.omittedBrands).toEqual([{ brandId: BRAND_3, reason: BRAND_NOT_FOUND }])
+      expect(applied.createdBrandIds).toEqual([])
+      expect(execute).not.toHaveBeenCalled()
+    })
+
     it('rejects invalid brandIdsFromFile and destroys the DataSource after CLI execution', async () => {
       // R15: red when backfillTokenWallets skips brandIdsFromFile UUID validation or leaks the DataSource.
       const { ds } = buildDataSourceDouble([])
+      const platform = buildPlatformDouble({ [BRAND_1]: 'owner-1' })
       await expect(
-        backfillTokenWallets({ dataSource: ds, brandIdsFromFile: ['invalid'] }),
+        backfillTokenWallets({ dataSource: ds, platform, brandIdsFromFile: ['invalid'] }),
       ).rejects.toThrow(/Invalid brand UUID/)
 
       const dir = mkdtempSync(join(tmpdir(), 'loc251-unit-'))
@@ -155,6 +183,7 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
           ['--brands-file', file],
           () => ds,
           (line) => lines.push(line),
+          platform,
         )
         expect(res.missingBrandIds).toEqual([BRAND_1])
         expect(lines).toHaveLength(1)
@@ -162,12 +191,25 @@ describe('backfill-token-wallets command helpers and dry-run/apply logic (LOC-25
           apply: false,
           count: 1,
           missingBrandIds: [BRAND_1],
+          omittedByReason: {},
+          omittedBrands: [],
+          createdCount: 0,
           createdBrandIds: [],
         })
         expect(ds.isInitialized).toBe(false)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
+    })
+
+    it('refuses an unverified TLS connection in production', () => {
+      // R15: red when rejectUnauthorized: false comes back or production without a CA connects.
+      expect(backfillSslOptions({ SSL: 'false' })).toBeUndefined()
+      expect(backfillSslOptions({ SSL: 'true', SSL_CA_CERT: 'ca' })).toEqual({
+        ca: 'ca',
+        rejectUnauthorized: true,
+      })
+      expect(() => backfillSslOptions({ SSL: 'true', ENV: 'production' })).toThrow(/SSL_CA_CERT/)
     })
   })
 })

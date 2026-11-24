@@ -11,6 +11,7 @@ import { SubscriptionService } from '../src/subscription/subscription.service'
 import { CycleExtension } from '../src/tasks/renewal-debit-refund'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
 import {
+  DAY_MS,
   daysLeft,
   loseNextCommitAnswer,
   rivalWaitsOrEnds,
@@ -276,26 +277,20 @@ describe('A renewal does not lose a cancellation confirmed during the pass', () 
     await expectClosedWithMoneyBack()
   })
 
-  it('E7: a sweep that closes the row during the pass is not undone', async () => {
-    // R15: red if the extension does not require a live row: it revives the closed row.
+  it('E7: a sweep during the pass waits for it and leaves the renewed row', async () => {
+    // R15: red if the access sweep takes no plan lock: it closes the row the pass is renewing.
     const [pass, gate] = await passHeldInRoles()
     await cancel()
-    await accessSweep(b)
-    expect((await subscription()).status).toBe(SubscriptionStatus.CANCELLED)
-
+    const sweep = accessSweep(b)
+    await rivalWaitsOrEnds(sweep, a.dataSource)
     gate.release()
-    await pass
+    await Promise.all([pass, sweep])
 
-    const sub = await subscription()
-    expect(sub.status).toBe(SubscriptionStatus.CANCELLED)
-    expect(sub.nextBillingDate).toEqual(due)
-    expect(await marks()).toEqual([CycleExtension.PENDING])
-
-    await a.tasks.refundOrphanRenewalDebits()
-
-    expect(await balanceOf(a.dataSource, walletId)).toBe(BALANCE)
-    expect(await refunds()).toHaveLength(1)
-    expect(await marks()).toEqual([CycleExtension.REFUNDED])
+    const sub = await expectCancellationKept()
+    expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
+    expect(sub.accessEndsAt).toEqual(sub.currentPeriodEnd)
+    expect(removePlan).not.toHaveBeenCalled()
+    expect(await marks()).toEqual([CycleExtension.EXTENDED])
   })
 
   it('E9: a pass on another instance waits, and roles renews once (regression)', async () => {
@@ -342,9 +337,8 @@ describe('A renewal does not lose a cancellation confirmed during the pass', () 
     await expectClosedWithMoneyBack()
   })
 
-  it('E11: an extension that lands while the sweep downgrades gets the plan back', async () => {
-    // R15: red if the cut stays at the old period: the sweep closes the row it just downgraded.
-    const [pass, renewal] = await passHeldInRoles()
+  it('E11: a row given more access while the sweep downgrades gets the plan back', async () => {
+    // R15: red if the sweep ignores a close that found the row changed: the brand stays on free.
     await cancel()
     const downgrade = createGate()
     removePlan.mockImplementation(async () => {
@@ -355,14 +349,17 @@ describe('A renewal does not lose a cancellation confirmed during the pass', () 
     const sweep = accessSweep(b)
     await downgrade.reached
 
-    renewal.release()
-    await pass
+    // A writer that does not take the plan lock moves the cut while roles downgrades.
+    const until = new Date(Date.now() + 30 * DAY_MS)
+    await a.dataSource.query(
+      `UPDATE subscriptions SET "accessEndsAt" = $2, "currentPeriodEnd" = $2 WHERE "brandId" = $1`,
+      [BRAND_ID, until],
+    )
     downgrade.release()
     await sweep
 
     const sub = await expectCancellationKept()
     expect(sub.status).toBe(SubscriptionStatus.ACTIVE)
-    expect(sub.accessEndsAt).toEqual(sub.currentPeriodEnd)
     expect(b.assignPlan).toHaveBeenLastCalledWith(BRAND_ID, sub.planSlug, sub.currentPeriodEnd)
   })
 
