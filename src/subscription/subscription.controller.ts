@@ -198,6 +198,8 @@ export class SubscriptionController {
     description: 'BRAND_ID_REQUIRED (no brandId and no brand in the session)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  @ApiResponse({ status: 502, description: 'CONFIO_CANCEL_REJECTED (ConfioPagos answered a 4xx)' })
+  @ApiResponse({ status: 503, description: 'CONFIO_CANCEL_UNAVAILABLE (retry later)' })
   async cancel(@Body() data: CancelSubscriptionDto, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId as string, req)
     return this.subscriptionService.cancel(brandId, {

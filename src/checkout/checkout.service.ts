@@ -62,6 +62,7 @@ import { EnterprisePricingService } from '../subscription/enterprise-pricing.ser
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
+import { positiveIntEnv } from '../shared/env/positive-int-env'
 import { logger as winstonLogger } from '../shared/logger/logger'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { ConfioApiError } from '../provider/confio/confio-api-error'
@@ -159,7 +160,7 @@ export interface CheckoutResult {
 @Injectable()
 export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
-  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly BILLING_PERIOD_DAYS = positiveIntEnv('BILLING_PERIOD_DAYS', 30)
   private readonly inFlightCheckouts: InFlightCheckoutsMap = new Map()
   private readonly inFlightCompletions = new Set<string>()
   private readonly walletReconcileLocks = new Map<string, Promise<void>>()
