@@ -195,9 +195,11 @@ describe('Freezing a wallet while its balance moves (PostgreSQL, LOC-107)', () =
     const wallet = await seedWallet(a.dataSource, BRAND_ID, 0)
     landAfterNextRead(repo, () => a.wallet.close(wallet.id))
 
-    const result = await admin.toggleFreezeWallet(wallet.id)
+    await expect(admin.toggleFreezeWallet(wallet.id)).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'WALLET_STATUS_CHANGED' },
+    })
 
-    expect(result.error).toEqual(expect.any(String))
     expect(await statusOf(wallet.id)).toBe(WalletStatus.CLOSED)
     expect(await auditActions(wallet.id)).toEqual([])
   })
@@ -207,9 +209,11 @@ describe('Freezing a wallet while its balance moves (PostgreSQL, LOC-107)', () =
     const wallet = await seedWallet(a.dataSource, BRAND_ID, 0)
     landAfterNextRead(repo, () => admin.toggleFreezeWallet(wallet.id))
 
-    const result = await admin.toggleFreezeWallet(wallet.id)
+    await expect(admin.toggleFreezeWallet(wallet.id)).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'WALLET_STATUS_CHANGED' },
+    })
 
-    expect(result.error).toEqual(expect.any(String))
     expect(await statusOf(wallet.id)).toBe(WalletStatus.FROZEN)
     expect(await auditActions(wallet.id)).toEqual(['wallet_frozen'])
   })

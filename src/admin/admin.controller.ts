@@ -41,6 +41,7 @@ import {
   RequireSessionUser,
   RequireSuperAdmin,
 } from '../shared/auth/require-permission.decorator'
+import { isUniqueViolation } from '../shared/db/unique-violation'
 import { RequestException } from '../shared/exception/request.exception'
 import { assertNotTokenCurrency, isTokenCurrency } from '../wallet/token-origin'
 import { TokenWalletService } from '../wallet/token-wallet.service'
@@ -187,6 +188,7 @@ export class AdminController {
   @Post('subscriptions/:id/extend')
   @ApiOperation({ summary: 'Extender suscripción manualmente (Admin)' })
   @ApiResponse({ status: 200, description: 'Suscripción extendida' })
+  @ApiResponse({ status: 404, description: 'SUBSCRIPTION_NOT_FOUND' })
   async extendSubscription(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: ExtendSubscriptionDto,
@@ -194,7 +196,10 @@ export class AdminController {
   ) {
     const sub = await this.subscriptionWriteRepo.findOne({ where: { id } })
     if (!sub) {
-      return { error: 'Suscripción no encontrada' }
+      throw new RequestException(
+        { code: 'SUBSCRIPTION_NOT_FOUND', message: 'Suscripción no encontrada' },
+        HttpStatus.NOT_FOUND,
+      )
     }
 
     const newEnd = new Date(sub.currentPeriodEnd)
@@ -334,14 +339,27 @@ export class AdminController {
   @Post('payments/:id/retry')
   @ApiOperation({ summary: 'Reintentar cobro de pago fallido manualmente (Admin)' })
   @ApiResponse({ status: 200, description: 'Pago marcado para reintento' })
-  @ApiResponse({ status: 409, description: 'El pago tiene débito o crédito, o cambió de estado' })
+  @ApiResponse({ status: 404, description: 'PAYMENT_NOT_FOUND' })
+  @ApiResponse({
+    status: 409,
+    description: 'PAYMENT_NOT_FAILED, PAYMENT_NOT_RETRYABLE, o tiene movimientos',
+  })
   async retryPayment(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const payment = await this.paymentWriteRepo.findOne({ where: { id } })
     if (!payment) {
-      return { error: 'Pago no encontrado' }
+      throw new RequestException(
+        { code: 'PAYMENT_NOT_FOUND', message: 'Pago no encontrado' },
+        HttpStatus.NOT_FOUND,
+      )
     }
     if (payment.status !== PaymentStatus.FAILED) {
-      return { error: `Pago no está en estado failed (actual: ${payment.status})` }
+      throw new RequestException(
+        {
+          code: 'PAYMENT_NOT_FAILED',
+          message: `Pago no está en estado failed (actual: ${payment.status})`,
+        },
+        HttpStatus.CONFLICT,
+      )
     }
     // Only the result Dropi reports may reopen a recharge paid with its balance.
     if (payment.provider === PaymentProvider.DROPI_WALLET) {
@@ -520,6 +538,7 @@ export class AdminController {
   @AllowServerToken()
   @ApiOperation({ summary: 'Crear wallet para una marca con balance inicial (Admin)' })
   @ApiResponse({ status: 201, description: 'Wallet creada' })
+  @ApiResponse({ status: 409, description: 'WALLET_ALREADY_EXISTS' })
   async createWallet(@Body() body: AdminCreateWalletDto, @Req() req?: any) {
     // The brand token wallet comes only from TokenWalletService: one per brand, balance by origin.
     assertNotTokenCurrency(body.currency)
@@ -536,10 +555,17 @@ export class AdminController {
     const existing = await this.walletReadRepo.findOne({
       where: { brandId: body.brandId, provider: body.provider as any, currency: body.currency },
     })
-    if (existing) {
+    const walletExists = async () => {
       await this.tokenWallets!.getOrCreate(body.brandId, userId)
-      return { error: `Ya existe una wallet ${body.provider}/${body.currency} para esta marca` }
+      return new RequestException(
+        {
+          code: 'WALLET_ALREADY_EXISTS',
+          message: `Ya existe una wallet ${body.provider}/${body.currency} para esta marca`,
+        },
+        HttpStatus.CONFLICT,
+      )
     }
+    if (existing) throw await walletExists()
 
     const wallet = this.walletWriteRepo.create({
       brandId: body.brandId,
@@ -551,7 +577,10 @@ export class AdminController {
       status: WalletStatus.ACTIVE,
     })
 
-    const saved = await this.walletWriteRepo.save(wallet)
+    // The read above runs on the replica: a lagging replica or a concurrent create reaches the unique index.
+    const saved = await this.walletWriteRepo.save(wallet).catch(async (error: unknown) => {
+      throw isUniqueViolation(error) ? await walletExists() : error
+    })
     await this.tokenWallets!.getOrCreate(body.brandId, userId)
 
     await this.auditService.log(
@@ -575,11 +604,22 @@ export class AdminController {
   @Post('wallets/:id/toggle-freeze')
   @ApiOperation({ summary: 'Congelar o descongelar wallet (Admin)' })
   @ApiResponse({ status: 200, description: 'Estado de wallet actualizado' })
+  @ApiResponse({ status: 404, description: 'WALLET_NOT_FOUND' })
+  @ApiResponse({ status: 409, description: 'WALLET_CLOSED, WALLET_STATUS_CHANGED' })
   async toggleFreezeWallet(@Param('id', ParseUUIDPipe) id: string, @Req() req?: any) {
     const wallet = await this.walletWriteRepo.findOne({ where: { id } })
-    if (!wallet) return { error: 'Wallet no encontrada' }
-    if (wallet.status === WalletStatus.CLOSED)
-      return { error: 'Wallet cerrada, no se puede modificar' }
+    if (!wallet) {
+      throw new RequestException(
+        { code: 'WALLET_NOT_FOUND', message: 'Wallet no encontrada' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
+    if (wallet.status === WalletStatus.CLOSED) {
+      throw new RequestException(
+        { code: 'WALLET_CLOSED', message: 'Wallet cerrada, no se puede modificar' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
     const previousStatus = wallet.status
     const newStatus =
@@ -590,7 +630,12 @@ export class AdminController {
       { id, status: previousStatus },
       { status: newStatus },
     )
-    if (!toggled.affected) return { error: 'La wallet cambió de estado, vuelva a intentar' }
+    if (!toggled.affected) {
+      throw new RequestException(
+        { code: 'WALLET_STATUS_CHANGED', message: 'La wallet cambió de estado, vuelva a intentar' },
+        HttpStatus.CONFLICT,
+      )
+    }
 
     await this.auditService.log(
       req?.user?.id || 'admin',
@@ -765,13 +810,19 @@ export class AdminController {
   @Post('providers')
   @ApiOperation({ summary: 'Crear configuración de proveedor' })
   @ApiResponse({ status: 201, description: 'Proveedor creado' })
+  @ApiResponse({ status: 409, description: 'PROVIDER_CONFIG_ALREADY_EXISTS' })
   async createProvider(@Body() body: CreateProviderConfigDto) {
     const existing = await this.providerReadRepo.findOne({
       where: { country: body.country.toUpperCase(), provider: body.provider.toLowerCase() },
     })
-    if (existing) {
-      return { error: `El proveedor ${body.provider} ya existe para ${body.country}` }
-    }
+    const providerExists = new RequestException(
+      {
+        code: 'PROVIDER_CONFIG_ALREADY_EXISTS',
+        message: `El proveedor ${body.provider} ya existe para ${body.country}`,
+      },
+      HttpStatus.CONFLICT,
+    )
+    if (existing) throw providerExists
 
     const config = this.providerWriteRepo.create({
       country: body.country.toUpperCase(),
@@ -781,19 +832,28 @@ export class AdminController {
       metadata: body.metadata || null,
     })
 
-    const saved = await this.providerWriteRepo.save(config)
+    // Same replica read as createWallet: the unique index is the check that holds under a race.
+    const saved = await this.providerWriteRepo.save(config).catch((error: unknown) => {
+      throw isUniqueViolation(error) ? providerExists : error
+    })
     return { data: saved }
   }
 
   @Patch('providers/:id')
   @ApiOperation({ summary: 'Actualizar configuración de proveedor' })
   @ApiResponse({ status: 200, description: 'Proveedor actualizado' })
+  @ApiResponse({ status: 404, description: 'PROVIDER_CONFIG_NOT_FOUND' })
   async updateProvider(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateProviderConfigDto,
   ) {
     const config = await this.providerWriteRepo.findOne({ where: { id } })
-    if (!config) return { error: 'Proveedor no encontrado' }
+    if (!config) {
+      throw new RequestException(
+        { code: 'PROVIDER_CONFIG_NOT_FOUND', message: 'Proveedor no encontrado' },
+        HttpStatus.NOT_FOUND,
+      )
+    }
 
     if (body.isActive !== undefined) config.isActive = body.isActive
     if (body.priority !== undefined) config.priority = body.priority

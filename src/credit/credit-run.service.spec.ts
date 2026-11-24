@@ -94,6 +94,19 @@ describe('CreditRunService', () => {
       expect(queue.add).not.toHaveBeenCalled()
     })
 
+    it('answers an invalid period with its code and message, never with an error field', async () => {
+      // R15: red when createRun throws `{ error: error.message, code }` again: there is no message.
+      const failure = await service
+        .createRun({ periodStart: '2026-03-15', periodEnd: '2026-06-01', triggeredBy: 't' })
+        .catch((error) => error)
+
+      expect(failure.getResponse()).toEqual({
+        code: 'periodNotWholeMonths',
+        message: 'El período debe ser meses completos (día 01)',
+        status: 400,
+      })
+    })
+
     it('rechaza si ya hay un run activo para el período (409)', async () => {
       runReadRepo.findOne.mockResolvedValue({ id: 'otro', status: ScoreRunStatus.RUNNING })
       await expect(service.createRun({ ...PERIOD, triggeredBy: 't' })).rejects.toMatchObject({

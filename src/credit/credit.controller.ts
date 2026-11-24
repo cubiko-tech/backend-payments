@@ -97,7 +97,7 @@ export class CreditController {
     const brandId = req?.user?.brand
     if (!brandId) {
       throw new RequestException(
-        { error: 'brandRequired', code: 'brandRequired' },
+        { code: 'BRAND_ID_REQUIRED', message: 'La sesión no tiene marca' },
         HttpStatus.BAD_REQUEST,
       )
     }

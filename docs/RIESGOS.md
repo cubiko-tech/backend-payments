@@ -55,7 +55,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El servicio no arranca si `ACCESS_SERVER` o `JWT_SECRET` falta o vale `CHANGEME` (LOC-56)
 
-- **Dónde**: `src/main.ts:12` (`requireStartupSecret`)
+- **Dónde**: `src/main.ts:13` (`requireStartupSecret`)
 - **Qué lo dispara**: iniciar con uno de los dos ausente, vacío, igual a `CHANGEME` o con espacios al borde.
 - **Qué rompe**: el arranque aborta antes de escuchar en el puerto 80.
 - **Estado**: abierto — lo cierra verificar los dos valores en cada ambiente antes de desplegar.
@@ -216,7 +216,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
 - **Dónde**: `src/provider/dropi/dropi.provider.ts:49` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
-  (`providerLetsExpire`); `src/admin/admin.controller.ts:266` (`paymentsPending`, con la ruta en `:263`)
+  (`providerLetsExpire`); `src/admin/admin.controller.ts:271` (`paymentsPending`, con la ruta en `:268`)
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id` por una ruta que no existe o por un cobro que no
   existe: no se distinguen. Se midió contra el core-back local; la API real no se conoce.
 - **Qué rompe**: un `pending` abandonado no vence, sin tope, hasta que el usuario lo cancela: una llamada y
@@ -546,7 +546,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una recarga desde Dropi informada `failed` y cobrada después no tiene corrección (LOC-175)
 
 - **Dónde**: `src/recharge/dropi-recharge-result.ts:31-35` (un `charged` sobre una `failed` es `conflict`) y
-  `src/admin/admin.controller.ts:347-352` (el reintento de admin la rechaza con 409)
+  `src/admin/admin.controller.ts:359-364` (el reintento de admin la rechaza con 409)
 - **Qué lo dispara**: ROAX Ads informa `failed` y Dropi termina descontando el saldo (un cobro que se confirma
   tarde, o un `failed` informado por error).
 - **Qué rompe**: la recarga queda `failed` sin tokens y el saldo de Dropi ya salió: la marca pagó sin recibir, y
@@ -599,7 +599,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: el aviso `charged` de una recarga manual y una escritura de la factura o sus ítems que falla.
 - **Qué rompe**: se revierte todo —tokens, `completed`, factura y auditoría—; el aviso recibe 500 y la recarga sigue
   `pending` con el saldo de Dropi ya descontado. Si la falla persiste en cada reintento, la marca pagó y no recibe
-  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:343-352`).
+  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:352-364`).
 - **Estado**: abierto — lo cierra acreditar sin esperar la factura y escribirla después, o una corrección manual que
   decida quien aprueba.
 
@@ -679,7 +679,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un llamador de `admin/*` con el token de servidor que no se relevó recibe 403 (LOC-271)
 
-- **Dónde**: `src/admin/admin.controller.ts:69` (`@RequireSessionUser()` en la clase), `:100` y `:520`
+- **Dónde**: `src/admin/admin.controller.ts:70` (`@RequireSessionUser()` en la clase), `:101` y `:532`
   (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:99`, `:106`, `:119`
 - **Qué lo dispara**: un servicio fuera de platform, processes, roles, auth, mcp-server, alerts-service y
   backend-ads que llame una ruta de `AdminController` distinta de `POST /admin/wallets` o
@@ -689,14 +689,14 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## `POST /admin/wallets` no verifica que la marca exista y con sesión de super admin abre saldo sin movimiento (LOC-251)
 
-- **Dónde**: `src/admin/admin.controller.ts:523`, `:536`, `:544-551`, `:550` y `:557` (`createWallet`);
+- **Dónde**: `src/admin/admin.controller.ts:536`, `:549`, `:564-572`, `:570` y `:580` (`createWallet`);
   `src/admin/dto/admin-wallet.dto.ts:20`, `:48-54` (`AdminCreateWalletDto`)
 - **Qué lo dispara**: (a) un pedido autenticado a `POST /admin/wallets` con un `brandId` UUID que no
   corresponde a ninguna marca en `backend-platform`; (b) un super admin con sesión que envía `balance > 0`
   desde el diálogo «Crear wallet» del admin (`admin` `src/app/(finance)/finance/wallets/page.tsx:201`).
 - **Qué rompe**: (a) se abren la wallet de dinero y la `internal/TKN` para un UUID sin marca; (b) la wallet
   de dinero nace con `balance: body.balance` y auditoría `wallet_created`, pero sin fila en `transactions`.
-  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:553-561`).
+  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:539-547`).
 - **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
   `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
   registrar la transacción inicial al crear desde sesión.

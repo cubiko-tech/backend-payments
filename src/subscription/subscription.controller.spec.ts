@@ -688,6 +688,20 @@ describe('SubscriptionController — brand resolution on subscription writes', (
       expect(service.cancel).not.toHaveBeenCalled()
     })
 
+    it('rejects a session without brand and without brandId with 400 BRAND_ID_REQUIRED', async () => {
+      // R15: red when resolveBrandId answers this case with 403 forbidden again.
+      await expectWriteException(
+        controller.cancel(
+          { reason: 'closing store', triggeredBy: USER_ID },
+          { user: { id: USER_ID, isSuperAdmin: false, brand: null } },
+        ),
+        'BRAND_ID_REQUIRED',
+        HttpStatus.BAD_REQUEST,
+      )
+      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
+      expect(service.cancel).not.toHaveBeenCalled()
+    })
+
     it('allows service token to target any brand and requires brandId', async () => {
       await controller.cancel(
         { brandId: FOREIGN_BRAND_ID, reason: 'admin cancel', triggeredBy: 'server' },

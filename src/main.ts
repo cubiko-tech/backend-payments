@@ -7,6 +7,7 @@ import { RequestMethod } from '@nestjs/common'
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger'
 import { isProductionEnv } from './shared/env/is-production'
 import { logger } from './shared/logger/logger'
+import { HttpErrorFilter } from './shared/exception/http-error.filter'
 import { createGlobalValidationPipe } from './shared/validation/global-validation-pipe'
 
 function requireStartupSecret(name: 'JWT_SECRET' | 'ACCESS_SERVER'): string {
@@ -43,6 +44,7 @@ export async function bootstrap() {
 
   app.use(helmet())
   app.useGlobalPipes(createGlobalValidationPipe())
+  app.useGlobalFilters(new HttpErrorFilter())
   app.use(cookieParser(jwtSecret))
 
   app.enableCors({

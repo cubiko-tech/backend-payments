@@ -789,7 +789,7 @@ export class CheckoutService implements OnModuleInit {
       if (error instanceof BuyerLookupFailure) throw error.toException()
       throw new RequestException({
         code: 'PROVIDER_ERROR',
-        message: `Error con ${req.provider}: ${error.message}`,
+        message: `No se pudo iniciar el pago con ${req.provider}`,
       })
     }
   }

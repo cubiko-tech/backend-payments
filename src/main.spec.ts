@@ -32,6 +32,7 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
     setGlobalPrefix: jest.Mock
     use: jest.Mock
     useGlobalPipes: jest.Mock
+    useGlobalFilters: jest.Mock
     enableCors: jest.Mock
     enableShutdownHooks: jest.Mock
     listen: jest.Mock
@@ -52,6 +53,8 @@ describe('bootstrap (JWT_SECRET requirement)', () => {
       setGlobalPrefix: jest.fn(),
       use: jest.fn(),
       useGlobalPipes: jest.fn(),
+      // R17: bootstrap registers the error filter; main-error-filter.spec.ts checks it on a real app.
+      useGlobalFilters: jest.fn(),
       enableCors: jest.fn(),
       enableShutdownHooks: jest.fn(),
       listen: jest.fn().mockResolvedValue(undefined),

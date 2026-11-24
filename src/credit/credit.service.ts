@@ -93,7 +93,10 @@ export class CreditService {
       Date.now(),
     )
     if (error) {
-      throw new RequestException({ error: error.message, code: error.code }, HttpStatus.BAD_REQUEST)
+      throw new RequestException(
+        { code: error.code, message: error.message },
+        HttpStatus.BAD_REQUEST,
+      )
     }
 
     const [inputs] = await this.client.getBatch([brandId], periodStart, periodEnd)

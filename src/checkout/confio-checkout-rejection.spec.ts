@@ -133,6 +133,22 @@ describe('Confio rejection on an external checkout', () => {
     expect(all).not.toContain('1234567890')
   })
 
+  it('answers a provider rejection with a fixed message that carries none of the provider text', async () => {
+    // R15: red when the PROVIDER_ERROR message appends the provider's error text again.
+    // R17: silences the expected rejection warn; the case asserts on the exception, not on the log.
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation()
+    confioRejects()
+    const { service } = checkoutWithRealConfio()
+
+    const failure = await service.processCheckout(packageRequest).catch((error) => error)
+
+    expect(failure.getStatus()).toBe(400)
+    expect(failure.getResponse()).toMatchObject({
+      code: 'PROVIDER_ERROR',
+      message: 'No se pudo iniciar el pago con confio',
+    })
+  })
+
   it.each([
     ['phone', { email: BUYER_EMAIL }, 'buyer.phoneNumber'],
     ['email', { phoneNumber: '3001234567' }, 'buyer.email'],
