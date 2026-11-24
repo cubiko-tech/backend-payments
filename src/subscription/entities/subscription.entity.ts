@@ -114,6 +114,8 @@ export const LIVE_SUBSCRIPTION_STATUSES = [
 
 @Entity('subscriptions')
 @Unique('UQ_subscriptions_brand', ['brandId'])
+@Index('IDX_subscriptions_provider_subscription_id', ['providerSubscriptionId'])
+@Index('IDX_subscriptions_access_ends_at', ['accessEndsAt'])
 @Index('IDX_subscriptions_billing', ['status', 'nextBillingDate'], {
   where: `"status" IN ('active', 'past_due')`,
 })
@@ -193,9 +195,6 @@ export class Subscription extends Content {
   // `metrics.service.ts` cuenta la fila en MRR y en «activas» (filtra `status IN
   // ('active','trial')`) aunque ya no vaya a renovar, y al mismo tiempo la cuenta como churn por
   // su `SubscriptionEvent`. Corregir la métrica es una decisión de negocio, anotada en el INBOX.
-  // SIN índice a propósito: la tabla tiene decenas de filas y el cron barre de todos modos por
-  // `autoRenew` (y ordena por esta columna con `take`, un sort en memoria irrelevante a esta
-  // escala); el índice se agrega el día que el volumen lo justifique, y exige migración.
   @Column({ type: 'timestamptz', nullable: true }) accessEndsAt: Date
   @Column({ type: 'uuid', nullable: true }) lastPaymentId: string
   @Column({ type: 'timestamptz', nullable: true }) nextBillingDate: Date
