@@ -2,6 +2,7 @@ import { HttpStatus, Injectable } from '@nestjs/common'
 
 import { RequestException } from '../exception/request.exception'
 import { logger } from '../logger/logger'
+import { authBaseUrl, SESSION_CHECK_TIMEOUT_MS } from './auth-config'
 
 /** A person whose web session auth has just confirmed as live and active. */
 export interface SessionPerson {
@@ -13,7 +14,6 @@ export interface SessionPerson {
 const SESSION_TYPE = 'session'
 const WEB_SESSION_AUDIENCE = 'web-session'
 const SESSION_ALGORITHMS = new Set(['EdDSA', 'HS256'])
-const DEFAULT_TIMEOUT_MS = 5000
 const BASE64URL = /^[A-Za-z0-9_-]+$/
 
 export const authUnavailable = () =>
@@ -24,9 +24,10 @@ export const authUnavailable = () =>
 
 /**
  * Resolves a person's session token through auth's single verification point
- * (`GET /auth/validate`), which checks the signature (EdDSA by `kid`, or HS256 while epic 031
- * lasts), that the session is still open and that the account is active. Payments verifies no
- * person with a key of its own: identity and `isSuperAdmin` come from auth's answer.
+ * (`GET /auth/validate`), which checks the signature (EdDSA by `kid`, or HS256 until auth stops
+ * issuing HS256 sessions), that the session is still open and that the account is active.
+ * Payments verifies no person with a key of its own: identity and `isSuperAdmin` come from
+ * auth's answer.
  *
  * Before the network, only a base64url token shaped as a web session with its `sid` goes on; a
  * refresh, an MCP token or a hand-made JWT without a session is refused here. Auth not answering,
@@ -35,9 +36,9 @@ export const authUnavailable = () =>
  */
 @Injectable()
 export class SessionVerifier {
-  private readonly authUrl = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
+  private readonly authUrl = authBaseUrl()
 
-  async verify(token: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<SessionPerson | null> {
+  async verify(token: string, timeoutMs = SESSION_CHECK_TIMEOUT_MS): Promise<SessionPerson | null> {
     const claims = readSessionClaims(token)
     if (!claims) return null
     if (!this.authUrl) {
@@ -65,44 +66,59 @@ export class SessionVerifier {
       throw authUnavailable()
     }
 
-    let body: any
-    try {
-      body = await res.json()
-    } catch {
-      logger.warn('Session check unavailable: auth answered an unreadable body')
-      throw authUnavailable()
-    }
-    const user = body?.user
+    const body = asRecord(await readAuthBody(res))
+    const user = asRecord(body?.user)
     if (body?.valid !== true || user?.id !== claims.id || user?.status !== 'active') return null
     return {
-      id: user.id,
+      id: claims.id,
       isSuperAdmin: user.isSuperAdmin === true,
       brand: typeof claims.brand === 'string' ? claims.brand : null,
     }
   }
 }
 
+/** Auth's JSON answer, left `unknown` until each field is checked; unreadable is a 503. */
+export async function readAuthBody(res: globalThis.Response): Promise<unknown> {
+  try {
+    return await res.json()
+  } catch {
+    logger.warn('Session check unavailable: auth answered an unreadable body')
+    throw authUnavailable()
+  }
+}
+
+interface SessionClaims {
+  id: string
+  sid: string
+  brand?: unknown
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+}
+
 /** The unverified claims of a web session token, or null when the token is not one. */
-function readSessionClaims(token: string): Record<string, any> | null {
+export function readSessionClaims(token: string): SessionClaims | null {
   const [header, payload, signature] = token.split('.')
   if (!header || !payload || !signature) return null
   // fetch refuses to build a header with CR/LF, which would read as auth being down.
   if (![header, payload, signature].every((segment) => BASE64URL.test(segment))) return null
   let alg: unknown
-  let claims: any
+  let claims: Record<string, unknown> | null
   try {
-    alg = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'))?.alg
-    claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    alg = asRecord(JSON.parse(Buffer.from(header, 'base64url').toString('utf8')))?.alg
+    claims = asRecord(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')))
   } catch {
     return null
   }
+  const { id, sid } = claims ?? {}
   const isSession =
     SESSION_ALGORITHMS.has(alg as string) &&
     claims?.typ === SESSION_TYPE &&
     claims?.aud === WEB_SESSION_AUDIENCE &&
-    typeof claims?.id === 'string' &&
-    claims.id.length > 0 &&
-    typeof claims?.sid === 'string' &&
-    claims.sid.length > 0
-  return isSession ? claims : null
+    typeof id === 'string' &&
+    id.length > 0 &&
+    typeof sid === 'string' &&
+    sid.length > 0
+  return isSession ? { id, sid, brand: claims.brand } : null
 }

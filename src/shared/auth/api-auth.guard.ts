@@ -5,6 +5,7 @@ import { Request } from 'express'
 
 import { RequestException } from '../exception/request.exception'
 import { ClientRolesService } from '../../client/client-roles.service'
+import { AUTO_LOGIN_CHECK_TIMEOUT_MS, authBaseUrl } from './auth-config'
 import {
   API_ON_BEHALF_OF_KEY,
   API_PERMISSION_KEY,
@@ -44,7 +45,7 @@ function readAuthSecret(value: string | undefined): string | null {
 export class ApiAuthGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
   private readonly ACCESS_SERVER = readAuthSecret(process.env.ACCESS_SERVER)
-  private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
+  private readonly SERVICE_AUTH = authBaseUrl()
 
   constructor(
     private readonly reflector: Reflector,
@@ -165,7 +166,7 @@ export class ApiAuthGuard implements CanActivate {
     const client = this.decodeClaims(token)?.client
     if (!client) return null
 
-    const signal = AbortSignal.timeout(timeoutMs ?? 10000)
+    const signal = AbortSignal.timeout(timeoutMs ?? AUTO_LOGIN_CHECK_TIMEOUT_MS)
     let res: globalThis.Response
     try {
       res = await fetch(`${this.SERVICE_AUTH}/client/validate-token`, {
