@@ -13,13 +13,20 @@ import { HttpErrorFilter } from './http-error.filter'
 import { RequestException } from './request.exception'
 
 // R17: a captured response is the only way to read what the filter sends without an HTTP server.
-function respond(exception: unknown) {
+function respond(
+  exception: unknown,
+  request: object = {
+    method: 'POST',
+    path: '/v1/admin/payments/x/retry',
+    originalUrl: '/v1/admin/payments/x/retry',
+  },
+) {
   const json = jest.fn()
   const status = jest.fn().mockReturnValue({ json })
   const host = {
     switchToHttp: () => ({
       getResponse: () => ({ status }),
-      getRequest: () => ({ method: 'POST', originalUrl: '/v1/admin/payments/x/retry' }),
+      getRequest: () => request,
     }),
   } as unknown as ArgumentsHost
   new HttpErrorFilter().catch(exception, host)
@@ -174,5 +181,25 @@ describe('HttpErrorFilter', () => {
       expect.stringContaining('relation "wallets"'),
       expect.any(Object),
     )
+  })
+
+  it('logs a 5xx with the method and the path, never the query that can carry an email', () => {
+    // Mutation: HttpErrorFilter.catch logs `originalUrl` again -> the email reaches the log.
+    const url = '/v1/admin/credit/activation-requests?search=ana@ejemplo.co'
+    const { body } = respond(new Error('forced failure'), {
+      method: 'GET',
+      path: '/v1/admin/credit/activation-requests',
+      originalUrl: url,
+      url,
+    })
+
+    expect(body).toEqual({
+      statusCode: 500,
+      code: 'internalError',
+      message: 'Internal server error',
+    })
+    const line = logError.mock.calls[0][0] as string
+    expect(line).toContain('GET /v1/admin/credit/activation-requests -> 500')
+    expect(line).not.toMatch(/search=|ana@ejemplo\.co/)
   })
 })

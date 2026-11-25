@@ -55,8 +55,9 @@ interface HttpErrorBody {
  * Answers every error as `{ statusCode, code, message }` (R39). A 4xx keeps the `code` and `message` the
  * code wrote on purpose, plus the keys in `PUBLIC_DETAIL_KEYS`; it never echoes `error`, `driverError`,
  * `query`, `parameters` or a stack. A 5xx keeps its `code` but its message is always generic: the
- * original goes to the log. A non-`HttpException` with a 4xx `statusCode` (Express middleware) answers that
- * status with the code and message of the status; anything else is `500 internalError`.
+ * original goes to the log, with the path and never the query (it can carry an email). A
+ * non-`HttpException` with a 4xx `statusCode` (Express middleware) answers that status with the code
+ * and message of the status; anything else is `500 internalError`.
  */
 @Catch()
 export class HttpErrorFilter implements ExceptionFilter {
@@ -68,7 +69,7 @@ export class HttpErrorFilter implements ExceptionFilter {
     if (body.statusCode >= HttpStatus.INTERNAL_SERVER_ERROR) {
       const error = exception instanceof Error ? exception : undefined
       logger.error(
-        `${request?.method} ${request?.originalUrl ?? request?.url} -> ${body.statusCode} ${body.code}: ` +
+        `${request?.method} ${request?.path} -> ${body.statusCode} ${body.code}: ` +
           `${error?.message ?? String(exception)}`,
         { stack: error?.stack },
       )

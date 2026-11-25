@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt'
 
 import { FakeAuth, startFakeAuth } from '../../../test/support/fake-auth.server'
 import { unknownServiceKeys } from '../../../test/support/service-credential.double'
+import { logger } from '../logger/logger'
 import { ApiAuthGuard } from './api-auth.guard'
 import { RequireSuperAdmin } from './require-permission.decorator'
 import { SessionVerifier } from './session-verifier.service'
@@ -256,6 +257,44 @@ describe('ApiAuthGuard resolves a person through auth (LOC-352)', () => {
       code: 'AUTH_UNAVAILABLE',
     })
   })
+
+  it('logs a warn naming the 429 when auth rate limits, without the token', async () => {
+    // Mutation: drop the warn of the non-401/403 branch in SessionVerifier.verify -> no line names 429.
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+    const { sessionToken } = auth.login(OWNER)
+    auth.answerWith(429, { code: 'tooManyRequests' })
+    const { context } = contextOf(SubscriptionStub, bearer(sessionToken))
+
+    try {
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: 'AUTH_UNAVAILABLE',
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('429'))
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sessionToken)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('refuses with 401 a session cookie whose signature carries CR/LF, without asking auth', async () => {
+    // Mutation: drop the base64url check in readSessionClaims -> fetch throws, 503.
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+    const [header, payload] = auth.login(OWNER).cookieToken.split('.')
+    const injected = `${header}.${payload}.AAAA\r\nX-Injected: 1`
+    const { req, context } = contextOf(SubscriptionStub, {}, { [COOKIE]: injected })
+
+    try {
+      await expect(guard.canActivate(context)).rejects.toMatchObject({
+        status: HttpStatus.UNAUTHORIZED,
+      })
+      expect(auth.requests).toEqual([])
+      expect(error).not.toHaveBeenCalled()
+      expect(req.user).toBeUndefined()
+    } finally {
+      error.mockRestore()
+    }
+  })
 })
 
 describe('SessionVerifier when auth is down (LOC-352)', () => {
@@ -290,6 +329,27 @@ describe('SessionVerifier when auth is down (LOC-352)', () => {
         status: HttpStatus.SERVICE_UNAVAILABLE,
       })
     } finally {
+      await auth.stop()
+    }
+  }, 3000)
+
+  it('logs a warn naming the timeout when auth stalls, without the token', async () => {
+    // Mutation: drop the warn of the fetch catch in SessionVerifier.verify -> no line names it.
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+    const auth = await startFakeAuth(JWT_SECRET)
+    process.env = { ...previousEnv, SERVICE_AUTH: auth.url }
+    const { sessionToken } = auth.login(OWNER)
+    auth.stall()
+
+    try {
+      await expect(new SessionVerifier().verify(sessionToken, 200)).rejects.toMatchObject({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: 'AUTH_UNAVAILABLE',
+      })
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('TimeoutError'))
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sessionToken)
+    } finally {
+      warn.mockRestore()
       await auth.stop()
     }
   }, 3000)

@@ -271,7 +271,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/subscription/subscription.controller.ts:315`, `:330` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
   `src/shared/auth/api-auth.guard.ts:208` (la `brand` del auto-login) y
-  `src/shared/auth/session-verifier.service.ts:72` (la de una sesión que auth confirmó, y las de auth no la traen)
+  `src/shared/auth/session-verifier.service.ts:80` (la de una sesión que auth confirmó, y las de auth no la traen)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
   `brand`, con esa marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura no mira membresía ni rol, mientras otra marca nombrada exige `superuser`,
@@ -775,7 +775,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con `JWT_SECRET` y el `id` y el `sid` de una sesión viva se entra como esa persona (LOC-352)
 
-- **Dónde**: `src/shared/auth/session-verifier.service.ts:38` (`verify`, que deja la firma a auth)
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:40` (`verify`, que deja la firma a auth)
 - **Qué lo dispara**: un JWT HS256 firmado con `JWT_SECRET` con `typ: session`, `aud: web-session` y el `id` y el `sid`
   de una sesión abierta, que se leen sin clave en el payload de cualquier token de esa persona. backend-auth acepta
   HS256 (`jwks.service.ts:244-252`) y sólo pide que el `sid` sea una sesión viva de ese `id`
@@ -787,12 +787,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Con auth caído o limitando, toda persona recibe 503 en Pagos (LOC-352)
 
-- **Dónde**: `src/shared/auth/session-verifier.service.ts:52`, `:54-58` (`verify`)
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:56-58`, `:60-66` (`verify`)
 - **Qué lo dispara**: `GET /auth/validate` no contesta en 5 s (o en el `@UpstreamTimeout` de la ruta), o contesta 429,
   5xx u otro 4xx que no sea 401/403. Cada pedido de una persona es una llamada: comparte con el front y admin la cuota
   de auth de esa persona (600/min en esa ruta y 7500 cada 15 min), y un token que auth no verifica cuenta en el balde de
   la IP de Pagos (backend-auth `src/shared/guards/api-key-throttler.guard.ts:110-123`).
 - **Qué rompe**: toda ruta con sesión de persona responde 503 `AUTH_UNAVAILABLE` mientras dure; el token de servidor y
-  la credencial de servicio siguen. Antes de LOC-352 una persona no necesitaba a auth.
+  la credencial de servicio siguen. Cada 503 deja un `warn` con su causa (LOC-356). Antes de LOC-352 una persona no
+  necesitaba a auth.
 - **Estado**: abierto — lo cierra medir en `dev` las llamadas a `/auth/validate` que suma Pagos y decidir si hace falta
   un caché corto (que retrasa el 401 de una cuenta desactivada lo que dure).
