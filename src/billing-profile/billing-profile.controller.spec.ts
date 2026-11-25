@@ -1,6 +1,5 @@
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import * as request from 'supertest'
 import { ClientPlatformService } from '../client/client-platform.service'
@@ -17,6 +16,8 @@ import { WebhookService } from '../webhook/webhook.service'
 import { BillingProfileController } from './billing-profile.controller'
 import { BillingProfileService } from './billing-profile.service'
 import { LegalDocumentService } from './legal-document.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 describe('BillingProfileController and WebhookController admin operator authorization (LOC-47)', () => {
   const EXISTING_DOC_ID = '11111111-1111-4111-8111-111111111111'
@@ -28,7 +29,7 @@ describe('BillingProfileController and WebhookController admin operator authoriz
   const CONFIO_ACCESS_TOKEN = 'loc47-confio-access-token'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
   let prevJwtSecret: string | undefined
@@ -63,9 +64,9 @@ describe('BillingProfileController and WebhookController admin operator authoriz
     process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: 'user-regular', isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: 'user-regular', isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
 
     billingProfileService = {
       get: jest.fn().mockResolvedValue({ data: { brandId: OWN_BRAND_ID } }),
@@ -129,7 +130,7 @@ describe('BillingProfileController and WebhookController admin operator authoriz
         ApiAuthGuard,
         unknownServiceKeys,
         Reflector,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: BillingProfileService, useValue: billingProfileService },
         { provide: LegalDocumentService, useValue: legalDocumentService },

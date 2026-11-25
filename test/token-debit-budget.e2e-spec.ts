@@ -66,7 +66,7 @@ describe('A ROAX Ads debit answers within its 5 s budget (PostgreSQL, LOC-187)',
     })
     a = await startInstance()
     debits = await startDebitApp(a.dataSource)
-    member = debits.jwt.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+    member = debits.sessions.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
   })
 
   beforeEach(async () => {

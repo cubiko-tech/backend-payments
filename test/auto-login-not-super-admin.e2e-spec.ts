@@ -1,6 +1,6 @@
 /**
  * An auto-login token (signed with a client secret, validated by backend-auth) never makes its bearer a super
- * admin in payments; only a session verified with JWT_SECRET does. HTTP against PostgreSQL, LOC-143.
+ * admin in payments; only a session auth confirms as a super admin does. HTTP against PostgreSQL, LOC-143.
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -29,8 +29,13 @@ import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { brandOwnerLookup } from './support/brand-owner.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
+
+// R17: auth does not run here; the double knows the sessions this suite issues.
+const sessions = authSessionsDouble()
 
 const BRAND_A = 'a1430000-0000-4000-8000-0000000000e2'
 const [USER_ID, SUPERADMIN_ID] = ['user-loc143', 'superadmin-loc143']
@@ -121,7 +126,6 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
       }
     }
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
     const repo = (entity: any, conn: string) => ({
       provide: getRepositoryToken(entity, conn),
       useValue: dataSource.getRepository(entity),
@@ -134,7 +138,7 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[Wallet, AuditLog, TokenGiftNotice].flatMap((e) => [
           repo(e, 'DBWrite'),
@@ -200,12 +204,8 @@ describe('Auto-login tokens never grant super admin (PostgreSQL, LOC-143)', () =
   })
 
   it('a super admin session cookie still gives the gift with 201 and the balance ends at 20', async () => {
-    // R15: red when the JWT_SECRET session stops carrying isSuperAdmin: the gift answers 403.
-    const session = new JwtService({ secret: JWT_SECRET }).sign({
-      id: SUPERADMIN_ID,
-      isSuperAdmin: true,
-      brand: null,
-    })
+    // R15: red when the guard drops the isSuperAdmin auth confirms for a session: the gift answers 403.
+    const session = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true })
 
     const res = await http()
       .post(`/admin/token-wallets/${BRAND_A}/gifts`)

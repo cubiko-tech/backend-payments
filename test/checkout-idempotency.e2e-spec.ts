@@ -1,6 +1,5 @@
 // R6: One responsibility, checkout idempotency over HTTP and PostgreSQL, sharing a 120-line fixture.
 import { INestApplication } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -34,6 +33,8 @@ import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { WebhookService } from '../src/webhook/webhook.service'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 const { Payment, PaymentProvider, PaymentPurpose, PaymentStatus } = paymentEntities
 type Payment = paymentEntities.Payment
@@ -127,7 +128,7 @@ describe('POST /checkout idempotency e2e (PostgreSQL)', () => {
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: authSessionsDouble() },
         CheckoutService,
         PaymentService,
         WalletService,

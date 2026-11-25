@@ -4,6 +4,7 @@
  * nothing is saved. Each upstream is a local server that holds the request; Postgres is real.
  */
 import { HttpStatus } from '@nestjs/common'
+import { JwtService } from '@nestjs/jwt'
 import { config as dotenvConfig } from 'dotenv'
 
 import {
@@ -78,7 +79,7 @@ describe('Recharge from Dropi answers within its budget (PostgreSQL, LOC-189)', 
     async () => {
       // R15: red when the route loses @UpstreamTimeout: auth waits 10 s and the call gets 401.
       // Signed with another secret, so only auth can check it.
-      const token = stalledPeers.jwt.sign({ id: MEMBER_ID, client: 'dropi' }, { secret: 'other' })
+      const token = new JwtService({ secret: 'other' }).sign({ id: MEMBER_ID, client: 'dropi' })
 
       const res = await timed(() => postRecharge(stalledPeers, body, token))
 
@@ -93,7 +94,11 @@ describe('Recharge from Dropi answers within its budget (PostgreSQL, LOC-189)', 
     'answers 503 within 2 s when platform accepts the connection and does not answer, and saves nothing',
     async () => {
       // R15: red when canViewBrandCredit loses its 2 s here: it waits the 10 s default.
-      const member = stalledPeers.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+      const member = stalledPeers.sessions.sign({
+        id: MEMBER_ID,
+        isSuperAdmin: false,
+        brand: BRAND,
+      })
       const hitsBefore = silent.hits
 
       const res = await timed(() => postRecharge(stalledPeers, body, member))
@@ -114,7 +119,7 @@ describe('Recharge from Dropi answers within its budget (PostgreSQL, LOC-189)', 
     'answers 503 within 3 s when the TRM source does not answer, and saves nothing',
     async () => {
       // R15: red when create stops passing RECHARGE_TRM_TIMEOUT_MS: it waits the 5 s query timeout.
-      const member = stalledTrm.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+      const member = stalledTrm.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: BRAND })
 
       const res = await timed(() => postRecharge(stalledTrm, body, member))
 

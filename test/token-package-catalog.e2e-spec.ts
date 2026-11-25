@@ -4,7 +4,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -22,6 +21,8 @@ import { TokenPackageController } from '../src/wallet/token-package.controller'
 import { TokenPackageService } from '../src/wallet/token-package.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -69,9 +70,9 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
     })
     await dataSource.initialize()
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
-    operator = jwtService.sign({ id: OPERATOR_ID, isSuperAdmin: false, brand: null })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    operator = sessions.sign({ id: OPERATOR_ID, isSuperAdmin: false, brand: null })
     const moduleRef = await Test.createTestingModule({
       controllers: [TokenPackageController, AdminTokenPackageController],
       providers: [
@@ -80,7 +81,7 @@ describe('Token package catalog over HTTP (PostgreSQL, LOC-136)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getRepositoryToken(TokenPackage, 'DBWrite'), useValue: packages() },
         ...['DBWrite', 'DBRead'].map((conn) => ({
           provide: getRepositoryToken(AuditLog, conn),

@@ -4,7 +4,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -38,6 +37,8 @@ import { WalletService } from '../src/wallet/wallet.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
 import { unknownServiceKeys } from './support/service-credential.double'
 import { BRAND_OWNER_ID, brandOwnerLookup } from './support/brand-owner.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -141,8 +142,8 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
       }
     }
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
     const repo = (entity: any, conn = 'DBWrite') => ({
       provide: getRepositoryToken(entity, conn),
       useValue: dataSource.getRepository(entity),
@@ -156,7 +157,7 @@ describe('Gift tokens and keyed admin adjustments over HTTP (PostgreSQL, LOC-133
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[
           Subscription,

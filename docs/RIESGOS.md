@@ -269,7 +269,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/subscription/subscription.controller.ts:315`, `:330` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
-  `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
+  `src/shared/auth/api-auth.guard.ts:208` (la `brand` del auto-login) y
+  `src/shared/auth/session-verifier.service.ts:72` (la de una sesión que auth confirmó, y las de auth no la traen)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
   `brand`, con esa marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura no mira membresía ni rol, mientras otra marca nombrada exige `superuser`,
@@ -447,13 +448,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Quien tiene el `clientSecret` de un client firma el `id` y la `brand` de cualquier usuario (LOC-143)
 
-- **Dónde**: `src/shared/auth/api-auth.guard.ts:159`, `:165` (`validateViaAuth`: `id` y `brand` salen de la respuesta
+- **Dónde**: `src/shared/auth/api-auth.guard.ts:154`, `:165` (`validateViaAuth`: `id` y `brand` salen de la respuesta
   de backend-auth, que según LOC-143 devuelve el payload firmado tal cual)
 - **Qué lo dispara**: un token de auto-login firmado con el `clientSecret` (el client `dropi` lo usa Dropi) con el
   `id` de otro usuario o una `brand` ajena.
 - **Qué rompe**: `@RequirePermission` consulta `checkPermission(id)` y la marca `canViewBrandCredit(id)` con ese
   `id`, así que se actúa como ese usuario. Que backend-roles le conceda permisos de admin a ese id es hipótesis
-  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:164`).
+  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:207`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
 
@@ -502,7 +503,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
 
 - **Dónde**: `src/shared/auth/service-credential.service.ts:41` (`authenticate`);
-  `src/shared/auth/api-auth.guard.ts:126`
+  `src/shared/auth/api-auth.guard.ts:129`
 - **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
 - **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
   informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`. Crear una recarga pide además el token de
@@ -633,7 +634,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/wallet/token-debit.controller.ts:24-26` (el presupuesto) y `:120`,
   `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
 - **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
-  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
+  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:129`, en toda ruta) y el `START TRANSACTION`
   antes del `SET LOCAL` (`token-wallet.service.ts:259-261`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
   lo da por fallido y pide el reintegro antes de ver el débito.
 - **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
@@ -680,7 +681,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un llamador de `admin/*` con el token de servidor que no se relevó recibe 403 (LOC-271)
 
 - **Dónde**: `src/admin/admin.controller.ts:70` (`@RequireSessionUser()` en la clase), `:101` y `:538`
-  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:99`, `:106`, `:119`
+  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:92`, `:99`, `:112`
 - **Qué lo dispara**: un servicio fuera de platform, processes, roles, auth, mcp-server, alerts-service y
   backend-ads que llame una ruta de `AdminController` distinta de `POST /admin/wallets` o
   `GET /admin/subscriptions` con `ACCESS_SERVER`.
@@ -758,9 +759,10 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Revertir la marca de conversión de Confío abre un segundo link y corre la repesca (LOC-350)
 
-- **Dónde**: `migrations/1787862750922-AddInitialPaymentLinkIssuedAt.ts:40-44` (`down`, `DROP COLUMN`) y `:31-37`
-  (backfill); lectores: `src/tasks/subscription-renewal.ts:41`, `:78` y `src/tasks/pending-signup-confirmation.ts:77`.
-- **Qué lo dispara**: un `migration:revert` de esa migración, o volver a correr su `up` después.
+- **Dónde**: lectores de la marca, `src/tasks/subscription-renewal.ts:41`, `:78` y
+  `src/tasks/pending-signup-confirmation.ts:77`.
+- **Qué lo dispara**: un `migration:revert` de `migrations/1787862750922-AddInitialPaymentLinkIssuedAt.ts` (`down`,
+  `DROP COLUMN`, `:40-44`), o volver a correr su `up` (backfill, `:31-37`) después.
 - **Qué rompe**: con el código actual, sin la columna toda lectura de `subscriptions` falla (la entidad la
   selecciona): el `down` sólo es seguro junto con el código que deja de leerla. Sin la marca,
   `processTrialConversions` emite un segundo link de pago a cada fila que ya lo tuvo en el alta. Re-correr el `up`
@@ -769,3 +771,27 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   una sola vez y ya se aplicó donde la migración corrió: no es un punto de control.
 - **Estado**: abierto — lo cierra no revertir esa migración en un ambiente con datos; documentarlo en su
   encabezado espera la aprobación de `guard-files.sh` (migración ya en el historial).
+
+## Con `JWT_SECRET` y el `id` y el `sid` de una sesión viva se entra como esa persona (LOC-352)
+
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:38` (`verify`, que deja la firma a auth)
+- **Qué lo dispara**: un JWT HS256 firmado con `JWT_SECRET` con `typ: session`, `aud: web-session` y el `id` y el `sid`
+  de una sesión abierta, que se leen sin clave en el payload de cualquier token de esa persona. backend-auth acepta
+  HS256 (`jwks.service.ts:244-252`) y sólo pide que el `sid` sea una sesión viva de ese `id`
+  (`session-liveness.function.ts:13`).
+- **Qué rompe**: auth lo valida y Pagos lo toma por esa persona, con el `isSuperAdmin` de su cuenta. Sin `sid`, o con uno
+  que no es de una sesión viva de ese `id`, ya da 401.
+- **Estado**: abierto — lo cierra que auth deje de aceptar HS256 para sesiones (épica 031) o que los frentes manden el
+  `session_token` EdDSA y Pagos rechace HS256.
+
+## Con auth caído o limitando, toda persona recibe 503 en Pagos (LOC-352)
+
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:52`, `:54-58` (`verify`)
+- **Qué lo dispara**: `GET /auth/validate` no contesta en 5 s (o en el `@UpstreamTimeout` de la ruta), o contesta 429,
+  5xx u otro 4xx que no sea 401/403. Cada pedido de una persona es una llamada: comparte con el front y admin la cuota
+  de auth de esa persona (600/min en esa ruta y 7500 cada 15 min), y un token que auth no verifica cuenta en el balde de
+  la IP de Pagos (backend-auth `src/shared/guards/api-key-throttler.guard.ts:110-123`).
+- **Qué rompe**: toda ruta con sesión de persona responde 503 `AUTH_UNAVAILABLE` mientras dure; el token de servidor y
+  la credencial de servicio siguen. Antes de LOC-352 una persona no necesitaba a auth.
+- **Estado**: abierto — lo cierra medir en `dev` las llamadas a `/auth/validate` que suma Pagos y decidir si hace falta
+  un caché corto (que retrasa el 401 de una cuenta desactivada lo que dure).

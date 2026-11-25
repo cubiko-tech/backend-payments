@@ -1,6 +1,5 @@
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -14,6 +13,8 @@ import { unknownServiceKeys } from '../../test/support/service-credential.double
 import { DianController } from './dian.controller'
 import { DianProvider } from './dian.interface'
 import { DianService } from './dian.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 describe('DianController operator authorization (LOC-78)', () => {
   const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
@@ -28,7 +29,7 @@ describe('DianController operator authorization (LOC-78)', () => {
   const SERVER_SECRET = 'loc78-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
   let prevJwtSecret: string | undefined
@@ -60,9 +61,9 @@ describe('DianController operator authorization (LOC-78)', () => {
     process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
     invoiceRepo = {
       findOne: jest.fn(),
@@ -112,7 +113,7 @@ describe('DianController operator authorization (LOC-78)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: getRepositoryToken(Invoice, 'DBWrite'), useValue: invoiceRepo },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: billingProfileRepo },

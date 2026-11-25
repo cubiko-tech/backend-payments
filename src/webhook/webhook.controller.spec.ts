@@ -130,13 +130,8 @@ async function construirController(entorno: EntornoDePrueba): Promise<Armado> {
       { provide: ConfioProvider, useValue: confioProvider },
     ],
   })
-    // Los tres handlers `admin/*` declaran `@UseGuards(ApiAuthGuard)`, y Nest
-    // instancia todo guard referenciado al compilar el módulo aunque ningún caso
-    // de acá los invoque: sin esto la compilación falla pidiendo `JwtService`.
-    // Se sustituye en vez de cablear el guard real porque este spec prueba la
-    // AUTENTICACIÓN DE PROVEEDOR de los `@Post` —firma y bearer de ConfioPagos—,
-    // que no pasa por él. Que los `admin/*` exijan credencial, y que los `@Post`
-    // NO la exijan, lo fija `shared/auth/controllers-guarded.spec.ts`.
+    // Nest builds the guard of the `admin/*` handlers at compile time; this spec tests the provider auth of the
+    // `@Post` routes, which skip it. Which routes require it is pinned by `controllers-guarded.spec.ts`.
     .overrideGuard(ApiAuthGuard)
     .useValue({ canActivate: () => true })
     .compile()

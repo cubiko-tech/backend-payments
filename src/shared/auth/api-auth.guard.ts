@@ -1,6 +1,5 @@
 import { CanActivate, ExecutionContext, HttpStatus, Injectable } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { timingSafeEqual } from 'crypto'
 import { Request } from 'express'
 
@@ -16,6 +15,7 @@ import {
   ON_BEHALF_OF_HEADER,
 } from './require-permission.decorator'
 import { SERVICE_KEY_PREFIX, ServiceCredentialService } from './service-credential.service'
+import { authUnavailable, SessionVerifier } from './session-verifier.service'
 
 interface GuardUser {
   id: string
@@ -26,12 +26,6 @@ interface GuardUser {
   /** Set only when the request carried a valid service credential: the client it belongs to. */
   serviceClient?: string
 }
-
-const authUnavailable = () =>
-  new RequestException(
-    { code: 'AUTH_UNAVAILABLE', message: 'The user token cannot be checked right now' },
-    HttpStatus.SERVICE_UNAVAILABLE,
-  )
 
 function readAuthSecret(value: string | undefined): string | null {
   if (!value || !value.trim() || value !== value.trim() || value === 'CHANGEME') {
@@ -50,12 +44,11 @@ function readAuthSecret(value: string | undefined): string | null {
 export class ApiAuthGuard implements CanActivate {
   private readonly COOKIE_SESSION = process.env.COOKIE_SESSION
   private readonly ACCESS_SERVER = readAuthSecret(process.env.ACCESS_SERVER)
-  private readonly JWT_SECRET = readAuthSecret(process.env.JWT_SECRET)
   private readonly SERVICE_AUTH = process.env.SERVICE_AUTH || process.env.SERVER_AUTH
 
   constructor(
     private readonly reflector: Reflector,
-    private readonly jwt: JwtService,
+    private readonly sessions: SessionVerifier,
     private readonly roles: ClientRolesService,
     private readonly serviceCredentials: ServiceCredentialService,
   ) {}
@@ -154,22 +147,12 @@ export class ApiAuthGuard implements CanActivate {
   }
 
   private async resolvePersonToken(token: string, timeoutMs?: number): Promise<GuardUser | null> {
-    // 1) Verificación local con el JWT_SECRET global (tokens admin/internos).
-    if (this.JWT_SECRET) {
-      try {
-        const payload: any = this.jwt.verify(token, { secret: this.JWT_SECRET })
-        const id = payload.id || payload.user
-        if (id) return { id, isSuperAdmin: !!payload.isSuperAdmin, brand: payload.brand ?? null }
-      } catch {
-        /* fall through to auth-service validation */
-      }
-    }
+    // Auto-login tokens are signed with the client's rotating `clientSecret`, which payments cannot hold:
+    // auth checks them at POST /client/validate-token.
+    if (this.decodeClaims(token)?.client) return this.validateViaAuth(token, timeoutMs)
 
-    // 2) Tokens de auto-login: firmados con el `clientSecret` del cliente (que
-    // ROTA), así que payments NO puede guardarlo. Los valida el auth-service,
-    // que conoce el secreto vigente de cada cliente. Ver backend-auth
-    // POST /client/validate-token.
-    return this.validateViaAuth(token, timeoutMs)
+    const person = await this.sessions.verify(token, timeoutMs)
+    return person ? { id: person.id, isSuperAdmin: person.isSuperAdmin, brand: person.brand } : null
   }
 
   /**

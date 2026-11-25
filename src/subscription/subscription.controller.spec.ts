@@ -1,7 +1,6 @@
 // R6: Keeps all SubscriptionController route authorization and delegation specs in a single controller test file.
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import * as request from 'supertest'
 
@@ -13,6 +12,8 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { RequestException } from '../shared/exception/request.exception'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory'], ['confirm']] as const
 
@@ -210,7 +211,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   const SERVER_SECRET = 'loc48-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
   let prevJwtSecret: string | undefined
@@ -234,9 +235,9 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
     process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
 
     subscriptionService = {
       create: jest.fn().mockImplementation(async (data: any) => ({
@@ -274,7 +275,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
         ApiAuthGuard,
         unknownServiceKeys,
         Reflector,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
         { provide: SubscriptionService, useValue: subscriptionService },
         { provide: EnterprisePricingService, useValue: enterprisePricingService },

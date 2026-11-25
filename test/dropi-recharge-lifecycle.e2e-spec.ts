@@ -57,7 +57,7 @@ describe('A pending recharge from Dropi stays pending (PostgreSQL, LOC-174)', ()
     scopeSweepsToBrand(a.tasks, RECHARGE_BRAND)
     trm = await startTrmSource()
     recharge = await startRechargeApp(a.dataSource, trm, RECHARGE_BRAND)
-    member = recharge.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
+    member = recharge.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
   })
 
   beforeEach(async () => {

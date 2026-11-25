@@ -74,7 +74,7 @@ describe('ROAX Ads refunds a token debit (PostgreSQL, LOC-187)', () => {
     b = await startInstance()
     debitsA = await startDebitApp(a.dataSource)
     debitsB = await startDebitApp(b.dataSource)
-    member = debitsA.jwt.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+    member = debitsA.sessions.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
   })
 
   beforeEach(async () => {

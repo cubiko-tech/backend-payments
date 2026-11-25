@@ -4,7 +4,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -30,6 +29,8 @@ import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
 import { startUpstream, Upstream } from './support/token-debit.fixture'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -78,8 +79,8 @@ describe('Admin gift when platform cannot give the brand owner (PostgreSQL, LOC-
     })
     await dataSource.initialize()
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: 'superadmin-loc322', isSuperAdmin: true, brand: null })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: 'superadmin-loc322', isSuperAdmin: true, brand: null })
     const repo = (entity: unknown, conn: string) => ({
       provide: getRepositoryToken(entity as typeof Wallet, conn),
       useValue: dataSource.getRepository(entity as typeof Wallet),
@@ -93,7 +94,7 @@ describe('Admin gift when platform cannot give the brand owner (PostgreSQL, LOC-
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[Wallet, Transaction, AuditLog, TokenGiftNotice].flatMap((e) => [
           repo(e, 'DBWrite'),

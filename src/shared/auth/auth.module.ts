@@ -1,13 +1,13 @@
 import { Global, Module } from '@nestjs/common'
-import { JwtModule } from '@nestjs/jwt'
 import { TypeOrmModule } from '@nestjs/typeorm'
 
 import { ApiAuthGuard } from './api-auth.guard'
 import { ServiceCredential } from './entities/service-credential.entity'
 import { ServiceCredentialService } from './service-credential.service'
+import { SessionVerifier } from './session-verifier.service'
 
 /**
- * Autenticación de la API: el guard y el `JwtService` que necesita.
+ * API authentication: the guard and the session verifier it asks auth through.
  *
  * Vive acá y no dentro de un módulo de dominio porque lo usan superficies que no
  * tienen nada que ver entre sí —crédito, admin, checkout, suscripciones— y todas
@@ -28,11 +28,8 @@ import { ServiceCredentialService } from './service-credential.service'
  */
 @Global()
 @Module({
-  imports: [
-    JwtModule.register({ secret: process.env.JWT_SECRET }),
-    TypeOrmModule.forFeature([ServiceCredential], 'DBWrite'),
-  ],
-  providers: [ApiAuthGuard, ServiceCredentialService],
-  exports: [ApiAuthGuard, JwtModule, ServiceCredentialService],
+  imports: [TypeOrmModule.forFeature([ServiceCredential], 'DBWrite')],
+  providers: [ApiAuthGuard, ServiceCredentialService, SessionVerifier],
+  exports: [ApiAuthGuard, ServiceCredentialService, SessionVerifier],
 })
 export class AuthModule {}

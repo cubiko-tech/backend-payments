@@ -1,6 +1,5 @@
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -20,6 +19,8 @@ import { SubscriptionService } from '../subscription/subscription.service'
 import { Refund, RefundReason, RefundStatus } from './entities/refund.entity'
 import { RefundController } from './refund.controller'
 import { RefundService } from './refund.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
 const COMPLETED_PAYMENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -36,7 +37,7 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   const envSnapshot = { ...process.env }
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
   let refundWriteRepo: { create: jest.Mock; save: jest.Mock; findOne: jest.Mock; find: jest.Mock }
@@ -48,9 +49,9 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
   beforeAll(async () => {
     process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = ACCESS_SERVER
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
     // R17: unit spec for RefundService/controller branching; real locks: test/refund-and-authorship.e2e-spec.ts.
     refundWriteRepo = {
@@ -91,8 +92,8 @@ describe('Refund request guards and session authorship (LOC-115)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        // R17: real JwtService instance configured with test secret.
-        { provide: JwtService, useValue: jwtService },
+        // R17: auth does not run here; the double knows the sessions this suite issues.
+        { provide: SessionVerifier, useValue: sessions },
         // R17: permission check stub; routes under test use session brand or @RequireSuperAdmin.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
         // R17: brand membership stub allowing OWN_BRAND_ID; real HTTP boundary is tested in e2e.

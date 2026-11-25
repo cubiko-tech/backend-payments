@@ -1,7 +1,6 @@
 // R6: Keeps all refund guards, session authorship and who may act e2e cases against PostgreSQL in one suite.
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as cookieParser from 'cookie-parser'
@@ -55,6 +54,8 @@ import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletService } from '../src/wallet/wallet.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 const [BRAND_A, USER_A, SUPERADMIN_ID] = [
   'a1150001-1111-4111-8111-111111111111',
@@ -72,7 +73,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
 
   let app: INestApplication
   let dataSource: DataSource
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let paymentRepo: Repository<Payment>
   let refundRepo: Repository<Refund>
   let subRepo: Repository<Subscription>
@@ -126,9 +127,9 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
     subEventRepo = dataSource.getRepository(SubscriptionEvent)
     docRepo = dataSource.getRepository(BrandLegalDocument)
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_A, isSuperAdmin: false, brand: BRAND_A })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_A, isSuperAdmin: false, brand: BRAND_A })
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
     const provideRepo = (entity: any, conn = 'DBWrite') => ({
       provide: getRepositoryToken(entity, conn),
@@ -150,7 +151,7 @@ describe('Refund guards and session authorship (PostgreSQL, LOC-115)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         provideRepo(Refund, 'DBWrite'),
         provideRepo(Refund, 'DBRead'),

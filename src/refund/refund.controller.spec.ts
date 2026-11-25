@@ -1,6 +1,5 @@
 import { HttpStatus, INestApplication, ValidationPipe } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -12,6 +11,8 @@ import { unknownServiceKeys } from '../../test/support/service-credential.double
 import { Refund, RefundReason, RefundStatus } from './entities/refund.entity'
 import { RefundController } from './refund.controller'
 import { RefundService } from './refund.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 describe('RefundController and RefundService brand payment ownership and operator approval (LOC-51)', () => {
   const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
@@ -26,7 +27,7 @@ describe('RefundController and RefundService brand payment ownership and operato
   const SERVER_SECRET = 'loc51-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
   let prevJwtSecret: string | undefined
@@ -58,9 +59,9 @@ describe('RefundController and RefundService brand payment ownership and operato
     process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
     refundWriteRepo = {
       create: jest.fn((data) => ({ ...data })),
@@ -95,7 +96,7 @@ describe('RefundController and RefundService brand payment ownership and operato
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: ClientPlatformService, useValue: platformClient },
         { provide: getRepositoryToken(Refund, 'DBWrite'), useValue: refundWriteRepo },

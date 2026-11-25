@@ -5,7 +5,6 @@
  */
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { randomUUID } from 'crypto'
@@ -35,6 +34,8 @@ import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnaps
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { WalletService } from '../src/wallet/wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -89,8 +90,8 @@ describe('Admin routes answer their error status and code (PostgreSQL, LOC-348)'
     providers = dataSource.getRepository(ProviderConfig)
     payments = dataSource.getRepository(Payment)
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: 'superadmin-loc348', isSuperAdmin: true, brand: null })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: 'superadmin-loc348', isSuperAdmin: true, brand: null })
     const entities = [Subscription, Payment, Wallet, ProviderConfig]
     const moduleRef = await Test.createTestingModule({
       controllers: [AdminController],
@@ -98,7 +99,7 @@ describe('Admin routes answer their error status and code (PostgreSQL, LOC-348)'
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         ...entities.flatMap((entity) =>
           ['DBRead', 'DBWrite'].map((conn) => ({
             provide: getRepositoryToken(entity, conn),
