@@ -7,8 +7,6 @@ import {
   CheckoutResult,
   PaymentStatusResult,
   RefundResult,
-  CreateSubscriptionParams,
-  SubscriptionResult,
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
@@ -128,48 +126,6 @@ export class StripeProvider implements PaymentProvider {
       providerRefundId: refund.id,
       status: refund.status === 'succeeded' ? 'completed' : 'pending',
       amount: refund.amount / 100,
-    }
-  }
-
-  async createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult> {
-    this.ensureConfigured()
-
-    const session = await this.stripe.checkout.sessions.create({
-      mode: 'subscription',
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: params.currency.toLowerCase(),
-            unit_amount: Math.round(params.priceAmount * 100),
-            recurring: { interval: 'month' },
-            product_data: { name: `Plan ${params.planSlug}` },
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        brandId: params.brandId,
-        userId: params.userId,
-        planSlug: params.planSlug,
-      },
-      subscription_data: {
-        trial_period_days: params.trialDays || undefined,
-        metadata: { brandId: params.brandId, planSlug: params.planSlug },
-      },
-      success_url: `https://${process.env.DOMAIN}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://${process.env.DOMAIN}/subscription/cancel`,
-    })
-
-    const now = new Date()
-    const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + 30)
-
-    return {
-      providerSubscriptionId: session.id,
-      status: 'pending',
-      currentPeriodStart: now,
-      currentPeriodEnd: periodEnd,
     }
   }
 

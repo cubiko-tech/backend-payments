@@ -429,6 +429,27 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
       clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PLAN_NOT_FOUND })
       await esperarFallo(altaConWallet(), PLAN_NOT_FOUND, HttpStatus.SERVICE_UNAVAILABLE)
     })
+
+    it.each([
+      ['503 PLAN_NOT_FOUND', PLAN_NOT_FOUND, 0],
+      ['422 PRICE_NOT_FOUND_FOR_COUNTRY', PRICE_NOT_FOUND_FOR_COUNTRY, 1],
+    ])(
+      'a %s rejection is logged by the service only when it is not a 5xx (the filter logs those)',
+      async (_, code, warns) => {
+        // Mutation: drop the `< HttpStatus.INTERNAL_SERVER_ERROR` guard in checkout-pricing.ts → 503 row red.
+        // Mutation: drop the `deps.logger.warn` call in checkout-pricing.ts → 422 row red.
+        const log = (service as unknown as { log: { warn: (m: string) => void } }).log
+        const warn = jest.spyOn(log, 'warn')
+        clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code })
+
+        await expect(service.processCheckout(altaConWallet())).rejects.toBeInstanceOf(
+          RequestException,
+        )
+
+        const rejections = warn.mock.calls.filter(([m]) => String(m).startsWith('Alta rechazada'))
+        expect(rejections).toHaveLength(warns)
+      },
+    )
   })
 
   describe('guarda de brandId (el checkout no tiene DTO que lo valide)', () => {

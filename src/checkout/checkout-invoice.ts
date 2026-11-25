@@ -194,7 +194,7 @@ export function canSendToDian(
   invoiceId: string,
   currency: string,
 ): boolean {
-  // DIAN/Siigo electronic invoicing applies only to COP documents; `DianService` defaults missing billing profiles to CO.
+  // DIAN/Siigo invoicing applies only to COP documents; `DianService` defaults a missing billing profile to CO.
   if (currency && currency.toUpperCase() !== 'COP') {
     deps.logger.warn(
       `Factura ${invoiceId} emitida en ${currency}: no se envía a la DIAN ` +

@@ -36,24 +36,6 @@ export interface RefundResult {
   amount: number
 }
 
-export interface CreateSubscriptionParams {
-  brandId: string
-  userId: string
-  planSlug: string
-  priceAmount: number
-  currency: string
-  paymentMethodId?: string
-  trialDays?: number
-  metadata?: Record<string, any>
-}
-
-export interface SubscriptionResult {
-  providerSubscriptionId: string
-  status: string
-  currentPeriodStart: Date
-  currentPeriodEnd: Date
-}
-
 export interface SaveMethodParams {
   brandId: string
   userId: string

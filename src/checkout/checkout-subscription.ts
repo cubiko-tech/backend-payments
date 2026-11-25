@@ -102,7 +102,7 @@ export async function createOrRenewSubscription(
     subscription.retryCount = 0
     subscription.cancelledAt = null
     subscription.cancelReason = null
-    // Non-null `accessEndsAt` means a pending cancellation; clear it on renewal so `GET /subscription/current` does not report a stale cutoff.
+    // A non-null `accessEndsAt` is a pending cancellation; clear it so `GET /subscription/current` drops the cutoff.
     subscription.accessEndsAt = null
     subscription.autoRenew = true
 

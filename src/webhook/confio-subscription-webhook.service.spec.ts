@@ -1192,11 +1192,14 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       it.each(LLEGAN_AL_EVENTO)(
         '%s está mapeado y no otorga, así que su fila de historial nombra un evento',
         async (wire) => {
+          // Mutation: `PAST_DUE` maps to `eventType: null` in `CONFIO_SUBSCRIPTION_STATUS_MAP` → red.
+          const { eventType } = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
           conSuscripcion(suscripcion())
 
           await despachar(cambioDeEstado(wire as string))
 
-          expect(historial()[0].eventType).toBeDefined()
+          expect(eventType).not.toBeNull()
+          expect(historial()[0].eventType).toBe(eventType)
         },
       )
     })

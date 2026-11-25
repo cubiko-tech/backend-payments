@@ -51,7 +51,7 @@ export async function resolveAmountAndCurrency(
     if (req.planSlug === 'enterprise') {
       const customPricing = await deps.enterprisePricing.getForBrand(req.brandId)
       if (customPricing) {
-        // Initial sign-up uses the currency stored on the negotiated row so the caller cannot bypass it by sending another currency.
+        // Initial sign-up uses the negotiated row's currency so the caller cannot bypass it with another one.
         if (!req.renewal) {
           return { amount: Number(customPricing.monthlyPrice), currency: customPricing.currency }
         }
@@ -67,12 +67,15 @@ export async function resolveAmountAndCurrency(
 
     const resolved = await resolvePlanPricingByCountry(req.brandId, req.planSlug, deps)
     if (!resolved.ok) {
-      // No global ExceptionFilter logs HttpExceptions here, so log catalog/roles failures before throwing.
-      deps.logger.warn(
-        `Alta rechazada: brand=${req.brandId} plan=${req.planSlug} ` +
-          `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
-      )
-      throw planPricingException(req.planSlug, resolved.code)
+      const exception = planPricingException(req.planSlug, resolved.code)
+      // The global HttpErrorFilter logs every 5xx; log only a 4xx here so each rejection is logged once.
+      if (exception.getStatus() < HttpStatus.INTERNAL_SERVER_ERROR) {
+        deps.logger.warn(
+          `Alta rechazada: brand=${req.brandId} plan=${req.planSlug} ` +
+            `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
+        )
+      }
+      throw exception
     }
 
     return { amount: resolved.amount, currency: resolved.currency, country: resolved.country }

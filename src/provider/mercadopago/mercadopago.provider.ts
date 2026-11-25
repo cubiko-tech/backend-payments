@@ -6,8 +6,6 @@ import {
   CheckoutResult,
   PaymentStatusResult,
   RefundResult,
-  CreateSubscriptionParams,
-  SubscriptionResult,
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
@@ -221,46 +219,6 @@ export class MercadoPagoProvider implements PaymentProvider {
       providerRefundId: String(refund.id),
       status: refund.status === 'approved' ? 'completed' : 'pending',
       amount: refund.amount || amount || 0,
-    }
-  }
-
-  async createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult> {
-    this.ensureConfigured()
-
-    // MercadoPago suscripciones via preapproval
-    const preapproval = await this.mpFetch('/preapproval', {
-      method: 'POST',
-      body: JSON.stringify({
-        reason: `Plan ${params.planSlug} - Cubiko`,
-        auto_recurring: {
-          frequency: 1,
-          frequency_type: 'months',
-          transaction_amount: params.priceAmount,
-          currency_id: params.currency.toUpperCase(),
-        },
-        back_url: `https://${process.env.DOMAIN}/subscription/success`,
-        external_reference: `${params.brandId}:${params.planSlug}`,
-        payer_email: params.metadata?.email || '',
-        ...(params.trialDays
-          ? {
-              free_trial: {
-                frequency: params.trialDays,
-                frequency_type: 'days',
-              },
-            }
-          : {}),
-      }),
-    })
-
-    const now = new Date()
-    const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + 30)
-
-    return {
-      providerSubscriptionId: preapproval.id,
-      status: 'pending',
-      currentPeriodStart: now,
-      currentPeriodEnd: periodEnd,
     }
   }
 
