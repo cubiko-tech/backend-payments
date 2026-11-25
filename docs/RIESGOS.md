@@ -779,8 +779,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   de una sesión abierta, que se leen sin clave en el payload de cualquier token de esa persona. backend-auth acepta
   HS256 (`jwks.service.ts:244-252`) y sólo pide que el `sid` sea una sesión viva de ese `id`
   (`session-liveness.function.ts:13`).
-- **Qué rompe**: auth lo valida y Pagos lo toma por esa persona, con el `isSuperAdmin` de su cuenta. Sin `sid`, o con uno
-  que no es de una sesión viva de ese `id`, ya da 401.
+- **Qué rompe**: auth lo valida y Pagos lo toma por esa persona, con el `isSuperAdmin` de su cuenta. Sin `sid`, o con
+  uno que no es de una sesión viva de ese `id`, ya da 401.
 - **Estado**: abierto — lo cierra que auth deje de aceptar HS256 para sesiones (épica 031) o que los frentes manden el
   `session_token` EdDSA y Pagos rechace HS256.
 
