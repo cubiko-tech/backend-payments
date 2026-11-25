@@ -379,7 +379,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:6`, `:456`
-  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:247` (`autenticarRamoFirmado`)
+  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:254` (`autenticarRamoFirmado`)
 - **Qué lo dispara**: un aviso firmado de suscripción que llega o se reintenta a más de 24 h de su `timestamp`.
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
@@ -470,8 +470,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El id de un aviso de Confío llega sin escapar a los logs viejos de la suscripción
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:292` y `:887` (efecto ya aplicado), `:555` (la traza
-  de roles que usan `:565` y `:569`), y escapado en las líneas del 015, `:300`, `:342` y `:898`
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:298` y `:894` (efecto ya aplicado), `:561` (la traza
+  de roles que usan `:571` y `:575`), y escapado en las líneas del 015, `:306`, `:348` y `:905`
 - **Qué lo dispara**: un aviso de Confío autenticado cuyo id, armado con su `data.name`, trae un salto de línea,
   comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -482,8 +482,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:198-200` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:684-690` (`planearCambioDeEstado`) y
-  `:465-474` (`planearCobro`)
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:691-697` (`planearCambioDeEstado`) y
+  `:471-480` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
@@ -670,7 +670,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado re-partido pasa la firma y acuña otro ciclo (LOC-235)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:435-438` (concatenación sin separador),
-  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:121` (`signatureChecksum`)
+  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:144` (`signatureChecksum`)
 - **Qué lo dispara**: mover un dígito entre campos vecinos de un aviso ya firmado (`1/1990000` → `11/990000`): el
   checksum no cambia y `buildConfioWebhookEventId` acuña otro id.
 - **Qué rompe**: el bono ya no — no acredita un checksum ya aplicado a la fila ni un ciclo no posterior al último
@@ -704,8 +704,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:892-903` (`aplicar`, el rechequeo de la marca),
-  y la llamada a roles antes del candado, `:317-327` (`handle`)
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:899-910` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:323-333` (`handle`)
 - **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
   llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
   a roles no está garantizado.
@@ -737,7 +737,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:317` (la traza antes de roles);
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:323` (la traza antes de roles);
   `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
 - **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
   la cola, `processing`, fuera de `GET webhook/admin/failed`.

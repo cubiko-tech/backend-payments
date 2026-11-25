@@ -10,6 +10,16 @@ interface BrandMember {
   rolName?: string
 }
 
+type BrandMembersBody = BrandMember[] | { data?: BrandMember[] }
+
+/**
+ * `GET /v1/brand/:id`: `{ data: brand }`, or `{}` when the brand does not exist. Only the fields read
+ * here; `unknown` because platform may send them empty or with another type.
+ */
+interface BrandBody {
+  data?: { country?: unknown; owner?: unknown }
+}
+
 /**
  * No se pudo PREGUNTAR por la marca: backend-platform no respondió, respondió
  * un status inesperado o el servicio no está configurado. Es un fallo del
@@ -124,7 +134,7 @@ export class ClientPlatformService {
           HttpStatus.SERVICE_UNAVAILABLE,
         )
       }
-      const body = await response.json()
+      const body: BrandMembersBody = await response.json()
       const rows: BrandMember[] = Array.isArray(body) ? body : (body?.data ?? [])
       const membership = rows.find(
         (r) => (typeof r.user === 'object' ? r.user?.id : r.user) === userId,
@@ -256,7 +266,7 @@ export class ClientPlatformService {
         return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
       }
 
-      const body = await response.json()
+      const body: BrandBody = await response.json()
       const brand = body?.data
       if (!brand) {
         this.logger.warn(`backend-platform no conoce la marca ${brandId}`)
@@ -292,7 +302,7 @@ export class ClientPlatformService {
         this.logger.warn(`backend-platform brand/:id responded ${response.status} for the owner`)
         return { ok: false, code: BRAND_LOOKUP_UNAVAILABLE }
       }
-      const brand = (await response.json())?.data
+      const brand = ((await response.json()) as BrandBody)?.data
       if (!brand) return { ok: false, code: BRAND_NOT_FOUND }
       const owner = typeof brand.owner === 'string' ? brand.owner.trim() : ''
       return owner ? { ok: true, owner } : { ok: false, code: BRAND_WITHOUT_OWNER }
@@ -316,7 +326,7 @@ export class ClientPlatformService {
         signal: AbortSignal.timeout(30000),
       })
       if (!response.ok) throw new Error(`backend-platform brand list responded ${response.status}`)
-      const body = await response.json()
+      const body: { data?: unknown; count?: unknown } = await response.json()
       const page: Array<{ id?: unknown }> = Array.isArray(body?.data) ? body.data : []
       for (const brand of page) if (typeof brand.id === 'string') ids.push(brand.id)
       if (page.length < pageSize || (body?.count != null && ids.length >= Number(body.count)))

@@ -19,6 +19,16 @@ export type ConfioSubscriptionInputErrorCode =
   | 'invalid_subscription_name'
   | 'missing_cancel_reason'
 
+export type ConfioBuyerField = 'email' | 'firstName' | 'phoneNumber'
+
+/** Input that a local rejection points at; the trial and checkout map it to their HTTP field. */
+export type ConfioSubscriptionInputField =
+  | 'planName/buyer'
+  | 'planName'
+  | 'name'
+  | 'reason'
+  | `buyer.${ConfioBuyerField}`
+
 /**
  * Rechazo de entrada del cliente de suscripciones: la petición nunca salió.
  *
@@ -30,7 +40,7 @@ export type ConfioSubscriptionInputErrorCode =
 export class ConfioSubscriptionInputError extends Error {
   constructor(
     readonly code: ConfioSubscriptionInputErrorCode,
-    readonly field: string,
+    readonly field: ConfioSubscriptionInputField,
     detail: string,
   ) {
     super(`${CONFIO_SUBSCRIPTION_INPUT_ERROR} [${code}] ${field}: ${detail}`)

@@ -13,6 +13,21 @@ export enum TransactionStatus {
   REVERSED = 'reversed',
 }
 
+/**
+ * What `transactions.metadata` holds: the marks payments reads back, plus whatever context the writer of
+ * the movement attached (an admin adjustment, a recharge), which is why it stays open.
+ */
+export interface TransactionMetadata {
+  // Tokens per origin, as `token-spend.ts` stores it.
+  tokenSplit?: { gift?: unknown; purchased?: unknown; dropi?: unknown }
+  debitId?: string
+  cycleExtension?: 'pending' | 'extended' | 'refunded'
+  giftBatchId?: string
+  cycleNumber?: number
+  providerSubscriptionId?: string
+  [key: string]: unknown
+}
+
 @Entity('transactions')
 @Index('IDX_transactions_wallet_date', ['walletId', 'createdAt'])
 @Index('IDX_transactions_brand_date', ['brandId', 'createdAt'])
@@ -38,7 +53,7 @@ export class Transaction extends Content {
   @Column({ nullable: true }) referenceId: string
   @Column({ nullable: true, unique: true }) idempotencyKey: string
   @Column({ type: 'varchar', length: 20, nullable: true }) tokenOrigin: string | null
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: TransactionMetadata
 
   @ManyToOne(() => Wallet, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'walletId', foreignKeyConstraintName: 'FK_transactions_wallet' })

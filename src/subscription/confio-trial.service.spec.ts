@@ -20,7 +20,10 @@ import {
 import { ConfioPlanService, CONFIO_PLAN_ARCHIVED } from '../provider/confio/confio-plan.service'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioCancellationService } from './confio-cancellation.service'
-import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
+import {
+  ConfioSubscriptionInputError,
+  ConfioSubscriptionInputField,
+} from '../provider/confio/confio-subscription-error'
 import { RequestException } from '../shared/exception/request.exception'
 
 const BRAND = 'brand-1'
@@ -501,9 +504,9 @@ describe('ConfioTrialService', () => {
     // Los cuatro códigos de `ConfioSubscriptionInputError` NO son un solo bucket: dos
     // hablan del llamador y dos de NUESTRA configuración. Se mapea por `code`, nunca
     // por el texto del mensaje.
-    it.each([
+    it.each<[string, ConfioSubscriptionInputField]>([
       ['invalid_buyer', 'buyer.email'],
-      ['missing_buyer_or_plan', 'buyer'],
+      ['missing_buyer_or_plan', 'planName/buyer'],
     ])('%s → 422 INVALID_BUYER con el `field` (culpa del llamador)', async (code, field) => {
       confio.createSubscription.mockRejectedValue(
         new ConfioSubscriptionInputError(
@@ -523,7 +526,7 @@ describe('ConfioTrialService', () => {
       expect(JSON.stringify(error.getResponse())).not.toContain('roto@')
     })
 
-    it.each([
+    it.each<[string, ConfioSubscriptionInputField, string]>([
       ['plan_store_mismatch', 'planName', 'CONFIO_PLAN_STORE_MISMATCH'],
       ['invalid_subscription_name', 'name', 'CONFIO_SUBSCRIPTION_NAME_INVALID'],
     ])(

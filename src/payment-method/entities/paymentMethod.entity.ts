@@ -37,5 +37,6 @@ export class PaymentMethod extends Content {
     default: PaymentMethodStatus.ACTIVE,
   })
   status: PaymentMethodStatus
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  // The free-form map the client sent in `CreatePaymentMethodDto.metadata`; payments never reads it.
+  @Column({ type: 'jsonb', nullable: true }) metadata: Record<string, unknown>
 }

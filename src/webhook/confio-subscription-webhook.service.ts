@@ -37,8 +37,21 @@ import { downgradeBrandToFree } from '../client/plan-downgrade.util'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.service'
 
+/** ConfioPagos statuses that change the local row: every status except the signup ones. */
+export type ConfioEstadoMapeado = Exclude<
+  ConfioSubscriptionStatus,
+  'PENDING_ACCEPTANCE' | 'PROCESSING'
+>
+
 /**
- * ConfioPagos `status` to local status.
+ * ConfioPagos `status` to local status and to the `subscription_events.eventType` it records. One total
+ * map, so a mapped status cannot compile without naming its event.
+ *
+ * `eventType` is the closest member of a Postgres enum without a generic `status_changed`; the exact Confio
+ * event name stays in `metadata.event`. It is `null` for `TRIALING` and `ACTIVE` on purpose: their event
+ * depends on whether the plan was granted, which `planearOtorgamiento` decides
+ * (`CONFIRMATION_GRANTED`/`CONFIRMATION_NOT_GRANTED`); naming one would record a first confirmation as
+ * `reactivated`.
  *
  * `SUSPENDED` maps to `past_due`, not to a terminal status: access is cut on the first failed charge and
  * comes back if a later charge succeeds. `CANCELED` and `EXPIRED` are terminal on the provider side.
@@ -50,14 +63,23 @@ import { PlannedBonus, SubscriptionBonusService } from './subscription-bonus.ser
  * Guarded by `it.each(['PENDING_ACCEPTANCE', 'PROCESSING'])` in `webhook.service.spec.ts`.
  */
 export const CONFIO_SUBSCRIPTION_STATUS_MAP: {
-  [K in ConfioSubscriptionStatus]?: SubscriptionStatus
+  [K in ConfioEstadoMapeado]: {
+    toStatus: SubscriptionStatus
+    eventType: SubscriptionEventType | null
+  }
 } = {
-  TRIALING: SubscriptionStatus.TRIAL,
-  ACTIVE: SubscriptionStatus.ACTIVE,
-  PAST_DUE: SubscriptionStatus.PAST_DUE,
-  SUSPENDED: SubscriptionStatus.PAST_DUE,
-  CANCELED: SubscriptionStatus.CANCELLED,
-  EXPIRED: SubscriptionStatus.EXPIRED,
+  TRIALING: { toStatus: SubscriptionStatus.TRIAL, eventType: null },
+  ACTIVE: { toStatus: SubscriptionStatus.ACTIVE, eventType: null },
+  PAST_DUE: {
+    toStatus: SubscriptionStatus.PAST_DUE,
+    eventType: SubscriptionEventType.PAYMENT_FAILED,
+  },
+  SUSPENDED: {
+    toStatus: SubscriptionStatus.PAST_DUE,
+    eventType: SubscriptionEventType.PAYMENT_FAILED,
+  },
+  CANCELED: { toStatus: SubscriptionStatus.CANCELLED, eventType: SubscriptionEventType.CANCELLED },
+  EXPIRED: { toStatus: SubscriptionStatus.EXPIRED, eventType: SubscriptionEventType.EXPIRED },
 }
 
 /** Signup statuses: they are logged and never change the local status. */
@@ -83,22 +105,6 @@ export const CONFIO_ESTADOS_QUE_OTORGAN: ConfioSubscriptionStatus[] = ['TRIALING
  * nothing and charges nothing) and stops endless polling of a signup nobody will pay.
  */
 export const CONFIO_ESTADOS_MUERTOS: ConfioSubscriptionStatus[] = ['CANCELED', 'EXPIRED']
-
-/**
- * `subscription_events.eventType` is a Postgres enum without a generic `status_changed`, so each status maps
- * to the closest member; the exact Confio event name stays in `metadata.event`.
- *
- * Only statuses with a single meaning belong here. `TRIALING` and `ACTIVE` are left out on purpose: their
- * event depends on whether the plan was granted, which `planearOtorgamiento` decides
- * (`CONFIRMATION_GRANTED`/`CONFIRMATION_NOT_GRANTED`). Adding them would record a first confirmation as
- * `reactivated`.
- */
-const CONFIO_TIPO_DE_EVENTO: { [K in ConfioSubscriptionStatus]?: SubscriptionEventType } = {
-  PAST_DUE: SubscriptionEventType.PAYMENT_FAILED,
-  SUSPENDED: SubscriptionEventType.PAYMENT_FAILED,
-  CANCELED: SubscriptionEventType.CANCELLED,
-  EXPIRED: SubscriptionEventType.EXPIRED,
-}
 
 /** Canonical UUID: `subscriptions.id`. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -644,9 +650,10 @@ export class ConfioSubscriptionWebhookService {
     // `wire` is network text: an unknown status falls through as unmapped, and `hasOwnProperty` stops
     // `"constructor"`/`"valueOf"` from returning an inherited function that would land in `sub.status`.
     const mapeado = Object.prototype.hasOwnProperty.call(CONFIO_SUBSCRIPTION_STATUS_MAP, wire)
-    const toStatus = mapeado
-      ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioSubscriptionStatus]
+    const efectoDelEstado = mapeado
+      ? CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioEstadoMapeado]
       : undefined
+    const toStatus = efectoDelEstado?.toStatus
     if (!toStatus) {
       this.logger.warn(
         `Confio estado no mapeado: ${escapeLogValue(wire)} (${escapeLogValue(data?.name)})`,
@@ -690,7 +697,7 @@ export class ConfioSubscriptionWebhookService {
         : undefined
 
     return {
-      eventType: CONFIO_TIPO_DE_EVENTO[wire as ConfioSubscriptionStatus],
+      eventType: efectoDelEstado.eventType,
       toStatus,
       sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
       // The downgrading fact, readable from the history row without the payload.
@@ -710,7 +717,7 @@ export class ConfioSubscriptionWebhookService {
    *
    * The webhook, active confirmation and the sweep all pass here, so the event names the OUTCOME:
    * `CONFIRMATION_GRANTED` when the brand ended with access, `CONFIRMATION_NOT_GRANTED` otherwise. It never
-   * comes from `CONFIO_TIPO_DE_EVENTO`: the provider status is the same `TRIALING` in every exit.
+   * comes from `CONFIO_SUBSCRIPTION_STATUS_MAP`: the provider status is the same `TRIALING` in every exit.
    */
   private async planearOtorgamiento(
     data: ConfioWebhookPayload['data'],
@@ -810,12 +817,12 @@ export class ConfioSubscriptionWebhookService {
     // A signup ConfioPagos declared dead is CLOSED, or the sweep would poll it until the window ends. Roles is
     // left alone: a row awaiting confirmation never had a plan to remove.
     if (CONFIO_ESTADOS_MUERTOS.includes(wire) && sub.status === SubscriptionStatus.PENDING) {
-      const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
+      const { toStatus, eventType } = CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioEstadoMapeado]
       const data = { name: resourceName, status: wire }
       await this.aplicar(
         sub.id,
         {
-          eventType: CONFIO_TIPO_DE_EVENTO[wire],
+          eventType,
           toStatus,
           sellaCancelacion: toStatus === SubscriptionStatus.CANCELLED,
           reason: `ConfioPagos reportó la suscripción ${wire} sin que se completara el pago`,
@@ -835,7 +842,7 @@ export class ConfioSubscriptionWebhookService {
       return { resultado: 'sin_confirmar', estadoRemoto: wire }
     }
 
-    const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
+    const toStatus = CONFIO_SUBSCRIPTION_STATUS_MAP[wire as ConfioEstadoMapeado].toStatus
     const data = { name: resourceName, status: wire }
     const efecto = await this.planearOtorgamiento(data, sub, wire, toStatus, remota)
 

@@ -20,6 +20,18 @@ export const DIAN_PENDING_FLAG = 'dianPending'
 /** `metadata` key holding when a send to the DIAN was claimed: present only while it runs. */
 export const DIAN_SENDING_FLAG = 'dianSendingAt'
 
+/** What `invoices.metadata` holds: the printed service line and buyer, or the credit note's payment. */
+export interface InvoiceMetadata {
+  serviceDescription?: string
+  taxRate?: number
+  taxName?: string
+  buyer?: Record<string, unknown>
+  paymentId?: string
+  [DIAN_PENDING_FLAG]?: boolean
+  // An ISO timestamp, written by SQL as `to_jsonb(now()::text)`.
+  [DIAN_SENDING_FLAG]?: string
+}
+
 @Entity('invoices')
 @Index('IDX_invoices_brand_date', ['brandId', 'createdAt'])
 @Unique('UQ_invoices_number', ['invoiceNumber'])
@@ -63,7 +75,7 @@ export class Invoice extends Content {
   @Column({ type: 'timestamptz', nullable: true }) dueAt: Date
   @Column({ nullable: true }) dianCufe: string
   @Column({ nullable: true }) pdfUrl: string
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: InvoiceMetadata
 
   @OneToMany(() => InvoiceItem, (item) => item.invoice, { cascade: true })
   items: InvoiceItem[]

@@ -62,6 +62,15 @@ export enum SubscriptionTraceStatus {
   DISCARDED = 'discarded',
 }
 
+/**
+ * What `subscription_events.metadata` holds. Each writer stores its own shape (a Confio trace is
+ * `ConfioTrazaMetadata`); `providerEventId` is the idempotency mark the webhook looks up.
+ */
+export interface SubscriptionEventMetadata {
+  providerEventId?: string
+  [key: string]: unknown
+}
+
 @Entity('subscription_events')
 @Index('IDX_subscription_events_sub_date', ['subscriptionId', 'createdAt'])
 @Index('IDX_subscription_events_type_date', ['eventType', 'createdAt'])
@@ -79,7 +88,7 @@ export class SubscriptionEvent {
   @Column() triggeredBy: string
   @Column({ type: 'text', nullable: true }) reason: string
   @Column({ type: 'uuid', nullable: true }) paymentId: string
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: SubscriptionEventMetadata
   @Column({ type: 'varchar', length: 16, default: SubscriptionTraceStatus.APPLIED })
   traceStatus: SubscriptionTraceStatus
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date

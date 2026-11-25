@@ -13,6 +13,22 @@ export interface ProviderWatermark {
 }
 
 /**
+ * What `subscriptions.metadata` holds: the Confio block written by the signup, plus the map the client
+ * may send on `POST /subscription`. Never the Confio `raw` (buyer PII) nor the bearer `acceptanceUrl`.
+ */
+export interface SubscriptionMetadata {
+  confio?: {
+    buyerPhone?: string
+    name?: string
+    status?: string
+    planName?: string
+    correlationId?: string | null
+    acceptanceExpireTime?: string | null
+  }
+  [key: string]: unknown
+}
+
+/**
  * Estados locales de una suscripción. `PENDING` va ÚLTIMO a propósito: es el orden
  * físico en que `ALTER TYPE … ADD VALUE` lo agrega en Postgres
  * (`migrations/1788270915241-AddPendingSubscriptionStatus.ts`), y con la lista TS
@@ -199,7 +215,7 @@ export class Subscription extends Content {
   @Column({ type: 'uuid', nullable: true }) lastPaymentId: string
   @Column({ type: 'timestamptz', nullable: true }) nextBillingDate: Date
   @Column({ type: 'int', default: 0 }) retryCount: number
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: SubscriptionMetadata
   /** The latest signed Confio notice applied to the row; see `confio-watermark.util.ts`. */
   @Column({ type: 'jsonb', nullable: true }) providerWatermark: ProviderWatermark | null
 }

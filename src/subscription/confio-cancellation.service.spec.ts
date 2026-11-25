@@ -3,7 +3,10 @@ import { HttpStatus } from '@nestjs/common'
 import { ConfioCancellationService } from './confio-cancellation.service'
 import { ConfioApiError } from '../provider/confio/confio-api-error'
 import { ConfioProvider } from '../provider/confio/confio.provider'
-import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
+import {
+  ConfioSubscriptionInputError,
+  ConfioSubscriptionInputField,
+} from '../provider/confio/confio-subscription-error'
 import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { RequestException } from '../shared/exception/request.exception'
 
@@ -46,7 +49,7 @@ describe('ConfioCancellationService', () => {
    * contra su servidor HTTP de prueba. Fabricar el error acá sin ese respaldo
    * sería un verde sobre un control inexistente.
    */
-  it.each([
+  it.each<[string, ConfioSubscriptionInputField, string]>([
     ['invalid_subscription_name', 'name', 'CONFIO_SUBSCRIPTION_NAME_INVALID'],
     ['plan_store_mismatch', 'name', 'CONFIO_PLAN_STORE_MISMATCH'],
   ])('%s → 503 %s, sin filtrar el detalle', async (code, field, expected) => {

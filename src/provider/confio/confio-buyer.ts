@@ -1,5 +1,5 @@
 import { ConfioBuyer } from './confio.types'
-import { ConfioSubscriptionInputError } from './confio-subscription-error'
+import { ConfioBuyerField, ConfioSubscriptionInputError } from './confio-subscription-error'
 
 /**
  * The single normalizer of a ConfioPagos subscription buyer. Pure module (no Nest, no `fetch`, no
@@ -48,7 +48,7 @@ export interface ConfioBuyerSource {
   callingCode?: string
 }
 
-const reject = (field: string, detail: string): never => {
+const reject = (field: ConfioBuyerField, detail: string): never => {
   throw new ConfioSubscriptionInputError('invalid_buyer', `buyer.${field}`, detail)
 }
 
