@@ -1,3 +1,4 @@
+// R6: One ConfioTrialService suite shares a single mocked client and provider graph across its trial scenarios.
 import { HttpStatus, Logger } from '@nestjs/common'
 import { Test, TestingModule } from '@nestjs/testing'
 import { ConfioTrialService } from './confio-trial.service'
