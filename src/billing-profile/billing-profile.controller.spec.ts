@@ -24,7 +24,6 @@ describe('BillingProfileController and WebhookController admin operator authoriz
   const NON_EXISTENT_DOC_ID = '99999999-9999-4999-8999-999999999999'
   const WEBHOOK_EVENT_ID = '22222222-2222-4222-8222-222222222222'
   const OWN_BRAND_ID = '33333333-3333-4333-8333-333333333333'
-  const JWT_SECRET = 'loc47-test-jwt-secret'
   const SERVER_SECRET = 'loc47-test-server-secret'
   const CONFIO_ACCESS_TOKEN = 'loc47-confio-access-token'
 
@@ -32,7 +31,6 @@ describe('BillingProfileController and WebhookController admin operator authoriz
   let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let billingProfileService: {
@@ -59,9 +57,7 @@ describe('BillingProfileController and WebhookController admin operator authoriz
   let rolesService: { checkPermission: jest.Mock }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
     sessions = authSessionsDouble()
@@ -159,7 +155,6 @@ describe('BillingProfileController and WebhookController admin operator authoriz
         await app.close()
       }
     } finally {
-      process.env.JWT_SECRET = prevJwtSecret
       process.env.ACCESS_SERVER = prevAccessServer
     }
   })

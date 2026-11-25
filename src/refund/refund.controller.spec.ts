@@ -23,14 +23,12 @@ describe('RefundController and RefundService brand payment ownership and operato
   const NON_EXISTENT_REFUND_ID = '99999999-9999-4999-8999-999999999999'
   const USER_ID = '66666666-6666-4666-8666-666666666666'
   const SUPERADMIN_ID = '77777777-7777-4777-8777-777777777777'
-  const JWT_SECRET = 'loc51-test-jwt-secret'
   const SERVER_SECRET = 'loc51-test-server-secret'
 
   let app: INestApplication
   let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let refundWriteRepo: {
@@ -54,9 +52,7 @@ describe('RefundController and RefundService brand payment ownership and operato
   }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
     sessions = authSessionsDouble()
@@ -112,8 +108,6 @@ describe('RefundController and RefundService brand payment ownership and operato
 
   afterAll(async () => {
     await app.close()
-    if (prevJwtSecret === undefined) delete process.env.JWT_SECRET
-    else process.env.JWT_SECRET = prevJwtSecret
     if (prevAccessServer === undefined) delete process.env.ACCESS_SERVER
     else process.env.ACCESS_SERVER = prevAccessServer
   })

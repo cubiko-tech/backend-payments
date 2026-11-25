@@ -71,7 +71,7 @@ export async function startFakeAuth(jwtSecret: string) {
     answer(res, 200, {
       valid: true,
       user: { id: account.id, isSuperAdmin: account.isSuperAdmin, status: account.status },
-      expiresAt: new Date(claims.exp * 1000).toISOString(),
+      expiresAt: claims.exp ? new Date(claims.exp * 1000).toISOString() : null,
     })
   }
 

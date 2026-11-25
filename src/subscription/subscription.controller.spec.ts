@@ -207,14 +207,12 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
   const FOREIGN_BRAND_ID = '22222222-2222-4222-8222-222222222222'
   const USER_ID = '33333333-3333-4333-8333-333333333333'
-  const JWT_SECRET = 'loc48-test-jwt-secret'
   const SERVER_SECRET = 'loc48-test-server-secret'
 
   let app: INestApplication
   let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let subscriptionService: {
@@ -230,9 +228,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   let platformClient: { canViewBrandCredit: jest.Mock }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
     sessions = authSessionsDouble()
@@ -293,7 +289,6 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
         await app.close()
       }
     } finally {
-      process.env.JWT_SECRET = prevJwtSecret
       process.env.ACCESS_SERVER = prevAccessServer
     }
   })

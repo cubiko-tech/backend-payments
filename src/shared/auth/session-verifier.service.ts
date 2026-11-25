@@ -23,8 +23,8 @@ export const authUnavailable = () =>
 /**
  * Resolves a person's session token through auth's single verification point
  * (`GET /auth/validate`), which checks the signature (EdDSA by `kid`, or HS256 while epic 031
- * lasts), that the session is still open and that the account is active. Payments holds no key
- * that could mint a person: identity and `isSuperAdmin` come from auth's answer.
+ * lasts), that the session is still open and that the account is active. Payments verifies no
+ * person with a key of its own: identity and `isSuperAdmin` come from auth's answer.
  *
  * Before the network, only a token shaped as a web session with its `sid` goes on; a refresh,
  * an MCP token or a hand-made JWT without a session is refused here. Auth not answering, or

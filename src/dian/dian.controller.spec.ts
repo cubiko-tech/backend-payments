@@ -25,14 +25,12 @@ describe('DianController operator authorization (LOC-78)', () => {
   const USER_ID = '55555555-5555-4555-8555-555555555555'
   const SUPERADMIN_ID = '66666666-6666-4666-8666-666666666666'
   const EXISTING_CUFE = 'cufe-existing-0002'
-  const JWT_SECRET = 'loc78-test-jwt-secret'
   const SERVER_SECRET = 'loc78-test-server-secret'
 
   let app: INestApplication
   let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let invoiceRepo: {
@@ -56,9 +54,7 @@ describe('DianController operator authorization (LOC-78)', () => {
   let providerMock: jest.Mocked<DianProvider>
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
     sessions = authSessionsDouble()
@@ -191,11 +187,6 @@ describe('DianController operator authorization (LOC-78)', () => {
   afterAll(async () => {
     if (app) {
       await app.close()
-    }
-    if (prevJwtSecret === undefined) {
-      delete process.env.JWT_SECRET
-    } else {
-      process.env.JWT_SECRET = prevJwtSecret
     }
     if (prevAccessServer === undefined) {
       delete process.env.ACCESS_SERVER

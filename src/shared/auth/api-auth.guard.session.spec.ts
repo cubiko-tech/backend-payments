@@ -128,6 +128,32 @@ describe('ApiAuthGuard resolves a person through auth (LOC-352)', () => {
     expect(req.user).toBeUndefined()
   })
 
+  it('refuses a JWT_SECRET token shaped as a web session that names no sid, without asking auth', async () => {
+    // R15: red when the sid check leaves readSessionClaims: auth accepts a token without sid, 200 as super admin.
+    const forged = new JwtService({ secret: JWT_SECRET }).sign({
+      id: ADMIN,
+      isSuperAdmin: true,
+      typ: 'session',
+      aud: 'web-session',
+    })
+    const { req, context } = contextOf(AdminPaymentsStub, bearer(forged))
+
+    await expect(guard.canActivate(context)).rejects.toMatchObject({
+      status: HttpStatus.UNAUTHORIZED,
+    })
+    expect(auth.requests).toEqual([])
+    expect(req.user).toBeUndefined()
+  })
+
+  it('keeps the brand claim of a session auth confirmed', async () => {
+    // R15: red when SessionVerifier.verify stops reading `brand` from the confirmed claims: null.
+    const { sessionToken } = auth.login(OWNER, { brand: 'brand-loc352' })
+    const { req, context } = contextOf(SubscriptionStub, bearer(sessionToken))
+
+    await expect(guard.canActivate(context)).resolves.toBe(true)
+    expect(req.user).toEqual({ id: OWNER, isSuperAdmin: false, brand: 'brand-loc352' })
+  })
+
   it('refuses a JWT_SECRET token shaped as a session whose sid auth does not have', async () => {
     // R15: red when SessionVerifier.verify accepts a JWT_SECRET signature before fetching auth: 200.
     const forged = new JwtService({ secret: JWT_SECRET }).sign({

@@ -131,14 +131,12 @@ describe('AdminController — extendSubscription', () => {
 
 describe('AdminController and MetricsController operator authorization (LOC-46)', () => {
   const TEST_UUID = '11111111-1111-4111-8111-111111111111'
-  const JWT_SECRET = 'loc46-test-jwt-secret'
   const SERVER_SECRET = 'loc46-test-server-secret'
 
   let app: INestApplication
   let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let subscriptionReadRepo: ReturnType<typeof mockRepo>
@@ -159,9 +157,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
   let tokenWallets: { getOrCreate: jest.Mock }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
     sessions = authSessionsDouble()
@@ -246,7 +242,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         await app.close()
       }
     } finally {
-      process.env.JWT_SECRET = prevJwtSecret
       process.env.ACCESS_SERVER = prevAccessServer
     }
   })

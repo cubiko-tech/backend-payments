@@ -36,7 +36,7 @@ dotenvConfig({ path: '.env' })
 
 const BRAND_A = 'a1730000-0000-4000-8000-0000000000e2'
 const SUPERADMIN_ID = 'superadmin-loc173'
-const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc173-jwt-secret', 'e2e-loc173-server-token']
+const ACCESS_SERVER = 'e2e-loc173-server-token'
 
 /** Stands for the recharge routes of LOC-174/175, with the mark they carry. */
 @Controller('e2e-recharge')
@@ -94,7 +94,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
   }
 
   beforeAll(async () => {
-    Object.assign(process.env, { JWT_SECRET, ACCESS_SERVER })
+    Object.assign(process.env, { ACCESS_SERVER })
     dataSource = new DataSource({
       type: 'postgres',
       host: process.env.POSTGRES_HOST,
