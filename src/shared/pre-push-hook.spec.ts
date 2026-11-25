@@ -1,3 +1,5 @@
+// R6: One suite for the pre-push hook: every case pushes to the same clone-and-bare fixture
+// and stubbed git built by setupCloneAndBare at its top.
 // Red when pre-push.sh validates branch names, reads HEAD instead of stdin refs, or measures disk vs commit.
 import { spawnSync } from 'child_process'
 import {

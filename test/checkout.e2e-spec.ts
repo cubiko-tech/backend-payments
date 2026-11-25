@@ -621,6 +621,7 @@ describe('CheckoutService external payment completion concurrency (real database
     }
 
     it('completes a pending external recharge with completed status, one wallet credit, and one invoice (happy path)', async () => {
+      // Mutation: CheckoutService.generateInvoice stops passing invoiceService to checkout-invoice.ts: red.
       const { wallet, payment } = await seedWalletAndPendingRecharge()
 
       await checkoutWithRealPersistence.completeExternalPayment(payment.id, {

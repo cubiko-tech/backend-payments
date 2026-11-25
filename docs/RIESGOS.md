@@ -63,9 +63,9 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Tres bordes del reintento con `Idempotency-Key` siguen sin salida (LOC-86)
 
 - **Dónde**: `src/checkout/checkout-idempotency.ts:199`, `:39` (`resolvePaymentStateOutcome`,
-  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:420`, `:731`
+  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:408`, `:720`
   (`retryFailedIdempotentPayment`, la llamada `provider.createCheckout` en `processExternalPayment`, con la
-  entrada pública `processCheckout` en `:206`); `src/provider/dropi/dropi.provider.ts:79`
+  entrada pública `processCheckout` en `:194`); `src/provider/dropi/dropi.provider.ts:79`
 - **Qué lo dispara**: un reintento con la misma llave sobre (a) un `completed` sin
   `metadata.checkoutResult` (falló después del cierre o lo completó un webhook); (b) un externo `failed`
   sin `providerPaymentId`; (c) una fila que la ruta retirada `POST /payment/checkout` (`c77a594`, LOC-93)
@@ -80,8 +80,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
-  (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
+  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:1310`
+  (`assignPlanInRoles`, y el booleano que ignora en `:1317`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
   al asignar el plan; (c) el proceso muere entre el cierre y `assignPlanInRoles`; (d) un `failed` con
@@ -226,7 +226,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Lo que el barrido no rescata o completa sin mirar (LOC-89)
 
 - **Dónde**: `src/tasks/payment-sweep.ts:234`, `:114` (`expirePendingCheckouts`,
-  `settleLostExternalPayments`); `src/checkout/checkout.service.ts:2117` (`assertProviderConfirmedAmount`)
+  `settleLostExternalPayments`); `src/checkout/provider-confirmed-amount.ts:117`
+  (`assertProviderConfirmedAmount`)
 - **Qué lo dispara**: (a) se paga justo después de que la expiración leyó `pending` y el webhook se pierde;
   (b) un `pending` sin `providerPaymentId`, por una caída antes de guardarlo; (c) un `processing` con plan
   que el proveedor reembolsó; (d) un monto distinto cuando el pago ya dio plan, crédito o factura; (e) otra
@@ -238,7 +239,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un proveedor que no confirma el monto deja el pago esperando o lo completa sin verificarlo (LOC-117, LOC-127)
 
-- **Dónde**: `src/checkout/checkout.service.ts:2117`, `:2112` (`assertProviderConfirmedAmount`,
+- **Dónde**: `src/checkout/provider-confirmed-amount.ts:117`, `:107` (`assertProviderConfirmedAmount`,
   `isProviderNoticePayload`); `src/provider/mercadopago/mercadopago.provider.ts:173` (`transactionAmount`)
 - **Qué lo dispara**: (a) un aviso sin monto confirmado (el one-shot de Confío sin `amountCents`, Mercado
   Pago con `transaction_amount` nulo); (b) después, el retorno o el barrido tampoco traen monto.
@@ -250,7 +251,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El precio viejo todavía se puede pagar pasadas las 24 h (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:759`, `:451` (`createCheckout`, `firstAttemptAt`);
+- **Dónde**: `src/checkout/checkout.service.ts:720`, `:420` (`createCheckout`, `firstAttemptAt`);
   `src/checkout/checkout-idempotency.ts:238` (`checkoutResult`)
 - **Qué lo dispara**: (a) un reintento aceptado en plazo abre una sesión cuya vida pone el proveedor; (b) un
   `pending` que el barrido no vence sigue repitiendo su `checkoutUrl` con la misma llave.
@@ -260,7 +261,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un pago con débito se cierra pasadas las 24 h si se reintenta (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:424` (`assertRetryAllowed`)
+- **Dónde**: `src/checkout/checkout.service.ts:393` (`assertRetryAllowed`)
 - **Qué lo dispara**: un `failed` de wallet con débito sin acreditar que se reintenta antes del barrido.
 - **Qué rompe**: la compra cierra al precio ya cobrado, sin segundo débito, en vez de responder vencido.
 - **Estado**: mitigado por la exención: pedirle un pedido nuevo a quien ya pagó lo haría pagar dos veces.
@@ -336,7 +337,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El retorno del checkout distingue con 503 si el `paymentId` existe cuando cae `platform` (LOC-116)
 
-- **Dónde**: `src/checkout/checkout.service.ts:1147` (`reconcilePayment`);
+- **Dónde**: `src/checkout/checkout.service.ts:1109` (`reconcilePayment`);
   `src/checkout/checkout.controller.ts:134` (`paymentReturn`)
 - **Qué lo dispara**: (a) `GET /v1/checkout/return` mientras `backend-platform` no responde; (b) un 400 o
   404 que llega al BFF de `frontend-platform` (otro repositorio, no se abrió en LOC-131).

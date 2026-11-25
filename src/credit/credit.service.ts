@@ -1,3 +1,5 @@
+// R6: One responsibility, a brand's credit standing: the score, the preapproval read from it and the
+// activation request gated on that preapproval share resolvePreapprovalStatus.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { In, Repository } from 'typeorm'
