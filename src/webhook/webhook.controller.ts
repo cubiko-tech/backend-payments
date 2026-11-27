@@ -32,6 +32,7 @@ import {
   classifyConfioWebhookEvent,
 } from '../provider/confio/confio-webhook'
 import {
+  ConfioWebhookSignatureReason,
   timingSafeEqualStrings,
   verifyConfioWebhookSignature,
 } from '../provider/confio/confio-webhook-signature'
@@ -44,6 +45,12 @@ import { escapeLogValue } from '../shared/logger/log-value'
  * those fields do not exist, and saying so beats inventing them.
  */
 const SIN_CAMPOS_DE_FIRMA = 'signature.properties=no aplica data=no aplica'
+
+/** Every `reason=` a Confio rejection can log: the signature verdicts plus the body and bearer checks. */
+export type ConfioWebhookRejectionReason =
+  | ConfioWebhookSignatureReason
+  | 'invalid_json'
+  | 'bearer_mismatch'
 
 /**
  * Payload fields logged with a rejection AFTER signature verification: the property set the sender
@@ -288,7 +295,11 @@ export class WebhookController {
   }
 
   /** Logs exactly one line per rejection and returns the 401 to throw. */
-  private rechazarWebhookConfio(reason: string, campos: string, detail: string): HttpException {
+  private rechazarWebhookConfio(
+    reason: ConfioWebhookRejectionReason,
+    campos: string,
+    detail: string,
+  ): HttpException {
     this.logger.warn(
       `Webhook ConfioPagos rechazado: reason=${reason} ${campos} detail="${escapeLogValue(detail)}"`,
     )

@@ -1,4 +1,4 @@
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, Unique } from 'typeorm'
 import { Content } from '../../shared/entities/content.abstract'
 
 export enum GiftBatchStatus {
@@ -9,7 +9,7 @@ export enum GiftBatchStatus {
 }
 
 @Entity('token_gift_batches')
-@Index('UQ_token_gift_batches_idempotency_key', ['idempotencyKey'], { unique: true })
+@Unique('UQ_token_gift_batches_idempotency_key', ['idempotencyKey'])
 export class TokenGiftBatch extends Content {
   @Column({ type: 'varchar', length: 200 })
   idempotencyKey: string

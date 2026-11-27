@@ -6,7 +6,6 @@
  */
 import { Controller, HttpCode, HttpStatus, INestApplication, Post, UseGuards } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { createHash } from 'crypto'
@@ -30,12 +29,14 @@ import { createGlobalValidationPipe } from '../src/shared/validation/global-vali
 import { TokenWalletController } from '../src/wallet/token-wallet.controller'
 import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { failNextAuditWrite } from './support/audit-failure.fixture'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
 const BRAND_A = 'a1730000-0000-4000-8000-0000000000e2'
 const SUPERADMIN_ID = 'superadmin-loc173'
-const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc173-jwt-secret', 'e2e-loc173-server-token']
+const ACCESS_SERVER = 'e2e-loc173-server-token'
 
 /** Stands for the recharge routes of LOC-174/175, with the mark they carry. */
 @Controller('e2e-recharge')
@@ -93,7 +94,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
   }
 
   beforeAll(async () => {
-    Object.assign(process.env, { JWT_SECRET, ACCESS_SERVER })
+    Object.assign(process.env, { ACCESS_SERVER })
     dataSource = new DataSource({
       type: 'postgres',
       host: process.env.POSTGRES_HOST,
@@ -106,9 +107,9 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
     })
     await dataSource.initialize()
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
-    brandUser = jwtService.sign({ id: 'user-loc173', isSuperAdmin: false, brand: BRAND_A })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    brandUser = sessions.sign({ id: 'user-loc173', isSuperAdmin: false, brand: BRAND_A })
     const repo = (entity: typeof ServiceCredential | typeof AuditLog, conn: string) => ({
       provide: getRepositoryToken(entity, conn),
       useValue: dataSource.getRepository(entity),
@@ -124,7 +125,7 @@ describe('ROAX Ads service credential on recharge routes (PostgreSQL, LOC-173)',
         ServiceCredentialService,
         Reflector,
         ApiAuthGuard,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         repo(ServiceCredential, 'DBWrite'),
         repo(AuditLog, 'DBWrite'),
         repo(AuditLog, 'DBRead'),

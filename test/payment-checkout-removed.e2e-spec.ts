@@ -1,7 +1,6 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { INestApplication, InjectionToken } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -33,6 +32,8 @@ import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { WebhookService } from '../src/webhook/webhook.service'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 const ACCESS_SERVER = 'e2e-payment-checkout-removed-token'
 const BRAND_ID = 'f9393939-2222-4333-8444-555555555555'
@@ -105,7 +106,7 @@ describe('POST /payment/checkout removal e2e (PostgreSQL, LOC-93)', () => {
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: authSessionsDouble() },
         PaymentService,
         CheckoutService,
         WalletService,

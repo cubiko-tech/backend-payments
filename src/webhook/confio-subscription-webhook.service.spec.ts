@@ -1181,15 +1181,8 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
         },
       )
 
-      // La lista de arriba fija QUÉ evento escribe cada estado, y es fija a propósito: si uno
-      // cambiara de evento, tiene que doler. Pero por eso mismo no cuida el otro borde — agregar
-      // un séptimo estado al mapa sin agregarlo al de eventos la deja verde igual.
-      //
-      // Éste sí lo cuida, porque DERIVA los casos de las dos constantes exportadas en vez de
-      // enumerarlos. `CONFIO_TIPO_DE_EVENTO` es `Partial`, así que a un estado sin entrada le
-      // corresponde `undefined` y el compilador no lo ve —el repo no corre con `strictNullChecks`—,
-      // dejando la fila de historial sin evento. Todo estado mapeado que NO otorgue llega a esa
-      // lectura, así que todos tienen que nombrar el suyo.
+      // Derived from the map, unlike the fixed list above: a new status whose `eventType` is `null`
+      // compiles without `strictNullChecks`, and every mapped status that does not grant needs one.
       const LLEGAN_AL_EVENTO = (
         Object.keys(
           CONFIO_SUBSCRIPTION_STATUS_MAP,
@@ -1199,11 +1192,14 @@ describe('ConfioSubscriptionWebhookService — acceso en roles según el cobro',
       it.each(LLEGAN_AL_EVENTO)(
         '%s está mapeado y no otorga, así que su fila de historial nombra un evento',
         async (wire) => {
+          // Mutation: `PAST_DUE` maps to `eventType: null` in `CONFIO_SUBSCRIPTION_STATUS_MAP` → red.
+          const { eventType } = CONFIO_SUBSCRIPTION_STATUS_MAP[wire]
           conSuscripcion(suscripcion())
 
           await despachar(cambioDeEstado(wire as string))
 
-          expect(historial()[0].eventType).toBeDefined()
+          expect(eventType).not.toBeNull()
+          expect(historial()[0].eventType).toBe(eventType)
         },
       )
     })

@@ -14,6 +14,17 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Estado**: mitigado por el alcance: sólo cae a una fila en dólares que el catálogo declara. Abierto en lo
   comercial: no vender en un país se expresa quitando la fila en dólares del plan.
 
+## Archivar el mapeo de Confío de una moneda cobra el alta en dólares a una marca que paga en esa moneda
+
+- **Dónde**: `src/subscription/confio-trial.service.ts:276`, `:137` (`resolvePlanConCaidaAUsd`, `createForTrial`);
+  sus altas, `src/subscription/subscription.service.ts:292`, `:608` (`startTrial`, `startPaid`)
+- **Qué lo dispara**: un alta de Confío de una marca cuyo precio sale en pesos mientras la fila COP de
+  `confio_subscription_plan` está `archived` (la pasarela de esa moneda apagada).
+- **Qué rompe**: el alta va al plan USD de Confío y la marca queda suscrita en dólares, con el monto congelado en
+  ese plan. El único rastro es un `logger.warn` (`:290`) y la línea de log del alta: `subscriptions` no guarda la
+  moneda.
+- **Estado**: abierto — lo cierra guardar la moneda del alta y que apagar una moneda avise más que un `warn`.
+
 ## Una suscripción de wallet sin `walletId` conserva el plan sin cobrar
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:133`, `:192` (`processSubscriptionRenewals`)
@@ -44,7 +55,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El servicio no arranca si `ACCESS_SERVER` o `JWT_SECRET` falta o vale `CHANGEME` (LOC-56)
 
-- **Dónde**: `src/main.ts:12` (`requireStartupSecret`)
+- **Dónde**: `src/main.ts:13` (`requireStartupSecret`)
 - **Qué lo dispara**: iniciar con uno de los dos ausente, vacío, igual a `CHANGEME` o con espacios al borde.
 - **Qué rompe**: el arranque aborta antes de escuchar en el puerto 80.
 - **Estado**: abierto — lo cierra verificar los dos valores en cada ambiente antes de desplegar.
@@ -52,9 +63,9 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Tres bordes del reintento con `Idempotency-Key` siguen sin salida (LOC-86)
 
 - **Dónde**: `src/checkout/checkout-idempotency.ts:199`, `:39` (`resolvePaymentStateOutcome`,
-  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:420`, `:731`
+  `canRetryFailedIdempotentPayment`); `src/checkout/checkout.service.ts:408`, `:720`
   (`retryFailedIdempotentPayment`, la llamada `provider.createCheckout` en `processExternalPayment`, con la
-  entrada pública `processCheckout` en `:206`); `src/provider/dropi/dropi.provider.ts:79`
+  entrada pública `processCheckout` en `:194`); `src/provider/dropi/dropi.provider.ts:79`
 - **Qué lo dispara**: un reintento con la misma llave sobre (a) un `completed` sin
   `metadata.checkoutResult` (falló después del cierre o lo completó un webhook); (b) un externo `failed`
   sin `providerPaymentId`; (c) una fila que la ruta retirada `POST /payment/checkout` (`c77a594`, LOC-93)
@@ -69,8 +80,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 - **Dónde**: `src/checkout/wallet-payment-reconciliation.ts:336`, `:37`, `:306`
   (`refundSupersededWalletPayment`, `WALLET_FAILED_DEBIT_LOOKBACK_MS`, `isPlanAppliedByPayment`);
-  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:2223`
-  (`assignPlanInRoles`, y el booleano que ignora en `:2230`); `src/checkout/wallet-payment-close.ts:91`
+  `src/client/client-roles.service.ts:384` (`callRolesApi`); `src/checkout/checkout.service.ts:1310`
+  (`assignPlanInRoles`, y el booleano que ignora en `:1317`); `src/checkout/wallet-payment-close.ts:91`
   (`yieldOverlappedOlderPurchase`)
 - **Qué lo dispara**: (a) `walletService.credit` falla siempre al devolver un pago superado; (b) roles falla
   al asignar el plan; (c) el proceso muere entre el cierre y `assignPlanInRoles`; (d) un `failed` con
@@ -169,7 +180,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un aviso de Mercado Pago con `ts` a más de 5 minutos se rechaza con 401 (LOC-113)
 
-- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:318`, `:355` (`SIGNATURE_WINDOW_MS`, `tsToMs`)
+- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:276`, `:313` (`SIGNATURE_WINDOW_MS`, `tsToMs`)
 - **Qué lo dispara**: un reintento de Mercado Pago (cada 15 min, según su doc) que conserve el `ts`
   original; la doc no dice si lo conserva.
 - **Qué rompe**: el aviso no entra. El pago lo cierra el barrido `reconcileExternalPayments`, cada 5 min.
@@ -177,7 +188,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Mercado Pago sin pago encontrado no distingue «no pagó» de «no lo encuentro» (LOC-89)
 
-- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:146` (`getPaymentStatus`);
+- **Dónde**: `src/provider/mercadopago/mercadopago.provider.ts:144` (`getPaymentStatus`);
   `src/webhook/mercadopago-payment-notice.ts:29` (`resolveMercadoPagoNotice`)
 - **Qué lo dispara**: `payments/search` por `external_reference` devuelve una lista vacía: un pago anterior
   a LOC-89, con referencia `marca:propósito:ts`, o una respuesta real distinta de la del falso.
@@ -195,7 +206,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un 404 de un proveedor mal apuntado vence sus pagos (LOC-89)
 
-- **Dónde**: `src/provider/confio/confio.provider.ts:103`; `src/provider/stripe/stripe.provider.ts:86`
+- **Dónde**: `src/provider/confio/confio.provider.ts:102`; `src/provider/stripe/stripe.provider.ts:84`
   (`ProviderPaymentNotFoundError`)
 - **Qué lo dispara**: una configuración de Confío o Stripe que apunte a otro lado: el 404 se lee como «el
   pago no existe».
@@ -204,8 +215,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Mientras Dropi responda 404, sus `pending` no vencen y se acumulan (LOC-102)
 
-- **Dónde**: `src/provider/dropi/dropi.provider.ts:49` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
-  (`providerLetsExpire`); `src/admin/admin.controller.ts:266` (`paymentsPending`, con la ruta en `:263`)
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:52` (`dropiFetch`); `src/tasks/payment-sweep.ts:340`
+  (`providerLetsExpire`); `src/admin/admin.controller.ts:271` (`paymentsPending`, con la ruta en `:268`)
 - **Qué lo dispara**: Dropi responde 404 a `/charges/:id` por una ruta que no existe o por un cobro que no
   existe: no se distinguen. Se midió contra el core-back local; la API real no se conoce.
 - **Qué rompe**: un `pending` abandonado no vence, sin tope, hasta que el usuario lo cancela: una llamada y
@@ -215,7 +226,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Lo que el barrido no rescata o completa sin mirar (LOC-89)
 
 - **Dónde**: `src/tasks/payment-sweep.ts:234`, `:114` (`expirePendingCheckouts`,
-  `settleLostExternalPayments`); `src/checkout/checkout.service.ts:2117` (`assertProviderConfirmedAmount`)
+  `settleLostExternalPayments`); `src/checkout/provider-confirmed-amount.ts:117`
+  (`assertProviderConfirmedAmount`)
 - **Qué lo dispara**: (a) se paga justo después de que la expiración leyó `pending` y el webhook se pierde;
   (b) un `pending` sin `providerPaymentId`, por una caída antes de guardarlo; (c) un `processing` con plan
   que el proveedor reembolsó; (d) un monto distinto cuando el pago ya dio plan, crédito o factura; (e) otra
@@ -227,8 +239,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un proveedor que no confirma el monto deja el pago esperando o lo completa sin verificarlo (LOC-117, LOC-127)
 
-- **Dónde**: `src/checkout/checkout.service.ts:2117`, `:2112` (`assertProviderConfirmedAmount`,
-  `isProviderNoticePayload`); `src/provider/mercadopago/mercadopago.provider.ts:173` (`transactionAmount`)
+- **Dónde**: `src/checkout/provider-confirmed-amount.ts:117`, `:107` (`assertProviderConfirmedAmount`,
+  `isProviderNoticePayload`); `src/provider/mercadopago/mercadopago.provider.ts:171` (`transactionAmount`)
 - **Qué lo dispara**: (a) un aviso sin monto confirmado (el one-shot de Confío sin `amountCents`, Mercado
   Pago con `transaction_amount` nulo); (b) después, el retorno o el barrido tampoco traen monto.
 - **Qué rompe**: (a) el aviso no completa y el pago queda `pending`: si el barrido no lo encuentra, vence a
@@ -239,7 +251,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El precio viejo todavía se puede pagar pasadas las 24 h (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:759`, `:451` (`createCheckout`, `firstAttemptAt`);
+- **Dónde**: `src/checkout/checkout.service.ts:720`, `:420` (`createCheckout`, `firstAttemptAt`);
   `src/checkout/checkout-idempotency.ts:238` (`checkoutResult`)
 - **Qué lo dispara**: (a) un reintento aceptado en plazo abre una sesión cuya vida pone el proveedor; (b) un
   `pending` que el barrido no vence sigue repitiendo su `checkoutUrl` con la misma llave.
@@ -249,16 +261,17 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un pago con débito se cierra pasadas las 24 h si se reintenta (LOC-98)
 
-- **Dónde**: `src/checkout/checkout.service.ts:424` (`assertRetryAllowed`)
+- **Dónde**: `src/checkout/checkout.service.ts:393` (`assertRetryAllowed`)
 - **Qué lo dispara**: un `failed` de wallet con débito sin acreditar que se reintenta antes del barrido.
 - **Qué rompe**: la compra cierra al precio ya cobrado, sin segundo débito, en vez de responder vencido.
 - **Estado**: mitigado por la exención: pedirle un pedido nuevo a quien ya pagó lo haría pagar dos veces.
 
 ## Con el claim `brand` del token se escribe en la suscripción sin consultar a platform y con cualquier rol (LOC-94)
 
-- **Dónde**: `src/subscription/subscription.controller.ts:315`, `:330` (`resolveBrandId`, `sessionBrand`);
+- **Dónde**: `src/subscription/subscription.controller.ts:317`, `:332` (`resolveBrandId`, `sessionBrand`);
   `src/client/client-platform.service.ts:5` (`ALLOWED_BRAND_ROLES`);
-  `src/shared/auth/api-auth.guard.ts:123`, `:173` (`payload.brand`, `decodeClaims`, que se usa en `:165`)
+  `src/shared/auth/api-auth.guard.ts:207` (la `brand` del auto-login) y
+  `src/shared/auth/session-verifier.service.ts:75` (la de una sesión que auth confirmó, y las de auth no la traen)
 - **Qué lo dispara**: `POST /subscription/trial`, `/paid`, `/cancel` o `/reactivate` con un token que trae
   `brand`, con esa marca en el cuerpo o sin ninguna.
 - **Qué rompe**: la escritura no mira membresía ni rol, mientras otra marca nombrada exige `superuser`,
@@ -324,7 +337,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El retorno del checkout distingue con 503 si el `paymentId` existe cuando cae `platform` (LOC-116)
 
-- **Dónde**: `src/checkout/checkout.service.ts:1147` (`reconcilePayment`);
+- **Dónde**: `src/checkout/checkout.service.ts:1109` (`reconcilePayment`);
   `src/checkout/checkout.controller.ts:134` (`paymentReturn`)
 - **Qué lo dispara**: (a) `GET /v1/checkout/return` mientras `backend-platform` no responde; (b) un 400 o
   404 que llega al BFF de `frontend-platform` (otro repositorio, no se abrió en LOC-131).
@@ -345,8 +358,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Dos avisos de Dropi sin `eventId` e idénticos colisionan, y el `down` falla con claves repetidas (LOC-118)
 
-- **Dónde**: `src/provider/dropi/dropi.provider.ts:189` (`webhookEventId`);
-  `src/webhook/entities/webhookEvent.entity.ts:12` (`UQ_webhook_events_provider_event`)
+- **Dónde**: `src/provider/dropi/dropi.provider.ts:174` (`webhookEventId`);
+  `src/webhook/entities/webhookEvent.entity.ts:16` (`UQ_webhook_events_provider_event`)
 - **Qué lo dispara**: (a) dos notificaciones sin `eventId` con el mismo `rawBody`; (b) `migration:revert`
   de `migrations/1793775625851-WebhookEventsUniquePerProvider.ts` con una `providerEventId` repetida
   entre proveedores.
@@ -367,7 +380,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado de Confío con `timestamp` fuera de 24 h se rechaza con 401 para siempre (LOC-117)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:6`, `:456`
-  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:247` (`autenticarRamoFirmado`)
+  (`CONFIO_WEBHOOK_TIMESTAMP_WINDOW_MS`); `src/webhook/webhook.controller.ts:254` (`autenticarRamoFirmado`)
 - **Qué lo dispara**: un aviso firmado de suscripción que llega o se reintenta a más de 24 h de su `timestamp`.
 - **Qué rompe**: 401 `timestamp_out_of_window` en cada reentrega tardía, y no hay un barrido de
   suscripciones de Confío que rescate ese cambio sin intervención manual.
@@ -415,7 +428,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Aprobar el reembolso de un paquete quita los tokens antes de que la plata vuelva (LOC-161)
 
-- **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:84`
+- **Dónde**: `src/refund/refund.service.ts:230` (`approvePending`); `src/provider/provider.interface.ts:66`
   (`refundPayment`, sin llamador)
 - **Qué lo dispara**: un reembolso de paquete aprobado cuya devolución, hecha fuera de Pagos, nunca se paga; o un
   reembolso hecho directo en el proveedor (`src/webhook/webhook.service.ts:198-200` sólo lo loguea).
@@ -436,13 +449,13 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Quien tiene el `clientSecret` de un client firma el `id` y la `brand` de cualquier usuario (LOC-143)
 
-- **Dónde**: `src/shared/auth/api-auth.guard.ts:159`, `:165` (`validateViaAuth`: `id` y `brand` salen de la respuesta
+- **Dónde**: `src/shared/auth/api-auth.guard.ts:201`, `:166` (`validateViaAuth`: `id` y `brand` salen de la respuesta
   de backend-auth, que según LOC-143 devuelve el payload firmado tal cual)
 - **Qué lo dispara**: un token de auto-login firmado con el `clientSecret` (el client `dropi` lo usa Dropi) con el
   `id` de otro usuario o una `brand` ajena.
 - **Qué rompe**: `@RequirePermission` consulta `checkPermission(id)` y la marca `canViewBrandCredit(id)` con ese
   `id`, así que se actúa como ese usuario. Que backend-roles le conceda permisos de admin a ese id es hipótesis
-  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:164`).
+  (no se abrió). El super admin ya no: el guard lo pone en `false` para todo el camino del client (`:205`).
 - **Estado**: abierto — lo cierra que backend-auth devuelva el usuario y el rol de su base, no el payload (tarea
   aparte, en ese repo).
 
@@ -458,8 +471,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## El id de un aviso de Confío llega sin escapar a los logs viejos de la suscripción
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:292` y `:887` (efecto ya aplicado), `:555` (la traza
-  de roles que usan `:565` y `:569`), y escapado en las líneas del 015, `:300`, `:342` y `:898`
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:298` y `:894` (efecto ya aplicado), `:561` (la traza
+  de roles que usan `:571` y `:575`), y escapado en las líneas del 015, `:306`, `:348` y `:905`
 - **Qué lo dispara**: un aviso de Confío autenticado cuyo id, armado con su `data.name`, trae un salto de línea,
   comillas o `=`.
 - **Qué rompe**: la línea de log se parte o suma pares `clave=valor` falsos (CWE-117). Sólo el log: el id sigue
@@ -470,8 +483,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una suscripción de Confío en `past_due` recibe links de pago del cron además de la recurrencia de Confío
 
 - **Dónde**: `src/tasks/subscription-renewal.ts:198-200` (`retryFailedPayments` → `issueExternalCharge`); las
-  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:684-690` (`planearCambioDeEstado`) y
-  `:465-474` (`planearCobro`)
+  entradas a `past_due`, `src/webhook/confio-subscription-webhook.service.ts:691-697` (`planearCambioDeEstado`) y
+  `:471-480` (`planearCobro`)
 - **Qué lo dispara**: (a) un `subscription.subscriptionStatusChanged` con `PAST_DUE` o `SUSPENDED` sobre una fila
   `pending` (el cobro fallido sobre `pending` ya no la mueve, LOC-163); (b) un cobro fallido sobre una fila viva.
 - **Qué rompe**: (a) un alta que nunca se activó recibe un segundo link de pago sobre su primer período; (b) la marca
@@ -491,7 +504,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una key de servicio filtrada crea e informa recargas hasta que se rote o se desactive (LOC-173)
 
 - **Dónde**: `src/shared/auth/service-credential.service.ts:41` (`authenticate`);
-  `src/shared/auth/api-auth.guard.ts:126`
+  `src/shared/auth/api-auth.guard.ts:130`
 - **Qué lo dispara**: la key de ROAX Ads (`psk.roax-ads.…`) sale de donde la guarda backend-ads.
 - **Qué rompe**: quien la tenga entra a las rutas marcadas `@RequireServiceClient('roax-ads')` (crear e
   informar recargas, LOC-174/175); a ninguna otra, ni a `admin/*`. Crear una recarga pide además el token de
@@ -535,7 +548,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Una recarga desde Dropi informada `failed` y cobrada después no tiene corrección (LOC-175)
 
 - **Dónde**: `src/recharge/dropi-recharge-result.ts:31-35` (un `charged` sobre una `failed` es `conflict`) y
-  `src/admin/admin.controller.ts:347-352` (el reintento de admin la rechaza con 409)
+  `src/admin/admin.controller.ts:365-370` (el reintento de admin la rechaza con 409)
 - **Qué lo dispara**: ROAX Ads informa `failed` y Dropi termina descontando el saldo (un cobro que se confirma
   tarde, o un `failed` informado por error).
 - **Qué rompe**: la recarga queda `failed` sin tokens y el saldo de Dropi ya salió: la marca pagó sin recibir, y
@@ -545,7 +558,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## La migración de LOC-182 no sube si un ambiente ya tiene dos recargas con la misma operación
 
-- **Dónde**: `src/payment/entities/payment.entity.ts:33` (`UQ_payments_dropi_operation`, que crea la migración
+- **Dónde**: `src/payment/entities/payment.entity.ts:37` (`UQ_payments_dropi_operation`, que crea la migración
   1794106072424-AddDropiOperationUnique)
 - **Qué lo dispara**: antes del despliegue, el defecto de `d2f764d` cerró dos recargas con un mismo
   `dropiOperationId` en ese ambiente.
@@ -588,7 +601,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Qué lo dispara**: el aviso `charged` de una recarga manual y una escritura de la factura o sus ítems que falla.
 - **Qué rompe**: se revierte todo —tokens, `completed`, factura y auditoría—; el aviso recibe 500 y la recarga sigue
   `pending` con el saldo de Dropi ya descontado. Si la falla persiste en cada reintento, la marca pagó y no recibe
-  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:343-352`).
+  tokens, y el reintento de admin no la toma (`src/admin/admin.controller.ts:355-370`).
 - **Estado**: abierto — lo cierra acreditar sin esperar la factura y escribirla después, o una corrección manual que
   decida quien aprueba.
 
@@ -622,7 +635,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 - **Dónde**: `src/wallet/token-debit.controller.ts:24-26` (el presupuesto) y `:120`,
   `src/wallet/token-wallet.service.ts:176` (el 404 `DEBIT_NOT_FOUND` del reintegro)
 - **Qué lo dispara**: el débito pasa los 5 s del cliente de ROAX Ads por lo que no tiene tope: la búsqueda de la
-  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:136`, en toda ruta) y el `START TRANSACTION`
+  credencial de servicio en el guard (`src/shared/auth/api-auth.guard.ts:130`, en toda ruta) y el `START TRANSACTION`
   antes del `SET LOCAL` (`token-wallet.service.ts:259-261`); o el `COMMIT` se aplica y su respuesta no llega. ROAX Ads
   lo da por fallido y pide el reintegro antes de ver el débito.
 - **Qué rompe**: el reintegro responde 404 y, si ROAX Ads no reintenta, los tokens de ese débito quedan cobrados sin
@@ -658,7 +671,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 ## Un aviso firmado re-partido pasa la firma y acuña otro ciclo (LOC-235)
 
 - **Dónde**: `src/provider/confio/confio-webhook-signature.ts:435-438` (concatenación sin separador),
-  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:121` (`signatureChecksum`)
+  `src/webhook/subscription-bonus-rule.ts:38-39`, `src/webhook/confio-traza.util.ts:144` (`signatureChecksum`)
 - **Qué lo dispara**: mover un dígito entre campos vecinos de un aviso ya firmado (`1/1990000` → `11/990000`): el
   checksum no cambia y `buildConfioWebhookEventId` acuña otro id.
 - **Qué rompe**: el bono ya no — no acredita un checksum ya aplicado a la fila ni un ciclo no posterior al último
@@ -668,8 +681,8 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Un llamador de `admin/*` con el token de servidor que no se relevó recibe 403 (LOC-271)
 
-- **Dónde**: `src/admin/admin.controller.ts:69` (`@RequireSessionUser()` en la clase), `:100` y `:520`
-  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:99`, `:106`, `:119`
+- **Dónde**: `src/admin/admin.controller.ts:70` (`@RequireSessionUser()` en la clase), `:101` y `:538`
+  (`@AllowServerToken()`, las dos excepciones); `src/shared/auth/api-auth.guard.ts:93`, `:100`, `:113`
 - **Qué lo dispara**: un servicio fuera de platform, processes, roles, auth, mcp-server, alerts-service y
   backend-ads que llame una ruta de `AdminController` distinta de `POST /admin/wallets` o
   `GET /admin/subscriptions` con `ACCESS_SERVER`.
@@ -678,22 +691,22 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## `POST /admin/wallets` no verifica que la marca exista y con sesión de super admin abre saldo sin movimiento (LOC-251)
 
-- **Dónde**: `src/admin/admin.controller.ts:523`, `:536`, `:544-551`, `:550` y `:557` (`createWallet`);
+- **Dónde**: `src/admin/admin.controller.ts:542`, `:555`, `:570-578`, `:576`, `:581` y `:584` (`createWallet`);
   `src/admin/dto/admin-wallet.dto.ts:20`, `:48-54` (`AdminCreateWalletDto`)
 - **Qué lo dispara**: (a) un pedido autenticado a `POST /admin/wallets` con un `brandId` UUID que no
   corresponde a ninguna marca en `backend-platform`; (b) un super admin con sesión que envía `balance > 0`
   desde el diálogo «Crear wallet» del admin (`admin` `src/app/(finance)/finance/wallets/page.tsx:201`).
 - **Qué rompe**: (a) se abren la wallet de dinero y la `internal/TKN` para un UUID sin marca; (b) la wallet
   de dinero nace con `balance: body.balance` y auditoría `wallet_created`, pero sin fila en `transactions`.
-  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:553-561`).
+  Con `ACCESS_SERVER` un `balance` distinto de `0` ya se rechaza con 400 (`:545-553`).
 - **Estado**: abierto — (a) lo cierra verificar la marca contra platform antes de crear (INBOX
   `backend-payments-alta-de-wallet-con-marca-sin-verificar`); (b) lo cierra exigir ajuste con movimiento o
   registrar la transacción inicial al crear desde sesión.
 
 ## Un aviso de Confío más viejo que gana a roles y pierde bajo el candado deja a roles con su movimiento (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:892-903` (`aplicar`, el rechequeo de la marca),
-  y la llamada a roles antes del candado, `:317-327` (`handle`)
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:899-910` (`aplicar`, el rechequeo de la marca),
+  y la llamada a roles antes del candado, `:323-333` (`handle`)
 - **Qué lo dispara**: dos avisos distintos de la misma suscripción a la vez; el más viejo pasa el chequeo sin candado,
   llama a roles, y bajo el candado encuentra la marca ya movida por el nuevo. El orden en que llegan las dos llamadas
   a roles no está garantizado.
@@ -725,7 +738,7 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Una traza `pending` de Confío no la reprocesa nadie solo (LOC-272)
 
-- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:317` (la traza antes de roles);
+- **Dónde**: `src/webhook/confio-subscription-webhook.service.ts:323` (la traza antes de roles);
   `src/webhook/webhook.processor.ts:38-51` (el job sólo cuenta y relanza)
 - **Qué lo dispara**: roles rechaza el movimiento de un aviso firmado; el evento queda `failed` y, pasado el job de
   la cola, `processing`, fuera de `GET webhook/admin/failed`.
@@ -744,3 +757,53 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
   se midió cuánto tarda Confío en avisar el cobro al final de una prueba, ni qué hace el webhook sobre una fila
   `expired` (no se abrió).
 - **Estado**: abierto — lo cierra medir esa demora y que el aviso tardío reactive la fila.
+
+## Revertir la marca de conversión de Confío abre un segundo link y corre la repesca (LOC-350)
+
+- **Dónde**: lectores de la marca, `src/tasks/subscription-renewal.ts:41`, `:78` y
+  `src/tasks/pending-signup-confirmation.ts:77`.
+- **Qué lo dispara**: un `migration:revert` de `migrations/1787862750922-AddInitialPaymentLinkIssuedAt.ts` (`down`,
+  `DROP COLUMN`, `:40-44`), o volver a correr su `up` (backfill, `:31-37`) después.
+- **Qué rompe**: con el código actual, sin la columna toda lectura de `subscriptions` falla (la entidad la
+  selecciona): el `down` sólo es seguro junto con el código que deja de leerla. Sin la marca,
+  `processTrialConversions` emite un segundo link de pago a cada fila que ya lo tuvo en el alta. Re-correr el `up`
+  no devuelve las fechas reales: el backfill marca con `COALESCE("trialStart", "createdAt")` sólo las filas Confío
+  con `providerSubscriptionId`, y corre las franjas de la repesca de altas pendientes. El criterio del backfill es de
+  una sola vez y ya se aplicó donde la migración corrió: no es un punto de control.
+- **Estado**: abierto — lo cierra no revertir esa migración en un ambiente con datos; documentarlo en su
+  encabezado espera la aprobación de `guard-files.sh` (migración ya en el historial).
+
+## Con `JWT_SECRET` y el `id` y el `sid` de una sesión viva se entra como esa persona (LOC-352)
+
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:41` (`verify`, que deja la firma a auth)
+- **Qué lo dispara**: un JWT HS256 firmado con `JWT_SECRET` con `typ: session`, `aud: web-session` y el `id` y el `sid`
+  de una sesión abierta, que se leen sin clave en el payload de cualquier token de esa persona. backend-auth acepta
+  HS256 (`jwks.service.ts:244-252`) y sólo pide que el `sid` sea una sesión viva de ese `id`
+  (`session-liveness.function.ts:13`).
+- **Qué rompe**: auth lo valida y Pagos lo toma por esa persona, con el `isSuperAdmin` de su cuenta. Sin `sid`, o con
+  uno que no es de una sesión viva de ese `id`, ya da 401.
+- **Estado**: abierto — lo cierra que auth deje de aceptar HS256 para sesiones (épica 031) o que los frentes manden
+  el `session_token` EdDSA y Pagos rechace HS256.
+
+## Con auth caído o limitando, toda persona recibe 503 en Pagos (LOC-352)
+
+- **Dónde**: `src/shared/auth/session-verifier.service.ts:57-59`, `:61-67` (`verify`)
+- **Qué lo dispara**: `GET /auth/validate` no contesta en 5 s (o en el `@UpstreamTimeout` de la ruta), o contesta 429,
+  5xx u otro 4xx que no sea 401/403. Cada pedido de una persona es una llamada: comparte con el front y admin la cuota
+  de auth de esa persona (600/min en esa ruta y 7500 cada 15 min), y un token que auth no verifica cuenta en el balde de
+  la IP de Pagos (backend-auth `src/shared/guards/api-key-throttler.guard.ts:110-123`).
+- **Qué rompe**: toda ruta con sesión de persona responde 503 `AUTH_UNAVAILABLE` mientras dure; el token de servidor y
+  la credencial de servicio siguen. Cada 503 deja un `warn` con su causa (LOC-356). Antes de LOC-352 una persona no
+  necesitaba a auth.
+- **Estado**: abierto — lo cierra medir en `dev` las llamadas a `/auth/validate` que suma Pagos y decidir si hace
+  falta un caché corto (que retrasa el 401 de una cuenta desactivada lo que dure).
+
+## Un `0` en un contador de tareas o de facturación frena el arranque del servicio
+
+- **Dónde**: `src/shared/env/positive-int-env.ts:10`; `src/tasks/tasks.service.ts:67-69`, `:72`;
+  `src/checkout/checkout.service.ts:146`
+- **Qué lo dispara**: `MAX_PAYMENT_RETRY_COUNT`, `MAX_PENDING_CONFIRMATIONS`, `PENDING_CONFIRMATION_DAYS` o
+  `BILLING_PERIOD_DAYS` en `0`. Antes de `fc63cc4`, `MAX_PAYMENT_RETRY_COUNT=0` apagaba los reintentos de cobro.
+- **Qué rompe**: el servicio no arranca en ese ambiente. Que algún ambiente tenga `0` es hipótesis: los valores
+  están en Infisical y no se leyeron.
+- **Estado**: abierto — lo cierra quien aprueba: decidir si el piso es 0 o 1 y mirar Infisical antes de desplegar.

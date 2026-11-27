@@ -1,10 +1,5 @@
 import { ConfioSubscriptionInputError } from './confio-subscription-error'
-import {
-  assertConfioBuyer,
-  buildConfioBuyer,
-  resolveConfioBuyer,
-  ConfioBuyerSource,
-} from './confio-buyer'
+import { assertConfioBuyer, buildConfioBuyer, ConfioBuyerSource } from './confio-buyer'
 
 /**
  * El helper es PURO: no toca la red, ni Nest, ni `process.env`. Así que no hay
@@ -265,28 +260,5 @@ describe('assertConfioBuyer — validación de borde', () => {
     const err = rechazo(() => assertConfioBuyer({ ...buyer, email: 'me@x.com', firstName: '' }))
 
     expect(err.field).toBe('buyer.firstName')
-  })
-})
-
-describe('resolveConfioBuyer', () => {
-  it('arma el buyer con los datos que devuelve el lookup para ese userId', async () => {
-    const lookup = jest.fn().mockResolvedValue(source({ name: 'Ana Perez' }))
-
-    const buyer = await resolveConfioBuyer({ id: 'u-1' }, lookup)
-
-    expect(lookup).toHaveBeenCalledWith('u-1')
-    expect(buyer).toEqual({
-      email: 'usuario@roaxai.com',
-      phoneNumber: '+573001234567',
-      firstName: 'Ana',
-      lastName: 'Perez',
-    })
-  })
-
-  it('propaga el fallo del canal tal cual: NO lo convierte en invalid_buyer', async () => {
-    const boom = new Error('USER_LOOKUP_UNAVAILABLE')
-    const lookup = jest.fn().mockRejectedValue(boom)
-
-    await expect(resolveConfioBuyer({ id: 'u-1' }, lookup)).rejects.toBe(boom)
   })
 })

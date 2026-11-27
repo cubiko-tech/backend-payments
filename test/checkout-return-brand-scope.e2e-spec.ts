@@ -1,5 +1,4 @@
 import { INestApplication } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as cookieParser from 'cookie-parser'
@@ -41,6 +40,8 @@ import { Wallet } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { WebhookService } from '../src/webhook/webhook.service'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 const BRAND_A = 'a1160001-1111-4111-8111-111111111111'
 const BRAND_B = 'b1160002-2222-4222-8222-222222222222'
@@ -59,7 +60,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
 
   let app: INestApplication
   let dataSource: DataSource
-  let jwtService: JwtService
+  const sessions = authSessionsDouble()
   let platformClient: ClientPlatformService
   let paymentRepo: Repository<Payment>
   let subRepo: Repository<Subscription>
@@ -136,7 +137,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: sessions },
         ClientPlatformService,
         CheckoutService,
         WalletService,
@@ -176,8 +177,6 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
         provideVal(WebhookService, { setCheckoutService: () => undefined }),
       ],
     }).compile()
-
-    jwtService = moduleFixture.get(JwtService)
     platformClient = moduleFixture.get(ClientPlatformService)
     app = moduleFixture.createNestApplication()
     app.use(cookieParser(JWT_SECRET))
@@ -234,7 +233,7 @@ describe('GET /checkout/return brand scope and query validation (PostgreSQL, LOC
 
   /** Mirrors `frontend-platform/src/lib/bff/client.js:42-48`: user cookie + BFF server Bearer. */
   const getReturnAsUser = (userId: string, query: string) => {
-    const token = jwtService.sign({ id: userId }, { secret: JWT_SECRET })
+    const token = sessions.sign({ id: userId })
     return request(app.getHttpServer())
       .get(`/checkout/return${query ? `?${query}` : ''}`)
       .set('Cookie', `${COOKIE_NAME}=${token}`)

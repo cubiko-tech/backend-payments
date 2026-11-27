@@ -1,9 +1,9 @@
 import { Column, Entity, Index, PrimaryGeneratedColumn, CreateDateColumn } from 'typeorm'
 
 @Entity('audit_log')
-@Index(['entityType', 'entityId', 'createdAt'])
-@Index(['userId', 'createdAt'])
-@Index(['action', 'createdAt'])
+@Index('IDX_audit_log_entity', ['entityType', 'entityId', 'createdAt'])
+@Index('IDX_audit_log_user', ['userId', 'createdAt'])
+@Index('IDX_audit_log_action', ['action', 'createdAt'])
 export class AuditLog {
   @PrimaryGeneratedColumn('uuid') id: string
   @Column() userId: string

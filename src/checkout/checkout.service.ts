@@ -1,11 +1,12 @@
 /**
- * R6: CheckoutService keeps the end-to-end payment, subscription, invoice, DIAN,
- * and role-assignment orchestration together because immediate wallet settlements
- * and deferred external webhooks share the same transactional completion state.
+ * R6: CheckoutService keeps the intake, wallet and external payment paths, their completion,
+ * reconciliation and role assignment together because immediate wallet settlements and deferred
+ * external webhooks share the same completion state and in-flight maps. Pricing, the subscription
+ * it applies, the invoice and DIAN send, and the provider's confirmed amount live in their own files.
  */
 import { HttpStatus, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common'
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm'
-import { DataSource, EntityManager, In, Raw, Repository } from 'typeorm'
+import { DataSource, EntityManager, Raw, Repository } from 'typeorm'
 
 import { WalletService } from '../wallet/wallet.service'
 import { InvoiceService } from '../invoice/invoice.service'
@@ -30,39 +31,19 @@ import {
   PaymentPurpose,
 } from '../payment/entities/payment.entity'
 import { PaymentAttempt, AttemptStatus } from '../payment/entities/paymentAttempt.entity'
-import {
-  Subscription,
-  SubscriptionStatus,
-  SubscriptionProvider,
-} from '../subscription/entities/subscription.entity'
-import {
-  PLAN_APPLYING_EVENTS,
-  SubscriptionEvent,
-  SubscriptionEventType,
-} from '../subscription/entities/subscriptionEvent.entity'
+import { Subscription } from '../subscription/entities/subscription.entity'
+import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
 import { Wallet } from '../wallet/entities/wallet.entity'
-import { InvoiceStatus } from '../invoice/entities/invoice.entity'
 import { BillingProfile } from '../billing-profile/entities/billingProfile.entity'
 
-import {
-  ClientRolesService,
-  PLAN_NOT_FOUND,
-  PRICE_NOT_FOUND_FOR_COUNTRY,
-  PriceResolutionErrorCode,
-} from '../client/client-roles.service'
-import {
-  ClientPlatformService,
-  BRAND_LOOKUP_UNAVAILABLE,
-  BRAND_NOT_FOUND,
-  BRAND_WITHOUT_COUNTRY,
-  BrandCountryErrorCode,
-} from '../client/client-platform.service'
+import { ClientRolesService } from '../client/client-roles.service'
+import { ClientPlatformService } from '../client/client-platform.service'
 import { ClientAuthService } from '../client/client-auth.service'
 import { EnterprisePricingService } from '../subscription/enterprise-pricing.service'
 import { ProviderConfigService } from '../provider/provider-config.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { RequestException } from '../shared/exception/request.exception'
-import { logger as winstonLogger } from '../shared/logger/logger'
+import { positiveIntEnv } from '../shared/env/positive-int-env'
 import { escapeLogValue } from '../shared/logger/log-value'
 import { ConfioApiError } from '../provider/confio/confio-api-error'
 import {
@@ -72,7 +53,6 @@ import {
   InFlightCheckoutsMap,
   isRetryWindowOpen,
   isUniqueConstraintViolation,
-  normalizeIdempotencyKey,
   paymentBirth,
   resolveExistingIdempotentPayment,
 } from './checkout-idempotency'
@@ -80,7 +60,6 @@ import { checkoutExpiryHours } from './checkout-expiry'
 import { BuyerLookupFailure, resolveCheckoutBuyer } from './checkout-buyer'
 import {
   hasWalletPaymentDebit,
-  isLastPaymentNewer,
   reconcileWalletPayment as executeWalletPaymentReconciliation,
   WalletPaymentReconciliationResult,
 } from './wallet-payment-reconciliation'
@@ -94,7 +73,6 @@ import {
 import {
   closeExternalPlanPurchase,
   completeExternalPlanPurchase,
-  hasPaymentTakenEffect,
   LOST_TO_NEWER_PURCHASE_FLAG,
   settleLostExternalPurchase,
 } from './external-payment-close'
@@ -107,6 +85,23 @@ import {
   prepareTokenAmount,
   prepareTokenPackage,
 } from './token-package-checkout'
+import {
+  normalizeRequest as normalizeCheckoutRequest,
+  resolveAmountAndCurrency as resolveCheckoutPricing,
+  ResolvedPricing,
+} from './checkout-pricing'
+import { createOrRenewSubscription as applyPlanPurchase } from './checkout-subscription'
+import {
+  canSendToDian,
+  CheckoutDianDeps,
+  generateInvoice as issueCheckoutInvoice,
+  sendToDianAsync,
+} from './checkout-invoice'
+import {
+  assertProviderConfirmedAmount,
+  hasAmountMismatchMark,
+  isProviderNoticePayload,
+} from './provider-confirmed-amount'
 
 export interface CheckoutRequest {
   brandId: string
@@ -135,17 +130,6 @@ export interface CheckoutRequest {
   renewal?: boolean
 }
 
-/**
- * `country` is populated only when the price came from the country catalog so
- * provider gating and tax calculation use the same country that set the price
- * (omitted for enterprise custom pricing, legacy renewal fallback, and non-plan purposes).
- */
-interface ResolvedPricing {
-  amount: number
-  currency: string
-  country?: string
-}
-
 export interface CheckoutResult {
   paymentId: string
   status: string
@@ -159,7 +143,7 @@ export interface CheckoutResult {
 @Injectable()
 export class CheckoutService implements OnModuleInit {
   private readonly log = new Logger(CheckoutService.name)
-  private readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  private readonly BILLING_PERIOD_DAYS = positiveIntEnv('BILLING_PERIOD_DAYS', 30)
   private readonly inFlightCheckouts: InFlightCheckoutsMap = new Map()
   private readonly inFlightCompletions = new Set<string>()
   private readonly walletReconcileLocks = new Map<string, Promise<void>>()
@@ -209,7 +193,7 @@ export class CheckoutService implements OnModuleInit {
 
   async processCheckout(request: CheckoutRequest): Promise<CheckoutResult> {
     // Normalize once into a new object before any lookup so the cron caller's live subscription data is not mutated.
-    const req = this.normalizeRequest(request)
+    const req = normalizeCheckoutRequest(request)
     const idempotencyFingerprint = req.idempotencyKey ? buildIdempotencyFingerprint(req) : undefined
 
     if (req.idempotencyKey) {
@@ -789,7 +773,7 @@ export class CheckoutService implements OnModuleInit {
       if (error instanceof BuyerLookupFailure) throw error.toException()
       throw new RequestException({
         code: 'PROVIDER_ERROR',
-        message: `Error con ${req.provider}: ${error.message}`,
+        message: `No se pudo iniciar el pago con ${req.provider}`,
       })
     }
   }
@@ -824,14 +808,14 @@ export class CheckoutService implements OnModuleInit {
         payment.provider === PaymentProvider.WALLET ||
         payment.status === PaymentStatus.COMPLETED ||
         payment.status === PaymentStatus.REFUNDED ||
-        this.hasAmountMismatchMark(payment)
+        hasAmountMismatchMark(payment)
       ) {
         return false
       }
 
       const previousStatus = payment.status
       const previousMetadata = payment.metadata
-      const isNotice = Boolean(expectedProvider) || this.isProviderNoticePayload(providerData)
+      const isNotice = Boolean(expectedProvider) || isProviderNoticePayload(providerData)
       const metadata = providerData ? { ...payment.metadata, providerData } : payment.metadata
       const claimed = await this.paymentRepo.update(
         // This write replaces `metadata`: from a stale read it would erase the lost flag.
@@ -881,7 +865,8 @@ export class CheckoutService implements OnModuleInit {
     }
 
     const totalAmount = parseFloat(String(payment.amount))
-    const amountConfirmed = await this.assertProviderConfirmedAmount(
+    const amountConfirmed = await assertProviderConfirmedAmount(
+      { paymentRepo: this.paymentRepo, dataSource: this.dataSource, logger: this.log },
       payment,
       totalAmount,
       providerData,
@@ -1027,7 +1012,7 @@ export class CheckoutService implements OnModuleInit {
     payment.status = PaymentStatus.COMPLETED
     payment.paidAt = paidAt
 
-    this.sendToDianAsync(invoice.id, payment.currency)
+    sendToDianAsync(this.dianDeps, invoice.id, payment.currency)
 
     await this.auditService.log(
       'system',
@@ -1085,7 +1070,7 @@ export class CheckoutService implements OnModuleInit {
       auditService: this.auditService,
       dataSource: this.dataSource,
       logger: this.log,
-      canSendToDian: (invoiceId, currency) => this.canSendToDian(invoiceId, currency),
+      canSendToDian: (invoiceId, currency) => canSendToDian(this.dianDeps, invoiceId, currency),
       dianInFlightWaitMs: this.dianInFlightWaitMs,
     })
   }
@@ -1101,7 +1086,7 @@ export class CheckoutService implements OnModuleInit {
     if (current?.status === PaymentStatus.REFUNDED) {
       return { status: 'failed', refundedToWallet: true }
     }
-    if (current?.status === PaymentStatus.FAILED || this.hasAmountMismatchMark(current)) {
+    if (current?.status === PaymentStatus.FAILED || hasAmountMismatchMark(current)) {
       return { status: 'failed' }
     }
     if (
@@ -1139,7 +1124,7 @@ export class CheckoutService implements OnModuleInit {
     if (payment.status === PaymentStatus.COMPLETED) {
       return { status: 'completed', planSlug: payment.purposeId || undefined }
     }
-    if (payment.status === PaymentStatus.FAILED || this.hasAmountMismatchMark(payment)) {
+    if (payment.status === PaymentStatus.FAILED || hasAmountMismatchMark(payment)) {
       return { status: 'failed' }
     }
     if (!payment.providerPaymentId) {
@@ -1209,216 +1194,13 @@ export class CheckoutService implements OnModuleInit {
     )
   }
 
-  private async resolveAmountAndCurrency(req: CheckoutRequest): Promise<ResolvedPricing> {
-    // Gate on purpose alone so a missing planSlug cannot fall through to the generic caller-priced branch.
-    if (req.purpose === 'plan_purchase') {
-      this.assertUsablePlanSlug(req.planSlug)
-
-      // Caller-requested currency is used only for legacy renewal fallback and legacy enterprise renewal.
-      const legacyCurrency = req.currency || 'COP'
-
-      if (req.planSlug === 'enterprise') {
-        const customPricing = await this.enterprisePricing.getForBrand(req.brandId)
-        if (customPricing) {
-          // Initial sign-up uses the currency stored on the negotiated row so the caller cannot bypass it by sending another currency.
-          if (!req.renewal) {
-            return { amount: Number(customPricing.monthlyPrice), currency: customPricing.currency }
-          }
-          if (customPricing.currency === legacyCurrency) {
-            return { amount: Number(customPricing.monthlyPrice), currency: legacyCurrency }
-          }
-        }
-      }
-
-      if (req.renewal) {
-        return this.renewalPlanPrice(req, legacyCurrency)
-      }
-
-      const resolved = await this.resolvePlanPricingByCountry(req.brandId, req.planSlug)
-      if (!resolved.ok) {
-        // No global ExceptionFilter logs HttpExceptions here, so log catalog/roles failures before throwing.
-        this.log.warn(
-          `Alta rechazada: brand=${req.brandId} plan=${req.planSlug} ` +
-            `country=${resolved.country || 'desconocido'} code=${resolved.code}`,
-        )
-        throw this.planPricingException(req.planSlug, resolved.code)
-      }
-
-      return { amount: resolved.amount, currency: resolved.currency, country: resolved.country }
-    }
-
-    if (!req.currency) {
-      throw new RequestException({ code: 'MISSING_AMOUNT', message: 'Monto y moneda requeridos' })
-    }
-
-    if (typeof req.amount !== 'number' || !Number.isFinite(req.amount) || req.amount <= 0) {
-      throw new RequestException(
-        { code: 'INVALID_AMOUNT', message: 'Amount must be a finite number greater than zero' },
-        HttpStatus.BAD_REQUEST,
-      )
-    }
-
-    return { amount: req.amount, currency: req.currency }
-  }
-
-  /** Resolves plan pricing in the caller-requested currency; used only as the renewal cron fallback. */
-  private async legacyPlanPrice(planSlug: string, currency: string): Promise<ResolvedPricing> {
-    const price = await this.clientRoles.getPlanPrice(planSlug, currency)
-    if (price === null) {
-      throw new RequestException({
-        code: 'INVALID_PLAN',
-        message: `Plan '${planSlug}' no disponible en moneda '${currency}'`,
-      })
-    }
-    return { amount: price, currency }
-  }
-
-  /**
-   * Renewal pricing tries the country catalog first and falls back to `legacyPlanPrice`
-   * on country/catalog lookup errors so a transient failure or a non-UUID `subscriptions.brandId`
-   * does not turn an active subscription into `past_due`.
-   */
-  private async renewalPlanPrice(
-    req: CheckoutRequest,
-    legacyCurrency: string,
-  ): Promise<ResolvedPricing> {
-    if (this.isUsableBrandId(req.brandId)) {
-      const resolved = await this.resolvePlanPricingByCountry(req.brandId.trim(), req.planSlug)
-      if (resolved.ok) {
-        return { amount: resolved.amount, currency: resolved.currency, country: resolved.country }
-      }
-      this.log.error(
-        `Renovación fuera del catálogo por país: brand=${req.brandId} plan=${req.planSlug} ` +
-          `country=${resolved.country || 'desconocido'} code=${resolved.code} → precio legacy ${legacyCurrency}`,
-      )
-    } else {
-      this.log.error(
-        `Renovación con brandId no consultable: brand=${req.brandId} plan=${req.planSlug} ` +
-          `→ precio legacy ${legacyCurrency}`,
-      )
-    }
-
-    return this.legacyPlanPrice(req.planSlug, legacyCurrency)
-  }
-
-  /**
-   * Uses `resolveBrandCountry` rather than `getBrandCountry` so each failure mode maps to its own HTTP status.
-   * The row returned by `resolvePriceForCountry` comes from `ClientRolesService`'s cache and must not be mutated.
-   */
-  private async resolvePlanPricingByCountry(
-    brandId: string,
-    planSlug: string,
-  ): Promise<
-    // Opposite-branch `?: never` fields let TypeScript narrow the union with `strictNullChecks: false`.
-    | { ok: true; amount: number; currency: string; country: string; code?: never }
-    | {
-        ok: false
-        code: BrandCountryErrorCode | PriceResolutionErrorCode
-        country?: string
-        amount?: never
-        currency?: never
-      }
-  > {
-    const brand = await this.clientPlatform.resolveBrandCountry(brandId)
-    if (!brand.ok) return { ok: false, code: brand.code }
-
-    const price = await this.clientRoles.resolvePriceForCountry(planSlug, brand.country)
-    if (!price.ok) return { ok: false, code: price.code, country: brand.country }
-
-    // Reject null/missing or non-finite prices (`Number(null)` coerces to 0, which is valid only when explicitly 0.00).
-    const raw = price.price.price
-    const amount = Number(raw)
-    const currency = String(price.price.currency || '').toUpperCase()
-    const missing = raw === null || raw === undefined
-    if (missing || !Number.isFinite(amount) || amount < 0 || !/^[A-Z]{3}$/.test(currency)) {
-      this.log.error(
-        `Fila de precio inválida para plan=${planSlug} country=${brand.country}: ` +
-          `price=${String(raw)} currency=${String(price.price.currency)}`,
-      )
-      return { ok: false, code: PRICE_NOT_FOUND_FOR_COUNTRY, country: brand.country }
-    }
-
-    return { ok: true, amount, currency, country: brand.country }
-  }
-
-  /**
-   * Returns a shallow copy with `brandId` normalized; UUID format is enforced only on
-   * initial `plan_purchase` so renewals of existing subscriptions with non-UUID IDs do not fail.
-   */
-  private normalizeRequest(req: CheckoutRequest): CheckoutRequest {
-    const brandId =
-      req.purpose === 'plan_purchase' && !req.renewal
-        ? this.assertUsableBrandId(req.brandId)
-        : typeof req.brandId === 'string'
-          ? req.brandId.trim()
-          : req.brandId
-
-    if (
-      (req.purpose !== 'token_package' && req.packageId !== undefined) ||
-      (req.purpose !== 'token_amount' && req.tokens !== undefined)
-    ) {
-      throw new RequestException(
-        {
-          code: 'CONFLICTING_TOKEN_FIELDS',
-          message: 'packageId is only allowed for token_package and tokens only for token_amount',
-        },
-        HttpStatus.BAD_REQUEST,
-      )
-    }
-
-    const idempotencyKey =
-      req.idempotencyKey === undefined ? undefined : normalizeIdempotencyKey(req.idempotencyKey)
-
-    if (req.purpose === 'token_amount' && !idempotencyKey) {
-      throw new RequestException(
-        {
-          code: 'MISSING_IDEMPOTENCY_KEY',
-          message: 'Idempotency-Key is required for token_amount checkouts',
-        },
-        HttpStatus.BAD_REQUEST,
-      )
-    }
-
-    if (req.idempotencyKey === undefined) {
-      return { ...req, brandId }
-    }
-
-    return { ...req, brandId, idempotencyKey }
-  }
-
-  private static readonly BRAND_ID_RE =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-  private isUsableBrandId(brandId: string): boolean {
-    return typeof brandId === 'string' && CheckoutService.BRAND_ID_RE.test(brandId.trim())
-  }
-
-  /**
-   * Rejects malformed `brandId` values with 400 before calling `backend-platform`, which would
-   * otherwise return 400/404 and be misclassified as 503 `BRAND_LOOKUP_UNAVAILABLE`.
-   */
-  private assertUsableBrandId(brandId: string): string {
-    const normalized = typeof brandId === 'string' ? brandId.trim() : ''
-    if (!this.isUsableBrandId(normalized)) {
-      throw new RequestException(
-        { code: 'INVALID_BRAND_ID', message: 'brandId requerido y debe ser un UUID' },
-        HttpStatus.BAD_REQUEST,
-      )
-    }
-    return normalized
-  }
-
-  /**
-   * Restricts `planSlug` to safe identifier characters to prevent log injection (CWE-117) and path
-   * traversal in `assignPlanToBrand`; `typeof` guards against `RegExp.test(undefined)` coercing to `"undefined"`.
-   */
-  private assertUsablePlanSlug(planSlug: string) {
-    if (typeof planSlug !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(planSlug)) {
-      throw new RequestException(
-        { code: 'INVALID_PLAN_SLUG', message: 'planSlug inválido' },
-        HttpStatus.BAD_REQUEST,
-      )
-    }
+  private resolveAmountAndCurrency(req: CheckoutRequest): Promise<ResolvedPricing> {
+    return resolveCheckoutPricing(req, {
+      enterprisePricing: this.enterprisePricing,
+      clientPlatform: this.clientPlatform,
+      clientRoles: this.clientRoles,
+      logger: this.log,
+    })
   }
 
   /**
@@ -1478,199 +1260,25 @@ export class CheckoutService implements OnModuleInit {
     }
   }
 
-  /**
-   * `PLAN_NOT_FOUND` maps to 503 rather than 404 because `getPlanRows()` returns an empty map
-   * when `backend-roles` is unreachable with a cold cache.
-   */
-  private planPricingException(
-    planSlug: string,
-    code: BrandCountryErrorCode | PriceResolutionErrorCode,
-  ): RequestException {
-    switch (code) {
-      case BRAND_LOOKUP_UNAVAILABLE:
-        return new RequestException(
-          {
-            code: BRAND_LOOKUP_UNAVAILABLE,
-            message: 'No se pudo consultar el país de la marca, reintentá en unos minutos',
-          },
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
-      case BRAND_NOT_FOUND:
-        return new RequestException(
-          { code: BRAND_NOT_FOUND, message: 'La marca no existe' },
-          HttpStatus.NOT_FOUND,
-        )
-      case BRAND_WITHOUT_COUNTRY:
-        return new RequestException(
-          {
-            code: BRAND_WITHOUT_COUNTRY,
-            message: 'La marca no tiene país registrado: no se puede determinar el precio',
-          },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      case PRICE_NOT_FOUND_FOR_COUNTRY:
-        // Omit the country from the error message so the endpoint cannot be used to probe a brand's country.
-        return new RequestException(
-          {
-            code: PRICE_NOT_FOUND_FOR_COUNTRY,
-            message: `El plan '${planSlug}' no tiene precio para el país de la marca`,
-          },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      case PLAN_NOT_FOUND:
-      default:
-        return new RequestException(
-          { code: PLAN_NOT_FOUND, message: `Catálogo de planes no disponible para '${planSlug}'` },
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
-    }
-  }
-
-  private async createOrRenewSubscription(
+  private createOrRenewSubscription(
     req: CheckoutRequest,
     payment: Payment,
     manager?: EntityManager,
   ): Promise<{ subscription: Subscription; extended: boolean }> {
-    const subscriptionRepo = manager?.getRepository(Subscription) ?? this.subscriptionRepo
-    const subscriptionEventRepo =
-      manager?.getRepository(SubscriptionEvent) ?? this.subscriptionEventRepo
-    const now = new Date()
-    const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + this.BILLING_PERIOD_DAYS)
-
-    let subscription = await subscriptionRepo.findOne({
-      where: { brandId: req.brandId },
-    })
-
-    if (subscription) {
-      if (payment?.id) {
-        const existingEvent = await subscriptionEventRepo.findOne({
-          where: { paymentId: payment.id, eventType: In(PLAN_APPLYING_EVENTS) },
-        })
-        if (subscription.lastPaymentId === payment.id || existingEvent) {
-          return {
-            subscription,
-            extended: existingEvent?.metadata?.renewal === 'extended',
-          }
-        }
-      }
-      const fromPlan = subscription.planSlug
-      const fromStatus = subscription.status
-      const existingPeriodEnd =
-        subscription.currentPeriodEnd instanceof Date
-          ? subscription.currentPeriodEnd
-          : subscription.currentPeriodEnd
-            ? new Date(subscription.currentPeriodEnd)
-            : null
-      const isSameActivePlanExtension =
-        fromStatus === SubscriptionStatus.ACTIVE &&
-        !subscription.cancelledAt &&
-        fromPlan === req.planSlug &&
-        existingPeriodEnd !== null &&
-        !Number.isNaN(existingPeriodEnd.getTime()) &&
-        existingPeriodEnd.getTime() > now.getTime()
-
-      const targetPeriodEnd = isSameActivePlanExtension
-        ? new Date(existingPeriodEnd.getTime())
-        : periodEnd
-      if (isSameActivePlanExtension) {
-        targetPeriodEnd.setDate(targetPeriodEnd.getDate() + this.BILLING_PERIOD_DAYS)
-      }
-
-      subscription.planSlug = req.planSlug
-      subscription.status = SubscriptionStatus.ACTIVE
-      subscription.provider = req.provider as SubscriptionProvider
-      subscription.walletId = req.walletId || subscription.walletId
-      subscription.currentPeriodStart = isSameActivePlanExtension
-        ? subscription.currentPeriodStart || now
-        : now
-      subscription.currentPeriodEnd = targetPeriodEnd
-      subscription.nextBillingDate = targetPeriodEnd
-      // An older purchase of this plan extends it, but the newest purchase stays named:
-      // the close of another plan decides its conflict by this payment's createdAt.
-      const keepsNewerPayment =
-        fromPlan === req.planSlug &&
-        !!subscription.lastPaymentId &&
-        (await isLastPaymentNewer(
-          subscription.lastPaymentId,
-          payment,
-          manager?.getRepository(Payment) ?? this.paymentRepo,
-        ))
-      if (!keepsNewerPayment) {
-        subscription.lastPaymentId = payment.id
-      }
-      subscription.retryCount = 0
-      subscription.cancelledAt = null
-      subscription.cancelReason = null
-      // Non-null `accessEndsAt` means a pending cancellation; clear it on renewal so `GET /subscription/current` does not report a stale cutoff.
-      subscription.accessEndsAt = null
-      subscription.autoRenew = true
-
-      await subscriptionRepo.save(subscription)
-
-      const eventType =
-        fromPlan !== req.planSlug
-          ? SubscriptionEventType.PLAN_CHANGED
-          : SubscriptionEventType.RENEWED
-
-      await subscriptionEventRepo.save(
-        subscriptionEventRepo.create({
-          subscriptionId: subscription.id,
-          eventType,
-          fromPlanSlug: fromPlan,
-          toPlanSlug: req.planSlug,
-          fromStatus,
-          toStatus: SubscriptionStatus.ACTIVE,
-          triggeredBy: req.userId,
-          paymentId: payment.id,
-          reason:
-            eventType === SubscriptionEventType.PLAN_CHANGED
-              ? `Cambio de plan ${fromPlan} → ${req.planSlug}`
-              : 'Renovación por pago',
-          ...(isSameActivePlanExtension
-            ? {
-                metadata: {
-                  renewal: 'extended',
-                  currentPeriodEnd: targetPeriodEnd.toISOString(),
-                },
-              }
-            : {}),
-        }),
-      )
-
-      return { subscription, extended: isSameActivePlanExtension }
-    } else {
-      subscription = subscriptionRepo.create({
-        brandId: req.brandId,
-        userId: req.userId,
-        planSlug: req.planSlug,
-        status: SubscriptionStatus.ACTIVE,
-        provider: req.provider as SubscriptionProvider,
-        walletId: req.walletId || null,
-        currentPeriodStart: now,
-        currentPeriodEnd: periodEnd,
-        nextBillingDate: periodEnd,
-        lastPaymentId: payment.id,
-        autoRenew: true,
-      })
-      await subscriptionRepo.save(subscription)
-
-      await subscriptionEventRepo.save(
-        subscriptionEventRepo.create({
-          subscriptionId: subscription.id,
-          eventType: SubscriptionEventType.CREATED,
-          toPlanSlug: req.planSlug,
-          toStatus: SubscriptionStatus.ACTIVE,
-          triggeredBy: req.userId,
-          paymentId: payment.id,
-        }),
-      )
-    }
-
-    return { subscription, extended: false }
+    return applyPlanPurchase(
+      req,
+      payment,
+      {
+        subscriptionRepo: this.subscriptionRepo,
+        subscriptionEventRepo: this.subscriptionEventRepo,
+        paymentRepo: this.paymentRepo,
+        billingPeriodDays: this.BILLING_PERIOD_DAYS,
+      },
+      manager,
+    )
   }
 
-  private async generateInvoice(
+  private generateInvoice(
     payment: Payment,
     req: any,
     subtotal: number,
@@ -1679,348 +1287,24 @@ export class CheckoutService implements OnModuleInit {
     tax: any,
     extendedUntil?: Date,
   ): Promise<any> {
-    const billingProfile = await this.billingProfileRepo.findOne({
-      where: { brandId: payment.brandId },
-    })
-
-    const suffix = payment?.id
-      ? `-${String(payment.id).replace(/-/g, '').slice(0, 6).toUpperCase()}`
-      : ''
-    const invoiceNumber = `${process.env.INVOICE_PREFIX || 'CK'}-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}${suffix}`
-
-    const invoiceTotal = Math.round((subtotal + taxAmount) * 100) / 100
-    const items = []
-
-    if (req.purpose === 'plan_purchase') {
-      const description = extendedUntil
-        ? `Extensión del plan ${req.planSlug} hasta ${extendedUntil.toISOString()}`
-        : `Plan ${req.planSlug} — Suscripción mensual Cubiko`
-      items.push({
-        description,
-        quantity: 1,
-        unitPrice: subtotal,
-        subtotal,
-        taxRate: tax.taxRate ?? 0,
-        taxAmount,
-        total: invoiceTotal,
-        productType: 'plan',
-        referenceType: 'subscription',
-        referenceId: req.planSlug,
-      })
-    } else if (req.purpose === 'token_package') {
-      items.push({
-        description: tokenPackageInvoiceDescription(payment),
-        quantity: 1,
-        unitPrice: subtotal,
-        subtotal,
-        taxRate: tax.taxRate ?? 0,
-        taxAmount,
-        total: invoiceTotal,
-        productType: 'token_package',
-        referenceType: 'payment',
-        referenceId: payment.id,
-      })
-    } else if (req.purpose === 'token_amount') {
-      items.push({
-        description: tokenAmountInvoiceDescription(payment),
-        quantity: 1,
-        unitPrice: subtotal,
-        subtotal,
-        taxRate: tax.taxRate ?? 0,
-        taxAmount,
-        total: invoiceTotal,
-        productType: 'token_amount',
-        referenceType: 'payment',
-        referenceId: payment.id,
-      })
-    } else if (req.purpose === 'wallet_recharge') {
-      items.push({
-        description: 'Créditos de uso de la plataforma ROAX',
-        quantity: 1,
-        unitPrice: subtotal,
-        subtotal,
-        taxRate: tax.taxRate ?? 0,
-        taxAmount,
-        total: invoiceTotal,
-        productType: 'recharge',
-        referenceType: 'payment',
-        referenceId: payment.id,
-      })
-    } else {
-      items.push({
-        description: 'Pago de servicio Cubiko',
-        quantity: 1,
-        unitPrice: subtotal,
-        subtotal,
-        taxRate: tax.taxRate ?? 0,
-        taxAmount,
-        total: invoiceTotal,
-        productType: 'service',
-        referenceType: 'payment',
-        referenceId: payment.id,
-      })
+    const deps = {
+      billingProfileRepo: this.billingProfileRepo,
+      invoiceService: this.invoiceService,
     }
-
-    const requestBuyer = req?.buyer || payment.metadata?.buyer
-    const buyerIdentification = {
-      brandId: payment.brandId,
-      userId: payment.userId,
-      ...(billingProfile
-        ? {
-            billingProfileId: billingProfile.id,
-            legalName: billingProfile.legalName,
-            taxId: billingProfile.taxId,
-            taxIdType: billingProfile.taxIdType,
-            email: billingProfile.email,
-            country: billingProfile.country,
-          }
-        : {}),
-      ...(requestBuyer
-        ? {
-            firstName: requestBuyer.firstName,
-            lastName: requestBuyer.lastName,
-            name:
-              [requestBuyer.firstName, requestBuyer.lastName].filter(Boolean).join(' ') ||
-              billingProfile?.legalName ||
-              undefined,
-            email: requestBuyer.email || billingProfile?.email,
-            phoneNumber: requestBuyer.phoneNumber || billingProfile?.phone,
-          }
-        : {}),
-    }
-
-    const result = await this.invoiceService.create({
-      brandId: payment.brandId,
-      paymentId: payment.id,
-      billingProfileId: billingProfile?.id || null,
-      invoiceNumber,
+    return issueCheckoutInvoice(
+      deps,
+      payment,
+      req,
       subtotal,
-      taxTotal: taxAmount,
-      total: invoiceTotal,
+      taxAmount,
       currency,
-      status: InvoiceStatus.PAID,
-      issuedAt: new Date(),
-      paidAt: new Date(),
-      ...(req.purpose === 'wallet_recharge' ||
-      req.purpose === 'token_package' ||
-      req.purpose === 'token_amount'
-        ? {
-            metadata: {
-              serviceDescription:
-                req.purpose === 'token_package'
-                  ? tokenPackageInvoiceDescription(payment)
-                  : req.purpose === 'token_amount'
-                    ? tokenAmountInvoiceDescription(payment)
-                    : 'Créditos de uso de la plataforma ROAX',
-              taxRate: tax.taxRate ?? 0,
-              taxName: tax.taxName || 'N/A',
-              buyer: buyerIdentification,
-            },
-          }
-        : {}),
-      items,
-    })
-
-    if (result && typeof result === 'object' && 'error' in result && (result as any).error) {
-      throw new Error((result as any).error)
-    }
-    if (!result?.data) {
-      throw new Error('Failed to create invoice')
-    }
-
-    return result.data
-  }
-
-  private readonly providerConfirmedAmountSpecs: Record<
-    string,
-    | {
-        verifiesAmount: false
-        reason: 'provider_webhook_omits_confirmed_amount'
-      }
-    | {
-        verifiesAmount: true
-        unit: 'cents' | 'major'
-        extractConfirmedAmount: (providerData: any) => unknown
-      }
-  > = {
-    [PaymentProvider.STRIPE]: {
-      verifiesAmount: true,
-      unit: 'cents',
-      extractConfirmedAmount: (providerData: any) =>
-        providerData?.amount ??
-        providerData?.amount_total ??
-        providerData?.amountTotal ??
-        providerData?.data?.object?.amount ??
-        providerData?.data?.object?.amount_total ??
-        providerData?.providerStatus?.amountTotal,
-    },
-    [PaymentProvider.CONFIO]: {
-      verifiesAmount: true,
-      unit: 'cents',
-      extractConfirmedAmount: (providerData: any) =>
-        providerData?.data?.amountCents ??
-        providerData?.amountCents ??
-        providerData?.providerStatus?.amountCents,
-    },
-    [PaymentProvider.DROPI]: {
-      verifiesAmount: true,
-      unit: 'major',
-      extractConfirmedAmount: (providerData: any) =>
-        providerData?.amount ?? providerData?.data?.amount ?? providerData?.providerStatus?.amount,
-    },
-    // Its webhook omits the amount; only its status answer brings it.
-    [PaymentProvider.MERCADOPAGO]: {
-      verifiesAmount: true,
-      unit: 'major',
-      extractConfirmedAmount: (providerData: any) =>
-        providerData?.providerStatus?.transactionAmount,
-    },
-  }
-
-  private hasAmountMismatchMark(payment?: Payment | null): boolean {
-    return Boolean(payment?.metadata && payment.metadata.amountMismatch)
-  }
-
-  private async markPaymentAmountMismatch(
-    payment: Payment,
-    providerData: any,
-    mismatch: {
-      code: 'PROVIDER_AMOUNT_MISMATCH'
-      paymentId: string
-      provider: string
-      unit: 'cents' | 'major'
-      expectedAmount: number
-      confirmedAmount: number
-      message: string
-    },
-  ): Promise<void> {
-    const updatedMetadata = {
-      ...(payment.metadata || {}),
-      ...(providerData ? { providerData } : {}),
-      amountMismatch: mismatch,
-    }
-    await this.paymentRepo.update(
-      { id: payment.id, status: payment.status },
-      {
-        status: PaymentStatus.FAILED,
-        failureReason: mismatch.message,
-        metadata: updatedMetadata,
-      },
+      tax,
+      extendedUntil,
     )
   }
 
-  private toConfirmedAmountUnit(amountInMajorUnits: number, unit: 'cents' | 'major'): number {
-    if (unit === 'cents') {
-      return Math.round(Number(amountInMajorUnits) * 100)
-    }
-    return Math.round(Number(amountInMajorUnits) * 100) / 100
-  }
-
-  private normalizeConfirmedAmountInUnit(rawAmount: number, unit: 'cents' | 'major'): number {
-    if (unit === 'cents') {
-      return Math.round(rawAmount)
-    }
-    return Math.round(rawAmount * 100) / 100
-  }
-
-  private isProviderNoticePayload(providerData?: any): boolean {
-    if (!providerData || typeof providerData !== 'object') return false
-    return typeof providerData.source !== 'string' || providerData.source.length === 0
-  }
-
-  private async assertProviderConfirmedAmount(
-    payment: Payment,
-    expectedAmount: number,
-    providerData?: any,
-    isNotice = false,
-    previousStatus: PaymentStatus = PaymentStatus.PENDING,
-    previousMetadata?: Payment['metadata'],
-  ): Promise<boolean> {
-    const providerKey = String(payment.provider || '').toLowerCase()
-    const spec = this.providerConfirmedAmountSpecs[providerKey]
-    if (!spec || !spec.verifiesAmount) {
-      return true
-    }
-    const rawCandidate =
-      (providerData && typeof providerData === 'object'
-        ? spec.extractConfirmedAmount(providerData)
-        : undefined) ??
-      (payment.metadata?.providerData && typeof payment.metadata.providerData === 'object'
-        ? spec.extractConfirmedAmount(payment.metadata.providerData)
-        : undefined)
-    if (
-      rawCandidate === undefined ||
-      rawCandidate === null ||
-      rawCandidate === '' ||
-      !Number.isFinite(Number(rawCandidate))
-    ) {
-      if (!isNotice) {
-        return true
-      }
-      this.log.warn(
-        `Provider ${providerKey} notice for payment ${payment.id} omitted confirmed amount; deferring to reconciliation`,
-      )
-      await this.paymentRepo.update(
-        { id: payment.id, status: PaymentStatus.PROCESSING },
-        { status: previousStatus, metadata: previousMetadata },
-      )
-      payment.status = previousStatus
-      payment.metadata = previousMetadata
-      return false
-    }
-    const numericConfirmed = Number(rawCandidate)
-    const expectedInUnit = this.toConfirmedAmountUnit(expectedAmount, spec.unit)
-    const confirmedInUnit = this.normalizeConfirmedAmountInUnit(numericConfirmed, spec.unit)
-    if (expectedInUnit !== confirmedInUnit) {
-      const message =
-        `Provider confirmed gross amount (${confirmedInUnit} ${spec.unit}) does not match ` +
-        `payment.amount (${expectedInUnit} ${spec.unit}) for payment ${payment.id}`
-      const mismatch = {
-        code: 'PROVIDER_AMOUNT_MISMATCH' as const,
-        paymentId: payment.id,
-        provider: providerKey,
-        unit: spec.unit,
-        expectedAmount: expectedInUnit,
-        confirmedAmount: confirmedInUnit,
-        message,
-      }
-      this.log.error(message)
-      winstonLogger.log('error', message, mismatch)
-      // What was given stays given: `failed` would leave it in place with nothing to revert it.
-      if (await hasPaymentTakenEffect(payment.id, this.dataSource)) return true
-      await this.markPaymentAmountMismatch(payment, providerData, mismatch)
-      throw new RequestException(
-        {
-          code: 'PROVIDER_AMOUNT_MISMATCH',
-          paymentId: payment.id,
-          message,
-        },
-        HttpStatus.CONFLICT,
-      )
-    }
-    return true
-  }
-
-  private sendToDianAsync(invoiceId: string, currency: string) {
-    if (!this.canSendToDian(invoiceId, currency)) return
-
-    // Fire and forget: the buyer's response does not wait for the DIAN.
-    this.dianService.sendInvoice(invoiceId).catch((error) => {
-      winstonLogger.log('error', `Error enviando factura ${invoiceId} a DIAN: ${error.message}`)
-    })
-  }
-
-  private canSendToDian(invoiceId: string, currency: string): boolean {
-    // DIAN/Siigo electronic invoicing applies only to COP documents; `DianService` defaults missing billing profiles to CO.
-    if (currency && currency.toUpperCase() !== 'COP') {
-      this.log.warn(
-        `Factura ${invoiceId} emitida en ${currency}: no se envía a la DIAN ` +
-          '(facturación electrónica colombiana)',
-      )
-      return false
-    }
-
-    return this.dianService.isConfigured()
+  private get dianDeps(): CheckoutDianDeps {
+    return { dianService: this.dianService, logger: this.log }
   }
 
   private async assignPlanInRoles(brandId: string, planSlug: string, expiresAt?: Date) {
@@ -2060,13 +1344,4 @@ export class CheckoutService implements OnModuleInit {
     })
     return profile?.country || 'CO' // Default Colombia
   }
-}
-
-/** The invoiced line of a token package: only the paid tokens, the bonus is not invoiced. */
-function tokenPackageInvoiceDescription(payment: Payment): string {
-  return `Paquete de ${Number(payment.metadata?.tokenPackage?.purchasedTokens)} tokens ROAX`
-}
-
-function tokenAmountInvoiceDescription(payment: Payment): string {
-  return `Compra de ${Number(payment.metadata?.tokenAmount?.purchasedTokens)} tokens ROAX`
 }

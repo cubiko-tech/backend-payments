@@ -5,7 +5,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -29,6 +28,8 @@ import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { WalletBalanceSnapshot } from '../src/wallet/entities/walletBalanceSnapshot.entity'
 import { WalletService } from '../src/wallet/wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -89,8 +90,8 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
     })
     await dataSource.initialize()
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: 'superadmin-loc311', isSuperAdmin: true, brand: null })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: 'superadmin-loc311', isSuperAdmin: true, brand: null })
     const repo = (entity: typeof Payment | typeof Subscription | typeof Wallet, conn: string) => ({
       provide: getRepositoryToken(entity, conn),
       useValue: dataSource.getRepository(entity),
@@ -101,7 +102,7 @@ describe('Admin list filters over HTTP (PostgreSQL, LOC-311)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         ...[Subscription, Payment, Wallet].flatMap((e) => [repo(e, 'DBRead'), repo(e, 'DBWrite')]),
         // R17: the constructor needs them; the list routes never touch these tables.
         { provide: getRepositoryToken(ProviderConfig, 'DBRead'), useValue: {} },

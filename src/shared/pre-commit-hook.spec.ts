@@ -1,3 +1,5 @@
+// R6: One suite for the pre-commit hook: every case runs it against the same workspace and staged
+// blobs built by setupWorkspace at its top.
 // Red when pre-commit.sh skips gitleaks, uses eslint --fix, lints disk vs index, or in-container.sh fails >128KiB.
 import { spawnSync } from 'child_process'
 import { createHash } from 'crypto'

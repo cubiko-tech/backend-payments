@@ -36,24 +36,6 @@ export interface RefundResult {
   amount: number
 }
 
-export interface CreateSubscriptionParams {
-  brandId: string
-  userId: string
-  planSlug: string
-  priceAmount: number
-  currency: string
-  paymentMethodId?: string
-  trialDays?: number
-  metadata?: Record<string, any>
-}
-
-export interface SubscriptionResult {
-  providerSubscriptionId: string
-  status: string
-  currentPeriodStart: Date
-  currentPeriodEnd: Date
-}
-
 export interface SaveMethodParams {
   brandId: string
   userId: string
@@ -84,7 +66,6 @@ export interface PaymentProvider {
   refundPayment(providerPaymentId: string, amount?: number): Promise<RefundResult>
 
   // Suscripciones
-  createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult>
   // `reason` es OBLIGATORIO también en la firma: ConfioPagos lo EXIGE en runtime,
   // así que dejarlo opcional acá le regalaba al primer llamador que pase por
   // `ProviderFactory` un 503 que el compilador podía atajar. Stripe, mercadopago y

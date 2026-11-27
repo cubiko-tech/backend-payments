@@ -1,7 +1,6 @@
 import { INestApplication } from '@nestjs/common'
 import { randomUUID } from 'crypto'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -30,6 +29,8 @@ import { TRM_SOURCE_URL, TrmService } from '../../src/trm/trm.service'
 import { Wallet } from '../../src/wallet/entities/wallet.entity'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
 import { TrmSource } from './trm-source.fixture'
+import { authSessionsDouble } from './auth-session.double'
+import { SessionVerifier } from '../../src/shared/auth/session-verifier.service'
 
 export const MEMBER_ID = 'member-loc174'
 // Made per run: the credential double accepts exactly this value, so no key sits in the source.
@@ -40,7 +41,7 @@ export const COLOMBIAN_VAT = { taxName: 'IVA', taxRate: 0.19, isInclusive: true 
 export interface RechargeApp {
   app: INestApplication
   moduleRef: TestingModule
-  jwt: JwtService
+  sessions: ReturnType<typeof authSessionsDouble>
   tax: { getTaxForCountry: jest.Mock }
   platform: { canViewBrandCredit: jest.Mock }
   apm: ApmDouble
@@ -80,7 +81,7 @@ export async function startRechargeApp(
   brandId: string,
   options: { realPlatform?: boolean } = {},
 ) {
-  const jwt = new JwtService({ secret: JWT_SECRET })
+  const sessions = authSessionsDouble()
   // R17: tax_config is reference data shared by every suite; the case fixes the 19 % it prices with.
   const tax = { getTaxForCountry: jest.fn().mockResolvedValue(COLOMBIAN_VAT) }
   // R17: membership lives in backend-platform, a remote service; only the member belongs here.
@@ -116,7 +117,7 @@ export async function startRechargeApp(
       Reflector,
       ApiAuthGuard,
       { provide: TRM_SOURCE_URL, useValue: trm.url },
-      { provide: JwtService, useValue: jwt },
+      { provide: SessionVerifier, useValue: sessions },
       { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
       repo(Payment, 'DBWrite'),
       repo(Wallet, 'DBWrite'),
@@ -133,7 +134,7 @@ export async function startRechargeApp(
   const app = moduleRef.createNestApplication()
   app.useGlobalPipes(createGlobalValidationPipe())
   await app.init()
-  return { app, moduleRef, jwt, tax, platform, apm, dian } as RechargeApp
+  return { app, moduleRef, sessions, tax, platform, apm, dian } as RechargeApp
 }
 
 /** Drops the TRM cached by an earlier case: the cache lasts an hour and each case sets its rate. */

@@ -103,17 +103,6 @@ export class ConfioPlanService {
     return mapping.confioName
   }
 
-  /** Todos los mapeos de un plan: una fila por moneda y variante de prueba. */
-  async findMappings(planSlug: string): Promise<ConfioSubscriptionPlan[]> {
-    return this.planReadRepo.find({
-      where: { planSlug },
-      // `withTrial` entra en el orden porque desde que hay dos filas por moneda el
-      // orden anterior dejó de ser total, y una lista que se reordena sola entre
-      // llamadas es un dolor de cabeza para quien la lee o la compara.
-      order: { currencyCode: 'ASC', withTrial: 'DESC' },
-    })
-  }
-
   /**
    * TODOS los mapeos de la tabla, sin filtrar por plan.
    *
@@ -122,9 +111,8 @@ export class ConfioPlanService {
    * en el chequeo porque esta clase es la única puerta de lectura de
    * `confio_subscription_plan`.
    *
-   * El orden es TOTAL —plan, moneda y variante— por el mismo motivo que
-   * `findMappings`: una lista que se reordena sola entre pasadas hace ilegible
-   * el log que se compara con el de ayer.
+   * The order is TOTAL (plan, currency and variant): a list that reorders itself
+   * between passes makes the log unreadable against yesterday's.
    */
   async findAllMappings(): Promise<ConfioSubscriptionPlan[]> {
     return this.planReadRepo.find({

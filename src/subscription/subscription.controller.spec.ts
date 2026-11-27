@@ -1,7 +1,6 @@
 // R6: Keeps all SubscriptionController route authorization and delegation specs in a single controller test file.
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import * as request from 'supertest'
 
@@ -13,6 +12,8 @@ import { ClientRolesService } from '../client/client-roles.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { unknownServiceKeys } from '../../test/support/service-credential.double'
 import { RequestException } from '../shared/exception/request.exception'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 const READS = [['getCurrent'], ['getAcceptanceLink'], ['getHistory'], ['confirm']] as const
 
@@ -206,14 +207,12 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
   const FOREIGN_BRAND_ID = '22222222-2222-4222-8222-222222222222'
   const USER_ID = '33333333-3333-4333-8333-333333333333'
-  const JWT_SECRET = 'loc48-test-jwt-secret'
   const SERVER_SECRET = 'loc48-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let subscriptionService: {
@@ -229,14 +228,12 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
   let platformClient: { canViewBrandCredit: jest.Mock }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
 
     subscriptionService = {
       create: jest.fn().mockImplementation(async (data: any) => ({
@@ -274,7 +271,7 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
         ApiAuthGuard,
         unknownServiceKeys,
         Reflector,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },
         { provide: SubscriptionService, useValue: subscriptionService },
         { provide: EnterprisePricingService, useValue: enterprisePricingService },
@@ -292,7 +289,6 @@ describe('SubscriptionController — enterprise pricing authorization (LOC-48)',
         await app.close()
       }
     } finally {
-      process.env.JWT_SECRET = prevJwtSecret
       process.env.ACCESS_SERVER = prevAccessServer
     }
   })
@@ -685,6 +681,20 @@ describe('SubscriptionController — brand resolution on subscription writes', (
         HttpStatus.FORBIDDEN,
       )
       expect(platformClient.canViewBrandCredit).toHaveBeenCalledWith(USER_ID, FOREIGN_BRAND_ID)
+      expect(service.cancel).not.toHaveBeenCalled()
+    })
+
+    it('rejects a session without brand and without brandId with 400 BRAND_ID_REQUIRED', async () => {
+      // R15: red when resolveBrandId answers this case with 403 forbidden again.
+      await expectWriteException(
+        controller.cancel(
+          { reason: 'closing store', triggeredBy: USER_ID },
+          { user: { id: USER_ID, isSuperAdmin: false, brand: null } },
+        ),
+        'BRAND_ID_REQUIRED',
+        HttpStatus.BAD_REQUEST,
+      )
+      expect(platformClient.canViewBrandCredit).not.toHaveBeenCalled()
       expect(service.cancel).not.toHaveBeenCalled()
     })
 

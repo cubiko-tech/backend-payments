@@ -1,6 +1,8 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
+import { ConfioApiError } from '../provider/confio/confio-api-error'
 import { ConfioProvider } from '../provider/confio/confio.provider'
 import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
+import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
@@ -42,12 +44,14 @@ export class ConfioCancellationService {
    * Cancela la suscripción en ConfioPagos. Resolver = ellos confirmaron con un
    * HTTP 200; su respuesta viene vacía, así que no hay nada que devolver.
    *
-   * Dos salidas y ninguna tercera, igual que `ConfioTrialService.callConfio`:
-   * - `ConfioSubscriptionInputError` (rechazo LOCAL, la petición nunca salió) →
-   *   se desglosa por `code`, NUNCA por el texto del mensaje, que es el contrato
-   *   declarado en `confio-subscription-error.ts`.
-   * - cualquier otro fallo (4xx, 5xx, timeout, red) → 503 sin reexponer el cuerpo
-   *   de ConfioPagos: un fallo del canal no es un hecho sobre el objeto.
+   * Three exits, none of which echoes the body of ConfioPagos:
+   * - `ConfioSubscriptionInputError` (LOCAL rejection, the request never left) →
+   *   split by `code`, NEVER by the message text, the contract declared in
+   *   `confio-subscription-error.ts`.
+   * - a 4xx from ConfioPagos other than 408 and 429 → 502 `CONFIO_CANCEL_REJECTED`:
+   *   retrying the same cancellation gets the same answer.
+   * - anything else (408, 429, 5xx, timeout, network) → 503: a channel failure is
+   *   not a fact about the subscription, and retrying is safe.
    *
    * El `detail` del rechazo local NO viaja al cliente en ninguna rama: lleva el
    * store esperado o el `name` que tenemos guardado.
@@ -61,6 +65,19 @@ export class ConfioCancellationService {
           `Cancelación en ConfioPagos rechazada localmente [${error.code}] en ${error.field}`,
         )
         throw ConfioCancellationService.inputErrorException(error)
+      }
+
+      if (ConfioCancellationService.isPermanentRejection(error)) {
+        this.logger.error(
+          `ConfioPagos rechazó la cancelación: ${ConfioCancellationService.resumirFallo(error)}`,
+        )
+        throw new RequestException(
+          {
+            code: 'CONFIO_CANCEL_REJECTED',
+            message: 'ConfioPagos rechazó la cancelación de la suscripción',
+          },
+          HttpStatus.BAD_GATEWAY,
+        )
       }
 
       // NO se loguea `error.message`: para un no-2xx ese texto es el que arma
@@ -81,6 +98,13 @@ export class ConfioCancellationService {
         HttpStatus.SERVICE_UNAVAILABLE,
       )
     }
+  }
+
+  private static isPermanentRejection(error: unknown): boolean {
+    if (error instanceof ProviderPaymentNotFoundError) return true
+    if (!(error instanceof ConfioApiError)) return false
+    const { status } = error
+    return status >= 400 && status < 500 && status !== 408 && status !== 429
   }
 
   /**

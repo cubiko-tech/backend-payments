@@ -1,5 +1,5 @@
 import { Content } from '../../shared/entities/content.abstract'
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, Unique } from 'typeorm'
 
 export enum TaxIdType {
   NIT = 'NIT',
@@ -17,12 +17,12 @@ export enum TaxRegime {
 }
 
 @Entity('billing_profiles')
-@Index(['brandId'], { unique: true })
+@Unique('UQ_billing_profiles_brand', ['brandId'])
 export class BillingProfile extends Content {
   @Column({ unique: true }) brandId: string
   @Column() legalName: string
   @Column() taxId: string
-  @Column({ type: 'enum', enum: TaxIdType }) taxIdType: TaxIdType
+  @Column({ type: 'enum', enum: TaxIdType, enumName: 'tax_id_type_enum' }) taxIdType: TaxIdType
   @Column({ nullable: true }) address: string
   @Column({ nullable: true }) city: string
   @Column({ nullable: true }) state: string
@@ -30,7 +30,8 @@ export class BillingProfile extends Content {
   @Column({ nullable: true }) postalCode: string
   @Column() email: string
   @Column({ nullable: true }) phone: string
-  @Column({ type: 'enum', enum: TaxRegime, nullable: true }) taxRegime: TaxRegime
+  @Column({ type: 'enum', enum: TaxRegime, enumName: 'tax_regime_enum', nullable: true })
+  taxRegime: TaxRegime
   @Column({ nullable: true }) dianResolutionNumber: string
   @Column({ nullable: true }) dianResolutionPrefix: string
   @Column({ type: 'int', nullable: true }) dianResolutionRangeFrom: number

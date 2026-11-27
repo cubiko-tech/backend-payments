@@ -1,5 +1,4 @@
 import { INestApplication } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as cookieParser from 'cookie-parser'
@@ -33,6 +32,8 @@ import { WalletService } from '../wallet/wallet.service'
 import { WebhookService } from '../webhook/webhook.service'
 import { CheckoutController } from './checkout.controller'
 import { CheckoutService } from './checkout.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 const PAYMENT_ID = '11111111-2222-4333-8444-555555555555'
 const BRAND_A = 'aaaaaaaa-1111-4111-8111-111111111111'
@@ -123,7 +124,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
   }
 
   let app: INestApplication
-  let jwtService: JwtService
+  const sessions = authSessionsDouble()
   let checkoutService: CheckoutService
   let findOnePayment: jest.Mock
   let getProvider: jest.Mock
@@ -146,7 +147,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: sessions },
         ClientPlatformService,
         CheckoutService,
         {
@@ -173,8 +174,6 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
         { provide: WebhookService, useValue: { setCheckoutService: jest.fn() } },
       ],
     }).compile()
-
-    jwtService = moduleRef.get(JwtService)
     checkoutService = moduleRef.get(CheckoutService)
     app = moduleRef.createNestApplication()
     app.use(cookieParser(JWT_SECRET))
@@ -208,7 +207,7 @@ describe('GET /checkout/return brand scope through CheckoutController and Checko
   })
 
   const getAsBrandAFromBff = (query: string) => {
-    const token = jwtService.sign({ id: 'user-brand-a' }, { secret: JWT_SECRET })
+    const token = sessions.sign({ id: 'user-brand-a' })
     return request(app.getHttpServer())
       .get(`/checkout/return?${query}`)
       .set('Cookie', `${COOKIE_NAME}=${token}`)

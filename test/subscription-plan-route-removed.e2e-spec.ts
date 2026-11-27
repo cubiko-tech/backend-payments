@@ -1,5 +1,4 @@
 import { INestApplication } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -22,6 +21,8 @@ import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEven
 import { SubscriptionController } from '../src/subscription/subscription.controller'
 import { SubscriptionService } from '../src/subscription/subscription.service'
 import { ConfioSubscriptionWebhookService } from '../src/webhook/confio-subscription-webhook.service'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 const ACCESS_SERVER = 'e2e-subscription-plan-removed-token'
 const BRAND_ID = 'a1093939-2222-4333-8444-555555555555'
@@ -80,7 +81,7 @@ describe('PATCH /subscription/plan removal e2e (PostgreSQL, LOC-109)', () => {
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: authSessionsDouble() },
         SubscriptionService,
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptions },

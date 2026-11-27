@@ -4,7 +4,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import { randomUUID } from 'crypto'
@@ -21,6 +20,8 @@ import { TrmWeeklyService, weekStartOf } from '../src/trm/trm-weekly.service'
 import { TRM_SOURCE_URL, TrmService } from '../src/trm/trm.service'
 import { startTrmSource, trmDown, trmOk, trmRow, TrmSource } from './support/trm-source.fixture'
 import { raceConnectionOptions } from './support/wallet-race.fixture'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -73,7 +74,7 @@ describe('Weekly TRM (PostgreSQL)', () => {
         Reflector,
         ApiAuthGuard,
         { provide: TRM_SOURCE_URL, useValue: source.url },
-        { provide: JwtService, useValue: new JwtService({ secret: 'e2e-trm-weekly' }) },
+        { provide: SessionVerifier, useValue: authSessionsDouble() },
         { provide: ServiceCredentialService, useValue: credentials },
         // R17: the route uses the service mark, never a roles permission.
         { provide: ClientRolesService, useValue: { checkPermission: jest.fn() } },

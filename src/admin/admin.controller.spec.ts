@@ -6,7 +6,6 @@
  */
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -26,6 +25,8 @@ import { WalletBalanceSnapshot } from '../wallet/entities/walletBalanceSnapshot.
 import { TokenWalletService } from '../wallet/token-wallet.service'
 import { WalletService } from '../wallet/wallet.service'
 import { AdminController } from './admin.controller'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 // R17: These specs check the retry route and its audit; test/admin-payment-retry measures the claim.
 jest.mock('../checkout/wallet-payment-close', () => ({
@@ -130,14 +131,12 @@ describe('AdminController — extendSubscription', () => {
 
 describe('AdminController and MetricsController operator authorization (LOC-46)', () => {
   const TEST_UUID = '11111111-1111-4111-8111-111111111111'
-  const JWT_SECRET = 'loc46-test-jwt-secret'
   const SERVER_SECRET = 'loc46-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let subscriptionReadRepo: ReturnType<typeof mockRepo>
@@ -158,14 +157,12 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
   let tokenWallets: { getOrCreate: jest.Mock }
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: 'user-regular', isSuperAdmin: false, brand: 'brand-1' })
-    superAdminToken = jwtService.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: 'user-regular', isSuperAdmin: false, brand: 'brand-1' })
+    superAdminToken = sessions.sign({ id: 'user-superadmin', isSuperAdmin: true, brand: null })
 
     subscriptionReadRepo = mockRepo()
     subscriptionWriteRepo = mockRepo()
@@ -212,7 +209,7 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         ApiAuthGuard,
         unknownServiceKeys,
         Reflector,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: getRepositoryToken(Subscription, 'DBRead'), useValue: subscriptionReadRepo },
         { provide: getRepositoryToken(Subscription, 'DBWrite'), useValue: subscriptionWriteRepo },
@@ -245,7 +242,6 @@ describe('AdminController and MetricsController operator authorization (LOC-46)'
         await app.close()
       }
     } finally {
-      process.env.JWT_SECRET = prevJwtSecret
       process.env.ACCESS_SERVER = prevAccessServer
     }
   })

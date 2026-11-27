@@ -1,8 +1,13 @@
 import { Test, TestingModule } from '@nestjs/testing'
 import { HttpStatus } from '@nestjs/common'
 import { ConfioCancellationService } from './confio-cancellation.service'
+import { ConfioApiError } from '../provider/confio/confio-api-error'
 import { ConfioProvider } from '../provider/confio/confio.provider'
-import { ConfioSubscriptionInputError } from '../provider/confio/confio-subscription-error'
+import {
+  ConfioSubscriptionInputError,
+  ConfioSubscriptionInputField,
+} from '../provider/confio/confio-subscription-error'
+import { ProviderPaymentNotFoundError } from '../provider/provider.interface'
 import { RequestException } from '../shared/exception/request.exception'
 
 const CONFIO_PLAN = 'stores/store-1/subscription-plans/plan-1'
@@ -44,7 +49,7 @@ describe('ConfioCancellationService', () => {
    * contra su servidor HTTP de prueba. Fabricar el error acá sin ese respaldo
    * sería un verde sobre un control inexistente.
    */
-  it.each([
+  it.each<[string, ConfioSubscriptionInputField, string]>([
     ['invalid_subscription_name', 'name', 'CONFIO_SUBSCRIPTION_NAME_INVALID'],
     ['plan_store_mismatch', 'name', 'CONFIO_PLAN_STORE_MISMATCH'],
   ])('%s → 503 %s, sin filtrar el detalle', async (code, field, expected) => {
@@ -90,6 +95,36 @@ describe('ConfioCancellationService', () => {
     // Un fallo del canal no es un hecho sobre el objeto, y su cuerpo no vuelve al cliente.
     expect(JSON.stringify(error.getResponse())).not.toContain('traceId')
     expect(JSON.stringify(error.getResponse())).not.toContain('internal')
+  })
+
+  it.each([
+    ['a 400', new ConfioApiError('ConfioPagos error 400', 400, 'INVALID_ARGUMENT')],
+    ['a 404', new ProviderPaymentNotFoundError('ConfioPagos error 404')],
+  ])('answers %s from ConfioPagos with 502 CONFIO_CANCEL_REJECTED', async (_, rejection) => {
+    // Mutation (both rows): isPermanentRejection returns false -> the 503 branch answers, red.
+    confio.cancelSubscription.mockRejectedValue(rejection)
+
+    const error = await service.cancel(CONFIO_SUB, REASON).catch((e) => e)
+
+    expect(error).toBeInstanceOf(RequestException)
+    expect(error.getStatus()).toBe(HttpStatus.BAD_GATEWAY)
+    expect(error.getResponse()).toMatchObject({ code: 'CONFIO_CANCEL_REJECTED' })
+  })
+
+  it.each([
+    ['a 408', new ConfioApiError('ConfioPagos error 408', 408)],
+    ['a 429', new ConfioApiError('ConfioPagos error 429', 429)],
+    ['a 500', new ConfioApiError('ConfioPagos error 500', 500)],
+    ['a timeout', Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' })],
+  ])('answers %s from ConfioPagos with 503 CONFIO_CANCEL_UNAVAILABLE', async (_, rejection) => {
+    // Mutation (408, 429 rows): isPermanentRejection drops its 408/429 exclusion; (500 row): drops `< 500`.
+    // Mutation (timeout row): isPermanentRejection returns true for an error that is not a ConfioApiError.
+    confio.cancelSubscription.mockRejectedValue(rejection)
+
+    const error = await service.cancel(CONFIO_SUB, REASON).catch((e) => e)
+
+    expect(error.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE)
+    expect(error.getResponse()).toMatchObject({ code: 'CONFIO_CANCEL_UNAVAILABLE' })
   })
 
   it('un rechazo que no es Error tampoco rompe el envoltorio', async () => {

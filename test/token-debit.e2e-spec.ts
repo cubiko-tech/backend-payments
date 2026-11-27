@@ -65,7 +65,7 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
     })
     a = await startInstance()
     debits = await startDebitApp(a.dataSource)
-    member = debits.jwt.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+    member = debits.sessions.sign({ id: DEBIT_MEMBER_ID, isSuperAdmin: false, brand: BRAND })
   })
 
   beforeEach(async () => {
@@ -231,7 +231,11 @@ describe('ROAX Ads debits a brand token wallet (PostgreSQL, LOC-187)', () => {
   it('refuses with 403 a user who is not a member of the brand and moves nothing', async () => {
     // R15: red when the controller stops asking platform: the outsider gets 201.
     const wallet = await seed(4, 6, 5)
-    const outsider = debits.jwt.sign({ id: 'outsider-loc187', isSuperAdmin: true, brand: BRAND })
+    const outsider = debits.sessions.sign({
+      id: 'outsider-loc187',
+      isSuperAdmin: true,
+      brand: BRAND,
+    })
 
     const res = await postDebit(debits, body(), outsider)
 

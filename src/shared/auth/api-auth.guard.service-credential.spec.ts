@@ -1,6 +1,5 @@
 import { ExecutionContext, HttpStatus } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 
 import { ClientRolesService } from '../../client/client-roles.service'
@@ -11,6 +10,7 @@ import {
   ROAX_ADS_CLIENT,
 } from './require-permission.decorator'
 import { ServiceCredentialService } from './service-credential.service'
+import { SessionVerifier } from './session-verifier.service'
 
 const ADS_KEY = 'psk.roax-ads.secret'
 
@@ -23,11 +23,11 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
   const credentials = { authenticate: jest.fn() }
   const fetchMock = jest.fn()
 
-  // R17: verify stands for JwtService.verify, so a case can make a session token valid or not.
+  // R17: verify stands for SessionVerifier.verify, so a case can make a session valid or not.
   const guard = (verify = jest.fn()) =>
     new ApiAuthGuard(
       reflector as unknown as Reflector,
-      { verify } as unknown as JwtService,
+      { verify } as unknown as SessionVerifier,
       roles as unknown as ClientRolesService,
       credentials as unknown as ServiceCredentialService,
     )
@@ -52,7 +52,6 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
     jest.resetAllMocks()
     process.env.SERVICE_AUTH = 'http://auth.test/auth/v1'
     process.env.ACCESS_SERVER = 'srv-secret'
-    process.env.JWT_SECRET = 'global'
     global.fetch = fetchMock
   })
 
@@ -91,7 +90,7 @@ describe('ApiAuthGuard with a service credential (LOC-173)', () => {
       providers: [
         ApiAuthGuard,
         Reflector,
-        { provide: JwtService, useValue: {} },
+        { provide: SessionVerifier, useValue: {} },
         { provide: ClientRolesService, useValue: roles },
       ],
     }).compile()

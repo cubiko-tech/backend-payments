@@ -8,15 +8,15 @@ import { ClientRolesService } from '../../client/client-roles.service'
 import { logger } from '../../shared/logger/logger'
 
 /**
- * The plan whose catalog price is MADE UP and so cannot be compared: `getPlanPriceCents`
- * invents `COP 0` and `USD 0` for `free` when it has no rows (the
- * `rows.length === 0 && planSlug === 'free'` branch in `client-roles.service.ts`).
+ * The plan whose catalog price may be MADE UP: `free` can have real 0.00 rows, but without rows
+ * `getPlanPriceCents` invents `COP 0` and `USD 0` for it (the `rows.length === 0 && planSlug ===
+ * 'free'` branch in `client-roles.service.ts`). The check cannot tell that zero from a real one, so
+ * `free` is skipped whether it has rows or not.
  *
- * El literal se repite en vez de usar `freePlanSlug()` porque no es el mismo
- * concepto: `freePlanSlug()` es el plan al que se degrada una marca —una
- * decisión de negocio configurable por entorno— y esto es la clave con la que
- * aquella rama está escrita, hardcodeada allá. Si el plan de degradación
- * cambiara de nombre, el cero seguiría fabricándose para `free`.
+ * The literal is repeated instead of using `freePlanSlug()` because it is not the same concept:
+ * `freePlanSlug()` is the plan a brand is downgraded to, configurable per environment; this is the
+ * key that branch is written with, hardcoded there. If the downgrade plan were renamed, the zero
+ * would still be made up for `free`.
  */
 const SLUG_CON_PRECIO_FABRICADO = 'free'
 

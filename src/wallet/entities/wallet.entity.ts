@@ -15,7 +15,7 @@ export enum WalletStatus {
 }
 
 @Entity('wallets')
-@Index(['brandId', 'provider', 'currency'], { unique: true })
+@Index('IDX_wallets_brand_provider_currency', ['brandId', 'provider', 'currency'], { unique: true })
 export class Wallet extends Content {
   @Column() brandId: string
   @Column() userId: string
@@ -23,7 +23,13 @@ export class Wallet extends Content {
   @Column({ nullable: true }) providerWalletId: string
   @Column({ length: 3 }) currency: string
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) balance: number
-  @Column({ type: 'enum', enum: WalletStatus, default: WalletStatus.ACTIVE }) status: WalletStatus
+  @Column({
+    type: 'enum',
+    enum: WalletStatus,
+    enumName: 'wallet_status_enum',
+    default: WalletStatus.ACTIVE,
+  })
+  status: WalletStatus
   // Token balance by origin; only TKN wallets move them, and `balance` moves by the same amount.
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) giftTokens: number
   @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 }) purchasedTokens: number

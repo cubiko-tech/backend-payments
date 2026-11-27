@@ -1,3 +1,5 @@
+// R6: One responsibility, a brand's credit standing: the score, the preapproval read from it and the
+// activation request gated on that preapproval share resolvePreapprovalStatus.
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { In, Repository } from 'typeorm'
@@ -93,7 +95,7 @@ export class CreditService {
       Date.now(),
     )
     if (error) {
-      throw new RequestException({ error: error.message, code: error.code }, HttpStatus.BAD_REQUEST)
+      throw new RequestException({ ...error }, HttpStatus.BAD_REQUEST)
     }
 
     const [inputs] = await this.client.getBatch([brandId], periodStart, periodEnd)

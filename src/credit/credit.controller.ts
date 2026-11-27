@@ -28,6 +28,7 @@ import { GrantConsentDto } from './dto/grant-consent.dto'
 import { CreateBureauCheckDto } from './dto/create-bureau-check.dto'
 import { CreateScaleVersionDto } from './dto/create-scale-version.dto'
 import { CreateActivationRequestDto } from './dto/create-activation-request.dto'
+import { ParseColumnIntPipe } from '../shared/validation/parse-column-int.pipe'
 
 /**
  * Endpoints de scoring de crédito (Fase 2): cálculo individual, consulta por
@@ -97,7 +98,7 @@ export class CreditController {
     const brandId = req?.user?.brand
     if (!brandId) {
       throw new RequestException(
-        { error: 'brandRequired', code: 'brandRequired' },
+        { code: 'BRAND_ID_REQUIRED', message: 'La sesión no tiene marca' },
         HttpStatus.BAD_REQUEST,
       )
     }
@@ -233,9 +234,9 @@ export class CreditController {
   @UseGuards(ApiAuthGuard)
   @RequirePermission('credit:scale')
   @ApiOperation({ summary: 'Activar una versión de escala (valida draft→active)' })
-  async activateScale(@Param('version') version: string, @Req() req: any) {
+  async activateScale(@Param('version', ParseColumnIntPipe) version: number, @Req() req: any) {
     const activated = await this.scaleConfigService.activateVersion(
-      Number(version),
+      version,
       req?.user?.id || 'admin',
     )
     return { data: { version: activated.version, status: activated.status } }

@@ -44,7 +44,7 @@ import { invalidBuyerException } from './invalid-buyer-exception'
  * bearer token (whoever holds it registers a card on the subscription): it is returned to the caller
  * and never persisted or logged.
  *
- * `planPricingException` duplicates `CheckoutService.planPricingException`; change both together.
+ * `planPricingException` duplicates the one in `checkout/checkout-pricing.ts`; change both together.
  */
 /**
  * Reason sent when cancelling the PREVIOUS subscription on a new signup. ConfioPagos requires and
@@ -301,7 +301,7 @@ export class ConfioTrialService {
 
   /**
    * Maps a country/price resolution failure to the SAME codes and statuses as
-   * `CheckoutService.planPricingException`. `PLAN_NOT_FOUND` is 503, not 404: with roles down and
+   * `planPricingException` in `checkout/checkout-pricing.ts`. `PLAN_NOT_FOUND` is 503, not 404: with roles down and
    * no cache every plan reads as missing, and a 404 would disguise an outage as a client error.
    */
   private planPricingException(

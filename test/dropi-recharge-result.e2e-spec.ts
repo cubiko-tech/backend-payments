@@ -70,7 +70,7 @@ describe('The result of a recharge from Dropi closes it once (PostgreSQL, LOC-17
     a = await startInstance()
     trm = await startTrmSource()
     recharge = await startRechargeApp(a.dataSource, trm, RECHARGE_BRAND)
-    member = recharge.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
+    member = recharge.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
   })
 
   beforeEach(async () => {

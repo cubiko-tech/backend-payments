@@ -73,7 +73,7 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
     a = await startInstance()
     trm = await startTrmSource()
     recharge = await startRechargeApp(a.dataSource, trm, RECHARGE_BRAND)
-    member = recharge.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
+    member = recharge.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: RECHARGE_BRAND })
   })
 
   beforeEach(async () => {
@@ -172,7 +172,11 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
 
   it('refuses with 403 a user who is not a member of the brand and saves nothing', async () => {
     // R15: red when the controller stops asking platform: the outsider gets 201.
-    const outsider = recharge.jwt.sign({ id: 'outsider-loc174', isSuperAdmin: false, brand: null })
+    const outsider = recharge.sessions.sign({
+      id: 'outsider-loc174',
+      isSuperAdmin: false,
+      brand: null,
+    })
 
     const res = await postRecharge(recharge, body(), outsider)
 
@@ -182,7 +186,11 @@ describe('Recharge from Dropi is created pending (PostgreSQL, LOC-174)', () => {
 
   it('refuses with 403 a super admin who is not a member of the brand and saves nothing', async () => {
     // R15: red when membership goes back to assertBrandAccess: the super admin skips it, 201.
-    const superAdmin = recharge.jwt.sign({ id: 'super-loc174', isSuperAdmin: true, brand: null })
+    const superAdmin = recharge.sessions.sign({
+      id: 'super-loc174',
+      isSuperAdmin: true,
+      brand: null,
+    })
 
     const res = await postRecharge(recharge, body(), superAdmin)
 

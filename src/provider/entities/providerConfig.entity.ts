@@ -12,7 +12,7 @@ import {
  * Permite controlar qué proveedores aparecen en el checkout según el país de la marca.
  */
 @Entity('provider_config')
-@Index(['country', 'provider'], { unique: true })
+@Index('IDX_provider_config_country_provider', ['country', 'provider'], { unique: true })
 export class ProviderConfig {
   @PrimaryGeneratedColumn('uuid')
   id: string

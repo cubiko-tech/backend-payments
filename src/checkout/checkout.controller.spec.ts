@@ -1,6 +1,5 @@
 // R6: End-to-end controller + CheckoutService integration matrix shares one Nest TestingModule fixture.
 import { ExecutionContext, HttpException } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 
@@ -33,6 +32,8 @@ import { WebhookService } from '../webhook/webhook.service'
 import { CheckoutController } from './checkout.controller'
 import { CheckoutRequest, CheckoutService } from './checkout.service'
 import { walletCloseDataSource } from '../../test/support/wallet-close-double'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 describe('CheckoutController', () => {
   let controller: CheckoutController
@@ -55,13 +56,8 @@ describe('CheckoutController', () => {
         },
       ],
     })
-      // El controller está detrás de `ApiAuthGuard`, que inyecta `JwtService` y
-      // `ClientRolesService`. Este spec prueba la LÓGICA del controller, no la
-      // autenticación —eso vive en `shared/auth/api-auth.guard.spec.ts`—, así que
-      // el guard se reemplaza por uno que deja pasar. Sin esto Nest falla al
-      // resolver `JwtService` en el módulo de test, que es el mismo error que
-      // aparecería en runtime si un módulo con endpoints autenticados no tuviera
-      // `AuthModule` a mano.
+      // This spec tests the controller logic, not authentication (`api-auth.guard.spec.ts` does):
+      // the guard lets everything in, so the module needs neither `SessionVerifier` nor roles.
       .overrideGuard(ApiAuthGuard)
       .useValue({ canActivate: () => true })
       .compile()
@@ -155,7 +151,7 @@ describe('POST /checkout brand membership gate', () => {
 
   let controller: CheckoutController
   let guard: ApiAuthGuard
-  let jwtService: JwtService
+  const sessions = authSessionsDouble()
   let platformClient: ClientPlatformService
   let fetchMock: jest.Mock
   let brandBWallet: {
@@ -181,7 +177,7 @@ describe('POST /checkout brand membership gate', () => {
   })
 
   const signUserCookies = (userId: string): Record<string, string> => {
-    const token = jwtService.sign({ id: userId }, { secret: JWT_SECRET })
+    const token = sessions.sign({ id: userId })
     return { [COOKIE_SESSION]: token }
   }
 
@@ -260,7 +256,7 @@ describe('POST /checkout brand membership gate', () => {
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: sessions },
         ClientPlatformService,
         CheckoutService,
         { provide: getRepositoryToken(Payment, 'DBWrite'), useValue: paymentRepo },
@@ -357,7 +353,6 @@ describe('POST /checkout brand membership gate', () => {
 
     controller = module.get<CheckoutController>(CheckoutController)
     guard = module.get<ApiAuthGuard>(ApiAuthGuard)
-    jwtService = module.get<JwtService>(JwtService)
     platformClient = module.get<ClientPlatformService>(ClientPlatformService)
   })
 

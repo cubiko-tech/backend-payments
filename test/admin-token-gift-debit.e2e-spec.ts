@@ -6,7 +6,6 @@
  */
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -29,6 +28,8 @@ import { TokenWalletService } from '../src/wallet/token-wallet.service'
 import { failNextAuditWrite, failNextWriteOf } from './support/audit-failure.fixture'
 import { knownBrandOwners } from './support/brand-owner.double'
 import { unknownServiceKeys } from './support/service-credential.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -135,9 +136,9 @@ describe('Admin gift token debits over HTTP (PostgreSQL, LOC-252)', () => {
       }
     }
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdmin = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
-    brandAdmin = jwtService.sign({ id: BRAND_ADMIN_ID, isSuperAdmin: false, brand: BRAND_A })
+    const sessions = authSessionsDouble()
+    superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    brandAdmin = sessions.sign({ id: BRAND_ADMIN_ID, isSuperAdmin: false, brand: BRAND_A })
     const repo = (entity: any, conn = 'DBWrite') => ({
       provide: getRepositoryToken(entity, conn),
       useValue: dataSource.getRepository(entity),
@@ -150,7 +151,7 @@ describe('Admin gift token debits over HTTP (PostgreSQL, LOC-252)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[Wallet, Transaction, AuditLog, TokenGiftNotice].flatMap((e) => [
           repo(e, 'DBWrite'),

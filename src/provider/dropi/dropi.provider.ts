@@ -6,8 +6,6 @@ import {
   CheckoutResult,
   PaymentStatusResult,
   RefundResult,
-  CreateSubscriptionParams,
-  SubscriptionResult,
   SaveMethodParams,
 } from '../provider.interface'
 import { logger } from '../../shared/logger/logger'
@@ -142,24 +140,6 @@ export class DropiProvider implements PaymentProvider {
       providerRefundId: refund.id || refund.refundId,
       status: refund.status === 'completed' ? 'completed' : 'pending',
       amount: refund.amount || amount || 0,
-    }
-  }
-
-  /**
-   * Dropi no maneja suscripciones recurrentes directamente.
-   * Se crean cobros individuales cada periodo via cron (processDropiBatchCharges).
-   */
-  async createSubscription(params: CreateSubscriptionParams): Promise<SubscriptionResult> {
-    // No se crea suscripción en Dropi — se cobra manualmente cada periodo
-    const now = new Date()
-    const periodEnd = new Date()
-    periodEnd.setDate(periodEnd.getDate() + 30)
-
-    return {
-      providerSubscriptionId: `dropi-sub-${params.brandId}-${Date.now()}`,
-      status: 'active',
-      currentPeriodStart: now,
-      currentPeriodEnd: periodEnd,
     }
   }
 

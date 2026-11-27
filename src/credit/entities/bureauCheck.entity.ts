@@ -12,7 +12,7 @@ import { BureauBand } from '../domain/scale-config.types'
  * habeas data + RBAC. Aquí queda la tabla para que el snapshot pueda referenciarla.
  */
 @Entity('credit_bureau_check')
-@Index(['document', 'documentType', 'country'])
+@Index('IDX_credit_bureau_check_document', ['document', 'documentType', 'country'])
 export class BureauCheck extends Content {
   @Column()
   provider: string

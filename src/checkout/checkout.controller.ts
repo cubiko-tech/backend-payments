@@ -9,9 +9,9 @@ import { ClientPlatformService } from '../client/client-platform.service'
 import { RequestException } from '../shared/exception/request.exception'
 
 /**
- * `ApiAuthGuard` verifies session cookies, Bearer JWTs (`JWT_SECRET`), and `ACCESS_SERVER`
- * tokens locally, falling back to `backend-auth` for auto-login tokens signed with a
- * rotating `clientSecret` that this service does not hold.
+ * `ApiAuthGuard` checks `ACCESS_SERVER` tokens locally and asks `backend-auth` for the rest:
+ * session cookies and Bearer sessions through its single verification point, and
+ * auto-login tokens signed with a rotating `clientSecret` that this service does not hold.
  */
 @ApiTags('Checkout')
 @Controller('checkout')

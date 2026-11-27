@@ -26,13 +26,15 @@ describe('ApiAuthGuard', () => {
 
   const makeGuard = (verify: jest.Mock) =>
     new ApiAuthGuard(reflector, { verify } as any, roles, unknownServiceKeys.useValue as never)
+  // R17: stands for SessionVerifier.verify when the token is not a session auth confirms; the session
+  // cases run against a fake auth in api-auth.guard.session.spec.ts.
+  const noSession = () => jest.fn().mockResolvedValue(null)
 
   beforeEach(() => {
     jest.clearAllMocks()
     reflector.get.mockReturnValue(undefined) // preapproval: sin @RequirePermission
     process.env.SERVICE_AUTH = 'http://auth.test/auth/v1'
     process.env.ACCESS_SERVER = 'srv-secret'
-    process.env.JWT_SECRET = 'global'
     fetchMock = jest.fn()
     ;(global as any).fetch = fetchMock
   })
@@ -48,19 +50,9 @@ describe('ApiAuthGuard', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('verificación local OK → autoriza sin llamar al auth', async () => {
-    const g = makeGuard(jest.fn().mockReturnValue({ user: 'u1' }))
-    const t = tokenWith({ client: 'dev-client', user: 'u1' })
-    expect(await g.canActivate(ctx({ authorization: `Bearer ${t}` }))).toBe(true)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('local falla → valida contra /client/validate-token → autoriza', async () => {
-    const g = makeGuard(
-      jest.fn(() => {
-        throw new Error('invalid signature')
-      }),
-    )
+  it('validates an auto-login token at /client/validate-token and lets it in', async () => {
+    // R15: red when resolvePersonToken stops sending `client` tokens to validateViaAuth: 401.
+    const g = makeGuard(noSession())
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({ code: 'tokenValidate', data: { user: 'u9', role: 'user' } }),
@@ -73,12 +65,8 @@ describe('ApiAuthGuard', () => {
     )
   })
 
-  it('local falla + auth rechaza el token → 401', async () => {
-    const g = makeGuard(
-      jest.fn(() => {
-        throw new Error('invalid signature')
-      }),
-    )
+  it('answers 401 to an auto-login token that auth rejects', async () => {
+    const g = makeGuard(noSession())
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ error: 'tokenExpired' }) })
     const t = tokenWith({ client: 'dev-client' })
     await expect(g.canActivate(ctx({ authorization: `Bearer ${t}` }))).rejects.toBeDefined()
@@ -91,12 +79,7 @@ describe('ApiAuthGuard', () => {
     })
     return `Bearer ${tokenWith({ client: 'dropi', user: 'a1', ...data })}`
   }
-  const rejectLocal = () =>
-    makeGuard(
-      jest.fn(() => {
-        throw new Error('invalid signature')
-      }),
-    )
+  const rejectLocal = () => makeGuard(noSession())
 
   it.each([
     ['role superadmin', { role: 'superadmin' }],
@@ -139,11 +122,7 @@ describe('ApiAuthGuard', () => {
 
   it('rejects Bearer CHANGEME with 401 when ACCESS_SERVER is CHANGEME', async () => {
     process.env.ACCESS_SERVER = 'CHANGEME'
-    const g = makeGuard(
-      jest.fn(() => {
-        throw new Error('invalid signature')
-      }),
-    )
+    const g = makeGuard(noSession())
 
     await expect(g.canActivate(ctx({ authorization: 'Bearer CHANGEME' }))).rejects.toMatchObject({
       status: HttpStatus.UNAUTHORIZED,
@@ -155,11 +134,7 @@ describe('ApiAuthGuard', () => {
     'rejects server token with 401 when ACCESS_SERVER is blank or has edge whitespace (%j)',
     async (invalidServerSecret) => {
       process.env.ACCESS_SERVER = invalidServerSecret
-      const g = makeGuard(
-        jest.fn(() => {
-          throw new Error('invalid signature')
-        }),
-      )
+      const g = makeGuard(noSession())
 
       await expect(
         g.canActivate(
@@ -168,22 +143,6 @@ describe('ApiAuthGuard', () => {
       ).rejects.toMatchObject({
         status: HttpStatus.UNAUTHORIZED,
       })
-    },
-  )
-
-  it.each(['CHANGEME', ' global', 'global '])(
-    'skips local JWT verification and rejects with 401 when JWT_SECRET is %j',
-    async (invalidJwtSecret) => {
-      process.env.JWT_SECRET = invalidJwtSecret
-      const verify = jest.fn().mockReturnValue({ id: 'u1' })
-      const g = makeGuard(verify)
-
-      await expect(
-        g.canActivate(ctx({ authorization: 'Bearer some-token' })),
-      ).rejects.toMatchObject({
-        status: HttpStatus.UNAUTHORIZED,
-      })
-      expect(verify).not.toHaveBeenCalled()
     },
   )
 

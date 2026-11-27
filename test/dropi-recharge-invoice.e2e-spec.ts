@@ -76,7 +76,7 @@ describe('The invoice of a recharge from Dropi (PostgreSQL, LOC-206)', () => {
     a = await startInstance()
     trm = await startTrmSource()
     recharge = await startRechargeApp(a.dataSource, trm, BRAND)
-    member = recharge.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: BRAND })
+    member = recharge.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: BRAND })
   })
 
   beforeEach(async () => {

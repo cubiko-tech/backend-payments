@@ -1,7 +1,6 @@
 import { INestApplication } from '@nestjs/common'
 import { randomUUID } from 'crypto'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { createServer, Server, ServerResponse } from 'http'
@@ -18,7 +17,9 @@ import { Transaction } from '../../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../../src/wallet/entities/wallet.entity'
 import { TokenDebitController } from '../../src/wallet/token-debit.controller'
 import { TokenWalletService } from '../../src/wallet/token-wallet.service'
-import { ADS_KEY, JWT_SECRET } from './dropi-recharge.fixture'
+import { ADS_KEY } from './dropi-recharge.fixture'
+import { authSessionsDouble } from './auth-session.double'
+import { SessionVerifier } from '../../src/shared/auth/session-verifier.service'
 
 export const DEBIT_MEMBER_ID = 'member-loc187'
 // Made per run, like ADS_KEY: the valid key of a service that is not ROAX Ads.
@@ -68,7 +69,7 @@ export function platformMembers(brandIds: string[]): Upstream['reply'] {
 
 export interface DebitApp {
   app: INestApplication
-  jwt: JwtService
+  sessions: ReturnType<typeof authSessionsDouble>
   tokens: TokenWalletService
 }
 
@@ -77,7 +78,7 @@ export interface DebitApp {
  * platform and auth URLs come from `SERVICE_PLATFORM` and `SERVICE_AUTH`, set before this runs.
  */
 export async function startDebitApp(dataSource: DataSource): Promise<DebitApp> {
-  const jwt = new JwtService({ secret: JWT_SECRET })
+  const sessions = authSessionsDouble()
   // R17: the LOC-173 suite clears service_credentials while it runs; its e2e proves the key itself.
   const credentials = {
     authenticate: jest.fn(async (key: string) =>
@@ -91,7 +92,7 @@ export async function startDebitApp(dataSource: DataSource): Promise<DebitApp> {
       ClientPlatformService,
       Reflector,
       ApiAuthGuard,
-      { provide: JwtService, useValue: jwt },
+      { provide: SessionVerifier, useValue: sessions },
       { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
       {
         provide: getRepositoryToken(Wallet, 'DBWrite'),
@@ -105,7 +106,7 @@ export async function startDebitApp(dataSource: DataSource): Promise<DebitApp> {
   const app = moduleRef.createNestApplication()
   app.useGlobalPipes(createGlobalValidationPipe())
   await app.init()
-  return { app, jwt, tokens: moduleRef.get(TokenWalletService) }
+  return { app, sessions, tokens: moduleRef.get(TokenWalletService) }
 }
 
 /** `POST /token-wallet/debits` with `key` (ROAX Ads by default) and, unless null, a user token. */

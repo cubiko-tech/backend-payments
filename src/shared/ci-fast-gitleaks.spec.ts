@@ -1,3 +1,5 @@
+// R6: One suite for the ci-fast gitleaks job: every case extracts its steps from ci-fast.yml
+// and runs them with the gitleaks binary set up by the helpers at its top.
 // Red when ci-fast.yml drops the gitleaks job, drifts from pre-commit version/sha256, skips checksum verification, or stays green on a committed secret.
 import { spawnSync } from 'child_process'
 import {

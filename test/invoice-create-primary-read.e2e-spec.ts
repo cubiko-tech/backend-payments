@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { config as dotenvConfig } from 'dotenv'
 import { DataSource, QueryRunner, Repository } from 'typeorm'
+import { BillingProfile } from '../src/billing-profile/entities/billingProfile.entity'
 import { Invoice } from '../src/invoice/entities/invoice.entity'
 import { InvoiceItem } from '../src/invoice/entities/invoiceItem.entity'
 import { InvoiceService } from '../src/invoice/invoice.service'
@@ -21,7 +22,8 @@ describe('InvoiceService.create on a real primary (Postgres)', () => {
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
-      entities: [Invoice, InvoiceItem],
+      // Invoice declares a foreign key to BillingProfile; without its metadata initialize() fails.
+      entities: [Invoice, InvoiceItem, BillingProfile],
       synchronize: false,
       ...(process.env.SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
     })

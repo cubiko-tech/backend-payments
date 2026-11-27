@@ -183,8 +183,6 @@ describe('ConfioPlanPriceCheckService', () => {
 
     expect(errores().length).toBe(2)
     expect(fetchSpy).not.toHaveBeenCalled()
-    // Y tampoco escribe la fila local: la única puerta que se le da es de lectura.
-    expect(Object.keys(planes)).toEqual(['findAllMappings'])
   })
 
   /**

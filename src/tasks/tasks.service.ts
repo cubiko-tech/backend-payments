@@ -12,6 +12,7 @@ import { EventBusService } from '../event-bus/event-bus.service'
 import { Payment } from '../payment/entities/payment.entity'
 import { ProviderFactory } from '../provider/provider.factory'
 import { APM_AGENT, ApmAgent } from '../shared/apm/apm-agent'
+import { positiveIntEnv } from '../shared/env/positive-int-env'
 import { logger } from '../shared/logger/logger'
 import { Subscription } from '../subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../subscription/entities/subscriptionEvent.entity'
@@ -63,12 +64,12 @@ export type TasksDeps = PaymentSweepDeps &
  */
 @Injectable()
 export class TasksService implements TasksDeps {
-  readonly MAX_RETRY = parseInt(process.env.MAX_PAYMENT_RETRY_COUNT || '3')
-  readonly MAX_REPESCA = parseInt(process.env.MAX_PENDING_CONFIRMATIONS || '50')
-  readonly DIAS_DE_REPESCA = parseInt(process.env.PENDING_CONFIRMATION_DAYS || '8')
+  readonly MAX_RETRY = positiveIntEnv('MAX_PAYMENT_RETRY_COUNT', 3)
+  readonly MAX_REPESCA = positiveIntEnv('MAX_PENDING_CONFIRMATIONS', 50)
+  readonly DIAS_DE_REPESCA = positiveIntEnv('PENDING_CONFIRMATION_DAYS', 8)
   repescaEnCurso = false
   readonly CHECKOUT_EXPIRY_HOURS = checkoutExpiryHours()
-  readonly BILLING_PERIOD_DAYS = parseInt(process.env.BILLING_PERIOD_DAYS || '30')
+  readonly BILLING_PERIOD_DAYS = positiveIntEnv('BILLING_PERIOD_DAYS', 30)
   readonly RENEWAL_POSTPONEMENT_GRACE_HOURS = 24
   readonly subscriptionLocks = new Map<string, Promise<void>>()
 

@@ -1,7 +1,6 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { HttpStatus, INestApplication } from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import * as request from 'supertest'
 
@@ -14,6 +13,8 @@ import { ProviderConfigService } from '../provider/provider-config.service'
 import { ApiAuthGuard } from '../shared/auth/api-auth.guard'
 import { PaymentController } from './payment.controller'
 import { PaymentService } from './payment.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 const ACCESS_SERVER = 'unit-payment-controller-server-token'
 const BRAND_ID = '11111111-2222-4333-8444-555555555555'
@@ -39,7 +40,7 @@ describe('PaymentController — POST /payment/checkout removal (LOC-93)', () => 
       providers: [
         ApiAuthGuard,
         unknownServiceKeys,
-        JwtService,
+        { provide: SessionVerifier, useValue: authSessionsDouble() },
         {
           provide: PaymentService,
           // R17: In-memory PaymentService stub satisfies controller DI without opening a database.

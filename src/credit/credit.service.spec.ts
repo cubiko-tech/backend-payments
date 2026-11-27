@@ -1,3 +1,4 @@
+// R6: One unit, CreditService.calculate and getPreapproval, each with its own module; splitting is its own task.
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 
@@ -80,6 +81,25 @@ describe('CreditService.calculate', () => {
     client.getBatch.mockResolvedValue([i])
     return service.calculate({ ...PERIOD, brandId: 'brand-1', triggeredBy: 'test' })
   }
+
+  it('answers an invalid period with its code and message, never with an error field', async () => {
+    // R15: red when calculate throws `{ error: error.message, code }` again: there is no message.
+    const failure = await service
+      .calculate({
+        periodStart: '2026-03-15',
+        periodEnd: '2026-06-01',
+        brandId: 'b',
+        triggeredBy: 't',
+      })
+      .catch((error) => error)
+
+    expect(failure.getResponse()).toEqual({
+      code: 'periodNotWholeMonths',
+      message: 'El período debe ser meses completos (día 01)',
+      status: 400,
+    })
+    expect(client.getBatch).not.toHaveBeenCalled()
+  })
 
   it('marca scored y bureau_pending sin check de buró', async () => {
     const s = await run(inputs())

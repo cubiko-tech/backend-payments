@@ -62,13 +62,25 @@ export enum SubscriptionTraceStatus {
   DISCARDED = 'discarded',
 }
 
+/**
+ * What `subscription_events.metadata` holds. Each writer stores its own shape (a Confio trace is
+ * `ConfioTrazaMetadata`); `providerEventId` is the idempotency mark the webhook looks up.
+ */
+export interface SubscriptionEventMetadata {
+  providerEventId?: string
+  [key: string]: unknown
+}
+
 @Entity('subscription_events')
-@Index(['subscriptionId', 'createdAt'])
-@Index(['eventType', 'createdAt'])
+@Index('IDX_subscription_events_sub_date', ['subscriptionId', 'createdAt'])
+@Index('IDX_subscription_events_type_date', ['eventType', 'createdAt'])
+// Expression index TypeORM cannot describe; owned by migration 1795394546441.
+@Index('UQ_subscription_events_pending_trace', { synchronize: false })
 export class SubscriptionEvent {
   @PrimaryGeneratedColumn('uuid') id: string
   @Column('uuid') subscriptionId: string
-  @Column({ type: 'enum', enum: SubscriptionEventType }) eventType: SubscriptionEventType
+  @Column({ type: 'enum', enum: SubscriptionEventType, enumName: 'subscription_event_type_enum' })
+  eventType: SubscriptionEventType
   @Column({ nullable: true }) fromPlanSlug: string
   @Column({ nullable: true }) toPlanSlug: string
   @Column({ nullable: true }) fromStatus: string
@@ -76,12 +88,12 @@ export class SubscriptionEvent {
   @Column() triggeredBy: string
   @Column({ type: 'text', nullable: true }) reason: string
   @Column({ type: 'uuid', nullable: true }) paymentId: string
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: SubscriptionEventMetadata
   @Column({ type: 'varchar', length: 16, default: SubscriptionTraceStatus.APPLIED })
   traceStatus: SubscriptionTraceStatus
   @CreateDateColumn({ type: 'timestamptz' }) createdAt: Date
 
   @ManyToOne(() => Subscription, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'subscriptionId' })
+  @JoinColumn({ name: 'subscriptionId', foreignKeyConstraintName: 'FK_subscription_events_sub' })
   subscription: Subscription
 }

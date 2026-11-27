@@ -4,7 +4,6 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { config as dotenvConfig } from 'dotenv'
@@ -25,6 +24,7 @@ import { Payment } from '../src/payment/entities/payment.entity'
 import { ProviderConfig } from '../src/provider/entities/providerConfig.entity'
 import { Refund } from '../src/refund/entities/refund.entity'
 import { ApiAuthGuard } from '../src/shared/auth/api-auth.guard'
+import { HttpErrorFilter } from '../src/shared/exception/http-error.filter'
 import { createGlobalValidationPipe } from '../src/shared/validation/global-validation-pipe'
 import { Subscription } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
@@ -39,6 +39,8 @@ import { WalletController } from '../src/wallet/wallet.controller'
 import { WalletService } from '../src/wallet/wallet.service'
 import { unknownServiceKeys } from './support/service-credential.double'
 import { brandOwnerLookup } from './support/brand-owner.double'
+import { authSessionsDouble } from './support/auth-session.double'
+import { SessionVerifier } from '../src/shared/auth/session-verifier.service'
 
 dotenvConfig({ path: '.env' })
 
@@ -203,9 +205,9 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       }
     }
 
-    const jwtService = new JwtService({ secret: JWT_SECRET })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
-    memberToken = jwtService.sign({ id: USER_OWNER, isSuperAdmin: false, brand: null })
+    const sessions = authSessionsDouble()
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    memberToken = sessions.sign({ id: USER_OWNER, isSuperAdmin: false, brand: null })
 
     const repo = (entity: any, conn = 'DBWrite') => ({
       provide: getRepositoryToken(entity, conn),
@@ -226,7 +228,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: getDataSourceToken('DBWrite'), useValue: dataSource },
         ...[
           Subscription,
@@ -257,6 +259,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
 
     app = moduleRef.createNestApplication()
     app.useGlobalPipes(createGlobalValidationPipe())
+    app.useGlobalFilters(new HttpErrorFilter())
     await app.init()
   })
 
@@ -314,7 +317,7 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
     expect(txs).toHaveLength(0)
   })
 
-  it('CA5 opens the TKN wallet and preserves the duplicate-money-wallet response when the brand already had its COP wallet', async () => {
+  it('CA5 opens the TKN wallet and answers 409 WALLET_ALREADY_EXISTS when the brand already had its COP wallet', async () => {
     // R15: red when the existing-wallet branch returns before calling tokenWallets.getOrCreate.
     const walletRepo = dataSource.getRepository(Wallet)
     const existingCop = await walletRepo.save(
@@ -333,9 +336,11 @@ describe('Brand token wallet at brand birth, backfill command, and GET /wallet e
       .set('Authorization', `Bearer ${ACCESS_SERVER}`)
       .send(platformCreateWalletBody(BRAND_EXISTING_COP))
 
-    expect(res.status).toBe(HttpStatus.CREATED)
+    expect(res.status).toBe(HttpStatus.CONFLICT)
     expect(res.body).toEqual({
-      error: 'Ya existe una wallet internal/COP para esta marca',
+      statusCode: HttpStatus.CONFLICT,
+      code: 'WALLET_ALREADY_EXISTS',
+      message: 'Ya existe una wallet internal/COP para esta marca',
     })
 
     const wallets = await walletRepo.findBy({ brandId: BRAND_EXISTING_COP })

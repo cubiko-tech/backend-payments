@@ -138,7 +138,7 @@ export class SubscriptionController {
   @ApiResponse({ status: 201, description: 'Trial iniciado correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+    description: 'BRAND_ID_REQUIRED (no brandId and no brand in the session)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async startTrial(@Body() data: StartTrialSubscriptionDto, @Req() req?: any) {
@@ -169,7 +169,7 @@ export class SubscriptionController {
   })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+    description: 'BRAND_ID_REQUIRED (no brandId and no brand in the session)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   @ApiResponse({
@@ -195,9 +195,11 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Suscripción cancelada correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+    description: 'BRAND_ID_REQUIRED (no brandId and no brand in the session)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
+  @ApiResponse({ status: 502, description: 'CONFIO_CANCEL_REJECTED (ConfioPagos answered a 4xx)' })
+  @ApiResponse({ status: 503, description: 'CONFIO_CANCEL_UNAVAILABLE (retry later)' })
   async cancel(@Body() data: CancelSubscriptionDto, @Req() req?: any) {
     const brandId = await this.resolveBrandId(data?.brandId as string, req)
     return this.subscriptionService.cancel(brandId, {
@@ -211,7 +213,7 @@ export class SubscriptionController {
   @ApiResponse({ status: 200, description: 'Suscripción reactivada correctamente' })
   @ApiResponse({
     status: 400,
-    description: 'BRAND_ID_REQUIRED (service principal without brandId)',
+    description: 'BRAND_ID_REQUIRED (no brandId and no brand in the session)',
   })
   @ApiResponse({ status: 403, description: 'forbidden (caller is not a member of brandId)' })
   async reactivate(@Body() data: ReactivateSubscriptionDto, @Req() req?: any) {
@@ -348,6 +350,9 @@ export class SubscriptionController {
       return sessionBrand
     }
 
-    throw new RequestException({ error: 'forbidden', code: 'forbidden' }, HttpStatus.FORBIDDEN)
+    throw new RequestException(
+      { code: 'BRAND_ID_REQUIRED', message: 'La sesión no tiene marca: indicá brandId' },
+      HttpStatus.BAD_REQUEST,
+    )
   }
 }

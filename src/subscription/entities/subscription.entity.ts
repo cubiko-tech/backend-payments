@@ -1,5 +1,5 @@
 import { Content } from '../../shared/entities/content.abstract'
-import { Column, Entity, Index } from 'typeorm'
+import { Column, Entity, Index, Unique } from 'typeorm'
 
 /**
  * Order mark of the Confio notices of one Confio subscription: `name` is the subscription it belongs
@@ -10,6 +10,22 @@ export interface ProviderWatermark {
   name: string | null
   cycle?: number
   at?: string
+}
+
+/**
+ * What `subscriptions.metadata` holds: the Confio block written by the signup, plus the map the client
+ * may send on `POST /subscription`. Never the Confio `raw` (buyer PII) nor the bearer `acceptanceUrl`.
+ */
+export interface SubscriptionMetadata {
+  confio?: {
+    buyerPhone?: string
+    name?: string
+    status?: string
+    planName?: string
+    correlationId?: string | null
+    acceptanceExpireTime?: string | null
+  }
+  [key: string]: unknown
 }
 
 /**
@@ -113,16 +129,26 @@ export const LIVE_SUBSCRIPTION_STATUSES = [
 ]
 
 @Entity('subscriptions')
-@Index(['brandId'], { unique: true })
-@Index(['status', 'nextBillingDate'])
+@Unique('UQ_subscriptions_brand', ['brandId'])
+@Index('IDX_subscriptions_provider_subscription_id', ['providerSubscriptionId'])
+@Index('IDX_subscriptions_access_ends_at', ['accessEndsAt'])
+@Index('IDX_subscriptions_billing', ['status', 'nextBillingDate'], {
+  where: `"status" IN ('active', 'past_due')`,
+})
 export class Subscription extends Content {
   @Column() brandId: string
   @Column() userId: string
   @Column() planSlug: string
-  @Column({ type: 'enum', enum: SubscriptionStatus, default: SubscriptionStatus.TRIAL })
+  @Column({
+    type: 'enum',
+    enum: SubscriptionStatus,
+    enumName: 'subscription_status_enum',
+    default: SubscriptionStatus.TRIAL,
+  })
   status: SubscriptionStatus
   @Column({ type: 'uuid', nullable: true }) walletId: string
-  @Column({ type: 'enum', enum: SubscriptionProvider }) provider: SubscriptionProvider
+  @Column({ type: 'enum', enum: SubscriptionProvider, enumName: 'subscription_provider_enum' })
+  provider: SubscriptionProvider
   @Column({ nullable: true }) providerSubscriptionId: string
   @Column({ type: 'timestamptz' }) currentPeriodStart: Date
   @Column({ type: 'timestamptz' }) currentPeriodEnd: Date
@@ -185,14 +211,11 @@ export class Subscription extends Content {
   // `metrics.service.ts` cuenta la fila en MRR y en «activas» (filtra `status IN
   // ('active','trial')`) aunque ya no vaya a renovar, y al mismo tiempo la cuenta como churn por
   // su `SubscriptionEvent`. Corregir la métrica es una decisión de negocio, anotada en el INBOX.
-  // SIN índice a propósito: la tabla tiene decenas de filas y el cron barre de todos modos por
-  // `autoRenew` (y ordena por esta columna con `take`, un sort en memoria irrelevante a esta
-  // escala); el índice se agrega el día que el volumen lo justifique, y exige migración.
   @Column({ type: 'timestamptz', nullable: true }) accessEndsAt: Date
   @Column({ type: 'uuid', nullable: true }) lastPaymentId: string
   @Column({ type: 'timestamptz', nullable: true }) nextBillingDate: Date
   @Column({ type: 'int', default: 0 }) retryCount: number
-  @Column({ type: 'jsonb', nullable: true }) metadata: any
+  @Column({ type: 'jsonb', nullable: true }) metadata: SubscriptionMetadata
   /** The latest signed Confio notice applied to the row; see `confio-watermark.util.ts`. */
   @Column({ type: 'jsonb', nullable: true }) providerWatermark: ProviderWatermark | null
 }

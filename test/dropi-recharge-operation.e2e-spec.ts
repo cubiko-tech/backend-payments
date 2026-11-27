@@ -48,7 +48,7 @@ describe('One Dropi operation closes one recharge (PostgreSQL, LOC-182)', () => 
 
   const open = async (brandId: string): Promise<Payment> => {
     const app = apps[brandId]
-    const member = app.jwt.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: brandId })
+    const member = app.sessions.sign({ id: MEMBER_ID, isSuperAdmin: false, brand: brandId })
     requests += 1
     const requestId = `b1820000-0000-4000-8000-${String(requests).padStart(12, '0')}`
     const created = await postRecharge(app, { brandId, tokens: 10, requestId }, member)

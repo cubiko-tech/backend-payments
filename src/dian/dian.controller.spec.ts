@@ -1,6 +1,5 @@
 import { INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
-import { JwtService } from '@nestjs/jwt'
 import { Test, TestingModule } from '@nestjs/testing'
 import { getRepositoryToken } from '@nestjs/typeorm'
 import * as request from 'supertest'
@@ -14,6 +13,8 @@ import { unknownServiceKeys } from '../../test/support/service-credential.double
 import { DianController } from './dian.controller'
 import { DianProvider } from './dian.interface'
 import { DianService } from './dian.service'
+import { authSessionsDouble } from '../../test/support/auth-session.double'
+import { SessionVerifier } from '../shared/auth/session-verifier.service'
 
 describe('DianController operator authorization (LOC-78)', () => {
   const OWN_BRAND_ID = '11111111-1111-4111-8111-111111111111'
@@ -24,14 +25,12 @@ describe('DianController operator authorization (LOC-78)', () => {
   const USER_ID = '55555555-5555-4555-8555-555555555555'
   const SUPERADMIN_ID = '66666666-6666-4666-8666-666666666666'
   const EXISTING_CUFE = 'cufe-existing-0002'
-  const JWT_SECRET = 'loc78-test-jwt-secret'
   const SERVER_SECRET = 'loc78-test-server-secret'
 
   let app: INestApplication
-  let jwtService: JwtService
+  let sessions: ReturnType<typeof authSessionsDouble>
   let userToken: string
   let superAdminToken: string
-  let prevJwtSecret: string | undefined
   let prevAccessServer: string | undefined
 
   let invoiceRepo: {
@@ -55,14 +54,12 @@ describe('DianController operator authorization (LOC-78)', () => {
   let providerMock: jest.Mocked<DianProvider>
 
   beforeAll(async () => {
-    prevJwtSecret = process.env.JWT_SECRET
     prevAccessServer = process.env.ACCESS_SERVER
-    process.env.JWT_SECRET = JWT_SECRET
     process.env.ACCESS_SERVER = SERVER_SECRET
 
-    jwtService = new JwtService({ secret: JWT_SECRET })
-    userToken = jwtService.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
-    superAdminToken = jwtService.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
+    sessions = authSessionsDouble()
+    userToken = sessions.sign({ id: USER_ID, isSuperAdmin: false, brand: OWN_BRAND_ID })
+    superAdminToken = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
 
     invoiceRepo = {
       findOne: jest.fn(),
@@ -112,7 +109,7 @@ describe('DianController operator authorization (LOC-78)', () => {
         Reflector,
         ApiAuthGuard,
         unknownServiceKeys,
-        { provide: JwtService, useValue: jwtService },
+        { provide: SessionVerifier, useValue: sessions },
         { provide: ClientRolesService, useValue: rolesService },
         { provide: getRepositoryToken(Invoice, 'DBWrite'), useValue: invoiceRepo },
         { provide: getRepositoryToken(BillingProfile, 'DBRead'), useValue: billingProfileRepo },
@@ -190,11 +187,6 @@ describe('DianController operator authorization (LOC-78)', () => {
   afterAll(async () => {
     if (app) {
       await app.close()
-    }
-    if (prevJwtSecret === undefined) {
-      delete process.env.JWT_SECRET
-    } else {
-      process.env.JWT_SECRET = prevJwtSecret
     }
     if (prevAccessServer === undefined) {
       delete process.env.ACCESS_SERVER

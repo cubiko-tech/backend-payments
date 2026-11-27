@@ -27,6 +27,29 @@ interface TrazaDelMovimiento {
 }
 
 /**
+ * The closed list of keys a Confio trace row stores in `metadata` (point (2) of the header below).
+ * A type alias and not an interface so it fits `SubscriptionEventMetadata`'s index signature.
+ */
+export type ConfioTrazaMetadata = {
+  event: string
+  providerEventId: string
+  brandId: string
+  userId: string
+  planSlug: string
+  amountCents: number
+  currencyCode: string
+  cycleNumber: number
+  signatureChecksum?: string
+  providerRef?: { name?: string; payment?: string; reason?: string }
+  roles?: { accion: string; brandId: string; planSlug: string; expiresAt: string }
+}
+
+/** The trace row: an event whose `metadata` can only carry `ConfioTrazaMetadata`. */
+export type ConfioTraza = Omit<DeepPartial<SubscriptionEvent>, 'metadata'> & {
+  metadata: ConfioTrazaMetadata
+}
+
+/**
  * Fila de `subscription_events` desde la que se reconstruye un movimiento de
  * ConfioPagos —marca, usuario, plan, monto, moneda, referencia y resultado— SIN
  * volver a preguntarle al proveedor (épica 002, `trazabilidad-de-movimientos`).
@@ -82,7 +105,7 @@ export function armarTrazaDelMovimiento({
   providerEventId,
   roles,
   reason,
-}: TrazaDelMovimiento): DeepPartial<SubscriptionEvent> {
+}: TrazaDelMovimiento): ConfioTraza {
   const data = payload?.data || {}
   const checksum = payload?.signature?.checksum
 

@@ -9,8 +9,6 @@
  * de request/response sobre estos.
  */
 
-import { SubscriptionResult } from '../provider.interface'
-
 /** Centinela incluido: ConfioPagos puede devolver `STATUS_UNSPECIFIED`. */
 export type ConfioPlanStatus = 'STATUS_UNSPECIFIED' | 'ACTIVE' | 'INACTIVE' | 'ARCHIVED'
 
@@ -164,29 +162,22 @@ export interface ConfioSubscription {
 }
 
 /**
- * Resultado normalizado del alta y de la consulta de una suscripción.
+ * Normalized result of a subscription signup and lookup.
  *
- * Extiende `SubscriptionResult` (el contrato común de `PaymentProvider`) con lo
- * que ConfioPagos agrega. Ojo: **`getSubscription` NO está en `PaymentProvider`**,
- * así que se consume con el tipo concreto `ConfioProvider` (inyectado o
- * instanciado directo), no por `ProviderFactory.getProvider()`, que devuelve la
- * interfaz y no ve este método.
+ * Neither `createSubscription` nor `getSubscription` is part of `PaymentProvider`: both are
+ * consumed through the concrete `ConfioProvider`, never through `ProviderFactory.getProvider()`.
  */
-export interface ConfioSubscriptionResult extends SubscriptionResult {
+export interface ConfioSubscriptionResult {
   /** El `name` de ConfioPagos: el resource name completo, no un uuid. */
   providerSubscriptionId: string
   status: ConfioSubscriptionStatusWire
   /**
-   * Heredado de `SubscriptionResult` como `Date` OBLIGATORIO, pero en
-   * `PENDING_ACCEPTANCE` ConfioPagos no lo manda y llega `undefined` en runtime.
-   * Declararlo opcional rompe el `implements` ("Property is optional ... but
-   * required"), y con `strictNullChecks: false` en este tsconfig TS tampoco
-   * protegería al llamador si lo fuera. El arreglo real es ensanchar
-   * `provider.interface.ts`: deuda de otra tarea. Chequealo antes de usarlo.
+   * Absent in `PENDING_ACCEPTANCE`: the period opens when the buyer accepts. With
+   * `strictNullChecks: false` the compiler does not enforce the check, so check it before use.
    */
-  currentPeriodStart: Date
-  /** Mismo caso que `currentPeriodStart`: `undefined` hasta que el comprador acepta. */
-  currentPeriodEnd: Date
+  currentPeriodStart?: Date
+  /** Same case as `currentPeriodStart`. */
+  currentPeriodEnd?: Date
   /**
    * Link portador de aceptación: el "único link inicial" del criterio 1. Sólo
    * viene en `PENDING_ACCEPTANCE`. No se loguea ni se persiste.

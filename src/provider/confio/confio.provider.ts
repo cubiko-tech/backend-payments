@@ -8,7 +8,6 @@ import {
   CheckoutResult,
   PaymentStatusResult,
   RefundResult,
-  CreateSubscriptionParams,
   SaveMethodParams,
 } from '../provider.interface'
 import { isProductionEnv } from '../../shared/env/is-production'
@@ -250,18 +249,15 @@ export class ConfioProvider implements PaymentProvider {
    * Charges nothing: returns `PENDING_ACCEPTANCE` plus an `acceptanceUrl`; once the buyer accepts it
    * moves to `TRIALING` (with `trialPeriodDays > 0`) or `ACTIVE`.
    *
-   * `CreateSubscriptionParams` is accepted only to satisfy `PaymentProvider`; it lacks plan and
-   * buyer, so it is rejected with `missing_buyer_or_plan`.
-   *
    * Input errors are `ConfioSubscriptionInputError`, thrown before any network call; callers map
    * them by `instanceof` + `code` + `field`, never by message text.
    */
   async createSubscription(
-    params: CreateConfioSubscriptionParams | CreateSubscriptionParams,
+    params: CreateConfioSubscriptionParams,
   ): Promise<ConfioSubscriptionResult> {
     this.ensureConfigured()
 
-    if (!('planName' in params) || !params.planName || !params.buyer) {
+    if (!params?.planName || !params.buyer) {
       throw new ConfioSubscriptionInputError(
         'missing_buyer_or_plan',
         'planName/buyer',
@@ -396,8 +392,6 @@ export class ConfioProvider implements PaymentProvider {
       acceptanceExpireTime: rest.acceptanceExpireTime
         ? new Date(rest.acceptanceExpireTime)
         : undefined,
-      // Undefined in PENDING_ACCEPTANCE (no open period yet), although `SubscriptionResult` types them
-      // as required.
       currentPeriodStart: rest.currentPeriodStart ? new Date(rest.currentPeriodStart) : undefined,
       currentPeriodEnd: rest.currentPeriodEnd ? new Date(rest.currentPeriodEnd) : undefined,
       nextBillingTime: rest.nextBillingTime ? new Date(rest.nextBillingTime) : undefined,
