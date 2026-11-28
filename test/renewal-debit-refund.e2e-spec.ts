@@ -13,6 +13,7 @@ import { CycleExtension, markCycleDebit } from '../src/tasks/renewal-debit-refun
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
 import { Wallet, WalletStatus } from '../src/wallet/entities/wallet.entity'
 import { DAY_MS, daysLeft, seedSubscription, sweepOnlyBrands } from './support/plan-lock.fixture'
+import { scopeRenewalRefundsToBrand } from './support/brand-scoped-sweep'
 import {
   balanceOf,
   cleanBrand,
@@ -39,6 +40,8 @@ describe('An orphan renewal debit goes back to the wallet (PostgreSQL, LOC-105)'
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeRenewalRefundsToBrand(a.tasks, BRAND_ID)
+    scopeRenewalRefundsToBrand(b.tasks, BRAND_ID)
   })
 
   const cleanAll = async () => {

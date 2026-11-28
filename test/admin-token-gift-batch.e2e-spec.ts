@@ -12,12 +12,10 @@ import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { Job } from 'bullmq'
 import { config as dotenvConfig } from 'dotenv'
+import { join } from 'path'
 import * as request from 'supertest'
-import { DataSource } from 'typeorm'
+import { DataSource, DataSourceOptions } from 'typeorm'
 
-import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
-import { AddTokenGiftBatches1794300000000 } from '../migrations/1794300000000-AddTokenGiftBatches'
-import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -52,10 +50,14 @@ const [BRAND_1, BRAND_2, BRAND_3, BRAND_4, BRAND_5] = [
 const UNKNOWN_BRAND = 'a2650000-0000-4000-8000-0000000000ee'
 const [SUPERADMIN_ID, BRAND_ADMIN_ID] = ['superadmin-loc253', 'brand-admin-loc253']
 const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc253-jwt-secret', 'e2e-loc253-server-token']
+const GIFT_DB = `${process.env.POSTGRES_DB}_gift`
+// Running the whole migration chain on the spec's new base takes several seconds.
+const SETUP_TIMEOUT_MS = 120_000
 
 describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   const envSnapshot = { ...process.env }
   let app: INestApplication
+  let admin: DataSource
   let dataSource: DataSource
   let processor: TokenGiftBatchProcessor
   let superAdmin = ''
@@ -156,13 +158,23 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
       TOKEN_GIFT_MAX_TOKENS_PER_BRAND: '10000',
       TOKEN_GIFT_BATCH_SIZE: '500',
     })
-    dataSource = new DataSource({
+    const connection: DataSourceOptions = {
       type: 'postgres',
       host: process.env.POSTGRES_HOST,
       port: Number(process.env.POSTGRES_PORT),
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
+    }
+    // all_open reads every open TKN wallet and `clean` deletes them all: on the shared base a spec in
+    // the other worker opens one mid-case (409 set changed) or loses its own, so the spec owns a base.
+    admin = new DataSource(connection)
+    await admin.initialize()
+    await admin.query(`DROP DATABASE IF EXISTS "${GIFT_DB}"`)
+    await admin.query(`CREATE DATABASE "${GIFT_DB}"`)
+    dataSource = new DataSource({
+      ...connection,
+      database: GIFT_DB,
       entities: [
         Wallet,
         Transaction,
@@ -171,33 +183,12 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
         TokenGiftBatchItem,
         TokenGiftNotice,
       ],
+      migrations: [join(__dirname, '../migrations/*.ts')],
+      migrationsTableName: 'migrations',
       synchronize: false,
     })
     await dataSource.initialize()
-
-    const runner = dataSource.createQueryRunner()
-    try {
-      const hasOrigins = await runner.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name = 'wallets' AND column_name = 'giftTokens'`,
-      )
-      if (!hasOrigins.length) {
-        await new AddTokenWalletOrigins1793949572497().up(runner)
-      }
-      const hasBatches = await runner.query(
-        `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_batches'`,
-      )
-      if (!hasBatches.length) {
-        await new AddTokenGiftBatches1794300000000().up(runner)
-      }
-      const hasNotices = await runner.query(
-        `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
-      )
-      if (!hasNotices.length) {
-        await new AddTokenGiftNotices1794350000000().up(runner)
-      }
-    } finally {
-      await runner.release()
-    }
+    await dataSource.runMigrations()
 
     const sessions = authSessionsDouble()
     superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
@@ -239,7 +230,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     app.useGlobalPipes(createGlobalValidationPipe())
     await app.init()
     processor = app.get(TokenGiftBatchProcessor)
-  })
+  }, SETUP_TIMEOUT_MS)
 
   beforeEach(clean, 30000)
   afterEach(() => {
@@ -249,10 +240,14 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   })
 
   afterAll(async () => {
-    await clean()
-    await app?.close()
-    if (dataSource?.isInitialized) await dataSource.destroy()
-    process.env = { ...envSnapshot }
+    try {
+      await app?.close()
+      if (dataSource?.isInitialized) await dataSource.destroy()
+      if (admin?.isInitialized) await admin.query(`DROP DATABASE IF EXISTS "${GIFT_DB}"`)
+    } finally {
+      if (admin?.isInitialized) await admin.destroy()
+      process.env = { ...envSnapshot }
+    }
   }, 30000)
 
   it('CA6 — preview: with 4 open TKN wallets and 1 closed at 50 per brand, all_open returns 4 brands and total 200 without moving anything', async () => {

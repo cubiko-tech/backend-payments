@@ -7,6 +7,7 @@ import { Subscription, SubscriptionStatus } from '../src/subscription/entities/s
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
 import { CycleExtension } from '../src/tasks/renewal-debit-refund'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
+import { scopeRenewalRefundsToBrand } from './support/brand-scoped-sweep'
 import {
   daysLeft,
   elapseRetryBackoff,
@@ -65,6 +66,8 @@ describe('A renewal whose save fails does not charge twice (PostgreSQL, LOC-108)
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeRenewalRefundsToBrand(a.tasks, BRAND_ID)
+    scopeRenewalRefundsToBrand(b.tasks, BRAND_ID)
   })
 
   const cleanAll = async () => {

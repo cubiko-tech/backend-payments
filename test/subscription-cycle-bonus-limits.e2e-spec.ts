@@ -1,12 +1,13 @@
 import { Logger } from '@nestjs/common'
 
-import { AuditLog } from '../src/audit/entities/auditLog.entity'
 import { Subscription, SubscriptionStatus } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
+import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { WebhookStatus } from '../src/webhook/entities/webhookEvent.entity'
 import { failNextWriteOf } from './support/audit-failure.fixture'
 import {
   answerAsRoles,
+  auditOf,
   BonusChain,
   bonusesOf,
   catalog,
@@ -89,6 +90,12 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     const sub = await seedConfioSubscription(ds(), BRAND, 'pro-500')
 
     await deliver(chain, BRAND, 'SUCCEEDED', 1, 'loc214-payment-1')
+    // The cap counts bonuses from the first of the UTC month: dated at the next one, the first counts
+    // even when the second delivery lands after midnight of a month's last day.
+    const now = new Date()
+    const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+    const [first] = await bonusesOf(ds(), BRAND)
+    await ds().getRepository(Transaction).update({ id: first.id }, { createdAt: nextMonth })
     const second = await deliver(chain, BRAND, 'SUCCEEDED', 2, 'loc214-payment-2')
 
     expect(second.status).toBe(WebhookStatus.PROCESSED)
@@ -110,9 +117,8 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     expect(failed.status).toBe(WebhookStatus.FAILED)
     expect(await bonusesOf(ds(), BRAND)).toHaveLength(0)
     expect(Number((await tokenWalletOf(ds(), BRAND)).balance)).toBe(0)
-    expect(
-      await ds().getRepository(AuditLog).countBy({ userId: 'system:confio-subscription' }),
-    ).toBe(0)
+    // Mutation: count audit_log by author in the whole base: with another brand's bonus audit alive, `Received: 1`.
+    expect(await auditOf(ds(), (await tokenWalletOf(ds(), BRAND)).id)).toHaveLength(0)
     // Only the trace written before backend-roles is left, still pending (LOC-272).
     expect((await eventsOf(ds(), sub.id)).map((e) => e.traceStatus)).toEqual(['pending'])
     expect((await subscription(sub.id)).currentPeriodEnd).toEqual(before.currentPeriodEnd)
