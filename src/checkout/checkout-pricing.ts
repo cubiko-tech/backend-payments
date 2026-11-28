@@ -264,7 +264,7 @@ function assertUsablePlanSlug(planSlug: string) {
  * `PLAN_NOT_FOUND` maps to 503 rather than 404 because `getPlanRows()` returns an empty map
  * when `backend-roles` is unreachable with a cold cache.
  */
-function planPricingException(
+export function planPricingException(
   planSlug: string,
   code: BrandCountryErrorCode | PriceResolutionErrorCode,
 ): RequestException {

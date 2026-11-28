@@ -16,12 +16,12 @@ cuando se cierra y ya no hay código que la sostenga: la historia queda en el co
 
 ## Archivar el mapeo de Confío de una moneda cobra el alta en dólares a una marca que paga en esa moneda
 
-- **Dónde**: `src/subscription/confio-trial.service.ts:276`, `:137` (`resolvePlanConCaidaAUsd`, `createForTrial`);
+- **Dónde**: `src/subscription/confio-trial.service.ts:263`, `:124` (`resolvePlanConCaidaAUsd`, `createForTrial`);
   sus altas, `src/subscription/subscription.service.ts:292`, `:608` (`startTrial`, `startPaid`)
 - **Qué lo dispara**: un alta de Confío de una marca cuyo precio sale en pesos mientras la fila COP de
   `confio_subscription_plan` está `archived` (la pasarela de esa moneda apagada).
 - **Qué rompe**: el alta va al plan USD de Confío y la marca queda suscrita en dólares, con el monto congelado en
-  ese plan. El único rastro es un `logger.warn` (`:290`) y la línea de log del alta: `subscriptions` no guarda la
+  ese plan. El único rastro es un `logger.warn` (`:277`) y la línea de log del alta: `subscriptions` no guarda la
   moneda.
 - **Estado**: abierto — lo cierra guardar la moneda del alta y que apagar una moneda avise más que un `warn`.
 

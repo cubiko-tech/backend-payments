@@ -382,6 +382,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     }
 
     it('no se pudo preguntar a platform → 503 BRAND_LOOKUP_UNAVAILABLE', async () => {
+      // Mutation: return 422 for BRAND_LOOKUP_UNAVAILABLE in checkout-pricing.ts → red.
       clientPlatform.resolveBrandCountry.mockResolvedValue({
         ok: false,
         code: BRAND_LOOKUP_UNAVAILABLE,
@@ -390,6 +391,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
 
     it('platform no conoce la marca → 404 BRAND_NOT_FOUND', async () => {
+      // Mutation: return 422 for BRAND_NOT_FOUND in checkout-pricing.ts → red (and the signup 404 row too).
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code: BRAND_NOT_FOUND })
       await esperarFallo(altaConWallet(), BRAND_NOT_FOUND, HttpStatus.NOT_FOUND)
     })
@@ -426,6 +428,7 @@ describe('CheckoutService — precio del alta por país de la marca', () => {
     })
 
     it('catálogo sin ese plan → 503 (no 404): es indistinguible de una caída de backend-roles', async () => {
+      // Mutation: return 404 for PLAN_NOT_FOUND in checkout-pricing.ts → red.
       clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PLAN_NOT_FOUND })
       await esperarFallo(altaConWallet(), PLAN_NOT_FOUND, HttpStatus.SERVICE_UNAVAILABLE)
     })

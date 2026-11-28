@@ -1,18 +1,7 @@
 import { HttpStatus, Injectable, Logger } from '@nestjs/common'
-import {
-  BRAND_LOOKUP_UNAVAILABLE,
-  BRAND_NOT_FOUND,
-  BRAND_WITHOUT_COUNTRY,
-  BrandCountryErrorCode,
-  ClientPlatformService,
-} from '../client/client-platform.service'
-import {
-  ClientRolesService,
-  FALLBACK_CURRENCY,
-  PLAN_NOT_FOUND,
-  PRICE_NOT_FOUND_FOR_COUNTRY,
-  PriceResolutionErrorCode,
-} from '../client/client-roles.service'
+import { ClientPlatformService } from '../client/client-platform.service'
+import { ClientRolesService, FALLBACK_CURRENCY } from '../client/client-roles.service'
+import { planPricingException } from '../checkout/checkout-pricing'
 import {
   BuyerContactErrorCode,
   ClientAuthService,
@@ -43,8 +32,6 @@ import { invalidBuyerException } from './invalid-buyer-exception'
  * The signup does NOT charge: it returns `PENDING_ACCEPTANCE` plus `acceptanceUrl`. That link is a
  * bearer token (whoever holds it registers a card on the subscription): it is returned to the caller
  * and never persisted or logged.
- *
- * `planPricingException` duplicates the one in `checkout/checkout-pricing.ts`; change both together.
  */
 /**
  * Reason sent when cancelling the PREVIOUS subscription on a new signup. ConfioPagos requires and
@@ -127,10 +114,10 @@ export class ConfioTrialService {
     // Not `getBrandCountry`: it collapses the three failure modes into `null`, and each maps to a
     // different HTTP status here.
     const brand = await this.clientPlatform.resolveBrandCountry(brandId)
-    if (!brand.ok) throw this.planPricingException(planSlug, brand.code)
+    if (!brand.ok) throw planPricingException(planSlug, brand.code)
 
     const price = await this.clientRoles.resolvePriceForCountry(planSlug, brand.country)
-    if (!price.ok) throw this.planPricingException(planSlug, price.code)
+    if (!price.ok) throw planPricingException(planSlug, price.code)
 
     // Currency is DERIVED from the price row, never taken from the caller: the gateway plan is
     // picked by (plan, currency), and a wrong currency would charge COP to a brand paying in USD.
@@ -296,56 +283,6 @@ export class ConfioTrialService {
         conPrueba,
       )
       return { planName, currency: FALLBACK_CURRENCY }
-    }
-  }
-
-  /**
-   * Maps a country/price resolution failure to the SAME codes and statuses as
-   * `planPricingException` in `checkout/checkout-pricing.ts`. `PLAN_NOT_FOUND` is 503, not 404: with roles down and
-   * no cache every plan reads as missing, and a 404 would disguise an outage as a client error.
-   */
-  private planPricingException(
-    planSlug: string,
-    code: BrandCountryErrorCode | PriceResolutionErrorCode,
-  ): RequestException {
-    switch (code) {
-      case BRAND_LOOKUP_UNAVAILABLE:
-        return new RequestException(
-          {
-            code: BRAND_LOOKUP_UNAVAILABLE,
-            message: 'No se pudo consultar el país de la marca, reintentá en unos minutos',
-          },
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
-      case BRAND_NOT_FOUND:
-        return new RequestException(
-          { code: BRAND_NOT_FOUND, message: 'La marca no existe' },
-          HttpStatus.NOT_FOUND,
-        )
-      case BRAND_WITHOUT_COUNTRY:
-        return new RequestException(
-          {
-            code: BRAND_WITHOUT_COUNTRY,
-            message: 'La marca no tiene país registrado: no se puede determinar el precio',
-          },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      case PRICE_NOT_FOUND_FOR_COUNTRY:
-        // The country is NOT in the message: it would turn signup into a reader of any brand's
-        // country.
-        return new RequestException(
-          {
-            code: PRICE_NOT_FOUND_FOR_COUNTRY,
-            message: `El plan '${planSlug}' no tiene precio para el país de la marca`,
-          },
-          HttpStatus.UNPROCESSABLE_ENTITY,
-        )
-      case PLAN_NOT_FOUND:
-      default:
-        return new RequestException(
-          { code: PLAN_NOT_FOUND, message: `Catálogo de planes no disponible para '${planSlug}'` },
-          HttpStatus.SERVICE_UNAVAILABLE,
-        )
     }
   }
 
