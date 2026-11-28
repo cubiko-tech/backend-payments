@@ -1,8 +1,8 @@
+import type { Config } from '@jest/types'
 import { Logger } from '@nestjs/common'
 
 import { Subscription, SubscriptionStatus } from '../src/subscription/entities/subscription.entity'
 import { SubscriptionEvent } from '../src/subscription/entities/subscriptionEvent.entity'
-import { Transaction } from '../src/transaction/entities/transaction.entity'
 import { WebhookStatus } from '../src/webhook/entities/webhookEvent.entity'
 import { failNextWriteOf } from './support/audit-failure.fixture'
 import {
@@ -24,6 +24,23 @@ import {
 import { RaceInstance, startInstance, stopInstance } from './support/wallet-race.fixture'
 
 const BRAND = 'b2140214-3333-4333-8444-555555555214'
+// Only `Date` is held: the drivers and the webhook queue keep their real timers.
+const REAL_TIME_APIS: Config.FakeableAPI[] = [
+  'hrtime',
+  'nextTick',
+  'performance',
+  'queueMicrotask',
+  'requestAnimationFrame',
+  'cancelAnimationFrame',
+  'requestIdleCallback',
+  'cancelIdleCallback',
+  'setImmediate',
+  'clearImmediate',
+  'setInterval',
+  'clearInterval',
+  'setTimeout',
+  'clearTimeout',
+]
 
 /** What stops a cycle bonus: its caps, a failed write and an unavailable plan catalog (LOC-214). */
 describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', () => {
@@ -47,7 +64,10 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     answerAsRoles()
   })
 
-  afterEach(() => jest.restoreAllMocks())
+  afterEach(() => {
+    jest.useRealTimers()
+    jest.restoreAllMocks()
+  })
 
   afterAll(async () => {
     try {
@@ -85,17 +105,16 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
 
   it('S7: a cycle that takes the brand over its monthly cap credits nothing and logs the brand', async () => {
     // R15: red if the monthly cap is not compared: the second cycle reaches 1000 over a cap of 800.
+    // Mutation: skip the monthly cap compare (`subscription-bonus.service.ts:152`): two bonuses.
     process.env.SUBSCRIPTION_BONUS_MAX_TOKENS_PER_MONTH = '800'
     const warn = warnings()
     const sub = await seedConfioSubscription(ds(), BRAND, 'pro-500')
 
     await deliver(chain, BRAND, 'SUCCEEDED', 1, 'loc214-payment-1')
-    // The cap counts bonuses from the first of the UTC month: dated at the next one, the first counts
-    // even when the second delivery lands after midnight of a month's last day.
-    const now = new Date()
-    const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
+    // The cap counts bonuses from the first of the UTC month: with the clock held at the first bonus,
+    // it counts even when the second delivery lands after midnight of a month's last day.
     const [first] = await bonusesOf(ds(), BRAND)
-    await ds().getRepository(Transaction).update({ id: first.id }, { createdAt: nextMonth })
+    jest.useFakeTimers({ now: first.createdAt, doNotFake: REAL_TIME_APIS })
     const second = await deliver(chain, BRAND, 'SUCCEEDED', 2, 'loc214-payment-2')
 
     expect(second.status).toBe(WebhookStatus.PROCESSED)
@@ -108,6 +127,7 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
 
   it('S9: a write failing after the credit rolls all back and the retry credits once', async () => {
     // R15: red if the credit commits on its own: the failed delivery leaves tokens without effect.
+    // Mutation: swallow the failed trace save (`confio-subscription-webhook.service.ts:946`): `PROCESSED`.
     const sub = await seedConfioSubscription(ds(), BRAND, 'pro-500')
     const before = await subscription(sub.id)
     const failing = failNextWriteOf(SubscriptionEvent)
@@ -117,7 +137,6 @@ describe('Subscription cycle bonus limits and failures (PostgreSQL, LOC-214)', (
     expect(failed.status).toBe(WebhookStatus.FAILED)
     expect(await bonusesOf(ds(), BRAND)).toHaveLength(0)
     expect(Number((await tokenWalletOf(ds(), BRAND)).balance)).toBe(0)
-    // Mutation: count audit_log by author in the whole base: with another brand's bonus audit alive, `Received: 1`.
     expect(await auditOf(ds(), (await tokenWalletOf(ds(), BRAND)).id)).toHaveLength(0)
     // Only the trace written before backend-roles is left, still pending (LOC-272).
     expect((await eventsOf(ds(), sub.id)).map((e) => e.traceStatus)).toEqual(['pending'])

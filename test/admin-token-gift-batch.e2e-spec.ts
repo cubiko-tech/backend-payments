@@ -5,6 +5,7 @@
  * R6: one responsibility, the admin token gift batch endpoints and worker lifecycle behind one test
  * app and database; splitting would duplicate the schema and auth setup.
  */
+import { randomUUID } from 'crypto'
 import { getQueueToken } from '@nestjs/bullmq'
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -50,12 +51,57 @@ const [BRAND_1, BRAND_2, BRAND_3, BRAND_4, BRAND_5] = [
 const UNKNOWN_BRAND = 'a2650000-0000-4000-8000-0000000000ee'
 const [SUPERADMIN_ID, BRAND_ADMIN_ID] = ['superadmin-loc253', 'brand-admin-loc253']
 const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc253-jwt-secret', 'e2e-loc253-server-token']
-const GIFT_DB = `${process.env.POSTGRES_DB}_gift`
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|::1|192\.160\.\d{1,3}\.\d{1,3})$/
+
+/**
+ * Name of the base this spec creates and drops: one per run, next to `POSTGRES_DB`, and only on a
+ * local PostgreSQL (loopback or the `cubiko` network), so a run never drops a base it did not make.
+ */
+function giftDatabaseName(env: NodeJS.ProcessEnv): string {
+  if (!env.POSTGRES_DB) throw new Error('POSTGRES_DB is required to name the gift spec base')
+  if (!LOCAL_HOST.test(env.POSTGRES_HOST ?? '')) {
+    throw new Error(
+      `Refusing to create and drop the gift spec base on non-local host "${env.POSTGRES_HOST}"`,
+    )
+  }
+  return `${env.POSTGRES_DB}_gift_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+}
 // Running the whole migration chain on the spec's new base takes several seconds.
 const SETUP_TIMEOUT_MS = 120_000
 
+describe('Gift spec base name (LOC-389)', () => {
+  const local = { POSTGRES_DB: 'payments_qa_tree', POSTGRES_HOST: '192.160.1.2' }
+
+  it('refuses to name the base without POSTGRES_DB', () => {
+    // Mutation: drop the POSTGRES_DB check in `giftDatabaseName`: it returns `undefined_gift_...`.
+    expect(() => giftDatabaseName({ ...local, POSTGRES_DB: undefined })).toThrow(
+      'POSTGRES_DB is required',
+    )
+  })
+
+  it('refuses a PostgreSQL host that is not local', () => {
+    // Mutation: drop the host check in `giftDatabaseName`: it names a base on the remote host.
+    for (const host of ['db.roaxai.com', '10.0.0.5', '192.160.1.2.evil.com', undefined]) {
+      expect(() => giftDatabaseName({ ...local, POSTGRES_HOST: host })).toThrow('non-local host')
+    }
+  })
+
+  it('names a new base per run next to POSTGRES_DB on a local host', () => {
+    // Mutation: return the fixed `${POSTGRES_DB}_gift`: `Received string: "payments_qa_tree_gift"`.
+    const [first, second] = [
+      giftDatabaseName(local),
+      giftDatabaseName({ ...local, POSTGRES_HOST: '127.0.0.1' }),
+    ]
+
+    expect(first).toMatch(/^payments_qa_tree_gift_[0-9a-f]{12}$/)
+    expect(second).toMatch(/^payments_qa_tree_gift_[0-9a-f]{12}$/)
+    expect(first).not.toBe(second)
+  })
+})
+
 describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   const envSnapshot = { ...process.env }
+  let giftDb = ''
   let app: INestApplication
   let admin: DataSource
   let dataSource: DataSource
@@ -152,6 +198,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   }
 
   beforeAll(async () => {
+    giftDb = giftDatabaseName(process.env)
     Object.assign(process.env, {
       JWT_SECRET,
       ACCESS_SERVER,
@@ -170,11 +217,10 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     // the other worker opens one mid-case (409 set changed) or loses its own, so the spec owns a base.
     admin = new DataSource(connection)
     await admin.initialize()
-    await admin.query(`DROP DATABASE IF EXISTS "${GIFT_DB}"`)
-    await admin.query(`CREATE DATABASE "${GIFT_DB}"`)
+    await admin.query(`CREATE DATABASE "${giftDb}"`)
     dataSource = new DataSource({
       ...connection,
-      database: GIFT_DB,
+      database: giftDb,
       entities: [
         Wallet,
         Transaction,
@@ -243,7 +289,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     try {
       await app?.close()
       if (dataSource?.isInitialized) await dataSource.destroy()
-      if (admin?.isInitialized) await admin.query(`DROP DATABASE IF EXISTS "${GIFT_DB}"`)
+      if (admin?.isInitialized && giftDb) await admin.query(`DROP DATABASE IF EXISTS "${giftDb}"`)
     } finally {
       if (admin?.isInitialized) await admin.destroy()
       process.env = { ...envSnapshot }

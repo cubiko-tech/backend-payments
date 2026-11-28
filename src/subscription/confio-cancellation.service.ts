@@ -22,12 +22,9 @@ import { RequestException } from '../shared/exception/request.exception'
  *     pasarela vive afuera del servicio de dominio, que se queda con la fila y
  *     sus invariantes.
  *
- * **DUPLICACIÓN CONSCIENTE**: el mapeo de `plan_store_mismatch` /
- * `invalid_subscription_name` repite el de `ConfioTrialService.inputErrorException`
- * (`confio-trial.service.ts`). Se prefiere la duplicación ANOTADA antes que
- * extraer un mapeador compartido, que obligaría a abrir un archivo que esta tarea
- * no nombra — el mismo criterio con el que `confio-trial.service.ts` declara su
- * duplicación de `planPricingException`. La extracción queda para el groomer.
+ * **DELIBERATE DUPLICATION**: the `plan_store_mismatch` / `invalid_subscription_name`
+ * mapping repeats `ConfioTrialService.inputErrorException` (`confio-trial.service.ts`);
+ * a change to one must be made in the other until a shared mapper replaces both.
  *
  * ⚠️ Confirmado contra dev el 2026-08-27: la cancelación de ConfioPagos es
  * IDEMPOTENTE (cancelar dos veces también responde 200). Por eso acá no hay
