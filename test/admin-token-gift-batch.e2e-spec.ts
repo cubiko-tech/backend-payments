@@ -5,6 +5,7 @@
  * R6: one responsibility, the admin token gift batch endpoints and worker lifecycle behind one test
  * app and database; splitting would duplicate the schema and auth setup.
  */
+import { randomUUID } from 'crypto'
 import { getQueueToken } from '@nestjs/bullmq'
 import { HttpStatus, INestApplication } from '@nestjs/common'
 import { Reflector } from '@nestjs/core'
@@ -12,12 +13,10 @@ import { Test } from '@nestjs/testing'
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm'
 import { Job } from 'bullmq'
 import { config as dotenvConfig } from 'dotenv'
+import { join } from 'path'
 import * as request from 'supertest'
-import { DataSource } from 'typeorm'
+import { DataSource, DataSourceOptions } from 'typeorm'
 
-import { AddTokenWalletOrigins1793949572497 } from '../migrations/1793949572497-AddTokenWalletOrigins'
-import { AddTokenGiftBatches1794300000000 } from '../migrations/1794300000000-AddTokenGiftBatches'
-import { AddTokenGiftNotices1794350000000 } from '../migrations/1794350000000-AddTokenGiftNotices'
 import { AdminTokenGiftController } from '../src/admin/admin-token-gift.controller'
 import { AuditService } from '../src/audit/audit.service'
 import { AuditLog } from '../src/audit/entities/auditLog.entity'
@@ -52,10 +51,59 @@ const [BRAND_1, BRAND_2, BRAND_3, BRAND_4, BRAND_5] = [
 const UNKNOWN_BRAND = 'a2650000-0000-4000-8000-0000000000ee'
 const [SUPERADMIN_ID, BRAND_ADMIN_ID] = ['superadmin-loc253', 'brand-admin-loc253']
 const [JWT_SECRET, ACCESS_SERVER] = ['e2e-loc253-jwt-secret', 'e2e-loc253-server-token']
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|::1|192\.160\.\d{1,3}\.\d{1,3})$/
+
+/**
+ * Name of the base this spec creates and drops: one per run, next to `POSTGRES_DB`, and only on a
+ * local PostgreSQL (loopback or the `cubiko` network), so a run never drops a base it did not make.
+ */
+function giftDatabaseName(env: NodeJS.ProcessEnv): string {
+  if (!env.POSTGRES_DB) throw new Error('POSTGRES_DB is required to name the gift spec base')
+  if (!LOCAL_HOST.test(env.POSTGRES_HOST ?? '')) {
+    throw new Error(
+      `Refusing to create and drop the gift spec base on non-local host "${env.POSTGRES_HOST}"`,
+    )
+  }
+  return `${env.POSTGRES_DB}_gift_${randomUUID().replace(/-/g, '').slice(0, 12)}`
+}
+// Running the whole migration chain on the spec's new base takes several seconds.
+const SETUP_TIMEOUT_MS = 120_000
+
+describe('Gift spec base name (LOC-389)', () => {
+  const local = { POSTGRES_DB: 'payments_qa_tree', POSTGRES_HOST: '192.160.1.2' }
+
+  it('refuses to name the base without POSTGRES_DB', () => {
+    // Mutation: drop the POSTGRES_DB check in `giftDatabaseName`: it returns `undefined_gift_...`.
+    expect(() => giftDatabaseName({ ...local, POSTGRES_DB: undefined })).toThrow(
+      'POSTGRES_DB is required',
+    )
+  })
+
+  it('refuses a PostgreSQL host that is not local', () => {
+    // Mutation: drop the host check in `giftDatabaseName`: it names a base on the remote host.
+    for (const host of ['db.roaxai.com', '10.0.0.5', '192.160.1.2.evil.com', undefined]) {
+      expect(() => giftDatabaseName({ ...local, POSTGRES_HOST: host })).toThrow('non-local host')
+    }
+  })
+
+  it('names a new base per run next to POSTGRES_DB on a local host', () => {
+    // Mutation: return the fixed `${POSTGRES_DB}_gift`: `Received string: "payments_qa_tree_gift"`.
+    const [first, second] = [
+      giftDatabaseName(local),
+      giftDatabaseName({ ...local, POSTGRES_HOST: '127.0.0.1' }),
+    ]
+
+    expect(first).toMatch(/^payments_qa_tree_gift_[0-9a-f]{12}$/)
+    expect(second).toMatch(/^payments_qa_tree_gift_[0-9a-f]{12}$/)
+    expect(first).not.toBe(second)
+  })
+})
 
 describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   const envSnapshot = { ...process.env }
+  let giftDb = ''
   let app: INestApplication
+  let admin: DataSource
   let dataSource: DataSource
   let processor: TokenGiftBatchProcessor
   let superAdmin = ''
@@ -150,19 +198,29 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   }
 
   beforeAll(async () => {
+    giftDb = giftDatabaseName(process.env)
     Object.assign(process.env, {
       JWT_SECRET,
       ACCESS_SERVER,
       TOKEN_GIFT_MAX_TOKENS_PER_BRAND: '10000',
       TOKEN_GIFT_BATCH_SIZE: '500',
     })
-    dataSource = new DataSource({
+    const connection: DataSourceOptions = {
       type: 'postgres',
       host: process.env.POSTGRES_HOST,
       port: Number(process.env.POSTGRES_PORT),
       username: process.env.POSTGRES_USER,
       password: process.env.POSTGRES_PASSWORD,
       database: process.env.POSTGRES_DB,
+    }
+    // all_open reads every open TKN wallet and `clean` deletes them all: on the shared base a spec in
+    // the other worker opens one mid-case (409 set changed) or loses its own, so the spec owns a base.
+    admin = new DataSource(connection)
+    await admin.initialize()
+    await admin.query(`CREATE DATABASE "${giftDb}"`)
+    dataSource = new DataSource({
+      ...connection,
+      database: giftDb,
       entities: [
         Wallet,
         Transaction,
@@ -171,33 +229,12 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
         TokenGiftBatchItem,
         TokenGiftNotice,
       ],
+      migrations: [join(__dirname, '../migrations/*.ts')],
+      migrationsTableName: 'migrations',
       synchronize: false,
     })
     await dataSource.initialize()
-
-    const runner = dataSource.createQueryRunner()
-    try {
-      const hasOrigins = await runner.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name = 'wallets' AND column_name = 'giftTokens'`,
-      )
-      if (!hasOrigins.length) {
-        await new AddTokenWalletOrigins1793949572497().up(runner)
-      }
-      const hasBatches = await runner.query(
-        `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_batches'`,
-      )
-      if (!hasBatches.length) {
-        await new AddTokenGiftBatches1794300000000().up(runner)
-      }
-      const hasNotices = await runner.query(
-        `SELECT 1 FROM information_schema.tables WHERE table_name = 'token_gift_notices'`,
-      )
-      if (!hasNotices.length) {
-        await new AddTokenGiftNotices1794350000000().up(runner)
-      }
-    } finally {
-      await runner.release()
-    }
+    await dataSource.runMigrations()
 
     const sessions = authSessionsDouble()
     superAdmin = sessions.sign({ id: SUPERADMIN_ID, isSuperAdmin: true, brand: null })
@@ -239,7 +276,7 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
     app.useGlobalPipes(createGlobalValidationPipe())
     await app.init()
     processor = app.get(TokenGiftBatchProcessor)
-  })
+  }, SETUP_TIMEOUT_MS)
 
   beforeEach(clean, 30000)
   afterEach(() => {
@@ -249,10 +286,14 @@ describe('Admin token gift batches over HTTP (PostgreSQL, LOC-253)', () => {
   })
 
   afterAll(async () => {
-    await clean()
-    await app?.close()
-    if (dataSource?.isInitialized) await dataSource.destroy()
-    process.env = { ...envSnapshot }
+    try {
+      await app?.close()
+      if (dataSource?.isInitialized) await dataSource.destroy()
+      if (admin?.isInitialized && giftDb) await admin.query(`DROP DATABASE IF EXISTS "${giftDb}"`)
+    } finally {
+      if (admin?.isInitialized) await admin.destroy()
+      process.env = { ...envSnapshot }
+    }
   }, 30000)
 
   it('CA6 — preview: with 4 open TKN wallets and 1 closed at 50 per brand, all_open returns 4 brands and total 200 without moving anything', async () => {

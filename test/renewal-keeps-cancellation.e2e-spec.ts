@@ -10,6 +10,7 @@ import {
 import { SubscriptionService } from '../src/subscription/subscription.service'
 import { CycleExtension } from '../src/tasks/renewal-debit-refund'
 import { Transaction, TransactionType } from '../src/transaction/entities/transaction.entity'
+import { scopeRenewalRefundsToBrand } from './support/brand-scoped-sweep'
 import {
   DAY_MS,
   daysLeft,
@@ -58,6 +59,8 @@ describe('A renewal does not lose a cancellation confirmed during the pass', () 
   beforeAll(async () => {
     a = await startInstance()
     b = await startInstance()
+    scopeRenewalRefundsToBrand(a.tasks, BRAND_ID)
+    scopeRenewalRefundsToBrand(b.tasks, BRAND_ID)
     const subscriptions = a.dataSource.getRepository(Subscription)
     const events = a.dataSource.getRepository(SubscriptionEvent)
     // R17: wallet rows never reach the Confio collaborators, so the real `cancel` needs none of them.

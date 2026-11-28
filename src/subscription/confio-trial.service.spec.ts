@@ -401,6 +401,8 @@ describe('ConfioTrialService', () => {
       [BRAND_NOT_FOUND, HttpStatus.NOT_FOUND],
       [BRAND_WITHOUT_COUNTRY, HttpStatus.UNPROCESSABLE_ENTITY],
     ])('%s → %i', async (code, status) => {
+      // Mutation: map BRAND_NOT_FOUND to 422 in confio-trial.service.ts before planPricingException → 404 row red.
+      // Mutation: return 422 for BRAND_LOOKUP_UNAVAILABLE in checkout-pricing.ts → 503 row red.
       clientPlatform.resolveBrandCountry.mockResolvedValue({ ok: false, code })
 
       const error = await alta().catch((e) => e)
@@ -412,6 +414,7 @@ describe('ConfioTrialService', () => {
     })
 
     it(`${PLAN_NOT_FOUND} → 503 (no 404): el catálogo vacío es un outage de roles, no un plan inexistente`, async () => {
+      // Mutation: return 404 for PLAN_NOT_FOUND in checkout-pricing.ts → red.
       clientRoles.resolvePriceForCountry.mockResolvedValue({ ok: false, code: PLAN_NOT_FOUND })
 
       const error = await alta().catch((e) => e)
